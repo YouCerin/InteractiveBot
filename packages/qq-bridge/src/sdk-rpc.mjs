@@ -22,7 +22,7 @@
  * 本文件把 stderr 当作日志源原样转发，绝不往 stdout 写东西。
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { resolveModelCredentials } from './credentials.mjs'
 import { existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
@@ -85,18 +85,73 @@ export class SdkRpcClient extends EventTarget {
     this.apiKey = apiKey
   }
 
+  /**
+   * 子进程是否**已经终止**（无论正常退出还是被信号杀死）。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * ★ 为什么必须同时看 exitCode 与 signalCode（这是一个真实 bug）
+   * ══════════════════════════════════════════════════════════════════════════
+   * 被信号杀死的进程，`exitCode` 永远是 **null**，只有 `signalCode` 有值。
+   * 而 `kill()` 走的正是"发信号"这条路 —— 所以只看 `exitCode` 会把
+   * **已经死掉的子进程判定成还活着**，后果是：
+   *   · `kill()` 白等一轮再上 taskkill，最后可能**误报"未能确认退出"**；
+   *   · `shutdown()` 对着尸体发请求，超时后才说"对面不理我"；
+   *   · `alive` 永远是 true。
+   * 这个 bug 是行为测试抓出来的（`signalCode=SIGTERM` 而 `exitCode=null`），
+   * 静态断言完全看不见它。
+   */
+  #hasTerminated() {
+    if (!this.#child) return true
+    return this.#child.exitCode !== null || this.#child.signalCode !== null
+  }
+
   get ready() {
     return this.#ready
   }
 
   get alive() {
-    return this.#child !== null && this.#child.exitCode === null && !this.#closing
+    return this.#child !== null && !this.#hasTerminated() && !this.#closing
   }
 
   /** 订阅子进程的 stderr（日志）。返回取消订阅函数。 */
   onStderr(fn) {
     this.#stderrListeners.add(fn)
     return () => this.#stderrListeners.delete(fn)
+  }
+
+  /**
+   * **诊断用**：把内部生命周期状态露出来（只读）。
+   *
+   * 为什么需要：`kill()` / `shutdown()` 的判定依赖"子进程是否已退出"与"是否已在关闭中"，
+   * 而这些状态在测试里从外面看不见 —— 出问题时只能靠猜（本次就卡在这里很久）。
+   * 露出来之后，`--doctor` 与测试都能直接断言状态，而不是靠推理。
+   */
+  lifecycleState() {
+    return {
+      hasChild: this.#child !== null,
+      pid: this.#child?.pid ?? null,
+      exitCode: this.#child?.exitCode ?? null,
+      signalCode: this.#child?.signalCode ?? null,
+      closing: this.#closing,
+      ready: this.#ready,
+      pending: this.#pending.size,
+    }
+  }
+
+  /**
+   * **测试专用**：把一个已经在跑的子进程接管进来，跳过 `start()` / `initialize`。
+   *
+   * 为什么需要它：`kill()` 里"等确认 + 超时 taskkill 强杀"这条防线
+   * 恰恰是"退不掉"事故的根治点，必须有**行为测试**盯着它。
+   * 而正常路径要起真的 DSH（慢、依赖环境、还可能被沙箱拦），
+   * 所以给测试一个注入点：塞一个"什么协议都不懂、只会占着不退出"的哑进程进来，
+   * 就能验证"杀得掉"和"杀不掉时如实报告"这两条。
+   *
+   * ⚠️ 产品代码永远不该调用它。
+   */
+  attachExistingChild(child) {
+    this.#child = child
+    return this
   }
 
   /**
@@ -328,22 +383,154 @@ export class SdkRpcClient extends EventTarget {
     return this.request('session/prompt', { sessionId, contentBlocks }, timeoutMs)
   }
 
-  /** dispose 整棵运行时树并退出（官方 shutdown 语义）。 */
+  /**
+   * 优雅关停：请 DSH 自己 dispose 整棵运行时树。
+   *
+   * ★ 自带**硬截止**。这不是保险丝，是必须的：`request()` 万一因为协议流半死不活
+   *   而永远拿不到应答，调用方就会被无限拖住 —— 而调用方是 `shutdown()`，
+   *   它被拖住意味着**进程退不掉**，正是"上一个进程卡住关不掉"的成因之一。
+   *   超时后**不抛异常**：这只是"优雅"的方式没成功，上层还有强杀兜底。
+   *
+   * @returns {Promise<{graceful: boolean, timedOut?: boolean, error?: string}>}
+   */
   async shutdown({ timeoutMs = 15_000 } = {}) {
-    if (!this.#child || this.#child.exitCode !== null) return
-    this.#closing = true
+    // 判据只有一条：**子进程还在不在**。已经退出的（含被信号杀死的），没什么可关的。
+    if (this.#hasTerminated()) {
+      return { graceful: true, alreadyGone: true }
+    }
+
+    // ★★ 这里**不能**事先把 `#closing` 置真 —— 踩过这个坑，值得写清楚。
+    //
+    //   `#closing` 的语义是"**准备强杀，别再发请求了**"（`kill()` 才该置它）。
+    //   而"优雅关停"恰恰**必须**发一个请求（`shutdown`）。第一版在发请求前就置了它，
+    //   于是 `request()` 一进来就判"连接正在关闭"并立刻拒绝 —— 表现是
+    //   `shutdown()` **0ms 返回**、还被误报成"等超时了"，把"根本没发出去"
+    //   伪装成"对面不理我"，两者排查方向完全不同。
+    //   所以：优雅关停期间 `#closing` 保持原样；只有确认要走强杀时才置位。
+    const wasClosing = this.#closing
+
+    let timer = null
+    let timeoutReason = null
     try {
-      await this.request('shutdown', {}, timeoutMs)
+      await Promise.race([
+        this.request('shutdown', {}, timeoutMs),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            timeoutReason = `等 DSH 应答 shutdown 超过 ${Math.round(timeoutMs / 1000)} 秒`
+            reject(new Error(timeoutReason))
+          }, timeoutMs)
+        }),
+      ])
+      // 优雅关停已经发出去了，之后不该再接受新请求
+      this.#closing = true
+      return { graceful: true }
     } catch (error) {
-      this.log(`[rpc] shutdown 未得到应答：${error.message}`)
+      this.log(`[rpc] shutdown 未能优雅完成：${error.message}（将由强杀兜底）`)
+      // ★ "是不是等超时了"要按**错误来源**判定，不能只看我们自己的那个定时器：
+      //   `request()` 自己也有超时，而且当它先到点时抛的是
+      //   `RPC shutdown 超时（600ms）` —— 我们的定时器还没轮到触发。
+      //   第一版只看自己的定时器，于是把这种超时说成 reason:'error'，
+      //   把"对面不理我"和"协议坏了"混成一种，给了错误线索。
+      const isTimeout = Boolean(timeoutReason) || /超时|timeout/i.test(String(error?.message ?? ''))
+      return {
+        graceful: false,
+        timedOut: isTimeout,
+        reason: wasClosing ? 'already-closing' : isTimeout ? 'timeout' : 'error',
+        error: error.message,
+      }
+    } finally {
+      // ★ 必须清掉：这个 timer 若留着，会通过事件循环把进程的退出**拖住**
+      //   （Node 里一个 pending 的 timer 就是一条 keep-alive 引用）。
+      if (timer) clearTimeout(timer)
     }
   }
 
-  /** 强杀（兜底用）。 */
-  kill() {
-    if (this.#child && this.#child.exitCode === null) {
-      this.#closing = true
-      this.#child.kill()
+  /**
+   * 强杀兜底：**必须等它真的死了才返回**。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 为什么不能只写 `this.#child.kill()` 就完事（这里踩过坑）
+   * ══════════════════════════════════════════════════════════════════════════
+   * 原实现是"发一个 kill 就返回"，调用方紧接着 `process.exit(0)`。问题是：
+   *
+   *   · Windows 上子进程若卡在文件句柄 / sandbox 驱动 / sqlite 写锁里，
+   *     `kill()`（TerminateProcess）可能**迟迟不生效甚至失败**；
+   *   · 而桥接自己已经退出了 → 那个 DSH 成了**孤儿**，继续持有工作区与会话库；
+   *   · 下一次启动的新桥接再起一个 DSH 指着同一份工作区 —— 两个 agent 写同一份
+   *     状态，症状是回复错乱 / 文件写冲突，而日志里**没有任何线索**指向"有两个 DSH"。
+   *
+   * 所以这里：先发 kill → 等 `exit`（最多 `graceMs`）→ 还没走就用 `taskkill /T /F`
+   * 连整棵进程树一起杀 → 再等一小段确认 → **如实报告死没死**。
+   * `/T` 是必须的：DSH 自己还会派生 subagent 子进程，只杀父进程会留下一串孤儿。
+   *
+   * @returns {Promise<{stopped: boolean, method?: string, pid?: number, error?: string}>}
+   */
+  async kill({ graceMs = 3000, confirmMs = 2000 } = {}) {
+    const child = this.#child
+    // ★ 先判"本来就不需要杀"：**绝不能**给这种情况打上 `#closing`。
+    //   注意用 #hasTerminated()（同时看 signalCode）—— 只看 exitCode 会把
+    //   被信号杀死的进程当成活的，于是对它白等一轮再 taskkill。
+    if (this.#hasTerminated()) return { stopped: true, alreadyGone: true }
+    this.#closing = true
+    const pid = child.pid
+
+    // 注意：被信号杀死时 **exitCode 是 null、只有 signalCode**，
+    // 所以这里两个都要看（见 #hasTerminated 的说明）。
+    const isDead = () => child.exitCode !== null || child.signalCode !== null
+
+    /** 等子进程真的退出（用 exit 事件 + 状态双判，避免事件已错过）。 */
+    const waitExit = (ms) =>
+      new Promise((resolve) => {
+        if (isDead()) return resolve(true)
+        let timer = null
+        const done = (ok) => {
+          if (timer) clearTimeout(timer)
+          child.off('exit', onExit)
+          resolve(ok)
+        }
+        const onExit = () => done(true)
+        child.once('exit', onExit)
+        timer = setTimeout(() => done(isDead()), ms)
+      })
+
+    // ① 先礼：普通 kill
+    try {
+      child.kill()
+    } catch (error) {
+      this.log(`[rpc] kill() 抛错：${error.message}`)
+    }
+    if (await waitExit(graceMs)) return { stopped: true, method: 'kill', pid }
+
+    // ② 后兵：整棵进程树强杀（仅 Windows；其他平台再试一次普通 kill）
+    this.log(`[rpc] 子进程 pid ${pid} 在 ${graceMs}ms 内没退出，改用强制终止`)
+    let method = 'kill-retry'
+    if (process.platform === 'win32' && pid) {
+      method = 'taskkill /T /F'
+      try {
+        spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: confirmMs + 2000,
+        })
+      } catch (error) {
+        this.log(`[rpc] taskkill 调用失败：${error.message}`)
+      }
+    } else {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* 已经死了就算了 */
+      }
+    }
+
+    // ③ 如实报告：**不要假定它死了**。上层要据此决定是否报警。
+    const stopped = await waitExit(confirmMs)
+    if (stopped) return { stopped: true, method, pid }
+    return {
+      stopped: false,
+      method,
+      pid,
+      error: `pid ${pid} 在强制终止后仍未确认退出（可能卡在内核态）。工作区可能仍被占用。`,
     }
   }
 

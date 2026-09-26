@@ -32,8 +32,8 @@
     "launch": {
       "file": "start.bat",
       "also": "node src/index.mjs",
-      "shortcut": "启动机器人.lnk",
-      "note": "★ start.bat 现在会先拉起 SnowLuma（--snowluma）再起桥接。开关：--no-snowluma 跳过、--open-console 只开 SnowLuma 网页端、--no-browser 跳过开浏览器。⚠️ .bat 在 Windows 里**无法带自定义图标**（不是 PE 文件，没有图标资源槽），所以带图标的入口是快捷方式 启动机器人.lnk → 指向 start.bat，图标取 assets/icon.ico"
+      "shortcut": "QQbot.lnk（开发机用；发布包改由 `创建带图标的快捷方式.bat` 在用户机器上生成）",
+      "note": "★ start.bat 现在会先拉起 SnowLuma（--snowluma）再起桥接。开关：--no-snowluma 跳过、--open-console 只开 SnowLuma 网页端、--no-browser 跳过开浏览器。⚠️ .bat 在 Windows 里**无法带自定义图标**（不是 PE 文件，没有图标资源槽），所以带图标的入口只能是快捷方式；而 .lnk 里存绝对路径、随包发到别人机器上必然失效，因此发布包用 `创建带图标的快捷方式.bat` 现场生成。发布包另有三个引导入口：检查配置.bat（--check）、体检.bat（--doctor）、启动机器人.bat"
     },
     "check": { "file": "src/index.mjs", "args": "--check", "note": "只校验配置，不连接任何服务" },
     "doctor": { "file": "src/index.mjs", "args": "--doctor", "note": "真去连一次协议端，报出实际结果；不发消息、不调模型" },
@@ -110,8 +110,9 @@
     "src/vendor.mjs": "从 vendor/ 加载依赖，绕开标准 node_modules。",
     "src/doctor.mjs": "体检：包内依赖 / DSH / 配置自洽 / 真实连接探测。",
     "config.json": "全部运行配置。",
-    "assets/icon.ico": "入口图标（蓝色小鲸鱼，7 个尺寸帧：16/24/32/48/64/128/256，全部 PNG 编码）。被 `启动机器人.lnk` 引用。★ 为什么放包里而不是引用外部路径：快捷方式的图标路径是**绝对路径**，若指向 AppData 里的临时副本，那个副本被清掉后图标就会退化成白纸。",
-    "启动机器人.lnk": "★ 带图标的启动入口（指向 start.bat）。Windows 的 .bat **本身不能带自定义图标**，所以这是唯一能显示图标的做法。用 WScript.Shell COM 创建；图标存的是绝对路径，**包整体搬走后需要重建这个快捷方式**（或手动改图标）。",
+    "assets/icon.ico": "入口图标（蓝色小鲸鱼，7 个尺寸帧：16/24/32/48/64/128/256，全部 PNG 编码）。被快捷方式引用（图标写成**相对路径** assets/icon.ico，所以整包搬走图标依然有效）。",
+    "QQbot.lnk": "带图标的启动入口（指向 start.bat）。⚠️ 它是**生成物**：里面的目标与图标是绝对路径，在**别人机器上会失效**（图标退化成白纸）。所以发布包不靠它，而是带 `创建带图标的快捷方式.bat` 让用户现场生成（见下一条）。此文件保留仅为开发机方便。",
+    "创建带图标的快捷方式.bat": "★ 在**用户机器上**现场生成快捷方式（QQ机器人.lnk，图标用相对路径）。存在的理由有两条：① Windows 的 .bat **不能带自定义图标**（不是 PE 文件，没有图标资源槽），只有 .lnk 能显示；② .lnk 里存的是绝对路径，随包发一份在别人机器上必然失效。★ 该文件正文与内嵌 PowerShell **必须纯 ASCII**：cmd 按系统代码页（GBK）解析 .bat，而 Windows PowerShell 5.1 把无 BOM 的 UTF-8 .ps1 当 GBK 读 —— 一条中文注释就会吃掉紧随其后的代码（实际报错是「快捷方式路径名称需以 .lnk 或 .url 结尾」）。所以中文文件名用字符码拼。",
     "prices.json": "★ 价目表（元/百万 tokens）+ 峰谷时段规则。**故意独立于 config.json**：价格会变，而改它不该触发「改配置要重启」。DSH 本身不提供人民币价格，所以成本只能按这份文件估算。",
     "PROJECT.json": "本文件：包契约。",
     "AGENT.md": "给 agent 的操作说明（五分钟上手 + 陷阱清单）。"

@@ -109,26 +109,75 @@ function loadConfig() {
 }
 
 /**
- * 重启时另起一个桥接进程（给 /api/restart 用）。
+ * 绑定配置接口，端口忙时**重试**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么不能只 `await serveApi(...)` 一次就完（这里踩过坑）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 重启是"先起新进程、旧进程随后退出"的，于是新进程常常**在旧进程还没放开端口时**
+ * 就来绑定。原实现只试一次，然后在 catch 里把 `EADDRINUSE` 降级成一句 warning
+ * 并让 `apiServer = null` —— 后果非常坏：
+ *
+ *   · 第二个桥接**看起来启动成功**（能连 QQ、能回话），只是控制台不可用；
+ *   · 而用户打开的那张控制台界面其实是**第一个进程**的；
+ *   · 两个桥接同时从同一个 OneBot 收事件 → 同一句话可能被回答两次；
+ *   · 日志里只有一句 ⚠️，没有任何地方能看出"现在有两个桥接"。
+ *
+ * 所以：端口忙就等一小会儿再试（旧进程退出通常只要几百毫秒），
+ * 并且**失败时不许静默**：打 error 级日志，并把结果回报给启动流程，
+ * 让 `/api/status` 与 doctor 能如实显示"控制台端口被占用"。
+ */
+async function bindApiWithRetry({ port, handler, staticDir, log, attempts = 8, delayMs = 400 }) {
+  let lastError = null
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      return await serveApi({ port, handler, staticDir, log })
+    } catch (error) {
+      lastError = error
+      const busy = /EADDRINUSE|已被占用/.test(String(error?.message ?? ''))
+      if (!busy) throw error // 不是端口冲突（例如权限问题）就别重试了，直接上报
+      if (i < attempts) {
+        log(
+          `配置接口端口 ${port} 被占用，等待释放后重试（${i}/${attempts - 1}）——` +
+            `通常是上一个桥接进程还没退完`,
+        )
+        await new Promise((r) => setTimeout(r, delayMs))
+      }
+    }
+  }
+  throw lastError
+}
+
+/**
+ * 另起一个桥接进程（给 /api/restart 用）。
  *
  * 做法与 start.bat 保持一致：优先用包内 vendor\node\node.exe，
  * 找不到退回系统 node。新进程 detached + stdio 忽略 —— 父进程退出后
  * 它独立存活，日志照旧写 logs/bridge.log，控制台界面不受影响。
  *
- * 时序上不用担心端口冲突：新进程要先初始化 DSH（几秒）才会绑配置接口
- * 端口，而旧进程在 shutdown 里第一时间就关掉了接口。
+ * ★ 它**不负责**"顺序"：谁先谁后由调用方（requestRestart）决定。
+ *   原来的顺序是"先起新的、再关旧的"，注释里还断言"不用担心端口冲突"——
+ *   那个断言只在旧进程很快退完时成立，而旧进程恰恰可能慢
+ *   （在途回复最多等 8s + DSH shutdown 最多 15s）。现在改成：
+ *   **先关掉自己的配置接口（释放端口）→ 再 spawn 新进程 → 再收尾退出**，
+ *   于是"端口已释放"是**代码保证**的，不再依赖时序假设。
  */
-function respawnBridge(log) {
+function respawnBridge(log, { port } = {}) {
   const vendorNode = join(PKG_ROOT, 'vendor', 'node', 'node.exe')
   const nodeBin = existsSync(vendorNode) ? vendorNode : 'node'
+  // ★ 把端口告诉新进程：它会在绑定失败时重试（bindApiWithRetry），
+  //   这样即使旧进程退得比预期慢，新进程也只是慢一点起来，而不是静默丢掉控制台。
+  const env = port ? { ...process.env, DSH_BRIDGE_EXPECT_PORT: String(port) } : process.env
   const child = spawn(nodeBin, [join(PKG_ROOT, 'src', 'index.mjs')], {
     cwd: PKG_ROOT,
+    env,
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
   })
   child.unref()
-  log(`已拉起新的桥接进程（pid ${child.pid}），本进程即将退出`)
+  // 只"发起"，日志由调用方按顺序补充（见 requestRestart：要先释放端口再报成功）
+  return { pid: child.pid, target: join(PKG_ROOT, 'src', 'index.mjs') }
 }
 
 async function main() {
@@ -473,17 +522,34 @@ async function main() {
       // shutdown 在下方定义，这里只是闭包引用，调用时早已初始化。
       requestStop: () => {
         log('收到配置接口的停止请求')
-        shutdown('api-stop')
+        shutdown('api-stop', { exitDelayMs: 400 })
       },
       requestRestart: () => {
         log('收到配置接口的重启请求')
-        try {
-          respawnBridge(log)
-        } catch (error) {
-          log(`❌ 拉起新桥接进程失败：${error.message}（本进程继续运行，请手动重启）`)
-          return
-        }
-        shutdown('api-restart')
+        // ★ 顺序（改动过，理由见缺陷 2）：**先释放端口，再起新进程**。
+        //   原先是先 respawn 再 shutdown，于是新进程经常在旧进程还没放开端口时
+        //   就来绑定 —— 只试一次就失败，然后被降级成一句 warning，结果两个桥接
+        //   同时在跑、控制台指向旧的那个。现在由代码保证端口先空出来，
+        //   新进程那边还有 bindApiWithRetry 兜底重试。
+        ;(async () => {
+          try {
+            if (apiServer) {
+              try {
+                await apiServer.close()
+              } catch {
+                /* 关接口失败不影响重启 */
+              }
+              apiServer = null
+              log('已释放配置接口端口，开始拉起新进程')
+            }
+            const { pid, target } = respawnBridge(log, { port: config.ui.apiPort })
+            log(`已拉起新的桥接进程（pid ${pid ?? '?'}）：${target}`)
+          } catch (error) {
+            log(`❌ 拉起新桥接进程失败：${error.message}（本进程继续运行，请手动重启）`)
+            return
+          }
+          await shutdown('api-restart', { exitDelayMs: 500 })
+        })()
       },
     })
 
@@ -492,7 +558,7 @@ async function main() {
       // 这样 start.bat 打开 http://127.0.0.1:3410/ 就是完整控制台，无需另起服务。
       const uiDist = join(PKG_ROOT, 'config-ui', 'dist')
       const staticDir = existsSync(join(uiDist, 'index.html')) ? uiDist : undefined
-      apiServer = await serveApi({
+      apiServer = await bindApiWithRetry({
         port: config.ui.apiPort,
         handler: apiHandler,
         staticDir,
@@ -501,7 +567,14 @@ async function main() {
       if (staticDir) log(`控制台界面：http://127.0.0.1:${config.ui.apiPort}/`)
     } catch (error) {
       // 接口起不来**不该让机器人起不来** —— 它只是给 UI 用的辅助能力。
-      log(`⚠️ 配置接口未能启动：${error.message}`)
+      // ★ 但**不许静默**：端口被别人占着是最可能的原因，而它的后果是
+      //   "控制台显示的是另一个进程" —— 必须留一条 error 级证据。
+      log(`❌ 配置接口未能启动：${error.message}`)
+      log(
+        '   → 机器人本体照常工作，但**控制台界面不可用**。' +
+          '若你打开的控制台看起来"不对劲"，八成是另一个桥接进程还占着这个端口。',
+      )
+      log('   → 查占用：netstat -ano | findstr :' + config.ui.apiPort + '（最后一列是 PID）')
       apiServer = null
     }
   } else {
@@ -509,11 +582,31 @@ async function main() {
   }
 
   // ── 优雅退出 ──
+  //
+  // ★★ 这里有一条贯穿全局的硬规则：**退出可以慢，但绝不能退不掉。**
+  //
+  // 起因是一次真实事故：旧进程卡住关不掉、和新进程抢端口与 PID。
+  // 所以 shutdown 有**总预算**（SHUTDOWN_BUDGET_MS），到点就强制收尾并退出 ——
+  // 每一小步各自还有自己的超时（bridge.close 8s、rpc.shutdown 15s），
+  // 但"每一步都不超时"并不等于"总时间可控"，所以最外层必须有截止。
   let closing = false
-  const shutdown = async (signal) => {
-    if (closing) return
-    closing = true
-    log(`收到 ${signal}，开始收尾…`)
+  let apiServerClosed = false
+  const SHUTDOWN_BUDGET_MS = 20_000
+
+  /** 关掉配置接口（幂等：requestRestart 可能已经关过，释放端口用）。 */
+  const closeApiServer = async () => {
+    if (!apiServer || apiServerClosed) return
+    apiServerClosed = true
+    try {
+      await apiServer.close()
+    } catch {
+      /* 关接口失败不影响退出 */
+    }
+    apiServer = null
+  }
+
+  /** 真正的收尾动作（由 shutdown 用预算包住）。 */
+  const shutdownSteps = async () => {
     // ★ 顺序很重要：**先让在途回复发完，再关 QQ 通道**。
     //
     // 原来是反过来（第一件事就是 onebot.close()），后果实测过：
@@ -525,28 +618,79 @@ async function main() {
       log(`⚠️ 等待在途回复时出错（继续退出）：${error?.message ?? error}`)
     }
     onebot.close()
-    if (apiServer) {
-      try {
-        await apiServer.close()
-      } catch {
-        /* 关接口失败不影响退出 */
-      }
-    }
+    await closeApiServer()
+
+    // DSH：先请它自己收尾；**拿不到确认就强杀，并且强杀也要拿确认**。
+    // 这一段是"孤儿 DSH 继续持有工作区"的根治点 —— 见 sdk-rpc.mjs 的 kill()。
+    let stopped = { stopped: true }
     try {
-      await rpc.shutdown()
-    } catch {
-      rpc.kill()
+      const graceful = await rpc.shutdown()
+      if (!graceful.graceful) stopped = await rpc.kill()
+    } catch (error) {
+      log(`⚠️ 关停 DSH 时出错（转强杀）：${error?.message ?? error}`)
+      stopped = await rpc.kill()
     }
-    log(`=== 桥接退出（收到 ${bridge.stats.received} 条私聊，回复 ${bridge.stats.answered} 条）===`)
-    process.exit(0)
+    if (!stopped.stopped) {
+      // 不许假装成功：这条日志是"工作区可能仍被占用"的唯一线索
+      log(`❌ 未能确认 DSH 子进程退出：${stopped.error ?? '原因未知'}`)
+      log('   → 它可能仍持有工作区与会话库。请检查任务管理器里的 node.exe，')
+      log('     否则下一次启动会出现"两个 agent 写同一份工作区"。')
+    } else if (stopped.method && stopped.method !== 'kill') {
+      log(`DSH 子进程已强制终止（${stopped.method}，pid ${stopped.pid}）`)
+    }
+  }
+
+  const shutdown = async (signal, { exitDelayMs = 0 } = {}) => {
+    if (closing) return
+    closing = true
+    log(`收到 ${signal}，开始收尾…`)
+    const startedAt = Date.now()
+    let budgetTimer = null
+    try {
+      await Promise.race([
+        shutdownSteps(),
+        new Promise((resolve) => {
+          budgetTimer = setTimeout(() => {
+            log(
+              `⚠️ 收尾超过 ${Math.round(SHUTDOWN_BUDGET_MS / 1000)} 秒预算，**强制退出**` +
+                '（宁可少发一条在途回复，也不能留下一个退不掉的进程）',
+            )
+            resolve()
+          }, SHUTDOWN_BUDGET_MS)
+        }),
+      ])
+    } catch (error) {
+      log(`⚠️ 收尾过程中出错（继续退出）：${error?.message ?? error}`)
+    } finally {
+      // 定时器必须清掉：pending 的 timer 会通过事件循环把退出拖住
+      if (budgetTimer) clearTimeout(budgetTimer)
+    }
+    log(
+      `=== 桥接退出（收到 ${bridge.stats.received} 条私聊，回复 ${bridge.stats.answered} 条，` +
+        `收尾耗时 ${Date.now() - startedAt}ms）===`,
+    )
+    // exitDelayMs 是给"先响应 HTTP 再退出"那条路用的：立刻 process.exit 有可能
+    // 抢在响应写完之前，UI 就会看到连接被重置而不是"已重启"。
+    if (exitDelayMs > 0) setTimeout(() => process.exit(0), exitDelayMs)
+    else process.exit(0)
   }
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
   process.on('uncaughtException', (error) => {
     log(`❌ 未捕获异常：${error?.stack ?? error}`)
+    // ★ 记完日志就收尾退出，**不要继续带着损坏的状态跑**。
+    //   原来的实现只 log 不退出 —— 那正是"卡住但没死"的典型来源：
+    //   进程还在，但半边状态已经丢/错，外部也看不出它坏了。
+    //   退出后由 start.bat / 用户重新拉起，比带病运行安全得多。
+    log('   → 未捕获异常后进程状态不可信，主动收尾退出（请重新启动）')
+    void shutdown('uncaughtException', { exitDelayMs: 200 })
   })
   process.on('unhandledRejection', (error) => {
+    // Promise 拒绝的处理同 uncaughtException：记日志 + 收尾退出。
+    // 这里刻意与上面保持一致的策略，避免"一半情况会退出、一半不会"这种难查的差异。
     log(`❌ 未处理的 Promise 拒绝：${error?.stack ?? error}`)
+    log('   → 未处理拒绝说明有失败路径没被接住，进程状态不可信，主动收尾退出')
+    void shutdown('unhandledRejection', { exitDelayMs: 200 })
   })
 
   log('桥接已启动，等待消息…（Ctrl+C 退出）')

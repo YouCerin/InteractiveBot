@@ -2,8 +2,53 @@
 
 > 起因：用户报过两次同一种事故 —— **上一个进程卡住且关不掉，导致 PID / 端口冲突**。
 > 本文是对现有代码的审查结果：四个具体缺陷、各自的代码位置与触发场景、修法。
-> 审查结论：**当前代码里没有任何"进程治理"机制**（没有 PID 记录、没有单实例锁、
+> 审查结论：**当时代码里没有任何"进程治理"机制**（没有 PID 记录、没有单实例锁、
 > 没有强杀兜底、没有孤儿回收），所以这类事故只能靠人手动杀进程收场。
+>
+> **进度**：缺陷 1、2 已修（含回归测试 `mocks/verify-lifecycle.mjs`）；
+> 缺陷 3、4 待做。修的过程中被行为测试抓出**第三个**真 bug，见下方「修复记录」。
+
+---
+
+## 修复记录（缺陷 1、2）
+
+改动集中在 `src/sdk-rpc.mjs` 与 `src/index.mjs`，每一条都由
+`mocks/verify-lifecycle.mjs` 里的断言盯着：
+
+| 改动 | 说明 |
+|---|---|
+| `shutdown()` 加硬截止 | `Promise.race` + 定时器，超时后**不抛异常**而是返回 `{graceful:false, timedOut:true}`；`finally` 里清掉定时器（一个 pending timer 就是一条 keep-alive，会把退出拖住） |
+| `kill()` 改成等确认 | 先 `kill()` → 等 `exit`（默认 3s）→ 没走就 `taskkill /PID <pid> /T /F`（`/T` 连 subagent 子进程一起）→ 再等确认 → **如实返回 `stopped:false`** 而不是假定成功 |
+| `shutdown` 总预算 | `index.mjs` 的 `SHUTDOWN_BUDGET_MS = 20s`，到点强制退出并打日志 |
+| 端口占用重试 | `bindApiWithRetry()`：端口忙就等 400ms 重试（最多 8 次）；**失败不再静默降级**，改为 error 级日志 + 给出 `netstat` 排查命令 |
+| 重启改成 handoff | `requestRestart` 先 `apiServer.close()` **释放端口**，再 spawn 新进程（并把端口经 `DSH_BRIDGE_EXPECT_PORT` 告诉它），最后收尾退出 |
+| 未捕获异常后主动退出 | `uncaughtException` / `unhandledRejection` 记完日志就收尾退出，不再带病长跑 |
+
+### ★ 顺带抓出的第三个真 bug：用 `exitCode` 判断进程死没死是错的
+
+被信号杀死的进程 **`exitCode` 永远是 `null`**（只有 `signalCode` 有值），
+而 `kill()` 走的正是"发信号"这条路。原实现（以及我第一版的修复）都用
+`child.exitCode !== null` 当"已经退出"的判据，后果是：
+
+- 已经死掉的子进程被当成**还活着** → `kill()` 白等一轮再上 taskkill，甚至误报"未能确认退出"；
+- `shutdown()` 对着尸体发请求，超时后才说"对面不理我"；
+- `alive` 永远是 true。
+
+现在统一用 `#hasTerminated()`（`exitCode !== null || signalCode !== null`）。
+**这个 bug 静态断言完全看不见**，是行为测试实跑出来的（`signalCode=SIGTERM` 而 `exitCode=null`）。
+
+### 另一个教训：测试自己的假断言比没有测试更危险
+
+`verify-lifecycle.mjs` 第一版有 3 处假判据，全都在"看起来通过"的状态下掩盖了问题：
+
+1. `child.killed` 被当成"进程已死" —— 那个属性是**同步**置位的"信号已发出"，永远为真；
+2. `waitExit()` 超时时**无条件返回 true** —— "以为它退了"；
+3. 用"永不退出"的哑子进程去测"对已退出的子进程调 kill" —— **前提从来没成立**。
+
+以及 `verify-rpc.mjs` 里一条**一直存在**的断言 bug：它写
+`const [code] = await once(client, 'exit')`，而客户端派发的是 `CustomEvent`，
+退出码在 `event.detail.code` 里 —— 于是那条断言恒为假，只是因为它在最后一行且
+失败信息长得像 `exit code=0` 而长期没被发现。已一并修好。
 
 ---
 
@@ -133,12 +178,19 @@ SnowLuma 是 `detached: true` + `unref()` 启动的（`snowluma.mjs:686,692`）�
 
 ## 建议的落地顺序
 
-1. **缺陷 1 + 2**（都在 `index.mjs` / `sdk-rpc.mjs`，改动小、收益最大）：
-   硬截止 + `kill()` 等确认 + 启动重试/握手式重启。做完就能消掉"关不掉"。
-2. **缺陷 3**：`process-guard.mjs` + `--doctor` 报告 + `/api/status` 暴露。
+1. ~~**缺陷 1 + 2**（都在 `index.mjs` / `sdk-rpc.mjs`，改动小、收益最大）：
+   硬截止 + `kill()` 等确认 + 启动重试/握手式重启。做完就能消掉"关不掉"。~~
+   ✅ **已完成** —— 见上方「修复记录」，回归测试 `mocks/verify-lifecycle.mjs`（已进 `npm test`）。
+2. **缺陷 3**（下一步）：`process-guard.mjs` + `--doctor` 报告 + `/api/status` 暴露。
    做完才能"看见"冲突，而不是靠猜。
 3. **缺陷 4**：端口第三防线 + 记录并展示自己启动的 SnowLuma PID。
-4. 顺带那几条（尤其是 `uncaughtException` 的退出策略）。
+4. 顺带那几条（尤其是 `uncaughtException` 的退出策略 —— ✅ 已随第 1 组一起做掉）。
 
 每一组都要补回归测试（`mocks/verify-*`）：现有的测试体系里已经有
 "防重复启动"的断言（`verify-apitest.mjs`），新机制照同样的方式加。
+
+★ 写这类测试时的教训（别再犯）：**先把前提断言出来**。
+"对已经退出的进程调 kill"这种用例，必须单独断言"它确实已经退出了"——
+否则前提不成立时，后面的断言会给出看起来毫不相关的失败。
+另外不要用 `child.killed` 判断死亡（那只是"信号已发出"），
+要同时看 `exitCode` 与 `signalCode`。

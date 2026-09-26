@@ -200,9 +200,23 @@ async function main() {
 
   console.log('\n── 用例 7：shutdown + 进程退出 ────────────────────────────')
   const exited = once(client, 'exit')
-  await client.shutdown()
-  const [code] = await Promise.race([exited, new Promise((r) => setTimeout(() => r([null]), 5000))])
-  check('shutdown 后子进程退出', code === 0 || code === null, `exit code=${code}`)
+  // shutdown() 的返回值是"优雅关停的结果"对象（graceful / timedOut / alreadyGone），
+  // 不是空的 —— 这里顺手把它记下来，失败时能看出是"没等"还是"对面不理我"。
+  const shutdownResult = await client.shutdown()
+  const [event] = await Promise.race([
+    exited,
+    new Promise((r) => setTimeout(() => r([null]), 5000)),
+  ])
+  // ★ `client` 派发的是 CustomEvent：退出码在 `event.detail.code` 里，**不是**事件本身。
+  //   原实现写成 `const [code] = ...` 再直接用，拿到的是个 CustomEvent 对象，
+  //   断言里那句 `code === 0 || code === null` 于是永远为假 —— 而它以前没红过，
+  //   是因为这条断言跑在最后、且失败信息人眼扫过去像"exit code=0"。
+  const code = event?.detail?.code ?? (event === null ? null : undefined)
+  check(
+    'shutdown 后子进程退出',
+    code === 0 || code === null,
+    `exit code=${code}（shutdown 结果：${JSON.stringify(shutdownResult)}）`,
+  )
 
   console.log(`\n${failures === 0 ? '🎉 全部通过' : `⚠️ ${failures} 项失败`}\n`)
   process.exit(failures === 0 ? 0 : 1)
