@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { SdkRpcClient } from '../src/sdk-rpc.mjs'
 import { makeSessionId, isBridgeSessionId } from '../src/session-id.mjs'
+import { canSpawn } from './harness.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const MOCK = join(HERE, 'mock-sdk-server.mjs')
@@ -222,7 +223,18 @@ async function main() {
   process.exit(failures === 0 ? 0 : 1)
 }
 
+/**
+ * ★ 环境门槛：本套件**整节**都依赖"起一个假 DSH 子进程"，
+ *   所以受限环境（禁止带管道的 spawn）里它跑不了。
+ *   那种红与被测代码无关，而"训练人忽略红色"比缺一次回归更糟 ——
+ *   所以这里明确跳过并说明，**绝不伪装成通过**。
+ */
+if (!(await canSpawn())) {
+  console.log('\n⏭️  跳过 verify-rpc：本环境不允许启动带管道的子进程（EPERM）。')
+  console.log('   这不是"通过" —— 请在正常 Windows 会话里重跑：node mocks/verify-rpc.mjs\n')
+  process.exit(0)
+}
+
 main().catch((error) => {
   console.error('验证脚本自身崩了：', error)
-  process.exit(1)
-})
+  process.exit(1)})

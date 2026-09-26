@@ -52,10 +52,16 @@ const readReg = () => JSON.parse(readFileSync(file, 'utf8')).entries
 function spawnIdle(instanceId = '') {
   const arg = instanceId ? `--instance-id=${instanceId}` : '--noop'
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', arg], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
+    // spawn 在某些受限环境里会**同步抛**（不只是异步 emit error），两个都要接住
+    let child
+    try {
+      child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', arg], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    } catch (error) {
+      return resolve({ child: null, blocked: `${error?.code ?? ''} ${error?.message ?? error}`.trim() })
+    }
     let settled = false
     const done = (ok, why = null) => {
       if (settled) return

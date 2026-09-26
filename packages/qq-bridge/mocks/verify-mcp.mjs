@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+import { canSpawn } from './harness.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG_ROOT = join(HERE, '..')
@@ -36,6 +37,20 @@ const section = (t) => console.log(`\n── ${t} ──`)
 
 rmSync(CACHE, { recursive: true, force: true })
 mkdirSync(CACHE, { recursive: true })
+
+/**
+ * ★ 环境门槛必须在**任何 spawn 之前**。本文件的 spawn 与协议逻辑原本是顶层代码，
+ *   所以这里要放在它们前面（顶层 await 在 ESM 里是允许的）。
+ *
+ * 为什么值得为它调整文件结构：受限环境（禁止带管道的 spawn）里这套会硬失败，
+ * 而失败原因与被测代码无关 —— 那种红会训练人忽略红色，比缺一次回归更糟。
+ * 明确跳过并说明"这不算通过"，才是诚实且不误导的做法。
+ */
+if (!(await canSpawn())) {
+  console.log('\n⏭️  跳过 verify-mcp：本环境不允许启动带管道的子进程（EPERM）。')
+  console.log('   这不是"通过" —— 请在正常 Windows 会话里重跑：node mocks/verify-mcp.mjs\n')
+  process.exit(0)
+}
 
 // 故意指向一个不存在的端口：放行的动作会在网络层失败，
 // 正好用来验证"错误被正确报出来"，而不是真的去动 QQ。
@@ -192,6 +207,10 @@ async function main() {
   process.exit(failures === 0 ? 0 : 1)
 }
 
+/**
+ * ★ 环境门槛：本套件整节都依赖"起一个 MCP 服务器子进程"，受限环境里跑不了。
+ *   （真正的门槛在上面、spawn 之前；这里这段是给"结构上容易误读"留的说明。）
+ */
 main().catch((error) => {
   console.error('测试脚本自身崩了：', error)
   try {
