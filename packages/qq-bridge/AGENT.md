@@ -917,7 +917,9 @@ node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切�
 
 **要写文件就用**：本仓库的文件工具（`read` / `edit` / `write`）；或 `git --output=<file>`（git 自己写字节，最保真）、`git checkout HEAD -- <path>`；或 .NET 显式编码 `[System.IO.File]::WriteAllText($p, $s, [System.Text.UTF8Encoding]::new($false))`。
 
-**守卫**：`node mocks/verify-text-encoding.mjs`（在 `npm test` 链上，11 项）扫全仓库文本文件，判据三条 —— 不许 UTF-16 BOM、不许 U+FFFD、`.md/.mjs/.json/.patch/.txt` 不许 UTF-8 BOM（`.bat` 的历史 BOM 豁免但会打印出来）。它自带**负对照**（拿事故的两种形态喂进判据，必须抓得住）—— 不然"守卫全绿"可能只是判据写错了。
+**守卫**：`node mocks/verify-text-encoding.mjs`（在 `npm test` 链上，**18 项**）扫全仓库 398 个文本文件，判据**四条** —— 不许 UTF-16 BOM、不许 U+FFFD、`.md/.mjs/.json/.patch/.txt` 不许 UTF-8 BOM（`.bat` 的历史 BOM 豁免但会打印）、★ **不许成片乱码**（判据④；前三条都可能不命中它，标定数据见下）。它自带**负对照**（拿事故的六种形态喂进判据，必须抓得住）+ **正对照**（正常中文不许误报）—— 不然"守卫全绿"可能只是判据写错了。
+
+⭐⭐ **完整记录（事故经过 / 损伤模型 / 判据标定 / 「我要做什么 → 用什么」决策表 / 实测字节对照 / 再中招时的恢复步骤）见 `docs/0.2.2-project-json-incident.md`。** 只记一条数字：那次现场文件里"乱码特征字"占 CJK 字符的 **29.0%**，而健康仓库 351 个文件里最高的一个只有 **0.006%** —— 判据就是照这个差距定的。
 
 ⭐ 教训记在这里的原因：这类损坏**不会让任何现有测试变红**（乱码照样是合法 JSON），只有人去读那几行字时才发现"这话怎么读不通"。**没有断言盯着的纪律等于不存在。**
 

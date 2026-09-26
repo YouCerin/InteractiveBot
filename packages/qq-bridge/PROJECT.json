@@ -387,10 +387,10 @@
     },
     {
       "cmd": "node mocks/verify-text-encoding.mjs",
-      "purpose": "★★ **文本编码守卫**（0.2.2 补的，因为真的踩过一次）：扫全仓库文本文件，判据三条 —— 不许 UTF-16 BOM（PowerShell `>` 重定向的产物）、不许 **U+FFFD**（GBK 误解码留下的替换字符）、`.md/.mjs/.json/.patch/.txt` 不许 UTF-8 BOM（`.bat` 的历史 BOM 豁免但会打印出来）。★ 为什么必须有断言而不是只在 AGENT.md 写一句注意：这类损坏**不会让任何现有测试变红**（乱码照样是合法 JSON），只有人读那几行字时才发现。★ 自带**负对照**（把事故的两种形态喂进判据，必须抓得住）+ 两条指名断言（PROJECT.json 不含 U+FFFD、pixiv patch 是 UTF-8 且 hunk 数没变）。",
+      "purpose": "★★ **文本编码守卫**（0.2.2 补的，因为真的踩过一次；完整记录见 `docs/0.2.2-project-json-incident.md`）：扫全仓库文本文件，**四条判据** —— ① 不许 UTF-16 BOM（PowerShell `>` 重定向的产物）、② 不许 **U+FFFD**（解码丢字节的痕迹）、③ `.md/.mjs/.json/.patch/.txt` 不许误加 UTF-8 BOM（`.bat` 历史用法豁免但会打印）、④ ★★ 不许**成片乱码**（「UTF-8 被当 GBK 读」—— 事故的第一形态，**前三条都可能不命中它**）。★ 判据④是**标定过的**：特征字集合取自真实现场的最高频 40 个 CJK 字（实测现场命中 29.0% / 67856 个 CJK 字符，而健康仓库 351 个文件里最高的一个只有 2 个 = 0.006%），阈值取「≥30 个」或「≥5 个且占比 ≥0.5%」。★ 自带**负对照**（事故的六种形态喂进判据，必须抓得住；其中最关键的一条用真实现场原文，证明只有判据④能抓）+ **正对照**（正常中文/含几个特征字的正当文本/英文代码都不许误报）。★ 豁免必须写理由（当前两条：这份事故记录、守卫自己），并如实区分「当前在用」与「预防性」。⚠️ 边界：抓的是**成片**乱码，单字级损坏抓不住；gitignore 的目录（cache/logs/dist…）不在扫描范围。",
       "network": false,
       "costs": "none",
-      "assertions": 11
+      "assertions": 18
     },
     {
       "cmd": "node mocks/verify-extensions.mjs",
@@ -503,7 +503,7 @@
     "mocks/verify-contacts.mjs": "★★ 联系人昵称测试（0.2.2，43 项）：① **解析**（`=`/`:` 两种分隔、可疑值/号码超长/形状不对/重复号码都进 `bad` 而**不静默丢**）；② **把关只有一处实现**（`normalizeNickname` 与底层 `cleanNickname` 同一个判据，不是抄一份）；③ 读写（文件不存在=空表、越界路径被拒、超 200 条被拒、渲染幂等）；④ **注入**（没有昵称时一个字都不产生、说清「不用每句都带」与「跟权限无关」、**不打印号码**）；⑤ ★★ **篡改回滚**：模拟「模型绕过桥接直接改文件」，跑 `verifyAndRestoreMemory` 后文件被还原、日志留证据、偷加的号码查不到；⑥ 接口（GET/POST、空昵称=删除、400/422/501 三种错误语义）。",
     "mocks/verify-personas.mjs": "★★ 人设库测试（0.2.2，97 项）：① **默认那两套是文件、与预设同源、只在空目录时落**（含「删掉之后启动不许复活它」与「读操作也不许复活它」）；② **命名校验拦在写盘之前**（路径分隔符 / Windows 保留字符 / 以点开头结尾 / 24 字上限 / 保留名 `none`）；③ 增删改查（重名拒绝、空正文拒绝、超 4000 字拒绝、复制新建、改名冲突、渲染带结尾换行、`hasNameBlock`、`blocked`）；④ ★★ **当前生效的是哪一套**（文件 / `none` / 老 `custom` / 老 `preset` / 两项都空 → 出厂默认；★ `active` 指向读不到的文件时**不静默退回内置**）；⑤ ★★ **写动作的配置跟随与重启语义**（保存/改名/删除**正在用的**那套 → 配置跟着改 + `restartRequired:true`；动别的 → `false`；切换不存在的名字 → 拒绝）；⑥ 接口（GET/POST、`activate` 真的写进配置且留 `.bak`、400 vs 422、没注入依赖 501、★ 旧接口 `/api/persona` 与 `/api/persona/names` 回 **410 + 新路径**而不是 404）；⑦ ★★ **接线断言**（直接读 `src/index.mjs`/`src/api.mjs` 源码：依赖真的注入了、启动真的落默认两套、路由真的挂上、配置落盘纪律只有一处、`--personas` 这个只读入口在 `--memory` 之前 —— 纯函数测过 ≠ 接线做过）。",
     "mocks/probe-extensions.mjs": "★ 扩展探针（不是测试）：打开某个技能后，把**提示词里到底多出什么字**打出来看。为什么需要它：技能对模型的影响几乎全在提示词与工具表上，而那是「看一眼就知道对不对、不看就只能猜」的东西。",
-    "mocks/verify-text-encoding.mjs": "★★ **文本编码守卫**（0.2.2）：全仓库文本文件不许是 UTF-16、不许含 U+FFFD、常见文本格式不许带 UTF-8 BOM（`.bat` 豁免）。存在的理由是一次真实事故：一条 PowerShell 命令把 `PROJECT.json` 按 ANSI 读、按 UTF-8 写回，中文全变乱码且**不报错**；同一条路子还会把 `.patch` 落成 UTF-16。★ 带负对照（拿事故的两种形态喂进判据，必须抓得住）。详见 `AGENT.md` §6.6。",
+    "mocks/verify-text-encoding.mjs": "★★ **文本编码守卫**（0.2.2）：全仓库文本文件不许是 UTF-16、不许含 U+FFFD、常见文本格式不许带 UTF-8 BOM（`.bat` 豁免）、**不许成片乱码**（判据④，标定过）。存在的理由是一次真实事故：一条 PowerShell 命令把 `PROJECT.json` 按 ANSI 读、按 UTF-8 写回，3277 处说明文字被写坏且**不报错**（乱码照样是合法 JSON，`npm test` 全绿）；同一条路子还会把 `.patch` 落成 UTF-16LE。★ 带负对照（事故的六种形态，必须抓得住）与正对照（不许误报）；豁免必须写理由。**完整的事故记录、损伤模型、标定数据与「正确改法决策表」见 `docs/0.2.2-project-json-incident.md`**，纪律见 `AGENT.md` §6.6。",
     "mocks/probe-ui-deadcode.mjs": "★ 控制台源码**死代码探针**（0.2.2）：从 `config-ui/src/main.tsx` 出发做 import 图可达性分析（支持 `@/` 别名、省略扩展名、`import 'x'` 副作用导入），列出不可达文件。实测 83 个源文件里只有 43 个可达 —— 38 个是模板残留的 shadcn 组件。**刻意不进 `npm test`**：清理还没做，塞进去只会让「全绿」变假（见 mocks/harness.mjs 的纪律）。用户要求控制台改造等指令，这个探针是那份方案的证据来源。",
     "mocks/verify-local.mjs": "路径解析测试（重点是 resolveDshHome：绝不能把 DSH 安装目录当成 DSH_HOME）",
     "mocks/verify-mcp-profile.mjs": "profile 补丁生成测试（重点：不能留下\"空列表 + 真实列表\"这种会让 DSH 起不来的非法 YAML）",
@@ -1199,6 +1199,11 @@
       "symptom": "改过的人设 / 配置「保存了但没生效」",
       "cause": "人设与大部分配置都是**启动时读一次并缓存**的（唯一的例外是 `src/extensions-service.mjs` 那条「即时生效」通道：技能开关与设置写盘的同时改活配置对象）",
       "fix": "看接口返回的 `restartRequired`：`true` 就必须重启（界面也照它说）。**不要**把「界面显示已保存」当成「已经生效」—— 那正是本项目最忌讳的「说了做不到」"
+    },
+    {
+      "symptom": "★ 某份文本文件的中文突然变成怪字/乱码 —— 而 `npm test` 全绿、机器人照常跑",
+      "cause": "**用它读/写了文件的工具在重编码**：① PowerShell 5.1 的 `Get-Content` 默认按**系统 ANSI（GBK）**解码（`-Encoding` 只作用于写，救不了读）；② `Set-Content -Encoding UTF8` 会**加 UTF-8 BOM**（5.1 的 `UTF8` 就是带 BOM）；③ PowerShell 的 `>` / `>>` 重定向把输出落成 **UTF-16LE**。★ 之所以没有任何测试拦得住：乱码**仍然是合法 JSON/Markdown/JS 字符串**，只有人读那几行字时才发现。",
+      "fix": "① **先停手**，别再对同一个文件做写操作（更别想「再跑一次改回来」）；② 留证据（坏文件复制到 `cache/` + 记下命令与时间）；③ **优先 git 回退**：`git log -- <文件>` → `git checkout <ref> -- <文件>`；④ 回退不了才做结构修复（GBK 逆变换 + U+FFFD 占位，**救不回被吃掉的字**，必须如实告知）；⑤ 补跑 `node mocks/verify-text-encoding.mjs` + `node mocks/verify-manifest.mjs` + `npm test`。★ **完整的判据、标定数据、正确写法决策表与实测字节对照见 `docs/0.2.2-project-json-incident.md`**（这份守卫与 AGENT.md §6.6 就是那次事故的产物）"
     }
   ],
   "verificationStatus": {
