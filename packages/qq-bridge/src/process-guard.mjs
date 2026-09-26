@@ -232,7 +232,18 @@ export function createProcessGuard({
         continue
       }
       keep.push(entry)
-      if (entry.profile === profile) conflicts.push({ ...entry, state, reason })
+      // ⚠️ 冲突只算**可能真的还活着**的：`alive` / `stale`（心跳过期但进程在）/ `suspect`
+      //    （读不到命令行，无法确认）。
+      //
+      //    这里踩过一次：原先只按 `profile` 相等就 push，于是**登记表里那些
+      //    已经确认死掉的条目**（state='dead'）也会被算进 conflicts。
+      //    它们的 state 会一路带到 `list()`，而 `list()` 的冲突过滤是
+      //    `state === 'alive' || state === 'stale'` —— 两处口径不一致，
+      //    结果就是**人看到的列表是干净的、却仍被警告"还有其它桥接在跑"**，
+      //    然后被指引去 kill 一个已经不存在的 pid。
+      //    实测（杀完旧实例后）就是这样：列表里只显示 23404 dead + 28312 alive，
+      //    下面却照样报"有 1 个其它桥接在跑"。
+      if (entry.profile === profile && state !== 'dead') conflicts.push({ ...entry, state, reason })
       else others.push({ ...entry, state, reason })
     }
 
@@ -398,4 +409,31 @@ export function unregisterExternal({ pkgRoot, pid }) {
 export function summarizeProcesses(entries) {
   const alive = entries.filter((e) => e.state === 'alive' || e.state === 'stale')
   return `${alive.length} 个在运行（登记 ${entries.length} 条）`
+}
+
+/**
+ * 从一份 `list()` 结果里挑出"**真的在跑的**桥接"。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么它必须是个**按数量**判定的纯函数（而不是 `!isSelf`）
+ * ══════════════════════════════════════════════════════════════════════════
+ * `--processes` 是**另起的一个进程**。对它来说 `isSelf` **恒为 false** ——
+ * 于是任何"用 isSelf 排除自己"的写法，在 CLI 这条路径上都会把
+ * **唯一那个正在跑的桥接**当成"其它进程"，报出
+ * 「有 1 个其它桥接在跑」并指引去 kill 它。
+ * 实测（进程表清理干净后）确实这样：列表只有一条 `alive`，警告照样出现。
+ *
+ * 正确口径是**数量**：在跑的桥接 **1 条 = 正常**，**≥2 条 = 真冲突**
+ * （两个都在抢同一个 OneBot 事件流）。这个口径对两种视角都成立。
+ *
+ * ⚠️ 不要拿它替代 `claim()` 里的冲突判定 —— 那里有 `isSelf` 的语义
+ *    （"自己"是确定的那个进程），两者用途不同。
+ *
+ * @param {{profile?: string, state?: string}[]} entries `list()` 的返回值
+ * @returns {object[]} 在跑的桥接条目
+ */
+export function runningBridges(entries) {
+  return (Array.isArray(entries) ? entries : []).filter(
+    (e) => e?.profile === 'bridge' && (e.state === 'alive' || e.state === 'stale'),
+  )
 }

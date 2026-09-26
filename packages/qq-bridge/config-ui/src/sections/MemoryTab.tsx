@@ -14,6 +14,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { ConfirmDialog, FieldRow, InlineNote, NumInput, type ConfirmRequest } from '@/components/common'
+import { MemorySearchCard } from '@/sections/MemorySearchCard'
+import { MemoryStatsCard } from '@/sections/MemoryStatsCard'
+import { PrivacyCard } from '@/sections/PrivacyCard'
 import { api, ApiError, isNotImplemented, type InboxState, type MemoryEntry, type MemoryTree } from '@/lib/api'
 import { getBool, getNum, getStr, isDangerousWorkspace } from '@/lib/config'
 import { toast } from 'sonner'
@@ -389,9 +392,9 @@ export function MemoryTab({
         由桥接校验后落盘。三个后果你需要知道：
         <ul className="mt-1 list-disc pl-5">
           <li>
-            <strong>这里手动改完会被回滚</strong>：桥接每次写入都留快照，读记忆前比对，
-            不一致（说明有人绕过了桥接）就恢复成桥接那版。想在界面上改，需要先
-            <strong>关掉记忆功能</strong>（<code className="rounded bg-white/50 px-1">memory.enabled</code>）再改。
+            <strong>在这个界面里改是生效的</strong>：保存成功后桥接会同步刷新快照基准，
+            你的编辑会留下来。会被回滚的只有<strong>模型自己拿写文件工具绕过协议</strong>的改动
+            （桥接每次写入都留快照，读记忆前比对，不一致就恢复成快照那版）。
           </li>
           <li>
             <strong>要跨会话共享就写 global</strong>：模型用{' '}
@@ -410,6 +413,15 @@ export function MemoryTab({
           </li>
         </ul>
       </InlineNote>
+
+      {/* ★ H13：记忆条目检索。以前只能逐个文件点开翻，条目攒到几十条之后就没人翻得动了。
+          ★ 与「对话页的历史检索」是两件事：那边搜"说过什么"，这边搜"沉淀下来的事实"。 */}
+      <MemorySearchCard demo={demo} />
+
+      {/* ★ 0.2.1 观测面：记忆系统在不在正常工作。两张卡并列放 ——
+          一张看"写没写进去"（零写入告警），一张看"拦没拦住"（隐私双侧硬闸）。 */}
+      <MemoryStatsCard demo={demo} />
+      <PrivacyCard demo={demo} />
 
       <Card>
         <CardHeader className="pb-2">
@@ -783,11 +795,10 @@ export function MemoryTab({
                       <span className="tabular-nums">{[...content].length} 字 · Ctrl+S 保存</span>
                     </div>
                     {memoryEnabled && (
-                      <InlineNote level="warn">
-                        记忆功能现在是<strong>开着</strong>的：桥接管着写入权，
-                        你在这里保存的内容<strong>可能在下一轮被回滚</strong>成桥接那版。
-                        想手工改，先关掉上面的「启用记忆」再改；
-                        或者直接在私聊里跟机器人说「这条记错了」，让桥接落成新条目。
+                      <InlineNote level="info">
+                        在这里保存<strong>立即生效、不会被回滚</strong>：保存成功后桥接会同步刷新快照基准。
+                        会被回滚的只有模型自己拿写文件工具绕过协议的改动。
+                        另一种改法是直接在私聊里跟机器人说「这条记错了」，让桥接落成新条目——两种方式都可以。
                       </InlineNote>
                     )}
                   </div>
@@ -823,18 +834,18 @@ export function MemoryTab({
             旧记忆留在旧目录里，不会跟过来。
           </p>
           <p>
-            <strong className="text-foreground">3. 手动改会被回滚：</strong>
+            <strong className="text-foreground">3. 在这个界面里改是生效的；被回滚的只有「绕过桥接的改动」：</strong>
             桥接每次写入都留快照（
             <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs">memory/.snapshots/</code>
-            ），读记忆前比对；不一致——无论是模型绕过协议改的、还是
-            <strong className="text-foreground">你在这个界面里改的</strong>——都会恢复成桥接那一版。
-            想手工编辑，<strong className="text-foreground">先关掉上面的「启用记忆」再改</strong>。
+            ），读记忆前比对，不一致就恢复成快照那一版——这条机制防的是
+            <strong className="text-foreground">模型</strong>拿写文件工具绕过协议直接改记忆。
+            你在这个界面里保存/删除后，桥接会<strong className="text-foreground">同步刷新快照基准</strong>，
+            所以你的编辑会留下来。
           </p>
           <p>
             <strong className="text-foreground">4. 改这里等于直接改机器人的长期记忆：</strong>
-            它是修正错误记忆的入口；但因为第 3 条，<strong className="text-foreground">推荐做法是
-            管理员在私聊里用自然语言纠正</strong>（「别记那个了」「这条记错了」）——
-            桥接会落成新条目，而不是手工覆盖文件。
+            它是修正错误记忆的入口。另一种做法是让管理员在私聊里用自然语言纠正
+            （「别记那个了」「这条记错了」），桥接会落成新条目——两种方式都可以，按你的习惯来。
           </p>
         </CardContent>
       </Card>

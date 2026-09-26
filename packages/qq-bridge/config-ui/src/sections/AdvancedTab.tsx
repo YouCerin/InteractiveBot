@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/select'
 import { FieldRow, InlineNote, type ConfirmRequest } from '@/components/common'
 import { getBool, getStr, getStrArr } from '@/lib/config'
+import { BridgeLogCard } from '@/sections/BridgeLogCard'
 import { KeyRound, ShieldAlert, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -26,6 +27,7 @@ export function AdvancedTab({
   askConfirm,
   apiKey,
   setApiKey,
+  demo = false,
 }: {
   cfg: Record<string, unknown>
   patch: (path: string, value: unknown) => void
@@ -33,6 +35,8 @@ export function AdvancedTab({
   /** 模型 API key 的草稿值（**不在 cfg 里** —— 见 Home.tsx 的说明）。 */
   apiKey: string
   setApiKey: (v: string) => void
+  /** 演示模式：不连后端（日志卡片直接不显示，见 BridgeLogCard） */
+  demo?: boolean
 }) {
   const perm = getStr(cfg, 'dsh.permissionMode', 'workspace-write')
   const hasApiKey = getBool(cfg, 'hasApiKey', false)
@@ -79,6 +83,10 @@ export function AdvancedTab({
 
   return (
     <div className="space-y-4">
+      {/* ★ H13：桥接日志（轮询增量）。放这里而不是概览页：它是排查用的，
+          而"正在发生什么"最常是在配置改动之后要看的 —— 改完配置的下一步就是看它有没有生效。 */}
+      <BridgeLogCard demo={demo} />
+
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-base">

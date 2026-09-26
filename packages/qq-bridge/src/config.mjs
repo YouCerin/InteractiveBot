@@ -42,6 +42,29 @@ function normalizePathList(value) {
 }
 
 /**
+ * 归一化表情表（`send.stickers`）：名字 → QQ 表情 id。
+ *
+ * **只接受值全是数字的条目**，别的形状**直接丢掉**（不报错、不猜）：
+ * 这个表最终会变成发出去的表情段，值不是数字就等于发一个未定义的东西。
+ * 空表是合法的默认值 —— 含义是"不发表情"（`[sticker:…]` 会被剥掉并记一行日志）。
+ *
+ * @param {unknown} value
+ * @returns {Record<string, string>}
+ */
+function normalizeStickerTable(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out = {}
+  for (const [name, id] of Object.entries(value)) {
+    const key = String(name ?? '').trim()
+    const faceId = String(id ?? '').trim()
+    if (!key || key.length > 32) continue
+    if (!/^\d{1,6}$/.test(faceId)) continue
+    out[key] = faceId
+  }
+  return out
+}
+
+/**
  * 补齐默认值并解析路径。
  *
  * 为什么路径要在这里解析：`config.json` 里写的是相对包根的路径，
@@ -126,6 +149,14 @@ export function normalizeConfig(c) {
       maxPerHour: src.send?.maxPerHour ?? 500,
       dedupeWindowMs: src.send?.dedupeWindowMs ?? 8000,
       maxCharsPerMessage: src.send?.maxCharsPerMessage ?? 1500,
+      // ── 表情表（H6）：`[sticker:名字]` → QQ 表情 id ────────────────────────
+      //
+      // ★ **默认空表**，而且不配就是"不发表情"（标记会被剥掉 + 记一行日志）。
+      //   为什么不做一张内置的名字→id 表：那需要**逐个确认 id 到底对应哪个表情**，
+      //   猜错就是**用户可见的错误**（想发"偷笑"结果发了个"菜刀"）。宁可不发，也不发错。
+      //   真正的表情库属于 M5' 的技能系统（离线标签 + 本地选图），届时由它填这张表。
+      // ⚠️ 只接受**值全是数字**的条目，别的形状直接丢掉（不报错、不猜）。
+      stickers: normalizeStickerTable(src.send?.stickers),
     },
     turn: { timeoutMs: src.turn?.timeoutMs ?? 10 * 60_000 },
     // 人味层：默认**开启**。这不是体验优化，是账号存活相关配置 ——

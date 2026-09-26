@@ -38,6 +38,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveMemoryPath } from './memory-files.mjs'
+import { screenForStore, logPrivacyBlock } from './privacy.mjs'
+// H4/R10：更正标注（旧条目不删、只加标注并停止注入）+ 文本相似度（判是不是在更正旧的）
+import { pickSupersedeTarget, markSupersededLine, isSuperseded } from './memory-supersede.mjs'
+import { similarity } from './text-similarity.mjs'
+import { readUsage, applyRecencyOrder, recordWrite } from './memory-usage.mjs'
 
 /** 三档作用域。 */
 export const SCOPE = {
@@ -64,6 +69,13 @@ const SCOPE_WORDS = {
   slang: SCOPE.SLANG,
   global: SCOPE.GLOBAL,
   directive: SCOPE.DIRECTIVE,
+  // ★ H4：`fix` = "这条是在**更正**上面记错的某一条"。
+  //
+  // 为什么需要它：实测证明**规则认不出纯陈述式的覆盖**（"服务器是 Forge" → "服务器是 Paper"
+  // 与"服务器内存改成 32G"的相似度差 0.013，分不开 —— 见 memory-supersede.mjs 的实测数字）。
+  // 所以给模型一个**显式出口**：它自己知道自己在更正，就写 `fix` 档。
+  // 落盘时仍然是 `fact` 档（更正的是事实），只是额外带一个 `force` 标记。
+  fix: SCOPE.FACT,
 }
 
 /**
@@ -137,9 +149,11 @@ function filesFor({ kind, peerId }) {
  *
  * @returns {{ text: string, files: string[], counts: Record<string, number> }}
  */
-export function readMemoryForPrompt({ workspace, kind, peerId }) {
+export function readMemoryForPrompt({ workspace, kind, peerId, log = () => {} }) {
   const root = String(workspace ?? '')
   const f = filesFor({ kind, peerId })
+  // ★ H3：读一次使用侧车，用来**决定显示顺序**（不改内容、不降权、不删 — 见 memory-usage.mjs）
+  const usage = readUsage({ workspace: root, log })
   const wanted = [
     // ① 全局记忆：**对所有人都生效**，所以两种会话都注入。
     //    它不含任何人的私事（私事一律写 private-<QQ>.md，那是按人隔离的）。
@@ -159,20 +173,33 @@ export function readMemoryForPrompt({ workspace, kind, peerId }) {
   const detail = []
   for (const [label, rel] of wanted) {
     const abs = join(root, rel)
-    const entries = readEntryLines(abs)
+    const all = readEntryLines(abs)
       // 注入给模型看的是"条目列表"，不是 markdown 文档：把 `- ` 剥掉，
       // 否则会把 `〔指令〕- （指令）…` 这种噪音喂进去。
       .map((l) => l.slice(2).trim())
       .filter(Boolean)
+    // ★ H4：**已被更正**的条目不注入 —— 它们的结论已经被推翻，
+    //   再喂给模型就是让它拿一个错的事实当依据。它们仍在文件里（可查、可追溯）。
+    const supersededCount = all.filter((t) => isSuperseded(t)).length
+    const live = all.filter((t) => !isSuperseded(t))
+    // ★★ H3：按"最近进过上下文"重排（**从没进过的排最前**）—— 见 `memory-usage.mjs` 文件头。
+    //    为什么需要：上限是 25 条，而**新条目是追加在文件末尾的** —— 只按文件顺序截，
+    //    最先被牺牲的恰恰是刚写下的那条。重排**不改内容、不删条目、不算权重**（D9：不做衰减）。
+    //    ⚠️ 前缀缓存：同一轮里所有注入条目的时间戳相同 → 相对次序不变 → 渲染文本不变；
+    //       只有两条的新旧真的翻转时文本才变。
+    const entries = applyRecencyOrder({ entries: live, usage })
     if (entries.length === 0) continue
     const shown = entries.slice(0, INJECT_ENTRIES)
     const more = entries.length - shown.length
-    const text = shown.join(' ') + (more > 0 ? ` （另有 ${more} 条未展开）` : '')
+    const text =
+      shown.join(' ') +
+      (more > 0 ? ` （另有 ${more} 条未展开）` : '') +
+      (supersededCount > 0 ? ` （另有 ${supersededCount} 条已被更正，不再作为事实使用）` : '')
     blocks.push(`〔${label}〕${text}`)
     // ★ 结构化副本（给"记忆体检"用）。为什么不在调用方解析那段文本：
     //   解析文本是二次实现，迟早与这里的格式分叉 —— 而分叉的表现是
     //   "体检说注入了、实际没注入"这种最难查的假信息。
-    detail.push({ label, rel, entries: entries.length, shown: shown.length, more, text })
+    detail.push({ label, rel, entries: entries.length, shown: shown.length, more, text, shownEntries: shown })
     usedFiles.push(rel)
     counts[rel] = entries.length
   }
@@ -210,12 +237,24 @@ export function parseMemoryMarkers(replyText) {
     if (!scope) continue
     const entry = m[2].trim()
     if (!entry) continue
-    items.push({ scope, text: entry, raw: t })
+    // ★ `fix` 档 = 模型明确说"这条是在更正上面记错的" → 落盘时仍写 fact，
+    //   但带 `force: true`（相似度门槛降到 floor，不再要求自指式措辞）
+    const force = String(m[1]).toLowerCase() === 'fix'
+    items.push({ scope, text: entry, raw: t, force })
   }
   return { clean: kept.join('\n').trim(), items }
 }
 
-/** 一条内容是否被内容级规则挡住。 */
+/**
+ * 一条内容是否被内容级规则挡住。
+ *
+ * ⚠️ 这是**所有记忆写入路径的唯一内容级闸门** —— 加规则请加在这里，
+ *    不要散到各个调用点（散出去必然漏掉某一条路径）。
+ *
+ * 顺序上**隐私判据排在最后**：前面几条是"这条不该记"（身份/权限、像指令、绕过约束），
+ * 隐私是"这条不该存"。两类原因都要如实回报，但隐私那条更硬 ——
+ * 它对应"不存隐私信息"的明确要求，所以放在最后、且带了专门的类别信息。
+ */
 export function screenEntry(scope, entry) {
   const text = String(entry ?? '').trim()
   if (!text) return { ok: false, why: '内容为空' }
@@ -226,6 +265,13 @@ export function screenEntry(scope, entry) {
       if (scope === SCOPE.DIRECTIVE && rule.why === '像行为指令，应走指令档') continue
       return { ok: false, why: rule.why }
     }
+  }
+  // ── 隐私：**双侧硬闸的写入侧**（详见 src/privacy.mjs）────────────────────
+  // 拒绝落盘。回执会把 `why` 带回给模型，所以措辞要说清"为什么没记上"，
+  // 否则模型会以为是自己写错了格式而反复重试。
+  const priv = screenForStore(text)
+  if (!priv.ok) {
+    return { ok: false, why: priv.why, privacy: true, categories: priv.categories }
   }
   return { ok: true }
 }
@@ -264,7 +310,7 @@ function readEntryLines(abs) {
  * "以后在群里别提那件事" 被截成 "以后在群里别提" 意思就反了。
  * 到上限时整条**拒绝**并如实回报，让模型/使用者知道"这条没记上"。
  */
-function appendEntry({ workspace, rel, entry, log }) {
+function appendEntry({ workspace, rel, entry, log, forceSupersede = false }) {
   const resolved = resolveMemoryPath(workspace, rel)
   if (!resolved.ok) return { ok: false, why: `路径不合法：${resolved.error}` }
   const abs = resolved.abs
@@ -276,6 +322,40 @@ function appendEntry({ workspace, rel, entry, log }) {
   if (entries.length >= MAX_ENTRIES) {
     return { ok: false, why: `该文件已有 ${entries.length} 条（上限 ${MAX_ENTRIES}），请先合并或删掉过时的` }
   }
+
+  // ── H4 / R10：这条是不是在**更正**上面某一条 ──────────────────────────────
+  //
+  // ★ 为什么必须在这里做（而不是等整理）：更正发生后**下一轮就会注入**，
+  //   若等到每小时的整理，模型在这中间会拿到两个互相矛盾的事实，**对错各半**。
+  // ★ 判据是确定性的（见 memory-supersede.mjs 文件头）：更正措辞 + 相似度门槛，
+  //   或模型的显式 `fix` 档。**不带措辞的陈述式冲突认不出来**（那条边界如实写在文档里）。
+  // ★ 旧条目**留着**，只加一行标注并**停止注入** —— 这样"我说错过什么"仍然查得到。
+  let superseded = null
+  try {
+    const target = pickSupersedeTarget({
+      lines: entries,
+      newEntry: entry,
+      similarity,
+      force: forceSupersede === true,
+    })
+    if (target) {
+      const marked = markSupersededLine(target.line, { newEntry: entry })
+      if (marked.changed) {
+        const raw = readFileSync(abs, 'utf8')
+        const lines = raw.split('\n')
+        const idx = lines.findIndex((l) => l.trim() === target.line.trim())
+        if (idx >= 0) {
+          lines[idx] = marked.line
+          writeFileSync(abs, lines.join('\n'), 'utf8')
+          superseded = { line: marked.line, score: Number(target.score.toFixed(3)) }
+        }
+      }
+    }
+  } catch (error) {
+    // 标注失败**不能**挡住写入（它只是"多留一条线索"）—— 但要留证据
+    log(`⚠️ [memory] 更正标注失败（这条照常写入）：${error?.message ?? error}`)
+  }
+
   try {
     mkdirSync(join(abs, '..'), { recursive: true })
     const header = entries.length === 0 ? `# 记忆（桥接维护，勿手改）\n\n` : ''
@@ -285,7 +365,15 @@ function appendEntry({ workspace, rel, entry, log }) {
   }
   // 写完立刻留快照：这就是"已知良好"的基准，供 verifyAndRestoreMemory 比对。
   saveSnapshot({ workspace, rel })
-  return { ok: true, rel, added: line }
+  // ★ H3：在**写入侧**登记"刚写下" —— 否则这条新记忆会被 25 条注入上限挤掉，
+  //   而且**不会有任何地方报错**（用户听到的是"记住了"，磁盘上也有，但它再也不出现）。
+  //   失败不影响写入本身，但要留证据（第 9 条）。
+  try {
+    recordWrite({ workspace, entries: [entry], rel, log })
+  } catch (error) {
+    log(`⚠️ [memory] 使用账本没记上"刚写下"（记忆本身已写好）：${error?.message ?? error}`)
+  }
+  return { ok: true, rel, added: line, superseded }
 }
 
 /**
@@ -309,9 +397,24 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
   for (const item of items ?? []) {
     const scope = item.scope
     const entry = String(item.text ?? '').trim()
+    // ★ `source` 一路带下去，供审计区分「模型提议」与「关键词直写」
+    //   （两条通道写进同一份文件，事后要能分清是谁写的）
+    const source = item.source ?? null
     const screen = screenEntry(scope, entry)
     if (!screen.ok) {
-      ignored.push({ scope, entry, why: screen.why })
+      ignored.push({ scope, entry, source, why: screen.why })
+      // ★ 隐私被拦**单独审计**（只记类别与长度，**绝不记原文** ——
+      //   否则审计文件本身就成了新的泄露通道）。别的拒绝原因不审计：
+      //   它们由回执与 `[memory]` 日志覆盖，而隐私拦截需要能被单独统计。
+      if (screen.privacy) {
+        logPrivacyBlock({
+          workspace,
+          side: 'store',
+          categories: screen.categories ?? [],
+          length: entry.length,
+          chatKey: `${kind}:${peerId}`,
+        })
+      }
       continue
     }
 
@@ -321,18 +424,18 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
       // 为什么不在群里也允许：群聊上下文最杂、最容易被话术带偏；
       // 私聊 + 管理员是能确定"这是主人的意思"的最小集合。
       if (tier !== 'admin') {
-        ignored.push({ scope, entry, why: '只有管理员能下达跨群的行为指令' })
+        ignored.push({ scope, entry, source, why: '只有管理员能下达跨群的行为指令' })
         continue
       }
       if (kind !== 'private') {
-        ignored.push({ scope, entry, why: '行为指令请在私聊里告诉我（群聊里的话会带到所有群，不适合）' })
+        ignored.push({ scope, entry, source, why: '行为指令请在私聊里告诉我（群聊里的话会带到所有群，不适合）' })
         continue
       }
       const r = appendEntry({ workspace, rel: FILE.directives, entry: `（指令）${entry}`, log })
       if (r.ok) {
-        applied.push({ scope, entry, rel: FILE.directives, deduped: r.deduped })
+        applied.push({ scope, entry, source, rel: FILE.directives, deduped: r.deduped })
         if (!r.deduped) wroteFiles.push(FILE.directives)
-      } else ignored.push({ scope, entry, why: r.why })
+      } else ignored.push({ scope, entry, source, why: r.why })
       continue
     }
 
@@ -347,24 +450,28 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
     if (scope === SCOPE.GLOBAL) {
       const r = appendEntry({ workspace, rel: FILE.global, entry: `（全局）${entry}`, log })
       if (r.ok) {
-        applied.push({ scope, entry, rel: FILE.global, deduped: r.deduped })
+        applied.push({ scope, entry, source, rel: FILE.global, deduped: r.deduped })
         if (!r.deduped) wroteFiles.push(FILE.global)
-      } else ignored.push({ scope, entry, why: r.why })
+      } else ignored.push({ scope, entry, source, why: r.why })
       continue
     }
 
     // fact / slang：任何人可写，但只写"当前会话该写的那份"
     const rel = scope === SCOPE.SLANG ? f.slang : f.facts
     if (!rel) {
-      ignored.push({ scope, entry, why: '这个会话没有对应的记忆文件（缺少会话标识）' })
+      ignored.push({ scope, entry, source, why: '这个会话没有对应的记忆文件（缺少会话标识）' })
       continue
     }
     const prefix = scope === SCOPE.SLANG ? '（黑话）' : ''
-    const r = appendEntry({ workspace, rel, entry: `${prefix}${entry}`, log })
+    // ★ H4：模型显式写了 `fix` 档 → 它明确说了"这是在更正上面记错的某一条"，
+    //   于是把相似度门槛降到 floor（不再要求自指式措辞 —— 那种措辞实测认不全）。
+    const r = appendEntry({ workspace, rel, entry: `${prefix}${entry}`, log, forceSupersede: item.force === true })
     if (r.ok) {
-      applied.push({ scope, entry, rel, deduped: r.deduped })
+      // ★ H4：把"这条更正了上面哪一条"的痕迹带出去（调用方要据此写日志/审计）
+      //   —— 不传出去的话，"标注到底发生了没有"在外面完全看不见。
+      applied.push({ scope, entry, source, rel, deduped: r.deduped, superseded: r.superseded ?? null })
       if (!r.deduped) wroteFiles.push(rel)
-    } else ignored.push({ scope, entry, why: r.why })
+    } else ignored.push({ scope, entry, source, why: r.why })
   }
 
   if (applied.length || ignored.length) {
@@ -383,8 +490,14 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
  * 那正是这个项目一直在防的失败模式（"失败必须让用户知道"）。
  * 回执在**下一轮的提示词**里出现，不额外发消息、不额外调接口。
  */
-export function writeReceipt({ workspace, kind, peerId, applied, ignored }) {
-  if ((applied?.length ?? 0) === 0 && (ignored?.length ?? 0) === 0) return null
+export function writeReceipt({ workspace, kind, peerId, applied, ignored, notes = [] }) {
+  // ★ 允许"只有 notes、没有条目"的回执 —— 实测需要两种：
+  //   ① 用户明确说"记住 X"（`source: 'keyword'`）→ 要告诉模型"这几条不用你再提议"；
+  //   ② 本轮**没跑完**（超时/中断）→ 要告诉模型"你自己提议的那些没有被处理"。
+  //      不说的话它下一轮会以为已经记上了 —— 那正是本项目最防的"静默失败"。
+  const extra = (notes ?? []).filter(Boolean)
+  const hasBody = (applied?.length ?? 0) > 0 || (ignored?.length ?? 0) > 0
+  if (!hasBody && extra.length === 0) return null
   const dir = join(String(workspace ?? ''), FILE.receiptsDir)
   const name = `${kind}-${String(peerId ?? 'unknown')}.txt`
   const lines = []
@@ -397,6 +510,7 @@ export function writeReceipt({ workspace, kind, peerId, applied, ignored }) {
         ignored.map((i) => `「${i.entry}」——${i.why}`).join('；'),
     )
   }
+  lines.push(...extra)
   try {
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, name), lines.join('\n') + '\n', 'utf8')
@@ -462,7 +576,11 @@ export function verifyAndRestoreMemory({ workspace, log = () => {} }) {
     }
     for (const name of names) {
       const rel = dir ? `${dir}/${name}` : name
-      const snapshot = join(root, FILE.snapshotsDir, dir ? `${dir}__${name}` : name)
+      // ★ 路径换算走 `snapshotNameOf`（唯一口径）。这里原来是自己拼的
+      //   `dir ? \`${dir}__${name}\` : name` —— 对根目录的 `MEMORY.md` 会算成
+      //   `memory/MEMORY.md`，与 `saveSnapshot` 写下的 `MEMORY.md` **对不上**，
+      //   于是根文件的篡改检测静默失效。详见 `snapshotNameOf` 的注释。
+      const snapshot = join(root, FILE.snapshotsDir, snapshotNameOf(rel))
       let cur = null
       let snap = null
       try {
@@ -501,12 +619,39 @@ export function verifyAndRestoreMemory({ workspace, log = () => {} }) {
   return { tampered, restored }
 }
 
+/**
+ * 记忆文件的相对路径 → 快照文件名。**这是唯一的换算口径**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ⚠️ 为什么必须抽成函数（同一个 bug 在这里犯过两次）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 快照的写法本来有两套：
+ *   · `saveSnapshot` / `dropSnapshot`：`rel.replace(/[\\/]/g, '__')`
+ *   · `verifyAndRestoreMemory`：自己拼 `dir ? \`${dir}__${name}\` : name`
+ * 两者**只对 `memory/x.md` 巧合一致**：
+ *
+ *   `memory/x.md`  → 两套都给 `memory__x.md`          ✅ 一致
+ *   `MEMORY.md`    → save 给 `MEMORY.md`，
+ *                    verify 给 `memory/MEMORY.md`      ❌ 不一致
+ *
+ * 后果：`MEMORY.md` 的篡改检测**永远找不到快照**，于是每次读记忆都走
+ * "还没有快照 → 以当前内容为准重建快照"那一支 —— **检测静默失效**，
+ * 而磁盘上真正的 `memory/.snapshots/MEMORY.md` 成了没人比对的孤儿。
+ *
+ * 所以现在只留这一个函数，三处调用它。**不要再在别处拼快照路径**。
+ *
+ * @param {string} rel 相对工作区的路径，如 `MEMORY.md` / `memory/group-1.md`
+ * @returns {string} 快照文件名，如 `MEMORY.md` / `memory__group-1.md`
+ */
+export function snapshotNameOf(rel) {
+  return String(rel ?? '').replace(/[\\/]/g, '__')
+}
+
 /** 删掉一个记忆文件的快照（文件被删掉时一起删，免得它"复活"已删的记忆）。 */
 export function dropSnapshot({ workspace, rel }) {
   const root = String(workspace ?? '')
   try {
-    const safe = String(rel).replace(/[\\/]/g, '__')
-    const p = join(root, FILE.snapshotsDir, safe)
+    const p = join(root, FILE.snapshotsDir, snapshotNameOf(rel))
     if (existsSync(p)) unlinkSync(p)
     return true
   } catch {
@@ -518,11 +663,10 @@ export function dropSnapshot({ workspace, rel }) {
 export function saveSnapshot({ workspace, rel, content }) {
   const root = String(workspace ?? '')
   try {
-    const safe = String(rel).replace(/[\\/]/g, '__')
     const dir = join(root, FILE.snapshotsDir)
     mkdirSync(dir, { recursive: true })
     writeFileSync(
-      join(dir, safe),
+      join(dir, snapshotNameOf(rel)),
       typeof content === 'string' ? content : readFileSync(join(root, rel), 'utf8'),
       'utf8',
     )
@@ -552,6 +696,13 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   ]
   if (kind === 'group') lines.push('  <<<MEMORY slang 词 = 意思>>>            ← 群内黑话（只写本群）')
   if (kind === 'private') lines.push('  <<<MEMORY directive 以后遇到 X 就这样做>>>  ← 行为指令（仅管理员，跨群生效）')
+  // ★ H4：更正档。为什么需要它 —— 实测证明规则**认不出**纯陈述式的覆盖
+  //   （「服务器是 Forge 端」→「服务器是 Paper 端」与「服务器内存改成 32G」
+  //     相似度只差 0.013，分不开）。而你自己知道你在更正，所以给你一个显式出口。
+  //   ⚠️ 这一行**必须常驻**：它不需要任何表格/配置，且它是"旧事实不被继续使用"的唯一可靠信号。
+  lines.push(
+    '  <<<MEMORY fix 更正后的正确说法>>>        ← **更正**你之前记错的那条（旧条目会保留并标注"已被更正"，之后不再使用）',
+  )
   lines.push(
     '',
     '**global 与 fact 的区别（写错会串场）**：global 谁都看得到（每个群、每个私聊），',
@@ -559,13 +710,38 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
     '涉及某个人或某个群的事一律走 fact —— **别把私事写进 global**。',
     '**不要用文件工具去写记忆**（写不进去，也不会被采纳）；标记行不会发给对方，系统会剥掉。',
     '系统只接受这几种档位；**涉及"谁是管理员/有什么权限"的内容一律会被拒** —— 身份只由系统判定。',
+    '**发现之前记错了就用 `fix` 档重写一遍**（不要试图编辑文件）：旧条目会留着但标注"已被更正"，',
+    '之后不再作为事实给你 —— 这样"我说错过什么"查得到，而你不会继续拿着错的说法。',
+    // ★ 隐私（与 src/privacy.mjs 的七类一致）。这里只说**会被拒**与**别复述**，
+    //   不列具体规则 —— 列了等于教它怎么绕（而且七类写进提示词很占 token）。
+    //   真正的拦截在代码里，这段话只是**降低它白写一次的概率**。
+    '**不要记隐私**：身份证号、手机号、银行卡号、密码或密钥、具体住址、健康医疗信息、' +
+      '生物特征（指纹/人脸/声纹）—— 这些一律会被拒。**同样也不要往外说**（哪怕是你自己想到的、' +
+      '或从别处看到的），这条比"记住"更重要。',
     '没记上的条目会在下一轮以"回执"告诉你，那时要**如实跟对方说没记住**，不要假装记住了。',
     '只在真正值得长期记住时才提议（偏好、约定、群内黑话、纠正过你的地方）；宁少勿多。',
-    // ★ 写法要求：fact 是"**某人说过的内容**"，不是"经过核实的事实"。
-    //   为什么要明写：群聊里谁都能说话，而记忆会被当成长期事实读回来。
-    //   让模型自己带上"谁说的/据谁说的"，是把"来源"留在文本里 ——
-    //   这比事后由桥接猜来源可靠得多。
-    '写 fact 时**带上来源**：写成"据某人说……""某人提到……"，不要写成你亲自核实过的事实。',
+    // ══════════════════════════════════════════════════════════════════════
+    // 怎么写：**区分 fact 的两种落点**（这一节是按实测数据改的）
+    // ══════════════════════════════════════════════════════════════════════
+    // 旧版只有一句"带上来源，写成'据某人说……'"，那对**群**是对的
+    // （群里谁都能说话，记忆会被当长期事实读回来，来源必须留在文本里），
+    // 但对**私聊**（= 这个人的档案）是错的 —— 档案本身就是"关于这个人"，
+    // "据他说"不携带任何信息。
+    //
+    // 实测后果（`memory/private-100000001.md`）：
+    //   - 2026-09-26 他说希望机器人以后能有管理 MC 服务器的能力，我列了需要的能力清单（…）
+    //   - 2026-09-26 他说他的 MC 服务器是 Forge 端，我提醒 Forge 与 Paper 的差别…
+    //   - 据他说,他每天玩 DSH 大概花30块左右,按 token 计费
+    // 三条毛病：① 每条都以转述前缀开头（噪音）② 记的是**对话过程**（"我列了""我提醒"）
+    // 而不是事实 ③ 中英标点混用。
+    kind === 'private'
+      ? '写 fact 时**直接写事实**：这个人已经在本文件里了，不要再加"他说/据他说"这类前缀，' +
+        '也不要记"我提醒了他什么"（那是对话过程，不是记忆）。' +
+        '写成一句能独立看懂的短句，例：「他的 MC 服务器是 Forge 端（版本没说）」。'
+      : '写 fact 时**带上来源**：写成"据某人说……""某人提到……"，不要写成你亲自核实过的事实。',
+    // ★★ 反流水账：这条是新增的，针对实测里"越记越长、全是过程"的形态。
+    '记忆要写**结论**，不写**过程**：不要记"我给他讲了 X""他问了我 Y 然后我答了 Z"，' +
+      '只记以后还用得上的那部分（他的偏好/环境/约定/踩过的坑）。一次对话只写一两句，别写流水账。',
     // ★★ 不许把记忆原文背出来（用户明确要求）。
     //   理由不是"保密"这么笼统：记忆里混着**别人的话**、群内的私事、
     //   以及管理员私下交代的约定（指令档还会跨群生效）。
@@ -599,15 +775,45 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   return lines.join('\n')
 }
 
-/** 记忆目录里现有哪些文件（给体检/配置界面用）。 */
+/**
+ * 记忆文件清单（`MEMORY.md` + `memory/*.md`），给体检/配置界面用。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ⚠️ 这里踩过一个**静默漏报**的坑，改之前务必读完
+ * ══════════════════════════════════════════════════════════════════════════
+ * 第一版只 `readdirSync('memory')` —— 而 `MEMORY.md` 在**工作区根目录**，
+ * 于是它**永远不进这份清单**。后果是"记忆体检"的①④两段完全看不到全局记忆：
+ * 实测该工作区 `MEMORY.md` 有 30 条 / 7605 字节，体检却一条都不显示，
+ * 也不报"因注入上限还有 5 条不会进上下文"。
+ *
+ * 这类"工具说没有、其实有"比没有工具更糟：使用者会据此以为全局记忆是空的。
+ * 所以根文件必须显式补进来。
+ *
+ * ⚠️ 顺序与去重：根在前（它是全局层，最该被先看到），`memory/` 内的按名字排序。
+ *
+ * @returns {string[]} 相对工作区的路径，如 `['MEMORY.md', 'memory/group-1.md']`
+ */
 export function listMemoryFiles(workspace) {
+  const root = String(workspace ?? '')
+  const out = []
+  // ① 全局记忆：在根目录，不在 memory/ 里 —— 这一条就是那个坑的修复点。
   try {
-    const dir = join(String(workspace ?? ''), 'memory')
-    if (!existsSync(dir)) return []
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.endsWith('.md'))
-      .map((e) => `memory/${e.name}`)
+    if (existsSync(join(root, FILE.global))) out.push(FILE.global)
   } catch {
-    return []
+    /* 读不到就当没有 */
   }
+  // ② memory/ 下的明细文件。
+  try {
+    const dir = join(root, 'memory')
+    if (existsSync(dir)) {
+      const names = readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith('.md'))
+        .map((e) => `memory/${e.name}`)
+        .sort()
+      for (const rel of names) if (!out.includes(rel)) out.push(rel)
+    }
+  } catch {
+    /* 目录不存在 = 没有明细文件 */
+  }
+  return out
 }

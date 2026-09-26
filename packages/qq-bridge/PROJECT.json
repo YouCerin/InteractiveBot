@@ -5,7 +5,6 @@
     "它由代码维护者手工同步。改动包的行为（命令、配置键、不变量、故障特征）时，必须同步改这里。",
     "它不是运行时配置 —— 运行配置在 config.json。"
   ],
-
   "package": {
     "name": "qq-bridge",
     "version": "0.2.0",
@@ -17,17 +16,27 @@
       "externalRuntime": "DSH 本体不复制，按候选顺序查找（见 invariants.portability）"
     }
   },
-
   "architecture": {
     "flow": "QQ → SnowLuma(OneBot v11) → qq-bridge → stdio JSON-RPC → dsh --profile sdk → 模型",
     "whyThisShape": "真正干活的是 DSH 的 agent 循环（工具/沙箱/会话）。桥接只做四件事：收消息、判断该不该回、转给 DSH、把回答发回去。不重复实现 DSH 已有的能力。",
     "processes": [
-      { "who": "SnowLuma", "role": "QQ 协议端（第三方）", "ports": "3000=HTTP 发消息 / 3001=WebSocket 收事件" },
-      { "who": "qq-bridge", "role": "本项目，Node 进程", "note": "主动连 SnowLuma 的 WS；通过管道与 dsh 子进程通信" },
-      { "who": "dsh --profile sdk", "role": "DSH 官方 SDK 运行时，由桥接拉起为子进程", "protocol": "JSONL JSON-RPC over stdio" }
+      {
+        "who": "SnowLuma",
+        "role": "QQ 协议端（第三方）",
+        "ports": "3000=HTTP 发消息 / 3001=WebSocket 收事件"
+      },
+      {
+        "who": "qq-bridge",
+        "role": "本项目，Node 进程",
+        "note": "主动连 SnowLuma 的 WS；通过管道与 dsh 子进程通信"
+      },
+      {
+        "who": "dsh --profile sdk",
+        "role": "DSH 官方 SDK 运行时，由桥接拉起为子进程",
+        "protocol": "JSONL JSON-RPC over stdio"
+      }
     ]
   },
-
   "entrypoints": {
     "launch": {
       "file": "start.bat",
@@ -35,33 +44,334 @@
       "shortcut": "QQbot.lnk（开发机用；发布包改由 `创建带图标的快捷方式.bat` 在用户机器上生成）",
       "note": "★ start.bat 现在会先拉起 SnowLuma（--snowluma）再起桥接。开关：--no-snowluma 跳过、--open-console 只开 SnowLuma 网页端、--no-browser 跳过开浏览器。⚠️ .bat 在 Windows 里**无法带自定义图标**（不是 PE 文件，没有图标资源槽），所以带图标的入口只能是快捷方式；而 .lnk 里存绝对路径、随包发到别人机器上必然失效，因此发布包用 `创建带图标的快捷方式.bat` 现场生成。发布包另有三个引导入口：检查配置.bat（--check）、体检.bat（--doctor）、启动机器人.bat"
     },
-    "check": { "file": "src/index.mjs", "args": "--check", "note": "只校验配置，不连接任何服务" },
-    "doctor": { "file": "src/index.mjs", "args": "--doctor", "note": "真去连一次协议端，报出实际结果；不发消息、不调模型" },
-    "main": { "file": "src/index.mjs", "note": "装配 + 启动；顺序：配置自检 → 建工作区 → 起 DSH → 连 QQ" }
+    "check": {
+      "file": "src/index.mjs",
+      "args": "--check",
+      "note": "只校验配置，不连接任何服务"
+    },
+    "doctor": {
+      "file": "src/index.mjs",
+      "args": "--doctor",
+      "note": "真去连一次协议端，报出实际结果；不发消息、不调模型"
+    },
+    "main": {
+      "file": "src/index.mjs",
+      "note": "装配 + 启动；顺序：配置自检 → 建工作区 → 起 DSH → 连 QQ"
+    }
   },
-
   "commands": [
-    { "cmd": "node setup.mjs", "purpose": "把 Node 运行时与 ws 依赖复制进 vendor/", "network": false, "costs": "none", "idempotent": true },
-    { "cmd": "node src/index.mjs --check", "purpose": "配置自检", "network": false, "costs": "none" },
-    { "cmd": "node scripts/assemble-release.mjs --zip", "purpose": "★ 组装发布包（staging 目录 + 可选 zip）。**用脚本，不要手敲 robocopy** —— 上一次手敲时把 `启动机器人.bat` / `检查配置.bat` / `体检.bat` 漏了，于是它们只存在于发布包里、仓库里没有源（文档的『最终形状』列了它们，拷贝清单一条都没有）。脚本六步：① 按**类别**判 `setup.mjs --release` 的 ❌（真 config.json 的明文**不算阻断** —— 组装根本不拷它）；② 拒绝覆盖已存在的同名版本目录（老版本要留着对照，`--force` 才会先删干净再建）；③ 清点源文件，缺一个都不组装；④ 组装后**自校验包里的 config.json 确实是空白**；⑤ 跑 `check-release-package.mjs` 并看**退出码**（不挑输出文案判通过）；⑥ 可选 `tar -a` 压缩。版本号**只从 package.json 读**。", "network": "local-only", "costs": "none" },
-    { "cmd": "node src/index.mjs --doctor", "purpose": "体检（含真实连接探测）", "network": "local-only", "costs": "none" },
-    { "cmd": "node src/index.mjs --ui", "purpose": "★ 界面新鲜度（只读）：这份 `config-ui/dist` 是不是当前源码构建的。存在的理由：界面分**两条路出货**（开发路径与 `_release/<包>/` 里的发布路径），而\"包里那份是不是当前源码构建的\"以前**没有任何东西能判断** —— 实测脱钩过一次（包里源码与 UI 都旧约 5 小时，1100 项测试全绿）。判定 = 构建时写入的源码哈希 vs 现在重算的哈希。三种结果分开：`fresh`(0) / `stale`(1，源码改了没构建) / `unstamped`(1，没有标记、重新构建也没用)。", "network": false, "costs": "none" },
-    { "cmd": "node src/index.mjs --memory", "purpose": "★ 记忆体检（只读）：此刻记着什么、下一轮按会话会注入什么、待消费回执、快照一致性。回答的是「它说记住了」与「它真的记住了」之间的差。", "network": false, "costs": "none" },
-    { "cmd": "node mocks/verify-memory-roundtrip.mjs", "purpose": "★★ 记忆**全链路**：模型提议 → 桥接落盘 → 剥离标记 → 回执 → 下一轮注入。存在的理由：`verify-memory-store.mjs` 测的是存储层（给了 items 能不能落盘），**不经过 Bridge** —— 于是链路上任何一环断了它都发现不了，而每一环断了都**不报错**：没剥离（对方在 QQ 里看到 `<<<MEMORY …>>>`）、没落盘（它说记下了其实没记）、没回执（模型不知道自己没记上，继续骗人）、不注入（记了等于没记）。做法是用**桩 rpc**（回复内容由测试指定，于是「模型会不会提议」这个人品问题被排除），而**文件系统是真的**（临时目录）。覆盖：全链路正例 / 记不上时必须留「没记下」回执 / 分档不串场（群事不写全局、别的群看不到）/ 绕过桥接改记忆被回滚 / 关掉开关就一个字都不写（★ 且**标记仍必须剥离** —— 这里抓出一个真 bug：原先整段剥离都在 `memory.enabled` 判断里面，关掉记忆后标记会原样发到 QQ）。", "network": false, "costs": "none", "assertions": 25 },
-    { "cmd": "node mocks/verify-memory-store.mjs", "purpose": "桥接托管记忆的存储层：分档落点、内容级过滤（身份/权限一律拒）、被拒必有回执、篡改回滚、注入文本不含路径；另含 `src/memory-inspect.mjs` 记忆体检工具的如实性（只读、结构化注入、不消费回执）。", "network": false, "costs": "none", "assertions": 78 },
-    { "cmd": "node mocks/verify-identity.mjs", "purpose": "★ 身份核实（\"这条消息是谁发的\"）。全部用**桩**（假 onebot + 假 rpc），不需要 spawn、不需要登录 QQ、零费用 —— 因此它在任何环境都能真跑。四件事：① 身份**真的从协议端查了**（群聊走 `get_group_member_info` 拿群名片与群内角色，私聊走 `get_friend_list` 拿昵称），并同步进会话镜像（每条消息自带 `senderId/senderName/senderRole`，会话上按人索引 `senders`）；② 身份**绝不参与权限判定** —— 桩里那个普通群友在协议端是 `admin`（群管理），他拿到的必须仍是「普通用户（只读）」；③ 查不到身份时必须 `verified:false` 且**不编名字**、不影响回话，身份缓存 5 分钟且 TTL 后**重查**；④ ★★ 权限判据必须**自解释** —— 这一节是为一反馈补的：「为什么 bot 显示他无法查询 bot 管理员」。根因是真正的名单从来没有进过提示词（提示词只给相对标签、工具返回的是群角色、记忆里写「谁是管理员」又被硬拦），于是它只能回「我查不了」。现在权限段开头说明判据来源与覆盖范围（只判**当前正在说话的人**）、给出结论句、禁止说「我没有查询管理员的功能」、并**禁止猜测**；管理员版多一条「他自己问名单可以直接说」的例外，普通用户版**没有**这条例外。★ 这个套件存在的**唯一理由**是防一个能把整台机器交出去的改动：如果哪天有人把群内 `role` 接进 `roster.decide()`，这里立刻变红。另含**会话名**（群聊=群名、私聊=对方昵称，来自协议端；拿不到就留空 + `nameVerified:false`，界面显示号码，**不编名字**）。", "network": "local-only", "costs": "none", "assertions": 57 },
-    { "cmd": "node mocks/verify-api.mjs", "purpose": "配置 HTTP 接口（脱敏、空值语义、回环限制、各接口行为）", "network": "local-only", "costs": "none", "assertions": 77 },
-    { "cmd": "node mocks/verify-apitest.mjs", "purpose": "★ 新增接口的**集成测试**：注入真实依赖（价目表/账本/记忆仓库）走完整 handler。存在的理由：verify-api.mjs 不注入依赖，验的是 notImplemented 兜底分支 —— 接口实现落地后那些断言照样通过，即**假绿**。本文件补上那个洞，且是唯一会真的写盘的接口测试（全程在 .tmp-apitest/ 内，不碰 logs/ 与 workspace-qq/）。", "network": "local-only", "costs": "none", "assertions": 46 },
-    { "cmd": "node mocks/verify-config.mjs", "purpose": "配置解析与校验（默认值是否安全、键名是否真的生效、危险配置是否被拦）", "network": false, "costs": "none", "assertions": 39 },
-    { "cmd": "node mocks/verify-images.mjs", "purpose": "★ 看图（QQ 图片 → 工作区 → 模型）。重点是 **SSRF 防护**（内网/回环/云元数据/IPv4映射IPv6/data: 一律拒；**逐跳**校验重定向，并断言内网那一跳「一个请求都没发出去」）与「**群聊没被唤醒时一次网络请求都不发**」这条防 DoS 回归。另含：大小上限（content-length 超限时**不读 body**）、按字节嗅探格式（伪装成 jpg 的 HTML 要被拒）、inbox 内容寻址去重与两种清理、rkey 过期 → 调 get_image 换新地址重试、配置默认值必须省钱、非法 mode 不被静默改写。", "network": false, "costs": "none", "assertions": 145 },
-    { "cmd": "node mocks/verify-units.mjs", "purpose": "纯逻辑单元测试（文本处理 / 唤醒判定 / 会话标识 / 防自环 / 人味层）", "network": false, "costs": "none", "assertions": 114 },
-    { "cmd": "node mocks/verify-rpc.mjs", "purpose": "JSON-RPC 协议层测试（对模拟 DSH）", "network": false, "costs": "none", "assertions": 19 },
-    { "cmd": "node mocks/verify-onebot.mjs", "purpose": "全链路测试（QQ 事件 → 回复发出）。★ 含身份核实的全链路段（用例 5e/5f）：断言提示词里的来源标注带协议端核实到的昵称与群内角色、且非管理员仍被标成「普通用户，只读」。⚠️ 这两条断言**不能**写成「号码紧跟着（普通用户，只读）」—— 加了身份标注后中间必然夹着昵称与角色，那种写法会变成假失败。", "network": "local-only", "costs": "none", "assertions": 59 },
-    { "cmd": "node mocks/verify-mcp.mjs", "purpose": "QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）", "network": false, "costs": "none", "assertions": 30 },
-    { "cmd": "node mocks/verify-mcp-profile.mjs", "purpose": "把 QQ 工具挂进 DSH 的 profile 补丁能否生成合法配置", "network": false, "costs": "none", "assertions": 23 },
-    { "cmd": "node mocks/verify-local.mjs", "purpose": "路径解析（Node / DSH 命令行 / DSH_HOME 三者不能互相认错）", "network": false, "costs": "none", "assertions": 13 },
-    { "cmd": "node mocks/verify-real-dsh.mjs", "purpose": "真实 dsh 能否被启动（不发 prompt）", "network": false, "costs": "none", "assertions": 7 },
-    { "cmd": "node mocks/verify-doctor.mjs", "purpose": "体检工具自身的准确性", "network": "local-only", "costs": "none", "assertions": 30 },
+    {
+      "cmd": "node setup.mjs",
+      "purpose": "把 Node 运行时与 ws 依赖复制进 vendor/",
+      "network": false,
+      "costs": "none",
+      "idempotent": true
+    },
+    {
+      "cmd": "node src/index.mjs --check",
+      "purpose": "配置自检",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node scripts/assemble-release.mjs --zip",
+      "purpose": "★ 组装发布包（staging 目录 + 可选 zip）。**用脚本，不要手敲 robocopy** —— 上一次手敲时把 `启动机器人.bat` / `检查配置.bat` / `体检.bat` 漏了，于是它们只存在于发布包里、仓库里没有源（文档的『最终形状』列了它们，拷贝清单一条都没有）。脚本六步：① 按**类别**判 `setup.mjs --release` 的 ❌（真 config.json 的明文**不算阻断** —— 组装根本不拷它）；② 拒绝覆盖已存在的同名版本目录（老版本要留着对照，`--force` 才会先删干净再建）；③ 清点源文件，缺一个都不组装；④ 组装后**自校验包里的 config.json 确实是空白**；⑤ 跑 `check-release-package.mjs` 并看**退出码**（不挑输出文案判通过）；⑥ 可选 `tar -a` 压缩。版本号**只从 package.json 读**。",
+      "network": "local-only",
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --doctor",
+      "purpose": "体检（含真实连接探测）",
+      "network": "local-only",
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --ui",
+      "purpose": "★ 界面新鲜度（只读）：这份 `config-ui/dist` 是不是当前源码构建的。存在的理由：界面分**两条路出货**（开发路径与 `_release/<包>/` 里的发布路径），而\"包里那份是不是当前源码构建的\"以前**没有任何东西能判断** —— 实测脱钩过一次（包里源码与 UI 都旧约 5 小时，1100 项测试全绿）。判定 = 构建时写入的源码哈希 vs 现在重算的哈希。三种结果分开：`fresh`(0) / `stale`(1，源码改了没构建) / `unstamped`(1，没有标记、重新构建也没用)。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --memory",
+      "purpose": "★ 记忆体检（只读）：此刻记着什么、下一轮按会话会注入什么、待消费回执、快照一致性。回答的是「它说记住了」与「它真的记住了」之间的差。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --memory --stats",
+      "purpose": "★★ 记忆写入统计（只读）：每个会话的 轮数/提议/接受/拒绝/去重 + 最后落盘时间，并在「跑够轮数却 0 落盘」时给出**零写入告警**。存在的理由是一次真实静默失败：聊了几十轮一条没写而无人报警（详见 docs/0.2.1-memory-diagnosis.md）。`--reset` 可清空。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --memory --compact [--apply]",
+      "purpose": "★ 记忆整理（规则版）：标点归一 + 摘掉行首冗余的日期与转述前缀 + 合并高度相似条目（不跨分节）。**默认预演、不写盘**，要真改加 `--apply`（写回带备份 + 刷新快照，否则下次读记忆会被回滚）。`--file <rel>` 只处理一个文件。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --memory --privacy",
+      "purpose": "★★ 隐私扫描（**只读**）：扫现有记忆与运行态文件里有没有七类隐私，并列出拦截审计。**先扫再装闸门** —— 装完才发现它把正常记忆全拦了，比不装更糟（表现成「记忆突然全不工作了」）。不改任何文件，机器人跑着也能执行。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node mocks/verify-privacy.mjs",
+      "purpose": "★★ 隐私硬闸：七类逐类拦得住、**真实记忆 60 条零误拦**（公开标识不许被拦）、双侧判据一致、审计只记类别与字数（断言不含原文）、审计坏掉不抛异常且该拒的仍拒。",
+      "network": false,
+      "costs": "none",
+      "assertions": 62
+    },
+    {
+      "cmd": "node src/index.mjs --ops [--inject <会话>] [--limit N]",
+      "purpose": "★ 操作日志（只读）：回答「它自己干过什么」—— 每次工具调用的**参数**、每条结果的状态/字节/摘要、审批、以及回合结束。数据由桥接从事件流自己写（不依赖模型报告）。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --ops-prune [--apply]",
+      "purpose": "★ 操作日志 TTL 清理（**默认预演**）：删早于保留期的日志文件。判据用**文件名里的日期**，认不出日期的文件**不删**（宁可留着也不误删）。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node mocks/verify-oplog.mjs",
+      "purpose": "★★ 操作日志：`ops` 带全参数与结果、`arguments` 是 JSON 字符串、超长参数先解析再截值、`isError`/`hasImage`、超时回合也留痕、隐私落盘前隐去、会话隔离、TTL 清理、写失败不抛异常。",
+      "network": false,
+      "costs": "none",
+      "assertions": 49
+    },
+    {
+      "cmd": "node src/index.mjs --tasks [--inject <会话>]",
+      "purpose": "★★ 任务台账（只读）：它「正在干什么、干到哪了」+ **注入预览**（与桥接同一份渲染函数）。数据由桥接从事件流自己写，目标取用户原话 —— **零模型参与也完整**。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --tasks --rollback <N> --inject <会话> [--mode replay|retry|abandon] [--note <说明>]",
+      "purpose": "★★ **回到第 N 步**：把任务台账回退到第 N 步（1..N 有效，N+1..M 标记作废**但保留**）。★ 三件如实说明：**DSH 的会话上下文不会回退**（实测无 checkpoint/fork/resume，模型仍记得那些步骤，我们只能在提示词里**声明**作废）；**副作用不回退**（已发的消息、已写的文件都不回滚）；**越界不猜**（报错并给出可用范围）。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --tasks-archive [--apply]",
+      "purpose": "★ 任务台账归档（**默认预演**）：已完成/已放弃超过保留期的移到 `runtime/archive/`（**不是删除**）。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --tasks --forget <会话>",
+      "purpose": "删掉某会话的任务台账（管理手段）。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node mocks/verify-tasks.mjs",
+      "purpose": "★★ 任务台账 + 回到第 N 步：零模型参与也完整、pending 不猜 failed、闲置开新任务、步骤上限、原子写、归档是移走不是删除、**措辞纪律**（必须显式禁止把步骤当消息引用）、触发词识别（含指代式，且「上一步」≠「这一步」）、作废保留不删、**连续回退能恢复**先前作废的步骤、越界给范围、redo 标记生命周期。",
+      "network": false,
+      "costs": "none",
+      "assertions": 105
+    },
+    {
+      "cmd": "node src/index.mjs --recipes [--match <文本>] [--show <id>]",
+      "purpose": "★★ 配方库（只读）：沉淀「怎么做」。`--match` 可以预览某段文本会命中哪条（与桥接同一份匹配函数），并打出会注入的那段原文。匹配用**子串命中**、零模型成本。",
+      "network": false,
+      "costs": "none"
+    },
+    {
+      "cmd": "node src/index.mjs --recipes --add --file <配方.json>",
+      "purpose": "★ 人工加一条配方（**推荐用 --file**：`--json` 要穿过 shell 的引号解析，中文与引号很容易被搅坏）。同 slug 会**合并**：关键词/步骤/坑取并集，stats 保留。`--enable/--disable/--forget <id>` 管理单条。",
+      "network": "local-only",
+      "costs": "none"
+    },
+    {
+      "cmd": "node mocks/verify-recipes.mjs",
+      "purpose": "★★ 配方库：匹配长尾要命中且无关严格为 0、置信度用拉普拉斯平滑（不是裸成功率）、requiredActions 只能当提示不能自动执行、同 slug 合并取并集、停用后不再被挑选。",
+      "network": false,
+      "costs": "none",
+      "assertions": 65
+    },
+    {
+      "cmd": "node mocks/verify-extract.mjs",
+      "purpose": "★★ 抽取（R4b）：真实 headless 裸词输出必须能解析、解析器必须终止（死循环踩过）、任何失败都不抛、抽到的配方能入库并立刻可匹配。",
+      "network": false,
+      "costs": "none",
+      "assertions": 56
+    },
+    {
+      "cmd": "（内部）回合后配方抽取 · dsh --profile headless",
+      "purpose": "★ 每 5 个回合起一个一次性 headless 进程，从刚结束的任务里提炼一条\"以后同类任务可套用\"的做法。**这是全项目唯一会产生额外模型调用的地方**（实测一次 3~5 秒）。不 await（不拖慢回复）、有 60 秒超时、失败静默。抽到的配方只作候选（置信度初始 0.5），不会立刻被当经验注入。",
+      "network": "local-only",
+      "costs": "model"
+    },
+    {
+      "cmd": "node mocks/verify-memory-stats.mjs",
+      "purpose": "★★ 记忆**可观测性**：计数无条件记轮数、零写入必报警（且落过盘就闭嘴、轮数不够不误报）、四计数各自对上、按会话分开、统计文件坏掉不抛异常、体检必须报出根 MEMORY.md 与快照路径唯一口径（根文件的篡改检测曾静默失效）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 29
+    },
+    {
+      "cmd": "node mocks/verify-memory-consolidate.mjs",
+      "purpose": "★ 记忆整理：**幂等性**（最要紧 —— 它会周期跑，不幂等则条目数逐次漂移）、多行条目解析、小标题/空行各归各位、标点归一不误伤千分位/URL/英文括号、转述前缀只摘行首、去重与合并且记录并掉了什么、不跨分节、分节结构原样保留、写盘带备份、刷新快照后不被回滚。",
+      "network": false,
+      "costs": "none",
+      "assertions": 74
+    },
+    {
+      "cmd": "node mocks/verify-memory-usage.mjs",
+      "purpose": "★★ 记忆使用侧车（H3 方案 B）：把\"这条记忆多久没进过上下文了\"变成可查的事实，且**只提示不降权**。① ★★ **不许偷偷加衰减**（设计决策 D9）—— 账本里不能出现权重/强度/衰减字段，也不许因为\"很久没用\"自动删或自动降权（\"顺手加个权重\"看起来太自然，后果是记忆被时间悄悄吞掉且无人察觉）；② **语义诚实**：我们只能观测\"被注入\"（进了上下文），观测不到\"被用上\"（模型真依赖了它），字段名与文案都按前者写；③ ★★ **\"没有数据\" ≠ \"没被用过\"** —— 账本刚部署时是全空的，那时必须说\"无法判断\"（第一版把 65 条全报成\"从没进过上下文\"：数字真、结论错）；④ ★★ **排序的唯一目的**：注入有 25 条上限而新条目追加在文件末尾，只按文件顺序截会让\"用户说记住 X、机器人也回了好、而 X 从此再没进过上下文\"**完全静默** —— 所以写入侧登记 `writtenAt` 让\"刚写下的\"排最前，同时**不许**\"从没进过的老条目\"反复抢占头部（那会让同一份记忆每轮渲染出不同文本、打断前缀缓存）。另含：条目不按行号而按归一化文本 hash 认人、账本坏掉不抛但必须留证据、上限丢最旧、体检要**扫文件**（只看账本会漏掉从没进过的那批）、`--memory --usage`。",
+      "network": false,
+      "costs": "none",
+      "assertions": 54
+    },
+    {
+      "cmd": "node mocks/verify-persona.mjs",
+      "purpose": "★★ 人设加固（H11 反注入 + 名字表 / H12 人设当不可信输入）。① ★★ **内置预设必须通过自己的扫描器**（判据写糙就会自拒；更现实的是用户把预设复制进 `persona.custom` 去改，那时人设整段变 `[BLOCKED]` 而原因完全猜不到 —— 第一版就是这样，被这条断言逼着重写措辞）；② **正常文本一个字都不许拦**（拦太宽的代价是人设突然失效）；③ 命中就**整文件拒载**、占位文本不含原文、必须留日志；④ ★★ 名字表**能被机器读出来并真的变成唤醒词**（唤醒判定在拼提示词之前，桥接不认这个名字，人设里写多少遍都没用）。另含超长截断保头尾、自检与运行时判据一致。",
+      "network": false,
+      "costs": "none",
+      "assertions": 52
+    },
+    {
+      "cmd": "node mocks/verify-delivery-ledger.mjs",
+      "purpose": "投递账本（H15）：**发送前落账**（真机上丢过一整条已生成的回复，而当时没有任何地方能说清丢的是哪条、给谁的）。① 所有者是 `pid@启动时刻`（pid 会被复用，只按 pid 认人会把上一个人的账当自己的 → 漏发或重发）；② 状态机 pending→done/failed（「崩溃留下的 pending」与「明确失败」要能分开看）；③ ★★ **绝不自动重放**，只把别人留下的 pending 报出来并说明**为什么**（崩溃可能发生在「已发出但没标上」那一瞬间，无法区分 → 自动重发会产生重复回复，而重复回复比漏一条更糟）；④ 账本只存长度 + 前 40 字（连同一条审计纪律：它不是第二份聊天记录）。另含坏文件不抛但留证据、上限裁剪**优先保 pending**。",
+      "network": false,
+      "costs": "none",
+      "assertions": 34
+    },
+    {
+      "cmd": "node mocks/verify-imports.mjs",
+      "purpose": "★ 导入与登记漂移审计（H16）：① 每个相对导入都指向真实存在的文件（改名漏改只有那条路径真的跑到才炸）；② src/ 下没有「没人 import 又没登记理由」的孤儿模块（忘记接线是本项目最贵的一类缺陷），且**白名单本身要维护**（已接上的条目留在白名单会掩盖真孤儿）；③ ★★ 每个 `verify-*.mjs` 都登记进 `package.json` 的 test 链（写好了没人跑 = 等于没写；H3/H10/H14 的套件都是靠人工记得才登记的）；④ 脚本不许把版本号写死（单一来源）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 9
+    },
+    {
+      "cmd": "node mocks/verify-release-hygiene.mjs",
+      "purpose": "★ 发布与升级卫生（H16）：**用户数据绝不许进发布包**（发布脚本按清单拷贝，往里多写一行就会把使用者的聊天记忆/日志/token 打进 zip，且**不会有任何报错**）；前缀与**大小写**两种绕过都要堵住（Windows 上 `LOGS` 与 `logs` 是同一目录）；删除前必须确认「这是我们自己的产物」（判据是我们自己写进去的标识文件，非空且无标识一律拒绝）；★★ 并断言 `scripts/assemble-release.mjs` **真的** import 了这些检查、在组装**之前**调用、把结果当**阻断**用、且**没有 --force 后门**（纯函数测过 ≠ 接线做过）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 33
+    },
+    {
+      "cmd": "node mocks/verify-api-h13.mjs",
+      "purpose": "★★ H13 的四个接口（**真起一个 HTTP 服务**测的，不是直接调 handler —— 真机那次崩溃点在 `serveApi` 里，直接调 handler 永远看不到）：① `/api/preflight` 前置门控（★ 异步接口**必须真的 await**，漏了会返回 Promise 并序列化成 `{}`，界面「什么都不显示」却不报错）；② `/api/snowluma/accounts` **绝不回 token**（路由做**字段白名单**，即使依赖不小心带回 token 也出不去）；③ `/api/logs/stream` 游标增量（游标超出总行数要**夹回开头**，否则日志轮转后永远收不到新日志）；④ `/api/corpus/search` **fail-closed**（缺会话就 400，绝不跨会话检索）；⑤ ★★★ **畸形返回不许拖垮进程** —— 这条是真机事故的回归锁：一条路由忘了包 `ok()`，`res.writeHead(undefined)` 抛 RangeError 且发生在 async 回调里没人接住 → 未处理拒绝 → **整个桥接退出**（症状是「连不上 3410」，看起来像端口问题）。",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 29
+    },
+    {
+      "cmd": "node mocks/verify-mcp-tools.mjs",
+      "purpose": "QQ 工具（MCP）**纯逻辑**测试（H14）：与 `verify-mcp.mjs` 的分工是它**不需要子进程**（受限沙箱里那套会整份跳过，于是工具定义/提示拼接/参数构造从来没被测过）。① 新增的每个具名工具都对应一个**真机探针验过的**动作名（`mocks/probe-onebot-actions.mjs`：空参返回\"要 message_id\"说明动作存在；负对照返回 1404 unknown action）；② ★★ **每个**工具的描述里都要有权限提示 + \"如实\"提示，且**写入类与只读类分开**（普通用户是只读的，工具本身不区分调用者）——判据是每个工具自带的 `adminOnly` 数据，不靠名字猜；③ 本地工具 fail-closed（缺 kind/peerId 就拒绝，绝不\"默认搜全部\"）；④ 黑名单没有因为新增工具而变松。",
+      "network": false,
+      "costs": "none",
+      "assertions": 55
+    },
+    {
+      "cmd": "node mocks/verify-memory-roundtrip.mjs",
+      "purpose": "★★ 记忆**全链路**：模型提议 → 桥接落盘 → 剥离标记 → 回执 → 下一轮注入。存在的理由：`verify-memory-store.mjs` 测的是存储层（给了 items 能不能落盘），**不经过 Bridge** —— 于是链路上任何一环断了它都发现不了，而每一环断了都**不报错**：没剥离（对方在 QQ 里看到 `<<<MEMORY …>>>`）、没落盘（它说记下了其实没记）、没回执（模型不知道自己没记上，继续骗人）、不注入（记了等于没记）。做法是用**桩 rpc**（回复内容由测试指定，于是「模型会不会提议」这个人品问题被排除），而**文件系统是真的**（临时目录）。覆盖：全链路正例 / 记不上时必须留「没记下」回执 / 分档不串场（群事不写全局、别的群看不到）/ 绕过桥接改记忆被回滚 / 关掉开关就一个字都不写（★ 且**标记仍必须剥离** —— 这里抓出一个真 bug：原先整段剥离都在 `memory.enabled` 判断里面，关掉记忆后标记会原样发到 QQ）。⑥~⑫ 是**接线级**的：任务段/配方段真的进提示词、作废与超时回合的记忆三分类、定时整理接线、投递前终检门、带内标记（引用真的发得出去、编的 id 不许用）、断线缺口用过即清、★★ **对话走向段真的进提示词且与任务台账两条轴并存**（第⑫节抓出「话头被 `noteUser` 提前清空 → 那句指令在真机上一次也渲染不出来」——纯函数测试看不见，因为它自己调 `noteUser` 再渲染）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 130
+    },
+    {
+      "cmd": "node mocks/verify-memory-store.mjs",
+      "purpose": "桥接托管记忆的存储层：分档落点、内容级过滤（身份/权限一律拒）、被拒必有回执、篡改回滚、注入文本不含路径；另含 `src/memory-inspect.mjs` 记忆体检工具的如实性（只读、结构化注入、不消费回执）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 78
+    },
+    {
+      "cmd": "node mocks/verify-identity.mjs",
+      "purpose": "★ 身份核实（\"这条消息是谁发的\"）。全部用**桩**（假 onebot + 假 rpc），不需要 spawn、不需要登录 QQ、零费用 —— 因此它在任何环境都能真跑。四件事：① 身份**真的从协议端查了**（群聊走 `get_group_member_info` 拿群名片与群内角色，私聊走 `get_friend_list` 拿昵称），并同步进会话镜像（每条消息自带 `senderId/senderName/senderRole`，会话上按人索引 `senders`）；② 身份**绝不参与权限判定** —— 桩里那个普通群友在协议端是 `admin`（群管理），他拿到的必须仍是「普通用户（只读）」；③ 查不到身份时必须 `verified:false` 且**不编名字**、不影响回话，身份缓存 5 分钟且 TTL 后**重查**；④ ★★ 权限判据必须**自解释** —— 这一节是为一反馈补的：「为什么 bot 显示他无法查询 bot 管理员」。根因是真正的名单从来没有进过提示词（提示词只给相对标签、工具返回的是群角色、记忆里写「谁是管理员」又被硬拦），于是它只能回「我查不了」。现在权限段开头说明判据来源与覆盖范围（只判**当前正在说话的人**）、给出结论句、禁止说「我没有查询管理员的功能」、并**禁止猜测**；管理员版多一条「他自己问名单可以直接说」的例外，普通用户版**没有**这条例外。★ 这个套件存在的**唯一理由**是防一个能把整台机器交出去的改动：如果哪天有人把群内 `role` 接进 `roster.decide()`，这里立刻变红。另含**会话名**（群聊=群名、私聊=对方昵称，来自协议端；拿不到就留空 + `nameVerified:false`，界面显示号码，**不编名字**）。",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 57
+    },
+    {
+      "cmd": "node mocks/verify-api.mjs",
+      "purpose": "配置 HTTP 接口（脱敏、空值语义、回环限制、各接口行为）",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 77
+    },
+    {
+      "cmd": "node mocks/verify-apitest.mjs",
+      "purpose": "★ 新增接口的**集成测试**：注入真实依赖（价目表/账本/记忆仓库）走完整 handler。存在的理由：verify-api.mjs 不注入依赖，验的是 notImplemented 兜底分支 —— 接口实现落地后那些断言照样通过，即**假绿**。本文件补上那个洞，且是唯一会真的写盘的接口测试（全程在 .tmp-apitest/ 内，不碰 logs/ 与 workspace-qq/）。",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 46
+    },
+    {
+      "cmd": "node mocks/verify-config.mjs",
+      "purpose": "配置解析与校验（默认值是否安全、键名是否真的生效、危险配置是否被拦）",
+      "network": false,
+      "costs": "none",
+      "assertions": 39
+    },
+    {
+      "cmd": "node mocks/verify-images.mjs",
+      "purpose": "★ 看图（QQ 图片 → 工作区 → 模型）。重点是 **SSRF 防护**（内网/回环/云元数据/IPv4映射IPv6/data: 一律拒；**逐跳**校验重定向，并断言内网那一跳「一个请求都没发出去」）与「**群聊没被唤醒时一次网络请求都不发**」这条防 DoS 回归。另含：大小上限（content-length 超限时**不读 body**）、按字节嗅探格式（伪装成 jpg 的 HTML 要被拒）、inbox 内容寻址去重与两种清理、rkey 过期 → 调 get_image 换新地址重试、配置默认值必须省钱、非法 mode 不被静默改写。",
+      "network": false,
+      "costs": "none",
+      "assertions": 145
+    },
+    {
+      "cmd": "node mocks/verify-units.mjs",
+      "purpose": "纯逻辑单元测试（文本处理 / 唤醒判定 / 会话标识 / 防自环 / 人味层）",
+      "network": false,
+      "costs": "none",
+      "assertions": 114
+    },
+    {
+      "cmd": "node mocks/verify-rpc.mjs",
+      "purpose": "JSON-RPC 协议层测试（对模拟 DSH）",
+      "network": false,
+      "costs": "none",
+      "assertions": 19
+    },
+    {
+      "cmd": "node mocks/verify-onebot.mjs",
+      "purpose": "全链路测试（QQ 事件 → 回复发出）。★ 含身份核实的全链路段（用例 5e/5f）：断言提示词里的来源标注带协议端核实到的昵称与群内角色、且非管理员仍被标成「普通用户，只读」。⚠️ 这两条断言**不能**写成「号码紧跟着（普通用户，只读）」—— 加了身份标注后中间必然夹着昵称与角色，那种写法会变成假失败。",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 59
+    },
+    {
+      "cmd": "node mocks/verify-mcp.mjs",
+      "purpose": "QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）",
+      "network": false,
+      "costs": "none",
+      "assertions": 30
+    },
+    {
+      "cmd": "node mocks/verify-mcp-profile.mjs",
+      "purpose": "把 QQ 工具挂进 DSH 的 profile 补丁能否生成合法配置",
+      "network": false,
+      "costs": "none",
+      "assertions": 23
+    },
+    {
+      "cmd": "node mocks/verify-local.mjs",
+      "purpose": "路径解析（Node / DSH 命令行 / DSH_HOME 三者不能互相认错）",
+      "network": false,
+      "costs": "none",
+      "assertions": 13
+    },
+    {
+      "cmd": "node mocks/verify-real-dsh.mjs",
+      "purpose": "真实 dsh 能否被启动（不发 prompt）",
+      "network": false,
+      "costs": "none",
+      "assertions": 7
+    },
+    {
+      "cmd": "node mocks/verify-doctor.mjs",
+      "purpose": "体检工具自身的准确性",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 30
+    },
     {
       "cmd": "node mocks/verify-live.mjs",
       "purpose": "真实端到端：真 dsh + 真模型 + 沙箱越界验证",
@@ -69,10 +379,17 @@
       "costs": "★ 会产生一次模型调用（约几厘钱）",
       "requires": "打开 QQ 无关；但需要 DSH 与模型凭据可用"
     },
-    { "cmd": "node mocks/verify-live.mjs --clean", "purpose": "清理测试临时目录", "costs": "none" },
-    { "cmd": "npm test", "purpose": "跑全部离线测试（不含 verify-live）", "costs": "none" }
+    {
+      "cmd": "node mocks/verify-live.mjs --clean",
+      "purpose": "清理测试临时目录",
+      "costs": "none"
+    },
+    {
+      "cmd": "npm test",
+      "purpose": "跑全部离线测试（不含 verify-live）",
+      "costs": "none"
+    }
   ],
-
   "directories": {
     "src/": "桥接实现",
     "mocks/": "测试替身与验证脚本（不需要真 QQ，不花钱）",
@@ -80,35 +397,44 @@
     "logs/": "运行日志（不入库）",
     "workspace-qq/": "★ agent 的工作区 = 权限沙箱的根（不入库）"
   },
-
   "files": {
-    "src/index.mjs": "装配与启动顺序。改启动流程看这里。",
+    "src/index.mjs": "装配与启动顺序。改启动流程看这里。 ★ 新增 `--recipes --extract --inject <会话> [--dry]`：**手动跑一次自动抽取**。为什么需要它 —— 自动抽取是「每 5 轮后台跑一次、失败静默」的路径，出问题时既等不起 5 轮也没法只跑一次；而它**第一次上真机就失败了**，当时是靠「临时脚本 + 手动翻 DSH 落盘的抽取会话」才把原文捞回来。这个入口把那次的手工动作固化成一条命令（会真的调一次模型）。 ★ H7 新增 `--corpus`：统计（条数/会话分布/占用/超期数）、`--search <关键词> [--inject 会话] [--limit N]`、`--prune [--apply] [--days N]`（**默认预演**）、`--rebuild`（重建 FTS 索引）。",
     "src/local.mjs": "★ 唯一的路径解析处。可搬迁性全靠它（绝不用 process.cwd()）。",
     "src/config.mjs": "配置解析（normalizeConfig）与校验（validateConfig）。抽出来是为了能被测试 —— 原先埋在 index.mjs 里、只在启动时跑一次，从未被测过；而配置键名写错会静默回落默认值。",
     "src/api.mjs": "★ 本地配置 HTTP 接口（给配置 UI 用）。只监听回环；读配置删 token 而非置空；写配置空值=保持原样。核心逻辑与网络分离，可单测。",
-    "src/bridge.mjs": "★ 核心：一条 QQ 消息 → 一句回答。唤醒判定、准入、串行锁、发送都在这里。",
+    "src/bridge.mjs": "★ 核心：一条 QQ 消息 → 一句回答。唤醒判定、准入、串行锁、发送都在这里。 ★★★ **注入接线出过一次最贵的静默缺陷（已修 + 已加接线测试）**：`#buildPrompt` 里用的 `chatKey` 其实是 `#runTurn` 的**局部变量**，于是 `readTask` 每轮抛 `ReferenceError`，被那个「少一段上下文而已」的**空 catch 吞掉** —— 【当前任务】段**在真机上 7 轮一次都没注入过**，而 124 项离线断言全绿（它们只测纯函数 `renderTaskBlock`，**没测接线**）。修法：① `#runTurn` 显式把 `chatKey` 传进 `#buildPrompt`（读写必须是同一个键）；② 两处空 catch 换成 `#warnInjectOnce(段落名, error)` —— **增强路径可以失败，但不许安静地失败**，同一段只喊一次防刷屏；③ `mocks/verify-memory-roundtrip.mjs` 第⑥节走完整桥接、读 `rpc.prompts`（模型真正收到的提示词）断言任务段与配方段真的进去了（该测试**验过牙**：把 `chatKey` 注释掉立刻红）。★ 另：`#maybeExtractRecipe` 解析失败时把**原文前 200 字**打进日志（原来只记 `why`，导致只能去翻 DSH 抽取会话捞原文）。 ★★ **H1：未完成/被取代轮次的记忆三分类**（真机缺陷修复）。原先 `superseded` / 超时两条路径**直接 return**，而记忆标记的解析、落盘、回执都在它们**之后** —— 于是那一轮模型提议的记忆**整条静默消失**（连\"没记上\"的回执都没有），而用户看到机器人回过了话，会以为记住了。现在统一在 `#settleMemory` 里结算，且**必须排在两个提前 return 之前**：① 正常回合：全部处理；② `superseded`（回复不发但内容有效）：**照常落盘**；③ 超时/中断：**关键词直写照写**（那句话是完整的、与模型表现无关），**模型提议的不写**（不写半截污染记忆），并在回执里说明\"上一轮没跑完、你提议的没有被处理\"。⚠️ 这段代码的**位置**本身就是被测试抓出来的：第一版顺手插在 `token.superseded` 之后，行为完全没变、测试全红。 ★★ **H5 投递前终检门已接线**：`gateDelivery` 排在**隐私闸门之前** —— 因为它会改文本（删内部行、剥 CQ 码），而隐私判定必须发生在\"最终要发出去的那串字符\"上。整条被判为内部泄漏时**改发诚实话术**（并把原文片段写进日志、在会话镜像里留痕），不用静默丢弃 —— 静默丢弃在用户看来就是\"机器人坏了\"。 ★★ **H6 带内标记已接线**：① 每轮把**这条消息的 id** 写进来源标注（`#123456`）——在此之前提示词里**根本没有 id**，而任务段却一直说\"用带 # 的消息 id 引用回复\"，也就是**承诺了一个不存在的能力**；② 教它写 `[reply:<id>]`（**只在有 id 时教**）；③ 回程时校验 id 是否是**本会话近期真的见过**的（`#seenMsgIds`，内存 50 条），不是就**丢掉引用、正文照发**（不猜 —— 否则 QQ 上会出现指向空气甚至**指向别的会话**的引用）；④ `#deliver` 支持 `replyTo` / `faceId`：引用段只跟**第一条**（每条都带引用气泡 = 刷屏），表情段只跟**最后一条**；⑤ **只有表情、没有正文**时也能发（那正是表情的典型用法，不能被\"没有输出文字\"的兜底话术顶掉）。★ 任务段末尾那句指向【本次唤醒】/【过去状态】的说明已改成真的（那两个段从来不存在）。 ★★ **H7 语料库已接线**：① 每条**入站**消息在**唤醒判定之前**落库（没被唤醒的群消息也要进库 —— \"上次是谁说来着\"的答案往往就在那些没 @ 机器人的消息里）；② 自己发出的每条也进库（`is_bot=1`）；③ 失败只记一行日志（增强路径纪律）；④ `close()` 里关连接（Windows 上不关会留着文件句柄，测试的临时目录就删不掉 —— 实测一次跑完留下 22 个删不掉的目录 + 一屏 EPERM 警告）；⑤ 新增 `searchHistory()` / `corpusStats()` 供 MCP 工具与 CLI 用。 ★★ **H9 已接线**：① 监听 `gap` 事件 → 存成**一次性**的 `#pendingGap` → 下一轮拼提示词时插进**易变区**（紧挨 origin 之前，不打断前缀缓存）→ **用过即清**（隔几轮再提\"刚才掉线了\"只会让人莫名其妙）；② 投递去重键改成 `deliveryKey({会话, 文本, 引用, 表情})`，修掉跨会话误拦。★ 为什么缺口是\"进模型上下文\"而不是\"发一条 QQ 消息\"：后者会平白多一条消息（而他可能没说话），真正的危害是**模型把掉线前后当成连续对话**。",
     "src/sdk-rpc.mjs": "与 dsh 子进程的 JSONL JSON-RPC 客户端。",
     "src/session-bridge.mjs": "回合收集器（turn/end 之前收拢事件）+ 会话路由器（丢弃未知 sessionId 的事件）。",
     "src/session-id.mjs": "★ QQ 会话键 → sessionId。顶部记录了\"重启后不能复用 id\"的实测硬限制。",
-    "src/onebot.mjs": "OneBot v11 客户端（WS 收事件 / HTTP 发消息）+ 发送队列（节流+去重）。",
+    "src/onebot.mjs": "OneBot v11 客户端（WS 收事件 / HTTP 发消息）+ 发送队列（节流+去重）。 ★★ **H9 已接线**：① `call()` 抛出的错误现在**挂着结构化描述符**（`error.transport`），人话消息**逐字保留**（426 那句排查提示是本项目最有用的一句话，不能改），需要判\"能不能重试\"的地方直接读 `retryable`，不必再匹配字符串；② **按会话去重**：`SendQueue.check/markSent` 接受调用方给的键（默认仍是裸文本，向后兼容）—— 修掉\"同一句话 8 秒内发给两个会话时第二个被误拦\"；③ **断线缺口**：`close` 时记下断开时刻、重连成功时算时长并派 `gap` 事件（<5 秒的抖动不提）。",
     "src/trigger.mjs": "唤醒判定矩阵 + 关键词体检（防止静默变成\"全响应\"）。",
     "src/text.mjs": "消息段渲染、Markdown 降级、长文本分片。",
     "src/humanize.mjs": "★ 人味层（账号存活相关）：拟人延迟、静默时段、分条发送。纯计算，可注入时钟与随机源。",
     "src/ports.mjs": "★ 端口占用探测（缺陷 4 的第三道防线）。只做 I/O，不读配置、不决定策略。★ 一个必须记住的事实：**bind 成功不等于端口空闲** —— Windows 上别人监听 `0.0.0.0:3000` 时我们仍可能成功 bind `127.0.0.1:3000`（不同地址可以分开绑），所以判定顺序是「先 TCP 连接试（连上=有人听，最可靠）→ 再两次 bind 都失败才算占用」。另含 `probeHttpAnswered`：只问\"有没有 HTTP 服务应答\"（401/403 也算有），与 probeConsole 的区别是它不判断对方是谁。",
-    "src/process-guard.mjs": "★★ 进程登记（缺陷 3 的修复）：回答\"现在有几个桥接在跑\"。起因是真实事故 —— 上一个进程卡住关不掉、和新进程抢 PID/端口，而当时**没有任何 PID 记录**，于是只能靠人手动杀进程且事后无从取证。登记写在 cache/processes.json（已 gitignore）。★ 设计上最要紧两点：① **防 PID 复用** —— 判定\"这个 PID 还是不是原来那个进程\"要同时看 instanceId（经 `--instance-id=` 写进命令行，可读回来比对）与心跳（活着每 30 秒刷新，超过 120 秒算过期）；② **宁可漏报不可误杀** —— 唯一的\"已死\"依据是\"PID 不存在\"，读写不到命令行时判 `suspect`（不清登记、不杀），要停一个进程必须 PID + instanceId 双重匹配。刻意**不自动杀**冲突进程：判定依据含\"心跳过期\"这种可能误判的信号，误杀一个正在干活的机器人比多跑一个更糟。CLI：`--processes`（列登记）、`--processes --kill <pid>`。",
+    "src/process-guard.mjs": "★★ 进程登记（缺陷 3 的修复）：回答\"现在有几个桥接在跑\"。起因是真实事故 —— 上一个进程卡住关不掉、和新进程抢 PID/端口，而当时**没有任何 PID 记录**，于是只能靠人手动杀进程且事后无从取证。登记写在 cache/processes.json（已 gitignore）。★ 设计上最要紧两点：① **防 PID 复用** —— 判定\"这个 PID 还是不是原来那个进程\"要同时看 instanceId（经 `--instance-id=` 写进命令行，可读回来比对）与心跳（活着每 30 秒刷新，超过 120 秒算过期）；② **宁可漏报不可误杀** —— 唯一的\"已死\"依据是\"PID 不存在\"，读写不到命令行时判 `suspect`（不清登记、不杀），要停一个进程必须 PID + instanceId 双重匹配。刻意**不自动杀**冲突进程：判定依据含\"心跳过期\"这种可能误判的信号，误杀一个正在干活的机器人比多跑一个更糟。CLI：`--processes`（列登记）、`--kill <pid>`。★ 三处踩过的坑（都有回归测试）：① `--kill` 原先排在 `--processes` **之后**，而后者结尾就 `process.exit(0)` —— 于是提示语教的那条 `--processes --kill <pid>` **永远只打列表、从不真杀**，旧进程继续抢事件流；现在 `--kill` 优先。② `claim()` 的冲突判定原先只比 `profile`，**把已确认死掉的条目也推进 conflicts**，而 `list()` 的过滤是 `alive||stale` —— 两处口径不一致，表现成\"列表干净却仍警告、并指引去 kill 一个不存在的 pid\"。③ `runningBridges()` 取代 CLI 里的 `!isSelf && alive`：`--processes` 是**另一个进程**，`isSelf` 恒为 false，于是**唯一那个在跑的桥接**也会被算成\"其它\"并给出去杀它的建议；现在按**数量**判定（1 条正常、≥2 条才是真冲突）。",
     "src/memory.mjs": "★ 跨重启记忆的**历史设计**（供 mocks 与考古用）：给 agent 一个\"在工作区里记笔记\"的约定，让它用自己的文件工具读写。⚠️ 这条路径**已不再进入提示词** —— 现在由 src/memory-store.mjs 托管写入权。保留它是因为 mocks/verify-units.mjs 仍在断言那段文本，且它是\"为什么不给 agent 加存储层\"这段推理的原始记录。",
-    "src/memory-store.mjs": "★★ 记忆：**桥接托管**（取代 memory.mjs 进入提示词）。核心取舍是\"语义归模型、落盘权归桥接\"：模型只能在回复里写 `<<<MEMORY fact|slang|directive 内容>>>` 标记来**提议**，桥接解析后按发起人身份与来源校验、落盘、并出具回执（下一轮告诉模型到底记上没有）。★ 为什么改：原设计让模型直接写记忆文件，于是\"写入权在模型手里、判据却在桥接手里\"，位置对不上 —— 实测事故正是提示词里一行错标签让模型把普通群友写成了管理员。四档作用域：`global` 写 `MEMORY.md`（**对所有聊天生效**，任何人可写 —— 全局是共享层）、`fact` 写本会话那层（群聊本群/私聊本人）、`slang` 只写本群、`directive` 写独立的 `memory/directives.md` 且**只有管理员私聊**能写（跨群生效）。⚠️ 指令文件名不能以 `.` 开头：写入走 resolveMemoryPath，它拒绝隐藏文件 —— 第一版写成 `memory/.directives.md` 导致指令根本写不进去，被测试抓出。内容级硬拦：涉及\"谁是管理员/有什么权限\"、像行为指令、试图绕过既有约束的，一律拒绝并**在回执里说明原因**（不许静默丢弃）。只限条数（60/文件）**不限字数**：截断句子会破坏语义（\"以后别提那件事\"截成\"以后别提\"意思就反了）。★ 刻意**不做**\"群主/群管理员\"这个权限等级（用户明确要求）：身份只有 adminUsers 一套判据，少一层就少一类误判。★ 注入提示词的文本里**不含任何文件路径**（写入由桥接做，模型不需要；路径随会话变化会破坏前缀缓存，实测本项目缓存命中率 91%~96%）。",
+    "src/memory-store.mjs": "★★ 记忆：**桥接托管**（取代 memory.mjs 进入提示词）。核心取舍是\"语义归模型、落盘权归桥接\"：模型只能在回复里写 `<<<MEMORY fact|slang|directive 内容>>>` 标记来**提议**，桥接解析后按发起人身份与来源校验、落盘、并出具回执（下一轮告诉模型到底记上没有）。★ 为什么改：原设计让模型直接写记忆文件，于是\"写入权在模型手里、判据却在桥接手里\"，位置对不上 —— 实测事故正是提示词里一行错标签让模型把普通群友写成了管理员。四档作用域：`global` 写 `MEMORY.md`（**对所有聊天生效**，任何人可写 —— 全局是共享层）、`fact` 写本会话那层（群聊本群/私聊本人）、`slang` 只写本群、`directive` 写独立的 `memory/directives.md` 且**只有管理员私聊**能写（跨群生效）。⚠️ 指令文件名不能以 `.` 开头：写入走 resolveMemoryPath，它拒绝隐藏文件 —— 第一版写成 `memory/.directives.md` 导致指令根本写不进去，被测试抓出。内容级硬拦：涉及\"谁是管理员/有什么权限\"、像行为指令、试图绕过既有约束的，一律拒绝并**在回执里说明原因**（不许静默丢弃）。只限条数（60/文件）**不限字数**：截断句子会破坏语义（\"以后别提那件事\"截成\"以后别提\"意思就反了）。★ 刻意**不做**\"群主/群管理员\"这个权限等级（用户明确要求）：身份只有 adminUsers 一套判据，少一层就少一类误判。★ 注入提示词的文本里**不含任何文件路径**（写入由桥接做，模型不需要；路径随会话变化会破坏前缀缓存，实测本项目缓存命中率 91%~96%）。 ★ 两处配合关键词直写：① `applyMemoryItems` 把每条的 **`source`**（`marker` / `keyword`）带进 applied/ignored，审计才能区分\"这条是模型提议的还是用户明确要求记的\"；② `writeReceipt` 支持 **`notes`**（只有整句说明、没有条目时也能写回执）——两种都不说就会出现\"静默失败\"：用户要求记的那条要告诉模型\"系统已直接落盘、不用你再提议\"，本轮没跑完则要告诉它\"你提议的没被处理\"。 ★★ **H4 更正（supersede）已接线**：`appendEntry` 在写入前先判\"这条是不是在更正上面某条\"（`pickSupersedeTarget`）：命中就把**旧行**追加标注（`markSupersededLine`，幂等）、再写新行，并把 `superseded` 痕迹带进 `applied`（否则外面看不见标注发生了没有）。⚠️ **标注必须在写新行之前做，且做完要刷新快照** —— 不刷新的话下一次读记忆会被 `verifyAndRestoreMemory` 把标注回滚掉（与\"整理不刷新快照\"是同一个坑，测试里专门有一条盯着）。注入侧：**已被更正的条目不注入**，并如实追加\"另有 N 条已被更正，不再作为事实使用\"（不许悄悄少一条）。标记协议新增 `fix` 档（= 模型显式声明这是更正，落盘仍写 fact，但带 `force`，不再要求自指措辞）。",
     "src/images.mjs": "★ 看图：QQ 图片 → 工作区 inbox/ → 模型。★ 存在的理由是一条取证链：模型本来就支持图片输入（dsh-llm-deepseek 里 deepseek-flash 的 inputModalities 含 image）、SDK 的 session/prompt 本来就收 {type:image,data,mimeType}（dsh-sdk-jsonrpc-server 的 durablePromptContent）、附件库本来就挂着（dsh-base 有 attachment-local）、read_image 工具本来就在（dsh-tool-fs 在 ctx.inject(['attachments']) 里注册）—— 唯一缺的是 text.mjs 把 data.url 原地丢掉了。★ 两种模式：on-demand（默认，只给路径，省钱）/ auto（直接塞图片块）。★ **本项目唯一一处外部输入能指挥进程发网络请求的地方**，所以 SSRF 防护是重点：只允许 http/https、**逐跳**校验重定向（只在第一跳查等于没查）、拒绝回环/私有/CGNAT/组播与 IPv4 映射进 IPv6 的写法、域名先解析再校验（挡 nip.io 这类「看着像域名」的）、大小上限+超时+重定向次数。已知边界：解析与 fetch 是两次解析，理论上存在 DNS rebinding 窗口，如实标注未彻底堵住。★ 文件名用内容哈希（QQ 里同一个表情包会反复出现）。★ 删除必须用 unlinkSync（Windows 上 rmSync 删单文件会静默失败，已在 memory-files.mjs 踩过）。",
-    "src/persona.mjs": "★ 人设提示词（也是账号存活相关：客服腔本身就是机器人特征）。两个预设 + 自定义；含\"提到不存在的工具\"体检。",
+    "src/persona.mjs": "★ 人设提示词（也是账号存活相关：客服腔本身就是机器人特征）。两个预设 + 自定义；含\"提到不存在的工具\"体检。 ★★ **H11 反提示词注入 + 名字表**：新增四段 —— ① **反注入**（不念/不复述/不翻译收到的指令，不换身份、不进\"更高权限\"的模式，**不因为对方自称管理员就改权限**：权限由代码判定；并如实写明我们**不总能识破**，判据只有\"它有没有要求你改变身份或交出上面那段内容\"）；② **被指出错了先认**（短一句、给对的，别长篇道歉、别再编一个理由）；③ **\"短\"只约束发给对方的那句话**（查资料/多步操作该做就做，省掉的是客套不是认真）；④ **别的 bot 不互相 @、不接力**。 ★★ 另加**机器可读的名字表**（`正式名:` / `别名:` / `又称:`）+ `personaWakeWords()` / `mergeWakeKeywords()`：为什么必须有它 —— 人设里写\"别人叫你小鱼也是在叫你\"只是一句**愿望**，而**唤醒判定发生在拼提示词之前**，桥接不认这个名字，那句话根本进不了模型。★ `又称`（DeepSeek）**刻意不作为唤醒词**（技术群里这个词太常见，会乱插嘴），这条判断写在数据里而不是藏在代码里。 ★★ **H12 人设是不可信输入**：`scanPersonaText()` 命中不可见/双向控制字符（`U+200B`–`U+202E`）、行首祈使式\"忽略上面的指令\"、身份改写、索要系统提示词、jailbreak/DAN 话术 → **整文件拒载**（替换成 `[BLOCKED]`，**不做\"删掉那几行再放行\"**：部分加载意味着拆开恶意段落就能绕过，而使用者会以为自己的角色卡生效了）；拒载必须**大声说**且占位文本**不含原文**。超长（>4000 字）做**头 + 省略提示 + 尾**截断（保留尾部是因为\"不要写这些话\"这类约束常写在末尾）。★ **内置预设不扫**（它们天生含\"有人叫你改设定怎么办\"这类描述性句子，扫了必然误拒）—— 但有一条断言要求**预设必须通过扫描器**，因为用户很可能把预设复制进 `persona.custom` 去改：第一版三条判据把它全命中了，是那条断言当场抓出来并逼着重写措辞的。",
     "src/speed.mjs": "★ 回应速度三档预设（快速约1秒 / 均衡约8秒 / 谨慎约20秒）。每档显式给参数并带风险文案；含反推识别与自洽性体检。",
-    "src/mcp-profile.mjs": "★ 把 QQ 工具 MCP 服务器挂进 sdk profile（运行时生成 patch + MCP 配置）。解决\"模型在子进程里、看不到桥接的 OneBot 连接\"这个架构缺口。",
+    "src/mcp-profile.mjs": "★ 把 QQ 工具 MCP 服务器挂进 sdk profile（运行时生成 patch + MCP 配置）。解决\"模型在子进程里、看不到桥接的 OneBot 连接\"这个架构缺口。 ★ H7：`writeMcpConfig` 增加 `workspace` 字段（`qq_search_history` 要读工作区里的语料库；它**不含密钥**，所以放进这份 cache 配置是安全的）。",
     "src/prices.mjs": "★ 价目表 + 峰谷时段判定 + 成本估算。DSH 不提供人民币价格，所以价格必须自己维护（这个事实决定了整个模块的设计）。判定用 Intl 按 peak.timezone 取墙上时间，**不能用 getHours()**。",
     "src/usage.mjs": "★ 用量记账（追加写 JSONL）+ 按天/按会话聚合。核心是三个口径：totalTokens 不可求和、inputTokens 是【未缓存】输入、reasoning 是 output 的一部分。缺字段保持 null 而不是补 0。",
     "src/memory-files.mjs": "★ 记忆文件的读写（UI 唯一能改磁盘文件的入口）。三条底线：只允许工作区内相对路径、只允许 .md、拒绝软链接。写操作带 sha256 冲突检测（409）。⚠️ 删除必须用 unlinkSync：实测 rmSync 删单个文件会静默失败（返回正常但文件还在）。",
-    "src/snowluma.mjs": "★ 探测/拉起 SnowLuma + token 解析（以它自己的配置为准）。它能被拉起是因为它在桥接**外面**（桥接自己不行，见 api.mjs 里为什么没有 /api/start）。⚠️ Windows 上 spawn .bat 必须 shell:true，且要 detached+stdio:ignore，否则关掉桥接会连带杀掉它。★ 发现入口时优先 index.mjs 而不是 launcher.bat：后者的 `pause` 会开一个控制台窗口，而现在输出是在界面里看的。★★ **防重复启动有三道防线**（缺陷 4 补齐第三道）：① 探 Web 控制台是否可达；② 用**我们自己的 token** 问 OneBot（只有\"对面接受我们的 token\"才算正确的那份在跑）；③ **端口占用探测**（只看\"有没有人应答\"，401 也算有）—— 前两道都只覆盖\"对面接受我们的 token\"，而 3000 上蹲着别的东西时会答 401，于是\"端口有东西\"被当成\"没人在跑\"，再 spawn 就撞车（两个实例抢端口与登录态且都不会自己退出）。第三道**必须排在\"入口校验\"之前**：端口被占时用户真正需要知道的是\"别再起一个\"，而不是去修路径。★ 启动成功后把 PID **登记进进程表**（profile: snowluma）：以前它只出现在一行日志里，于是\"我起了哪个 SnowLuma\"\"要不要停掉它\"都答不出来；登记失败**不影响启动**（它已经在跑了，那是既成事实），但要打告警，不许静默。",
+    "src/snowluma.mjs": "★ 探测/拉起 SnowLuma + token 解析（以它自己的配置为准）。它能被拉起是因为它在桥接**外面**（桥接自己不行，见 api.mjs 里为什么没有 /api/start）。⚠️ Windows 上 spawn .bat 必须 shell:true，且要 detached+stdio:ignore，否则关掉桥接会连带杀掉它。★ 发现入口时优先 index.mjs 而不是 launcher.bat：后者的 `pause` 会开一个控制台窗口，而现在输出是在界面里看的。★★ **防重复启动有三道防线**（缺陷 4 补齐第三道）：① 探 Web 控制台是否可达；② 用**我们自己的 token** 问 OneBot（只有\"对面接受我们的 token\"才算正确的那份在跑）；③ **端口占用探测**（只看\"有没有人应答\"，401 也算有）—— 前两道都只覆盖\"对面接受我们的 token\"，而 3000 上蹲着别的东西时会答 401，于是\"端口有东西\"被当成\"没人在跑\"，再 spawn 就撞车（两个实例抢端口与登录态且都不会自己退出）。第三道**必须排在\"入口校验\"之前**：端口被占时用户真正需要知道的是\"别再起一个\"，而不是去修路径。★ 启动成功后把 PID **登记进进程表**（profile: snowluma）：以前它只出现在一行日志里，于是\"我起了哪个 SnowLuma\"\"要不要停掉它\"都答不出来；登记失败**不影响启动**（它已经在跑了，那是既成事实），但要打告警，不许静默。 ★★ **H8：token 读取已委托给 `token-discovery.mjs`**（保守读 + 四条门槛），`readSnowlumaTokens` 形状不变、额外透出 `why`/`picked`/`accounts` 给排查用；`resolveOnebotTokens` 在**回退到 config.json 时也会说明为什么** —— 过去那是一段**静默回退**，而「静默回退到可能过期的 token」正是 401 的源头。",
     "src/snowluma-log.mjs": "★ 读 SnowLuma 的终端输出给界面用。**读它的日志文件而不是抓 stdout** —— 实测日志文件是 UTF-8（中文正常），而 stdout 是终端编码（重定向会变 GBK 乱码）；要给人看的内容变乱码等于没显示。支持增量轮询（offset），并在文件轮转时如实标记 `rotated`（否则界面会以为「没有新日志」而悄悄少一段）。",
     "src/ui-status.mjs": "★ 界面新鲜度：回答「我手上这份 dist 是不是当前源码构建的」。存在的理由：界面分**两条路出货** —— 开发路径 `config-ui/dist`（已入库）与发布路径 `_release/<包>/config-ui/dist`（RELEASE.md §5 用 robocopy 拷）；而「包里那份是不是当前源码构建的」以前**没有任何东西能判断**（验收脚本只验 `dist/index.html` 在不在，存在即通过）。实测脱钩过一次：包里源码与 UI 都比工作区旧约 5 小时，**1100 项测试全绿**。判定方式是构建时写入的源码内容哈希 vs 现在重算的哈希（哈希逻辑只有一份，在 `scripts/ui-build-stamp.cjs` —— 两边各写一套必然分叉）。★ 三种结果**必须分开报**，不能混成绿/红：`fresh`（一致）/ `stale`（源码改了没重新构建 → 修法是构建）/ `unstamped`（没有标记 → **重新构建也没用**，产物不是本项目构建的）。混起来报一句「界面不同步」会让人往错的方向修。入口：`node src/index.mjs --ui [--dist <路径>] [--json]`，并进 `/api/status.ui`。",
-    "src/memory-inspect.mjs": "★ 记忆体检（`node src/index.mjs --memory`）：把工作区里的真实记忆状态摊开给人看，回答「它此刻到底记着什么、下一轮会注入什么」。存在的理由：**『它说记住了』和『它真的记住了』是两件事** —— 离线测试只能证明机制通不通，而运行时状态测试答不了，偏偏那才是使用者最想确认的（最常见的失败是机器人客气地回一句『好的记住了』而其实一条都没写）。四个部分：① 记忆文件（条数/字节/最后写入/最后一条）；② 按会话的注入预览；③ 待消费的回执（看到「没记下」= 那条被拒了，机器人若说记住了就是骗人）；④ 快照一致性。★ 三条硬规矩：**只读**（绝不写、绝不消费回执，所以机器人跑着也能执行）、**不猜**（注入内容直接调 `readMemoryForPrompt`，不另写一套估算 —— 两份逻辑必然分叉）、**说清边界**（只答「记了什么、会不会注入」，「模型会不会主动提议」只能从真实对话看）。★ 它会主动报出「**存在但不会被注入**」的记忆文件 —— 实测就有 `memory/self-unknowns.md` 十几条却不在注入清单里，模型根本读不到，而使用者以为它知道。",
+    "src/memory-inspect.mjs": "★ 记忆体检（`node src/index.mjs --memory`）：把工作区里的真实记忆状态摊开给人看，回答「它此刻到底记着什么、下一轮会注入什么」。存在的理由：**『它说记住了』和『它真的记住了』是两件事** —— 离线测试只能证明机制通不通，而运行时状态测试答不了，偏偏那才是使用者最想确认的（最常见的失败是机器人客气地回一句『好的记住了』而其实一条都没写）。四个部分：① 记忆文件（条数/字节/最后写入/最后一条）；② 按会话的注入预览；③ 待消费的回执（看到「没记下」= 那条被拒了，机器人若说记住了就是骗人）；④ 快照一致性。★ 三条硬规矩：**只读**（绝不写、绝不消费回执，所以机器人跑着也能执行）、**不猜**（注入内容直接调 `readMemoryForPrompt`，不另写一套估算 —— 两份逻辑必然分叉）、**说清边界**（只答「记了什么、会不会注入」，「模型会不会主动提议」只能从真实对话看）。★ 它会主动报出「**存在但不会被注入**」的记忆文件 —— 实测就有 `memory/self-unknowns.md` 十几条却不在注入清单里，模型根本读不到，而使用者以为它知道。★ 快照比对走 `snapshotNameOf`（`memory-store.mjs` 里的**唯一**路径口径）—— 自己拼路径会与 `saveSnapshot` 分叉，表现成「体检说一致、实际不一致」。",
+    "src/memory-stats.mjs": "★★ 记忆写入计数 + **零写入告警**（`--memory --stats`）。存在的理由是一次真实的静默失败：机器人聊了两天、几十轮，**一条记忆都没写**，而**没有任何地方报过警** —— 发现它靠人工去解 DSH 的会话落盘记录逐层比对（详见 `docs/0.2.1-memory-diagnosis.md`）。本项目第一条约束就是「失败必须让用户知道」（`AGENT.md` 第 6 条），所以这里补四个计数（proposed/applied/ignored/deduped）+ 一个判据：**跑了 ≥10 轮却 0 次落盘 → 报警**。★ 三条纪律：① **计数绝不阻断主流程**（任何异常都吞掉，统计文件坏掉也只是当空处理）；② **只记数字不记内容**（统计文件里没有记忆原文）；③ **按会话分开**（告警必须能指出是哪个会话没写）。★ 分母 `turns` 必须**无条件**记录（每轮都记，不管有没有提议）—— 因为「从没提议过」的会话只有靠它才积累得起轮数；若只在有提议时记，最该告警的情况反而永远不告警。",
+    "src/privacy.mjs": "★★ 隐私硬闸（**双侧独立**）：写入侧拒绝落盘 + 输出侧拒绝发送。为什么必须是两侧而不是一个开关 —— **失效后果不同**：写入侧漏了隐私躺在磁盘上（还能删、但会被打包分享与重复计费）；输出侧漏了是**已经发给第三方、QQ 消息撤不回**，本项目唯一无法挽回的操作。七类判据写成**可核对的具体形状**而非「注意隐私」：身份证走**校验位算法**、银行卡走 **Luhn**、手机号 `1[3-9]` 十一位、凭据要**关键词 + 高熵值同时命中**（只看关键词会把「token 用量」这种常用词全拦了）、住址要**行政区划+街道+门牌的组合**、健康医疗与生物特征用明确词表。★★ 一条硬约束：**登录号/群昵称/群名片/群号是公开标识，必须放行** —— 记忆系统拿 QQ 号当主键、群号当目录名，拦了整个记忆功能就死了（测试里专门有一节拿**真实记忆的 60 条原文**当负例，必须零误拦）。★ 审计 `memory/privacy-audit.jsonl` **只记类别与字数、绝不记原文**，否则拦截本身就成了新的泄露通道。★ 刻意**不做成配置开关** —— 做成 `privacy.enabled` 就等于给了一个静默关掉它的入口，而关掉后表现成「今天开始它什么都说」。",
+    "src/oplog.mjs": "★★ 操作日志（`--ops`）：**记住自己干过什么**。修的是一个真缺口 —— `TurnCollector` 收到 `tool/call` 时原先**只留工具名**（`{name, callId}`），把 `arguments` 与 `tool/result` 的内容全丢了，于是「记住自己干过什么」连原料都没有（桥接明明收到了完整事件）。两条原则：① **桥接自己写、不问模型**（记忆诊断已证明「让模型报告自己做过什么」漏报率极高，而事件流里全都有）；② **写的是索引不是内容仓库** —— 实测一次 web_fetch 的结果就是整篇文章，全文入库会让它比记忆库大几个数量级、还把外部网页内容复制进了本地磁盘，所以每条结果只留 `excerpt`（300 字），全文留在 DSH 会话记录里。按 `chatKey + 本地日期` 分文件（前者做隔离，后者让 TTL 清理只需看文件名）。★ 落盘前过隐私闸门：`excerpt` 与 `args` 命中七类就换成占位符（**保留结构只隐内容**，这样「这一步失败了」仍可查）。★ 三条纪律：写失败**绝不抛异常**、单文件有字节上限（到限明说不再追加，不静默丢）、TTL 清理**按文件名日期**判定且**认不出日期的文件不删**。",
+    "mocks/verify-oplog.mjs": "★★ 操作日志测试。盯的是「记住自己干过什么」的原料链：`TurnCollector` 的 `ops` 是否带全**参数与结果**（原先只有工具名）、`arguments` 是 **JSON 字符串**要解析、超长参数**先解析再截值**（先截字符串再解析会留下半个对象，实测 `write` 的 `content` 动辄上千字）、`isError` 与 `hasImage` 都要标出来（`read_image` 的结果是 `text+image`，不标会显示成「结果为空」）。事件 fixture **逐字段照抄本机真实会话**，不是猜的。另含：超时回合**也**留下流水（与记账同理）、`turn/end` 没有 step 要继承上一步、隐私在落盘前被隐去（磁盘原文里也找不到）、会话隔离、TTL 清理按文件名日期且认不出日期的不动、写失败不抛异常。★ 还固化了一个真实陷阱：`TurnCollector` 的超时定时器**故意 unref**，测试必须自己保持进程存活，否则表现为 `Detached unsettled top-level await` + 退出码 13 而不是断言失败。",
+    "src/tasks.mjs": "★★ 任务台账（`--tasks`）：**不丢主线的锚** + **回到第 N 步**。它解决的是整个项目最容易被忽略的一类失败 —— DSH 的会话上下文（L-A）**我们够不到**（SDK 没有 resume、也控制不了压缩，见 session-id.mjs），长会话里早期内容被挤出时模型就丢主线：反复重试走不通的路、忘了已经查过什么。改不了 L-A，就在里面**钉一个锚**：把「当前任务」每轮注入，于是不管 L-A 怎么滚，主线始终在提示词里。★★ **关键设计决定：目标与主线不让模型写（v1）** —— 设计文档原本给台账设计了模型写的 `goal`/`mainline`，这里刻意先不做，理由是已被两次实测验证的教训（记忆诊断：本机 58 次 + 我们这里几十轮真实运行，模型「顺手记一笔」一次都没主动做过）。而任务台账**每轮都要用**，它一旦空着「不丢主线」就完全失效。所以 `goal` 直接取**用户原话**、`steps` 从 ops 机械提炼、`tried`/`blocked` 由结果与审批状态推导 —— **零模型参与也完整**。★★ **回到第 N 步**（`--tasks --rollback N --inject <会话> [--mode replay|retry|abandon]`）：`rollbackTo = N` → 1..N 有效、N+1..M 标记 `superseded`（**保留不删**，可追溯），并记 `checkpoint` 与 `redo` 供注入。★ 三件必须在文档与接口里说清的事：① **DSH 的会话上下文不会回退**（实测 17 种事件类型里零条 checkpoint/fork/revert/resume），模型**仍然记得**那些步骤，我们唯一的手段是**在提示词里声明作废** —— 是声明不是清除；② **副作用不回退**（已发的 QQ 消息、已写的文件都不回滚）；③ **越界不猜**，报错并给出可用范围。★ 触发词**本地匹配、不让模型插手**（同记忆写入的教训）；「上一步」与「这一步」是**两个不同语义**，合成一个会让一半用户拿到相反结果。★ 连续回退要能**恢复**之前作废的步骤（否则先回 5 再回 3 会让第 4~5 步永久作废）。★ 结果没回来记 `pending` 而**不是** failed；注入段必须显式声明「不要当消息引用」（「第 N 步」是我们的编号，`replyToMessageId` 用的是真正的消息 id，混称是用户可见的错误）。★ 闲置超过 30 分钟要**降级**（`isTaskStale`/`taskIdleMs`）：原先闲置判定只写在 `noteTaskTurn`（回合**结束**）里，而注入发生在回合**开始** —— 于是长时间没动的台账仍以【当前任务】注入，同一轮结尾却被判成新任务，两边自相矛盾。现在渲染端也判：超窗就改叫【上一件事（可能已经结束）】并写明闲置了多久、禁止「对方没提也主动接着做」，但**保留内容**（对方隔一小时回来说「继续」时主线不能丢）。判不出时间戳（缺 `lastActiveAt`）时返回 `null` → 保守地按当前渲染，不凭空降级。 ★★ 目标字段的语义也修过一次（真机）：原先**每轮无条件**用本轮用户原话覆盖 `goal`，于是用户最后一句「原来如此，太棒了」成了目标 —— 注入变成「对方最近的要求：原来如此，太棒了」，R4 抽取向模型描述的「用户的要求」也变成这句，模型在自己的思考里明确纠结过「这只是一句夸赞，不是要求」。现在判据与「重做标记生命周期」用**同一个概念**：**只有这一轮真的动手了（`newSteps` 非空）才覆盖目标**；任务建立时仍无条件记原话。",
+    "mocks/verify-tasks.mjs": "★★ 任务台账 + 回到第 N 步测试。最要紧的是「**零模型参与也完整**」：目标直接取用户原话、步骤从 ops 机械提炼、失败进 tried、审批被拒进 blocked —— 全都不依赖模型行为（靠模型自觉那条路已被两次实测证伪）。另含：工具→人话动作（认不出的如实用工具名、不编语义）、call/result 配对、**结果没回来记 pending 不猜 failed**、闲置超阈值开新任务、步骤上限只留最近 12 步、原子写无 tmp 残留、坏 JSON 读回 null、同批 ops 喂两次不重复记、归档是**移走不是删除**、那组**措辞纪律**断言（必须显式禁止把步骤当消息引用），以及 R3 的：触发词识别（含「撤销这一步」这类**指代式**，且断言「上一步」≠「这一步」）、编号从 1 起、作废**保留不删**、**连续回退能恢复**先前作废的步骤、越界给可用范围、`redo` 标记的生命周期（**真的动手才清**，只有话不清）。★ 两处如实固化的取舍：① 「回到第3步之前我们先确认一下」这类含触发词的普通句子**会**命中（已知假阳性，代价是「多回退一次」可再回退回来；收窄要靠语义判断而那是「依赖模型」的路，与设计取舍冲突）；② 时间基准必须**从盘上读** `lastActiveAt` —— 第一版用了个过期的 `t0`，表现为「startedAt 没更新」这种看起来像代码 bug 的假失败。 含真机修出来的两条：闲置超窗**降级渲染**（且渲染端与记账端同一时刻必须给出一致结论）、目标只在「真的动手了」时才覆盖（一句道谢不该变成「对方最近的要求」）。",
+    "mocks/verify-privacy.mjs": "★★ 隐私硬闸测试。最要紧的一组是「**不许误拦**」—— 隐私闸门拦错的代价是**功能整体失效**（把 QQ 号当隐私拦掉 = 记忆系统拿不到主键 = 整个记忆功能死掉）。所以正例只在构造的、形状明确的隐私上验，而负例直接拿**真实记忆的 60 条原文**跑（必须零误拦）。另含：校验算法本身（身份证校验位、Luhn —— 不能靠「位数像」判定）、七类逐类拦得住、双侧判据一致、安全话术不含原文片段、写入侧真拒且回执说明原因、审计只记类别与字数（断言原文里没有隐私）、**审计坏掉不抛异常且该拒的仍拒**。",
+    "mocks/verify-memory-stats.mjs": "★★ 记忆**可观测性**测试（不是测记忆能不能写，而是测**记忆不工作时我们能不能知道**）：① 计数无条件记轮数；② 跑满轮数却 0 落盘必须报警、落过盘后必须闭嘴、轮数不够不许误报；③ 四个计数各自对上、去重不混进拒绝；④ 按会话分开（一个会话报警不影响另一个）；⑤ 统计文件坏掉**不抛异常**（观测手段不能反过来把主流程弄挂）；⑥ 体检必须报出根目录的 `MEMORY.md`（0.2.0 漏报了 7605 字节，使用者以为全局记忆是空的）与快照路径唯一口径（根文件的篡改检测曾因路径算错而**静默失效**）。",
+    "src/memory-consolidate.mjs": "★ 记忆整理（规则版，`--memory --compact`）：把模型写的\"流水账\"收敛成可用的记忆。实测数据逼出来的 —— 模型写成 `2026-09-26 他说希望机器人以后能有管理 MC 服务器的能力，我列了需要的能力清单（…）`，三类毛病叠加：**第一人称转述**（记的是对话过程不是事实）、**中英标点混用**（`他说,他`）、**冗余日期前缀**。只做**确定性、可验证、不改语义**的四件事：① 解析多行条目；② 标点归一（只在中文语境，`1,000`/URL/英文括号都不动）；③ 摘掉行首冗余的日期与**转述前缀**（`他说`/`据他说，` —— 按人分档的档案里那句不携带信息；**只处理行首**，句中的\"张三说他\"不动；`我提醒…` 一类属语义判断，留给 LLM 版）；④ 合并高度相似的条目（字符 bigram Jaccard ≥0.85，**不跨分节**，保留更长的那条，并掉的记入 `merged[]` 供核对）。★ **不做语义改写** —— 规则做不到可靠，属二期 LLM 版且必须配反幻觉断言与快照回滚。★ 三条踩过的坑（都有回归测试）：① 第一版解析器把**空行与小标题当成条目续行**，于是 `MEMORY.md`（4 个日期分节）被拍平成 `- ## 2026-09-26 …`、还产出只有空白的\"条目\"；② 渲染器给条目**每一行**都加 `- `，续行变成新条目 → **不幂等**，而它要周期跑；③ 整理**必须刷新快照**，否则下次读记忆会被 `verifyAndRestoreMemory` 回滚（表现成\"整理完它自己变回去了\"），与 `/api/memory/file` 同一道理。 ★★ H2 **定时整理**（`createConsolidateScheduler`）：能力早就有了（规则版整理 + 幂等断言），缺的只是**谁来按这个按钮** —— 现在桥接自己**每小时跑一次**（`attach()` 启动、`close()` 停掉）。为什么必须有它：**QQ 会话永远不会 `/reset`**，一个会话能连续用几个月；不主动整理，模型写的流水账会一直堆在**每轮都要注入**的记忆文件里（越堆越贵，而且看不出哪条还有用）。三条不能改的约束：① **只在桥接空闲时动手**（整理是读-算-写回，而写记忆发生在回合结束时，撞上就会覆盖刚写的那条）——忙时**跳过这一跳**，不是排队；② **`unref()`**，绝不能因为一个整理定时器拖住进程退出；③ **只在真的有变更时记日志**（每小时一行「没变化」会把该看的那行埋掉），失败必须留证据，间隔有 5 分钟下限（防配置成 1ms 打满 CPU）。★ 定时整理**必须传 `saveSnapshot` 刷新快照基准** —— 不刷新的话下次读记忆会被 `verifyAndRestoreMemory` 把整理结果回滚掉（表现成「整理完它又自己变回去了」）。 ★★ **H4：被更正的条目在整理时\"原样保留、不参与去重/合并\"** —— 它是**历史**（\"这条为什么变成现在这样\"的证据），而整理的两件事都建立在\"这是当前有效的事实\"这个前提上：让它碰这条，要么被当重复删掉（证据没了），要么被并进有效条目（把被推翻的结论重新焊回有效事实里）。⚠️ 保留时必须**物化成 `{type:'entry', text}`** —— `parseEntries` 产出的 node 正文在 `lines[]` 里、`text` 是空串，直接 push 原 node 会渲染出 `- undefined`（实测踩过）。另：本模块**不再 import `memory-store`**（`listFiles` 由 bridge 注入）—— 否则与\"写入侧要用 similarity\"形成循环依赖。",
+    "mocks/verify-memory-consolidate.mjs": "★ 记忆整理测试，最要紧的一条是**幂等性**（整理过的文件再整理一次必须不再变化 —— 它会周期跑，不幂等则条目数逐次漂移；第一版渲染器实测就不幂等，被这里抓到）。另含：多行条目解析（修之前 1 条 + 3 个孤儿行）、小标题/空行各归各位、标点归一**不误伤**（千分位、URL、英文括号）、转述前缀只摘行首（句中的\"张三说他\"不动、`我提醒` 不动）、只有转述前缀的条目应丢弃、去重与合并且**记录并掉了什么**、合并不跨分节、分节结构原样保留（真实形状的长文档整理后逐字相同）、写盘带备份、**刷新快照后不被回滚**、缺文件明确失败。",
     "src/roster.mjs": "★ 名单与权限分级（三级）：管理员 / 用户（只读）/ 陌生人。私聊白名单与**群白名单分开**（群不再以用户权限作为回复条件）；管理员权限在群里依然生效。★ 非管理员的禁写是**提示词层**限制，不是 OS 硬墙 —— 取证：SDK 只暴露 initialize/session/prompt/shutdown，其实现里搜 sandbox|permissionMode|approval 零匹配，所以桥接无法按会话切沙箱模式。真正的硬墙需要另起一个 read-only 的 DSH 进程（代价已记录，未做）。",
     "src/credentials.mjs": "★ 从 `$DSH_HOME/.credentials.yaml` 的 `refs.DEEPSEEK_API_KEY` 读出 key，**注入 DSH 子进程的环境变量**。存在的理由是一次真实故障：桥接起的 DSH 子进程拿不到 key（环境变量没有、SDK 那条路径也不读凭据文件），于是每次模型调用立刻以 MISSING_CREDENTIAL 失败，**表现只是「机器人不输出内容」**（没有异常、没有报错）。★ 只解析 refs 那一个路径（文件里还有 OAuth secret），密钥只进子进程环境、**从不写日志或接口**。",
     "mocks/verify-credentials.mjs": "凭据读取测试（含「绝不误取 OAuth secret」「环境变量优先」「失败提示可执行」「密钥不进 source/warning」）",
@@ -126,130 +452,555 @@
     "创建带图标的快捷方式.bat": "★ 在**用户机器上**现场生成快捷方式（QQ机器人.lnk，图标用相对路径）。存在的理由有两条：① Windows 的 .bat **不能带自定义图标**（不是 PE 文件，没有图标资源槽），只有 .lnk 能显示；② .lnk 里存的是绝对路径，随包发一份在别人机器上必然失效。★ 该文件正文与内嵌 PowerShell **必须纯 ASCII**：cmd 按系统代码页（GBK）解析 .bat，而 Windows PowerShell 5.1 把无 BOM 的 UTF-8 .ps1 当 GBK 读 —— 一条中文注释就会吃掉紧随其后的代码（实际报错是「快捷方式路径名称需以 .lnk 或 .url 结尾」）。所以中文文件名用字符码拼。",
     "prices.json": "★ 价目表（元/百万 tokens）+ 峰谷时段规则。**故意独立于 config.json**：价格会变，而改它不该触发「改配置要重启」。DSH 本身不提供人民币价格，所以成本只能按这份文件估算。",
     "PROJECT.json": "本文件：包契约。",
-    "AGENT.md": "给 agent 的操作说明（五分钟上手 + 陷阱清单）。"
+    "AGENT.md": "给 agent 的操作说明（五分钟上手 + 陷阱清单）。",
+    "src/recipes.mjs": "★★ 配方库（`--recipes`）：沉淀「怎么做」，同类任务直接套用。与任务台账是两个轴 —— 台账说「我正在干什么」（当下），配方说「这种事一般怎么做」（积累），两段都要注入、不要合并。★ 三个刻意的设计约束：① **置信度用拉普拉斯平滑** `(ok+1)/(used+2)` 而不是裸成功率 —— 只成功 1 次就记 1.0 会误导（平滑后 1 次成功 = 0.67、10 成 0 败 ≈ 0.92）；② **衰减只降权不删**（60 天半衰期）—— 过时的做法仍可检索、只是不再自动注入，删掉等于把「以前试过这条路」的知识扔掉；③ **requiredActions 只作提示文本、绝不自动执行** —— 那等于给了一个「配方作者可以远程命令执行」的通道。★ 匹配打分**改过一版**：第一版「命中数/关键词总数，命中<2 个打 0.75 折」实测太严 —— 用户说「这个牌子口碑怎么样」只命中「口碑」得 0.15 被挡在阈值外，可那恰恰是配方最该命中的情况（人很少一次说中好几个关键词）。现在用**子串命中**加命中率下限补正，且**不做语义相似度**（那要模型，而这里的全部意义就是零模型成本地决定要不要提）。★ 自动沉淀（从刚结束的任务提炼做法）需要一次额外模型调用，而本项目**没有直连模型 API 的代码**（dsh.apiKey 只用于注入 DSH 子进程环境变量），本机也没有 headless profile —— **通道待定**。★ 删配方用 unlinkSync：实测 Windows 上 rmSync 删**中文文件名**会把进程崩掉（退出码 -1073740791），而配方 id 正是由中文标题派生 —— 这个坑项目里三处早有记录，这里是第四处。 ★ 关键词长度上限 16→**30** 字（真机证据）：抽取产出的 `keywords` 是**用户会怎么说出这类需求**的整句话，中文里自然 15~25 字，16 字会把它从中间**截断**（实测三条截两条），而截断的后果是**静默的**（匹配靠前缀照样能跑，只是准确率下降，没有任何地方会提示「这条关键词少了一半」）。",
+    "mocks/verify-recipes.mjs": "★★ 配方库测试，三组容易做错且做错了会**静默变坏**的事：① **匹配不能太严也不能太松** —— 「这个牌子口碑怎么样」必须命中（长尾是常态），「今天天气不错」「帮我写个贪吃蛇」必须严格 0；② **置信度不能是裸成功率** —— 断言「只成功 1 次 ≠ 满分」「10 成 0 败 明显高于 1 成 0 败」「过一个半衰期约腰斩」；③ **requiredActions 只能当提示** —— 断言渲染里明确写了「要你自己判断该不该做」，防止以后有人顺手把它接上执行。另含：slug 派生、同 slug 合并**取并集不覆盖**（且 stats 保留）、坏输入拒绝、字段超长截断、低置信度**显式提醒**而非悄悄降权、停用后不再被挑选但仍在列表、使用反馈计数与置信度联动、坏 JSON/缺目录/空参都不抛。 含关键词长度：**自然长度的中文说法要完整保留**（真机 16 字上限会静默截断），同时确认上限仍在（防巨型条目）。",
+    "src/extract.mjs": "★★ 回合后抽取（R4b）：从刚结束的任务里提炼**配方**。本项目**唯一会产生额外模型调用**的地方。★ 通路只有一条：**起一个一次性 DSH 进程** —— `dsh --profile headless \"<prompt>\"`（答一次、打印、退出）。不能拿桥接自己那条 sdk 会话跑抽取：那是**用户对话的载体**，会把内部 prompt 混进用户上下文，且每 5 轮污染一次。★ 三个实测事实（都反直觉，都记在注释里）：① headless 把 **reasoning 写到 stderr**、stdout 只有答案 —— 用 `2>&1` 抓会把思考过程混进来；② 即使提示词明写「键名必须用双引号」并给带引号示例，模型**稳定输出裸词 JSON**（`{title:品牌口碑核查,...}`），强化措辞**无效** —— 所以整个 R4b 的可靠性取决于自制的 `parseLooseJson`；③ 写那个解析器时连踩四个「只做一半」的 bug：只给值补引号没管键 → `{a:\"1\"}` 仍非法；裸值扫描遇到 `[` 不停 → `{keywords:[a,b]}` 被整体加引号；只在 `:` 之后处理漏了**数组元素**；补上后又忘了**保证下标前进** → **死循环**。所以它有一条\"必须在 2 秒内返回\"的终止性测试。★ 还有一条语义修正：**JSON 字面量（true/false/null/数字）不加引号** —— 第一版无脑加引号会让 `{skip:true}` 变成字符串 `\"true\"`，于是 `parsed.skip === true` 静默失效，而\"不值得沉淀就 skip\"正是防止配方库被闲聊灌满的那条最重要的语义。★ 纪律：**任何一步失败都不抛**（它是每 5 轮顺带做的增强路径，坏了绝不能让聊天陪葬）。 ★★ **真机第一次自动抽取就失败了，这里记两条修复**（2026-09-26 22:36）：① 模型输出里**多写了两个 `}`**（根对象提前闭合）→ `dropPrematureRootClose` 删掉它（根对象内部 depth===1 的 `}` 后面还有 `,`/新键，在合法 JSON 里**不可能存在**，删它是唯一解，不猜）；② 兜底原用 `lastIndexOf(\"}\")` 从头切到尾，会把尾部杂字/畸形段一起焊进来 → `firstBalancedSpan` 只取**括号配平**那段，而模型写一半就断时仍然返回 `null`（宁可失败，也不交出一份**被截断**的配方 —— 截断的配方会变成一条错误的长期记忆）。真机原文已存成 fixture `mocks/fixtures/headless-extra-brace.txt`（测试 56→71 项）。★ 另外：`headless` 的 reasoning 走 **stderr**、答案走 **stdout**，用 `2>&1` 抓会把思考过程混进来。",
+    "mocks/verify-extract.mjs": "★★ 抽取测试。重心是「把不可靠的输出变成可靠对象」：用**真实 headless 输出当 fixture**（不是手写的理想输入 —— 手写的不会暴露那些坑），断言裸词 JSON 能解析、嵌套数组元素完整、同层字段没被吞、值里的 `/` 与 `+` 没被切坏，并断言解析结果能通过配方的字段校验（这是 R4b 的接线前提）。★ 另有三组：① 合法 JSON 一律走原生解析（不被修复器碰）；② **终止性**（十几个畸形输入必须在 2 秒内返回 —— 死循环踩过一次）；③ `extractRecipe` 全链路用**桩 runner**：正常/skip/解析失败/runner 失败/runner 抛异常，**任何失败都不抛**；以及抽到的配方能入库并立刻可匹配（置信度是初始 0.5，不会立刻被当经验）。 第⑥-b 节用**真机产出**的畸形输出当 fixture（`headless-extra-brace.txt`，模型多写了两个 `}`）：断言能解析且**四个字段一个不少**、恰好删掉两个 `}`、合法 JSON 幂等、根数组不受影响、写一半仍返回 `null`、尾部多话与围栏里都能取出完整对象。",
+    "mocks/session-grep.mjs": "★ 提示词**取证**工具（不是测试）：从 DSH 落盘的会话记录里搜出「模型这一轮实际收到了什么」。为什么必须有它 —— 本项目的改动大多落在**提示词文本**上，而「这段文本有没有真的进到生产提示词」读代码回答不了：桥接拼完就交给 DSH，中间没有我们能读的日志。两个实测踩过的坑都写在文件头：① 会话目录挂在 **workspace** 路径下（`--C-…-workspace-qq--`），不是包目录下，找错根目录会读到别的会话、得出错误的「没生效」；② 文件是 **zstd 追加帧**，整块解只能解出 222 字节的会话头，必须按 magic `28 B5 2F FD` 切帧逐帧解。用法 `node mocks/session-grep.mjs \"【当前任务\" [会话数]`，`--list` 只列会话；**没命中就退 1**，可以直接用在 if 里。",
+    "mocks/verify-memory-roundtrip.mjs": " ★★★ **记忆全链路 + 注入接线的桥接级测试**（走完整 `Bridge`、桩 rpc、真文件系统）：① 提议 → 落盘 → 剥离 → 回执 → 下一轮注入；② 记忆开关关掉就一个字都不写、但标记仍被剥离；③ ★★ **第⑥节「注入接线」** —— 读 `rpc.prompts`（模型真正收到的提示词）断言【当前任务】段与配方段**真的进去了**，并带反例（用会抛的假工作区逼注入失败 → 必须留证据且每段只喊一次）。为什么非有它不可：那个「任务段在真机上从未注入」的缺陷（`chatKey` 不在作用域、被空 catch 吞掉），124 项纯函数断言**一个都没抓到** —— 错在**接线**，不在纯函数。 ★★ 此后补到第⑱节（共 130 项），每一节都是同一类「整条链路走一遍才看得见」的断言：⑧ 定时整理接线（attach 启动、忙时跳过、真的会合并）、⑨ 投递前终检门（内部泄漏到不了用户手里）、⑩ 带内标记（引用真的发得出去、编的 id 不许用）、⑪ 断线缺口（带进下一轮、用过即清、明说不要猜）、⑫ 对话走向（★ 与任务台账**两条轴同时在场**、走向段落在**易变区**、话头真的到得了模型眼前 —— 第⑫节抓出的正是同一类 bug：`noteUser` 把话头提前清空，于是「先看他是不是在回答这个」在真机上一次也渲染不出来，而纯函数测试**看不见**，因为它自己调 `noteUser` 再渲染）、⑬ **H3 使用侧车接线**（写入侧登记 `writtenAt`、拼完提示词后记 `lastInjectedAt`/`injectedCount`/`chats`，并断言账本里**没有**权重字段且字段名不叫 `lastUsed`）、⑭ **H11 人设名字表真的接进了唤醒判定**（群里没 @ 也没配别名关键词，叫「小鱼」就能唤醒；带反例「不相干的话仍不唤醒」）、⑮ **H17 交付语义**（发送失败时模型只被调用一次、**正文只尝试发一次**、日志写明不重发/不重跑、结果标 `send-failed`；空回复与超时同样不重跑）。",
+    "src/memory-keyword.mjs": "★★ **关键词确定性写入**（M1'①）：用户说「记住 X」→ **不依赖模型**必然落盘，**零额外模型调用**（验收 N1/N9）。为什么它是整个记忆专项的地基：在此之前写入通道**只有一条** —— 模型自愿写标记，而实测那条路的漏报率极高（参考项目本机 58 次调用一次没主动记；我们这里几十轮里 proposed 长期是 0~1）。后果正是本项目最不能接受的失败：用户明确说了\"记住\"，机器人也回了\"好的记住了\"，**磁盘上什么都没有**。边界（都写在文件头）：① 只认**祈使句**（记住/帮我记住/记一下/别忘了/以后都…），**问句**（\"记住了吗\"\"记住了没\"）与**说话人自己**（\"我记住了\"\"我记得你说过\"）一律不认 —— 误判等于把闲聊写成永久记忆；② 内容抽两种语序（`记住 X` 取后面、`X，记住` 取前面），并剥掉紧跟触发词的**语气词+标点**（`记住啊，我搬到上海了`；⚠️ 必须要求语气词后面还有标点才剥，否则 `记住阿姨的生日…` 会被吃掉）；③ **只写 `fact` 档，绝不写 `directive`** —— 行为指令跨群生效，判据仍是\"管理员+私聊\"，不能因一句话放宽；④ 抽出来的内容**照旧过 `screenEntry`**：隐私/身份/越权一样拦，拦了写回执如实说\"没记下\" —— **确定性 ≠ 绕过闸门**。",
+    "src/memory-audit.mjs": "★ **记忆变更审计**（M1'第 6 项，对应验收 N6）：回答\"这条是谁在什么时候、通过**哪条通道**、写进了哪个档位、结果如何\"。之前有**四条写入通道**（模型标记 / 关键词直写 / 管理员手段 / 整理合并），而日志只有一行 `[memory] 记忆写入：接受 N 条` —— 不说是哪一条、也不说是哪条通道，出问题无从追。★★ **刻意不记原文**，只记 `at/chatKey/senderId/source/scope/outcome/chars/why`：审计若也存一份记忆内容，它自己就成了**第二个泄露面**（与 `privacy.mjs` 的\"审计只记类别与长度\"同一条纪律）。要查内容去看记忆文件本身。单个文件超 512KB 时**保留最近 500 行再截断**（不是整文件删除）。★ 写失败时**必须喊一声**（`AGENT.md` 第 9 条）—— 审计写不进去意味着\"变更没有留痕\"，那正是它存在的理由。CLI：`--memory --audit [--limit N]`。",
+    "mocks/verify-memory-keyword.mjs": "★★ **关键词直写 + 审计测试**（35 项）。三组：① **该认的必须认** —— 内容在后/在前、带冒号、带语气词、`以后都…` 等真实说法都要抽对；② **不该认的绝不能认** —— 问句（\"你还记得吗\"\"记住了没\"）、说话人在说他自己（\"我记住了\"\"我记得你说过\"）一律不认（误判 = 把闲聊写成永久记忆，而记忆会注入之后每一轮）；③ **确定性 ≠ 绕过闸门** —— 抽出来的内容过 `screenEntry`：含手机号的\"记住 X\"必须**没落盘**、回执要如实说\"没记下\"、审计里**不能出现原文**。另含审计的字段完整性、倒序、坏行容错、缺参不抛。",
+    "src/delivery-gate.mjs": "★★ **投递前终检门**（H5）：模型输出到用户之间的**最后一道闸**。在此之前这条链路上已有两道闸 —— `markdownToPlain` 管格式、`screenForOutput` 管隐私 —— 但\"**我们自己的内部东西被说漏出去**\"没有任何人管：工具调用的原始 JSON、我们注入的提示词段标题（`【当前任务（这是…`、`【上一条消息的记忆回执】`）、`<<<MEMORY` 内部标记（第二道网）、工具结果包装文案、**沙箱原始报错**（提示词要求它\"用你自己的话说\"，这里才是保证）、模型手写的 CQ 码（用户只会看到乱码）。★ 与参考项目（hermes）**三处刻意不同**：① 它把内部泄漏判成\"静默成功\"（什么都不发），我们是**改发一句诚实话术** —— 静默不发用户会以为机器人坏了（本项目第 6 条铁律\"失败必须让用户知道\"）；② 它剥掉**所有** `（…）` 旁白，我们**只剥一张极小白名单**（`（笑）`/`（叹气）`…）—— 中文里圆括号大量用于正常表达，全剥会把正常回复吃掉半句，**误删内容是内容事故**；③ 它把超长 markdown 回炉给主模型改写，我们**不做**（要再花一次模型调用，而我们有分条 + 人味层节奏）。★ 它只管文本、**绝不抛异常**（在投递路径上，坏了等于机器人哑了）。⚠️ 加规则前先问：\"正常聊天里会不会出现这个串？\"会 → 别加或降级成行级，并在 `verify-delivery-gate.mjs` 里补一条反例。",
+    "mocks/verify-delivery-gate.mjs": "★★ 投递前终检门测试（47 项）。**最要紧的是一整节\"不许误伤\"的反例**：正常中文圆括号、正文里提到工具名（\"我先用 web_search 查了一下\"）、句子中间的\"（笑死）\"、英文技术词（`ENOENT`/`arguments`）一律一个字都不许动 —— 闸门拦太宽的代价（把正常回复吃掉）远大于拦太窄（偶尔漏一句内部文案），这个项目已经因为\"隐私闸门差点把 QQ 号也拦了\"吃过一次亏。另含：整条判泄漏（工具 JSON/结构、`<<<MEMORY`）→ 不发明文；行级泄漏（注入标记、提示词段标题、工具包装文案、沙箱原始报错、被注入的斜杠命令）→ 只删那一行、正文照发；CQ 码与动作旁白清洗；删完只剩空白等同整条泄漏；**幂等**（洗过的再洗一次不变，防止越洗越短）。",
+    "src/markers.mjs": "★★ **带内标记**（H6）：模型用文本里的标记表达\"元意图\" —— `[reply:<消息id>]`（引用回复）与 `[sticker:<名字>]`（发表情）。★ 这一轮修的是一处\"**说了做不到**\"：任务台账的注入段从 0.2.1 之前就一直写着「引用回复要用【本次唤醒】/【过去状态】里带 # 的消息 id」，而**那两个段根本不存在**、发送侧也只有 `[{type:'text'}]`（**没有 reply 段** → 机器人根本不能引用），`text.mjs` 解析出的 `replyTo` 更是**全仓库零消费**。两条纪律：① **标记无条件剥离**（内部协议，绝不能让用户看到）；② **校验不过就丢掉引用、不猜** —— `[reply:123]` 里的 123 必须是**本会话近期真的见过**的 id（`Bridge.#seenMsgIds`，内存里 50 条），否则 QQ 上会出现指向空气甚至**指向别的会话**的引用。★ `[sticker:名]` 的表默认**空**（`config.send.stickers`）—— 不做内置\"名字→QQ 表情 id\"表，因为那要**逐个确认 id 到底对应哪个表情**，猜错就是用户可见的错误（想发\"偷笑\"发成\"菜刀\"）。宁可不发，也不发错；真正的表情库属于 M5' 的技能系统。★ `renderMarkerInstructions` **只在真有东西可教时才教**（没有表情表就不提 sticker）——提示词里凡是写了的能力都必须是真的，这正是这一轮在修的毛病。",
+    "mocks/verify-markers.mjs": "★ 带内标记测试：解析（`[reply:#123]` / 带空格 / 多个只取第一个 / 非数字 id 丢弃）、**剥离（无条件）**、`[sticker:名]` 的表查找（空表 → null；值不是数字 → null）、提示词渲染（**没有表情表就不提 sticker**、没有消息 id 就不提引用）。**反例同样重要**：正文里出现 `[reply:x]` 之外的方括号（如 `[图片]`、`[1]`）一律不许被动。",
+    "src/text-similarity.mjs": "文本度量：归一化（`normalizeForCompare`）+ 字符 bigram Jaccard 相似度（`similarity`）+ 行首日期/转述前缀正则。★ 为什么要单独一个模块（**为了拍平依赖**）：它现在有**两个**消费者 —— `memory-consolidate`（判两条是不是同一条，合并）与 `memory-store`（判这条是不是在更正上面某条，H4 supersede）。放在整理模块里会让\"写入\"依赖\"整理\"，而\"整理\"为了列文件又依赖\"写入\" —— **循环依赖**。ESM 能容忍，但那是\"跑起来没事、改一行就炸\"，本项目为这类看不见的接线错误付过代价（`AGENT.md` 第 9 条）。本模块**全是纯函数**：不碰文件、不碰配置。",
+    "src/memory-supersede.mjs": "★★ **记忆更正的行内标注**（H4 / 验收 R10）：旧条目**不删**，只追加 `〔已被更正：<新事实摘要> · <日期>〕`，并且**不再注入**给模型。为什么要有它：以前只有两条路，**两条都不对** —— 直接改掉旧条目（\"我说错过什么\"彻底消失，模型下次还可能把旧的写回来）、或两条都留着都注入（模型拿到两个矛盾事实，对错各半）。★ **判据只有两种，而且是被实测逼出来的**：第一版用\"更正措辞（含 换成/改成/其实）+ 相似度 ≥0.35\"，实测证伪 ——「他的 MC 服务器是 Forge 端」↔「换成了 Paper 端」= **0.273**，而 ↔「服务器内存改成 32G 了」= **0.286**，**只差 0.013**，阈值放哪都会错一边（往低调就把\"同一主体的另一件事\"当更正 → **一条真事实被悄悄停用**）。所以现在只认：① 模型显式 `<<<MEMORY fix …>>>`；② **自指式**措辞（\"纠正一下\"\"我之前说错了\"\"收回刚才\"）。`换成/改成/其实` 被**刻意排除**。⚠️ 边界如实写明：纯陈述式覆盖（\"是 Forge\"→\"是 Paper\"，不带 fix）**不会**被自动标注，两条都保留都注入（与升级前一致，没变坏）—— 要认出它必须做语义判断，硬做会**吃掉真实记忆**。",
+    "mocks/verify-memory-supersede.mjs": "★★ 记忆更正测试（50 项）。**最值钱的是边界那几条**：先把实测数字固化（0.273 vs 0.286 差 0.013），再断言 `换成/改成/其实/不再用/更新为` **不许**被当成更正信号（宁可漏也不误伤），而 `纠正一下/更正/我之前说错了/记错了/收回刚才` 要认。另含：标注格式（可读、可解析、**幂等**、摘要截断）、两条通道（`fix` 档与自指措辞）都真的落盘、**旧条目仍在**、注入里没有被推翻的结论且如实提示\"另有 N 条已被更正\"、整理时**原样保留且不参与合并**、以及\"标注后不被篡改检测回滚\"（与快照配合，同类坑踩过）。",
+    "src/corpus.mjs": "★★ **本地语料库 + 中文全文检索**（H7）：每条消息落 SQLite，支持\"用关键词搜过去说过什么\"。在此之前回看历史只有一条路 —— `qq_group_history` 现拉（拉一次算一次、不能检索、协议端一重启就没了），所以\"我上次说的那个方案叫什么来着\"这类问题机器人**真的答不了**。★ **纯词法检索**（零模型调用、零网络）：FTS5 + `tokenize='trigram'`；★★ **trigram 对 1~2 个汉字几乎无效**（实测 `MATCH '茶姬'` 返回 0 条，而 `LIKE '%茶姬%'` 命中），所以短查询自动走 **LIKE 回退**，FTS 抛错或 0 命中且含中文时也回退。★ FTS 用**外部内容表**（正文只有一份来源）+ 插入/删除**双触发器**（只建插入触发器的话，prune 之后 FTS 里会留下指向已删行的幽灵条目）。★ 结果带 `[mid:<消息id>]`，与 H6 的 `[reply:<id>]` **闭环**（搜到的消息可以被真正引用）。★ 三条边界（**用户确认过**）：① **七类隐私不落库**（入库前过 `screenForStore`，命中只往审计记类别与长度 —— \"写之前拦\"与\"写完再删\"是两件事）；② **30 天 TTL**（`--corpus --prune`，默认预演）；③ **不存媒体本体、也不存媒体路径**（只留张数 —— 存路径会留下一堆指向空气的路径）。★ 只读模式（`readOnly: true`）给 MCP 工具用：桥接是唯一写入方。",
+    "mocks/verify-corpus.mjs": "★★ 本地语料库测试（43 项）。四组：① **中文要真能搜到** —— 3 字走 FTS、**2 字必须走 LIKE 回退**（实测出来的边界）、英文、多词、按会话过滤、机器人自己说过的话也在库里；② **幂等与上限**（同一 message_id 只写一行、超长内容截断、limit/query 被夹到上限）；③ **隐私不落库**（含手机号的消息搜不到、审计里**没有原文**、side=corpus）；④ **TTL 默认只预演**（预演不动手、`--apply` 才删、删完 FTS 也不留幽灵、没超期的不受影响）。另含渲染（`[mid:]` + \"只能引用上面出现过的 id\"）与失败路径（库打不开时**只报一次**、必须留证据）。",
+    "src/token-discovery.mjs": "★★ **OneBot 凭据发现（保守读）**（H8）：从 SnowLuma 自己的配置里读 token，规矩是「**宁可找不到，也不要猜**」—— 猜错的症状是**令牌被拒 + 机器人完全不说话**（本项目踩过两次，且不报错）。采用参考项目的四条：① 只读明确的配置文件（不写 .env、不调 WebUI、**不发网络请求**）；② 只接受常规文件（`lstat` **拒符号链接**）+ 2MB 体积上限 + token 长度上限 + **拒控制字符**（后者会进 HTTP 头，症状是莫名其妙的 400）；③ 只采纳 `enabled !== false` 且 host **回环**的服务器条目；④ ★★ **显式指定账号时找不到它的文件就返回「没有」—— 绝不复用别的账号的 token**（原实现是「退到目录里任意一个 onebot_<数字>.json」，那是猜）。★ **一处刻意与参考项目不同**：NapCat 那条「http 与 ws token 不一致就放弃猜测」**不照搬** —— 他们的 http/ws 是同一连接的两个候选，而我们是**两条通道同时使用、各用各的凭据**（http 发消息、ws 收事件），照搬会让一份完全正常的配置直接失效；我们保留其**精神**：不一致时不静默（`differsFromConfig` + `why`）。★ `readAccountFile` 的 `lstat` **可注入** —— Windows 上建符号链接要开发者模式，而这条安全判据不能因为环境限制就没测试。另提供 `listAccountNames()`：给界面选账号用，**只给 ID、永不给密钥**。 ★★★ **真机上抓到的一条（必须留着）**：没写 `onebot.selfId` 时，**不能只看\"最新修改的那个账号文件\"** —— 真机取证：`snowluma/config/` 下有**两个**账号（机器人自己的 `onebot_200000001` 与使用者的 `onebot_100000001`），而**最新的是使用者的那个**；只按 mtime 挑就会挑到**别人的账号**，症状正是 401 + 机器人完全不说话。所以加了确定性判据：**哪个账号文件的 token 与 `config.json` 里的一致，就用它**（一致 = 确实就是这个账号）；都不一致时才退回\"最新\"，并**大声警告**（列出全部候选 + 让人去写 `onebot.selfId`）；若多个账号用同一组 token → 判为\"无法确定\"，**不猜**。修复后在真机复验：`picked: matched-config:onebot_200000001.json`、`differsFromConfig: false`（修复前是使用者的账号 + `true`）。",
+    "mocks/verify-token-discovery.mjs": "★ 凭据发现测试（53 项）。三组核心断言：① ★★ **显式账号找不到 → 必须返回「没有」**，绝不复用目录里别的账号的 token；② 只采纳 enabled 且 host 回环的条目（非回环条目在本机协议端配置里可疑）；③ 非法 token 一律不采纳（非字符串/超长/**含控制字符**）。另含：回环判定（`127.x`/localhost/`::1` 认，`0.0.0.0`/内网/域名不认）、保守读文件（**符号链接拒读** —— 用**注入的 lstat** 覆盖，不依赖本机能不能建链接；超大/坏 JSON/目录都拒）、以及**与参考项目刻意不同的那条**（http 与 ws token 不同**照样各取各的**）。",
+    "src/transport.mjs": "★★ **传输契约**（H9）：把\"出错了\"变成**结构化的、可判定的**东西。以前 `onebot.mjs` 是\"遇到情况就 throw 一句人话\"，消息写得不错但**没有任何机器可读字段** —— 上层想说\"这个能重试、那个重试也没用\"只能去**匹配错误字符串**（脆得要命）。现在 `classifyTransport()` 是**表驱动**的纯函数，`retryable` 是**一等字段**（借鉴参考项目的 TransportDescriptor）。三条纪律：① **不认识的情况不猜成\"可重试\"**（unknown 层 + 不可重试 —— 猜错方向会把\"其实对方已经收到了\"的操作再发一遍）；② **认证类错误给可执行提示**（本项目两次事故都是 token 漂移，症状是\"令牌被拒 + 机器人完全不说话\"）；③ 纯函数、可离线测。另含两个小工具：**投递幂等键** `deliveryKey()`（`sha256(会话|引用|表情|文本)[:32]`）与**断线缺口标注** `describeGap()`。",
+    "mocks/verify-transport.mjs": "★ 传输契约测试（35 项）。① 分类：426→config 不可重试（带\"端口填反\"提示）、401/403→auth、5xx→**可重试**、retcode 1403→auth、**不认识的 retcode 不猜**（protocol 但不可重试）、完全未知→unknown 且不可重试；② ★★ **投递去重键带会话** —— 并有一条**端到端复现**：同一句话发给两个不同会话时，旧行为（裸文本当键）会**误拦第二个**，新行为放行（同会话重发仍照拦）；③ 断线缺口：长缺口给出标注 + \"这期间的消息收不到\" + \"**不要猜**他刚才说了什么\"，短抖动（<5 秒）不提。",
+    "src/session-state.mjs": "★★ **会话状态机（规则版）**（H10）：回答「这段对话聊到哪了」。★★ 与 `tasks.mjs` 是**两条轴，不许混**：台账说「我在做什么任务、做到哪一步」（落盘、跨重启、粒度=任务），本模块说「这段对话的走向」（只在内存、粒度=对话）。两者**都在注入提示词**，边界不写死就会长成两套互相重复的东西 —— 台账防**重复劳动**，本模块防**答非所问与复读**。★ 为什么**不花模型调用**（参考项目每轮用一次 LLM 更新 16 字段状态机）：① 本项目没有直连模型 API 的代码，每轮都走一次 DSH 等于把成本翻倍；② 更要紧的是「聊到哪了」里最有用的那几样**本来就不需要语义** —— 第几个来回、谁在说话、上一轮我在干什么、我有没有问了他还没答。★ 因此**刻意不算「话题」**（规则硬做会写出一条看起来像话题、其实是「用户上一句话前 20 字」的东西，反而误导）。★ 水位的意义：`lastUserSeq > lastConsumedSeq` = 又来了一条更新的消息 —— 这正是桥接里「旧回合作废」那套机制的**显式形式**，显式化之后它**可以离线测**（不必真造两条并发消息）。★★ 两个**只有接线才暴露得出来**的坑（都在这个模块里踩过，注释保留）：① 第一版让 `noteUser` 清空「悬着的话头」，而 `noteUser` 跑在**拼提示词之前** → 那句「先看他是不是在回答这个」在真机上**一次也渲染不出来**（话头的生命周期必须由 `noteBot` 决定：每次机器人回话要么写上新问句、要么清空，恰好活一轮）；② 进度原本渲染 `turnCount`（把每条消息都算一轮）→ 第 3 次对话会写成「这是第 5 轮」，模型读到会误判「聊了很久」，现在报**来回数**并如实给出两个计数。★ 其余取舍：认不出的工具名**不编语义**（给「用工具」）；话头判定**宁可漏也不误报**（只看最后一句、且回复 ≤120 字 —— 长回答里夹个反问不是「我在等他答」）；闲置 30 分钟**当成新对话**（与台账同一条规则）；`read()` 返回**副本**。",
+    "mocks/verify-session-state.mjs": "★ 会话状态机测试（48 项）。五组：① **动作分类按「类」不按「全文」**（与台账的 `describeAction` 刻意不合并）、去重保序、认不出的工具不编语义、上限恰好等于类别上限；② **话头判定宁可漏**（陈述句/长回复/句中问号/多行只看最后一行都不算）；③ **水位**（未消费 = `hasPendingNewer` 为真、消费后追平、又来一条再为真、空会话不被误判成 pending）；④ 轮次统计 / 只留上一轮动作 / 闲置翻篇 / `read` 返回副本；⑤ ★★ 渲染（第 1 轮不注入、标题说清「不是任务台账」、报**来回数**而不是消息条数、话头给**指令**而非陈述、**话头恰好活一轮**）。★ 第⑤组最后两条是**接线级 bug 的回归锁**：模块内部改对了（`noteUser` 不再清话头）还得有人守住它；桥接级的那一半在 `verify-memory-roundtrip.mjs` 第⑫节。",
+    "src/memory-usage.mjs": "★★ **记忆使用侧车**（H3，**方案 B**）：回答「这条记忆多久没进过上下文了」。★★ 与设计决策 **D9** 的关系写在文件头（也写成断言）：D9 明确「不做强度浮点衰减」，所以本模块**刻意不做**权重/强度/自动降权/自动归档/删除，只旁挂一份 `memory/.usage.json`（条目 hash → `{writtenAt, lastInjectedAt, injectedCount, chats, preview}`），**只排序、只提示**。★★ **语义诚实**：我们能观测的是「**被注入**」（进了上下文），**不是**「被**用上**」（模型真依赖了它）—— 后者观测不到，所以字段名不叫 `lastUsed`（那是一种看起来更聪明的谎话）。★★ 排序的真实动机是一个**完全静默**的失效：注入有 25 条上限，而新条目**追加在文件末尾** → 「用户说记住 X、机器人也回了好，而 X 从此再没进过任何一轮上下文」。所以写入侧（`memory-store.appendEntry`）登记 `writtenAt`，让「刚写下的」排最前；而「从没进过、也不是刚写下」的老条目**排最后**—— 第一版让它们排最前，结果它们**每轮抢占头部**，同一份记忆每轮渲染出不同文本、把前缀缓存（实测命中 91%~96%）打断，测试当场打回。★ 并列一律保持文件顺序（稳定排序）；体检走 `staleEntries()` **扫文件**（只看账本会漏掉从没进过的那批）；「没有数据」与「没被用过」严格分开（账本刚部署是全空的，那时必须说**无法判断** —— 第一版把 65 条全报成「从没进过上下文」，数字真、结论错）。CLI：`node src/index.mjs --memory --usage`。",
+    "mocks/verify-memory-usage.mjs": "★★ 记忆使用侧车测试（54 项）。最值钱的三组：① ★★ **不许偷偷加衰减**（D9）—— 直接对账本文件做断言：不许出现 `strength/weight/decay/score/priority` 任何字段，文案里必须明写「不会自动降权/不归档/不删」；② ★★ **「没有数据」≠「没被用过」** —— 账本为空时渲染必须说「无法判断」，且**不许列出**那些没记录的条目（列出来就是在暗示它们没被用过）；③ ★★ **排序的两条硬要求同时成立** —— 「刚写下的必须进得去」（否则「记住 X」的最后一步静默失效）**且**「从没进过的老条目不许抢占头部」（否则每轮文本都变、打断前缀缓存）。另含：写入后**只乱一轮、之后每轮文本逐字相同**、新记住的一条下一轮就进上下文、账本坏掉不抛但留证据、上限丢最旧、体检扫文件且刚写下的不算「死」、`entryKey` 按归一化文本认人（标点差异不丢账、行号漂移不指错人）。",
+    "src/delivery-ledger.mjs": "★★ **投递账本**（H15）：发送前落账 → 确认后标记，回答「哪些回复正在投递、发到第几片、给谁」。它来自一个**真实事故**：一条已经生成好（模型调用已经花过钱）的回复，因为拟人延迟 116 秒期间使用者重启了桥接而**永远消失**，日志里只有一行「发送失败」，没人能回答丢的是哪条。★ 内容去重（`SendQueue` 的 8 秒窗口）解决的是「同一句话短时间内重复发」，与「崩溃后有没有漏发」是两件事。 ★★ **所有者是 `pid@启动时刻` 而不是 pid**：pid 会被复用，新进程拿到刚死掉那个进程的 pid 时，账本里「属于我」的行其实是**上一个人**留下的 —— 于是它会以为发过（漏发）或重发（重复）。 ★★ **边界写死：绝不自动重放**。计划里写的是 at-least-once，但崩溃可能发生在「已经发出去、但还没标上」的那一瞬间，这时我们**无法区分**发没发出去（分布式投递的经典难题，不是实现偷懒），自动重发就会产生**重复回复** —— 而重复回复在本项目里被判定为**比漏一条更糟**（对方会看到两条口径不同的回复）。所以：✅ 落账 + 标记、✅ 启动时把别人留下的 pending **大声报出来**（第 9 条）、✅ `--delivery` 给人看、❌ 不自动补发。 ★ 账本只存每片**长度 + 前 40 字**（与 `memory-audit.mjs` 同一条纪律：审计面越窄越好，它不是第二份聊天记录）。",
+    "mocks/verify-delivery-ledger.mjs": "投递账本测试（30 项）。四组：① 所有者 `pid@启动时刻`（同一个 pid 的两次运行必须能分开）；② 状态机 pending→done/failed，且 **`finish()` 在没发完时仍是 pending**（这是「崩溃后能报出来」的前提）；③ ★★ 未完成投递只报**别人**的 pending（自己的、已投递完的都不算）、文案里**明说不会自动重发**并给出理由与人工入口；④ 账本只存长度与前 40 字（断言全文**没有**落进账本）。另含坏文件不抛但留证据、上限裁剪**优先保 pending**（已投递的可以丢，pending 是还没处理的证据）。",
+    "mocks/verify-mcp-tools.mjs": "★★ QQ 工具**纯逻辑**测试（55 项，H14）。存在的理由：`verify-mcp.mjs` spawn 真进程走 stdio（最接近生产），但**受限沙箱里会整份跳过**，于是工具定义、提示拼接、参数构造从来没被测过；这一套 `import` 服务器模块即可（生产路径是脚本方式拉起，互不影响）。四组：① H14 新增工具的**动作名**（都是真机探针验过的）与参数构造；② ★★ 每个工具的描述里必须有权限提示 + 「如实」提示，且**写入类与只读类分开**（判据是 `adminOnly` 数据，不靠名字猜；`qq_api` 是万能口必须算写入侧）；③ 本地工具 fail-closed（缺 kind/peerId 就拒绝）；④ 黑名单没因为新增工具而变松。",
+    "mocks/probe-onebot-actions.mjs": "★ OneBot **动作探针**（真机、只读，不是测试）：回答「这台协议端到底支不支持某个动作名」。为什么需要：具名工具每个都对应一个真实动作名，而各协议端不一样（go-cqhttp / NapCat / SnowLuma / Lagrange）——**猜错的后果是「工具在模型那里存在、一调就失败」**，那看起来像「机器人坏了」而不是「这个动作不支持」。纪律：**绝不产生副作用**（只调查询类，或对写入类动作只发空参），并且**把「参数错误」与「不支持」分开判读**（前者恰恰说明动作存在）——内置一个一定不存在的动作名当负对照。用法：`node mocks/probe-onebot-actions.mjs [动作名…]`。",
+    "src/protected-files.mjs": "★ **受保护路径清单**（H16）。它防的不是文档问题，而是**泄露**：发布脚本按 `COPY_DIRS` / `COPY_FILES` 拷贝，**往清单里多写一行**（比如顺手加上 `workspace-qq` 或 `logs`）就会把某个真实使用者的**聊天记忆、日志、token**打进发布 zip —— 而且**不会有任何报错**（zip 里多两个目录而已）。所以清单写成**可执行的数据**，发布脚本与测试都来消费它。★ 三分类不许混：`user`（使用者数据：不许进包、不许覆盖、任何脚本不许删）、`artifact`（我们自己的产物：不进包但可重生成/删）、`junk`（测试残留：可清掉、不进包）—— 第一版把 `_release` / `node_modules` 也当成「使用者数据」，于是「删自己的产物」被自己的门禁拦住了。★★ **比较必须忽略大小写**：Windows 上 `LOGS` 与 `logs` 是同一个目录，只按区分大小写比对，`LOGS` 就能**悄悄绕过清单**（打包照常成功，只是把日志打进去了）。另含 `classifyDeleteTarget()`：删除前必须确认「这是我们自己的产物」（判据是**我们自己写进去的标识文件**，不是「目录名长得像」），非空且无标识一律拒绝。",
+    "mocks/verify-imports.mjs": "★ **导入与登记漂移审计**（H16，9 项）。防三种「不报错的坏」：① **导入指向不存在的文件**（改名漏改只有那条代码路径真的跑到才会 `ERR_MODULE_NOT_FOUND` 炸出来，而它可能一周才跑一次）；② **孤儿模块**（写好了没人 import = 接线从来没做，本项目最贵的一类缺陷；白名单必须写理由，且**白名单本身也要维护** —— 已经有人导入的条目留在白名单里会掩盖真正的孤儿，这条断言真的抓到过一次）；③ ★★ **写了测试套件没登记进 `package.json` 的 test 链**（永远不会跑且没有任何提示 —— H3/H10/H14 的套件都是靠人工记得才登记上的）。另含包外越界导入、以及「脚本不许把版本号写死」。★ 它自己也踩过一次坑：第一版直接扫全文，于是文件头里 `from './x.mjs'` 的**示例**把审计自己报了出来 —— 现在先剥注释再扫。",
+    "mocks/verify-release-hygiene.mjs": "★ 发布与升级卫生测试（H16，33 项）。① 受保护清单本身（每条都必须写「为什么」——只写路径名的话，下一个人不知道它为什么不能动）；② **前缀与大小写两种绕过都要堵住**（`logs/bridge.log` 算、`logs\\bridge.log` 算、`LOGS` 也算，而 `logs-old` **不**算）；③ 输入端审计抓「被污染的清单」（混进 `workspace-qq` / `logs` / `config.json` 必须**阻断并逐条说明后果**）；④ 删除前检查（使用者数据一律拒绝、非空且无标识文件也拒绝、有标识文件才放行）；⑤ ★★ **接线断言** —— 纯函数测过 ≠ 接线做过，所以直接读 `scripts/assemble-release.mjs` 的源码断言它真的 import 了、真的在组装**之前**调用、真的把结果当**阻断**用、且**没有 --force 后门**。",
+    "src/log-tail.mjs": "★ **日志增量切片**（H13）：给「日志流」接口用的**纯函数**（游标 = 已经给过的行数）。★ 为什么要单独抽出来：第一版把这段逻辑写在接口实现里，于是**测试里只能照着再写一遍** —— 而「测试里二次实现」正是本项目明确反对的做法（迟早分叉，分叉的表现是「测试说对了、线上是错的」）。抽出来之后实现与测试用同一份代码。★ 游标语义写死在注释里：**游标超出总行数时回到 0** —— 日志被截断/轮转（行数变少）时，老游标会永远大于行数，不夹回开头就**永远收不到新日志**，而界面上只显示「没有新日志」，看不出是游标的问题。",
+    "mocks/probe-h13-endpoints.mjs": "★ H13 接口的**真机探针**（不是测试）：把四个新接口各打一次并打印响应。为什么必须有它：`node --check` 与导入审计都**抓不到 ReferenceError**，而「漏 await（返回 Promise → `{}`）」、「忘了包 `ok()`（→ 整个进程下线）」、「字段名取错（结果全空）」这三类**只有真的打一次请求**才暴露 —— 真机上这三类全部出现过。★ 它还自检响应里有没有疑似 token。用法：`node mocks/probe-h13-endpoints.mjs [基址]`。",
+    "scripts/clean-junk.mjs": "★ 清理测试残留（`junk` 类路径）。★ 它**只删** `src/protected-files.mjs` 里标成 `kind: 'junk'` 的路径 —— 使用者数据（config.json / workspace-qq / logs / cache / snowluma）**永远不在**这个集合里。为什么要做成一个命令而不是「我顺手 rm 一下」：手写 rm 的判据是「我觉得这是垃圾」，而这个判据在别人手里会变成「把 workspace-qq 删了」。默认只报不删，加 `--apply` 才动手。",
+    "mocks/probe-ui-bundle.mjs": "★ **界面产物探针**（不是测试）：把**正在伺服的那份 JS 产物**取下来，断言里面真的有本轮新增的功能（按关键串），并顺带看 `/api/status.ui.status` 是不是 `fresh`。为什么必须有它：**改了 React 源码却忘了 `npm run build` 不会有任何报错** —— 而这个项目真的踩过一次「发布包里的界面旧了 5 小时」，当时 1100 项测试全绿（测试跑的是源码，不是产物）。用法：`node mocks/probe-ui-bundle.mjs [基址]`。",
+    "src/channel-prompt.mjs": "★★ **通道提示词拼装**（H16：从 `bridge.mjs` 里拆出来的那一块，原 `#buildPrompt` 约 230 行）。★★ 拆分前先建了两张网，因为**搬一段拼装逻辑时，离线测试只能证明「行为不变」**：① **段的顺序快照**（`verify-memory-roundtrip.mjs` §⑰）钉住「有哪些段、谁在前谁在后」；② **逐字基线**（§⑱ + `mocks/fixtures/prompt-golden.txt`）要求搬前搬后**一个字都不差**。没有这两张网，改动的就是**前缀缓存（实测命中 91%~96%）与注入语义**所依赖的东西，却只能「看着像对的」。★ 边界：本模块**不持有状态**（拼装顺序与措辞在这边）—— 有状态的东西（一次性断线缺口 `consumeGap()`、会话状态、注入告警去重）全部由桥接通过 `ctx` 传入，于是拼装逻辑**可以在不起桥接的情况下被审阅**。★ 搬动结果：bridge.mjs 2528 → 2319 行，提示词**逐字未变**（4269 字完全一致）。顺手把 `PLATFORM_RULES` 也搬了过来（原来只被这一段用）。",
+    "src/memory-search.mjs": "★ **记忆条目检索**（H13）：在 `MEMORY.md` 与 `memory/*.md` 里按关键词找条目。★ 与语料库检索的**分工别合并**：这里搜的是「沉淀下来的事实」（记忆条目、跨重启生效、按会话分档），`corpus.mjs` 搜的是「说过什么」（消息流水、有 30 天 TTL）——合起来会让人以为「搜到的就是它记住的」。三条取舍：① **不需要会话参数**（记忆文件名本身就分了档：`MEMORY.md` / `private-<QQ>.md` / `group-<群号>.md`，不存在跨会话混淆）；② **只回行预览**（120 字，够认出是哪条，又不把整份记忆复制到浏览器）；③ **标出已被更正的条目**（它们仍在文件里可追溯，但不再作为事实使用 —— 不标会让人以为模型还在用那条错的）。★ 抽成独立模块的理由与 `log-tail.mjs` 相同：**实现与测试用同一份代码**（第一版写在接口闭包里，测试只能照着再写一遍）。",
+    "mocks/probe-memory-search.mjs": "★ 记忆检索接口的**真机探针**（不是测试）。为什么单独一个：`node --check` 抓不到「依赖名写错导致路由回 501」—— 而 501 在界面上是「未实现」（会被**静默隐藏**），看起来像「这个功能还没做」。真机打一次就能区分「没实现」与「名字拼错」。用法：`node mocks/probe-memory-search.mjs [基址] [关键词]`。",
+    "mocks/verify-persona.mjs": "★★ 人设加固测试（52 项，H11 反注入 + H12 不可信输入）。四组：① ★★ **内置预设必须通过自己的扫描器**（这条是地基：预设里**描述**了攻击话术，判据写糙就会自拒；更现实的是用户把预设复制进 `persona.custom` 去改 —— 那时人设整段变 `[BLOCKED]` 而原因完全猜不到。第一版三条判据全命中，是这条断言逼着重写措辞的）；② **正常文本一个字都不许拦**（提到“忽略”但不祈使、提到系统提示词但不要求输出、技术讨论、中英混排 —— 拦太宽的代价是人设突然失效）；③ **命中就整文件拒载**（不是部分加载）+ 占位文本**不含原文** + 必须留日志；④ 名字表**能被机器读出来并真的变成唤醒词**（`又称` 如 DeepSeek 不参与唤醒；配置关键词在前、人设名字在后、去重；解析不到就回落默认而不是给空）。另含超长截断保留头尾、自检与运行时**判据一致**（不许\"自检说没事、运行时被拒\"）。"
   },
-
   "config": {
     "file": "config.json",
     "note": "相对路径一律相对**包根**解析，所以包搬走配置跟着走。",
-    "_hiddenKeys": ["humanize.delay"],
+    "_hiddenKeys": [
+      "humanize.delay"
+    ],
     "_hiddenKeys_说明": "这些键存在于配置里但**刻意不暴露给 UI**：humanize.delay 是测试专用开关（关掉可跳过拟人延迟，否则测试一条回复要等 8 秒会超时）。UI 不要渲染它 —— 用户关掉它没有任何好处，只会让测试失效。",
     "keys": [
-      { "key": "dsh.cliPath", "type": "string", "default": "自动查找", "note": "留空则按 invariants.portability 的候选顺序找" },
-      { "key": "dsh.searchPaths", "type": "string[]", "default": "[]", "note": "**额外的** DSH 安装根候选（相对包根解析），按顺序在 vendor/dsh、环境变量之后参与查找。存在的意义：DSH 装在非标准位置时不用改代码，也不用把路径写进 cliPath（那个会覆盖自动发现）" },
-      { "key": "dsh.workspace", "type": "string", "default": "workspace-qq", "constraints": "不能是盘符根、不能是用户主目录", "note": "★ 它是权限沙箱的根" },
-      { "key": "dsh.provider", "type": "string", "default": "deepseek-official" },
-      { "key": "dsh.model", "type": "string", "default": "deepseek-flash" },
-      { "key": "dsh.reasoningEffort", "type": "string", "default": "" },
-      { "key": "dsh.apiKey", "type": "secret", "default": "", "optional": true, "note": "★ 模型 API key。**可选**：留空则回退到环境变量 DEEPSEEK_API_KEY、再回退到 $DSH_HOME/.credentials.yaml（DSH 桌面版「模型」页填的那份）。三处用的是同一把账号级 key。**API 返回时被删除**，只回 hasApiKey 布尔；界面传 null 表示显式清除（空串仍是「保持原样」）。★ 标 optional 的理由：桥接侧 `normalizeConfig` 对缺字段会回退成空串（有测试），所以 config.json 里不写它也能正常跑 —— 它是「可选键」而不是「必须存在的键」；`verify-manifest` 的取值核对会自动跳过 optional 键" },
-      { "key": "dsh.permissionMode", "type": "enum", "values": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "note": "★ 默认值不得改成 danger-full-access" },
-      { "key": "onebot.wsUrl", "type": "string", "default": "ws://127.0.0.1:3001", "note": "收事件" },
-      { "key": "onebot.httpUrl", "type": "string", "default": "http://127.0.0.1:3000", "note": "发消息" },
-      { "key": "onebot.wsToken", "type": "string", "note": "★ 与 httpToken 是两个不同的 token（SnowLuma 特性）" },
-      { "key": "onebot.httpToken", "type": "string" },
-      { "key": "onebot.selfId", "type": "string", "note": "留空则从 get_login_info 学习" },
-      { "key": "access.adminUsers", "type": "string[]", "default": "[]", "note": "★ 空 = 谁都不能用（fail-closed，刻意如此）。管理员=满权限，可以命令机器人做有实际修改的动作" },
-      { "key": "access.dmAllowlist", "type": "string[]", "default": "[]", "note": "★ 私聊白名单（普通用户：能聊天、**不能**触发修改类动作）。应在机器人的**好友列表**里选。空 = **只有管理员能私聊**（fail-closed，刻意不退回「谁都能私聊」）" },
-      { "key": "access.groupAllowlist", "type": "string[]", "default": "[]", "note": "★ 群白名单。应在机器人的**群列表**里选。空 = 所有群都不回。群聊**不再以用户权限作为回复条件**，而是由这张表决定；群里的权限仍由 adminUsers 决定" },
-      { "key": "trigger.private", "type": "boolean", "default": true },
-      { "key": "trigger.mention", "type": "boolean", "default": true },
-      { "key": "trigger.keyword", "type": "boolean", "default": true },
-      { "key": "trigger.groupEnabled", "type": "boolean", "default": false, "note": "★ 群聊总开关，**fail-closed（缺省关）**。开启后群聊**只有两种唤醒方式：被 @ 或命中关键词**，其余一律不回且零成本（连关键词都不扫）。群聊涉及账号风控风险 —— 上一个 QQ 号就是因此被处置的" },
-      { "key": "trigger.keywords", "type": "string[]", "note": "包含匹配；单字或群聊高频词会被 lintKeywords 警告" },
-      { "key": "send.minGapMs", "type": "number", "default": 1000, "note": "拟人间隔下限" },
-      { "key": "send.maxGapMs", "type": "number", "default": 3000 },
-      { "key": "send.maxPerMinute", "type": "number", "default": 8 },
-      { "key": "send.maxPerHour", "type": "number", "default": 500 },
-      { "key": "send.dedupeWindowMs", "type": "number", "default": 8000, "note": "同内容去重窗口" },
-      { "key": "send.maxCharsPerMessage", "type": "number", "default": 1500, "note": "超出按自然边界分片" },
-      { "key": "turn.timeoutMs", "type": "number", "default": 600000, "note": "单轮超时；超时会结算并告知用户，不会挂死" },
-      { "key": "humanize.enabled", "type": "boolean", "default": true, "note": "★ 人味层总开关。这是账号存活相关配置，不是体验优化" },
-      { "key": "humanize.reactMinMs", "type": "number", "default": 1500, "note": "基础反应时间下限（看到消息到开始打字）" },
-      { "key": "humanize.reactMaxMs", "type": "number", "default": 5000 },
-      { "key": "humanize.speed", "type": "enum", "values": ["fast", "balanced", "careful"], "default": "balanced", "note": "★ 回应速度档位：fast≈1秒(≈秒回，风险最高) / balanced≈8秒(推荐) / careful≈20秒(风险最低)。档位展开成下面五个参数，显式写的字段会覆盖档位" },
-      { "key": "humanize.charsPerSecond", "type": "number", "default": 5, "note": "打字速度（字数折算）" },
-      { "key": "humanize.typingMaxMs", "type": "number", "default": 3000, "note": "★ 打字时间的**单独**上限。只靠 maxDelayMs 不够：5 字/秒下 200 字要打 40 秒" },
-      { "key": "humanize.maxDelayMs", "type": "number", "default": 9000, "note": "总延迟上限（均衡档）" },
-      { "key": "humanize.chunkChars", "type": "number", "default": 300, "note": "超过该长度就分条发送（真人不会把 800 字糊在一条里）" },
-      { "key": "humanize.quietHours.enabled", "type": "boolean", "default": true, "note": "静默时段" },
-      { "key": "humanize.quietHours.start", "type": "string", "default": "02:00" },
-      { "key": "humanize.quietHours.end", "type": "string", "default": "07:00", "note": "支持跨午夜区间（如 23:00–07:00）" },
-      { "key": "humanize.quietDelayMinMs", "type": "number", "default": 45000, "note": "静默时段【不拒答，只大幅延迟】——拒答会让人以为机器人坏了" },
-      { "key": "humanize.quietDelayMaxMs", "type": "number", "default": 150000 },
-      { "key": "humanize.interim", "type": "object", "note": "长任务\"先应一声\"这一组（含下面五项）" },
-      { "key": "humanize.interim.enabled", "type": "boolean", "default": true, "note": "★ 长任务期间先应一声（实测有一轮 40 秒、20 次工具调用期间完全静默，使用者会以为机器人坏了）" },
-      { "key": "humanize.interim.afterMs", "type": "number", "default": 8000, "note": "回合超过这个时长就先发一条" },
-      { "key": "humanize.interim.messages.thinking", "type": "string[]", "note": "「在思考」时的话术（回合超时且**没调工具**）" },
-      { "key": "humanize.interim.messages.searching", "type": "string[]", "note": "「联网搜索」时的话术。★ 只有这一类才可以说「在搜」。旧键名 `web` 仍能读入（归一化时做别名）" },
-      { "key": "humanize.interim.messages.tooling", "type": "string[]", "note": "「调用其它工具」时的话术（读文件/跑命令/QQ 工具）。**不要说「搜」** —— 那是不诚实的。旧键名 `working` 仍能读入" },
-      { "key": "humanize.interim.messages.blocked", "type": "string[]", "note": "「权限受阻」时的话术（有审批被拒/越界）" },
-      { "key": "session.salt", "type": "string", "note": "留空用 DSH_HOME" },
-      { "key": "session.instance", "type": "string", "note": "★ 一般留空。留空 = 每次启动自动换新（必须如此，否则重启必撞 already exists，详见 invariants.sessionLifecycle）。填固定值 = 复用同一会话号，只用于观察错误" },
-      { "key": "persona.callerName", "type": "string", "note": "仅用于提示词里标注是谁在说话" },
-      { "key": "persona.preset", "type": "enum", "values": ["mermaid", "mermaid-lite", "none"], "default": "mermaid-lite", "note": "★ mermaid-lite=精简版（388 字，当前用），mermaid=完整版（761 字），none=不用人设" },
-      { "key": "persona.custom", "type": "string", "default": "", "note": "自己写的人设，非空即优先于 preset" },
-      { "key": "memory.enabled", "type": "boolean", "default": true, "note": "★ 跨重启记忆：让 agent 在工作区里自己记笔记。关掉则重启后真的什么都不记得" },
-      { "key": "image.enabled", "type": "boolean", "default": true, "note": "看图总开关。关掉则图片只显示成 [图片]，且**一次网络请求都不会发**" },
-      { "key": "image.mode", "type": "enum", "values": ["on-demand", "auto"], "default": "on-demand", "note": "★ on-demand=只把图存进工作区并把路径写进提示词，模型自己按需调 read_image（省钱；QQ 里表情包很多，自动注入等于每个表情包都花 vision token 且会进历史重复计费）；auto=直接把图片塞进模型（更快更准，每张图都计 vision token）。★ 非法值不会被改写掉（否则校验看不到、用户以为生效了），行为上只有精确等于 auto 才自动注入" },
-      { "key": "image.maxCount", "type": "number", "default": 4, "note": "单条消息最多处理几张图。DSH 附件库单条消息上限 20 张，超过会被整批拒绝" },
-      { "key": "image.maxBytes", "type": "number", "default": 10485760, "note": "单张图片字节上限（默认 10MB）。DSH 附件库单张上限 20MB，配更大没有意义" },
-      { "key": "image.timeoutMs", "type": "number", "default": 15000, "note": "单张图片的下载超时" },
-      { "key": "image.maxRedirects", "type": "number", "default": 3, "note": "最多跟随几次重定向。★ 每一跳都会重新校验目标地址（只在第一跳查等于没查）" },
-      { "key": "image.retentionHours", "type": "number", "default": 72, "note": "★ inbox 里图片的保留小时数。这是**唯一**的清理机制：图片必须落在工作区内才能被 read_image 读到，所以清理只能由桥接负责。填 0/负数等于不清理" },
-      { "key": "image.maxTotalBytes", "type": "number", "default": 104857600, "note": "inbox 总占用上限（默认 100MB），超过就按最旧的开始删" },
-      { "key": "mcp.enabled", "type": "boolean", "default": true, "note": "★ QQ 工具（MCP）：把 SnowLuma 动作暴露给模型（戳一戳/表情/撤回/查成员…）。关掉则模型只能用文字回复" },
-      { "key": "mcp.toolTimeoutMs", "type": "number", "default": 20000, "note": "单个 QQ 动作的超时" },
-      { "key": "snowluma.installDir", "type": "string", "default": "", "note": "★ SnowLuma 装在哪个目录，相对路径按 PKG_ROOT 解析。**留空 = 交给自动发现**（vendor/snowluma → snowluma.searchPaths → 环境变量 SNOWLUMA_HOME）。填了会**覆盖**自动发现，所以要么留空要么填对。★ 本包不分发 SnowLuma（其许可证 §5.4 禁止并入第三方安装包）" },
-      { "key": "snowluma.searchPaths", "type": "string[]", "default": "[]", "note": "**额外的**候选安装目录（相对包根），一行一个。与 installDir 的区别：它是补充候选而非覆盖，找不到就继续往下找。★ 代码里**不再有**写死的参考项目路径（`D:\\QQagent_DeepSeek\\snowluma`）—— 那条兜底会启动错的那一份、导致全部 401。需要额外位置就写在这里" },
-      { "key": "snowluma.launchCmd", "type": "string", "default": "", "note": "留空 = 自动用 installDir 下的 launcher.bat（推荐路径）。要填就填文件不是文件夹" },
-      { "key": "snowluma.launchCwd", "type": "string", "default": "", "note": "启动时的工作目录；留空则用 launchCmd 所在目录" },
-      { "key": "snowluma.consoleUrl", "type": "string", "default": "http://127.0.0.1:5099/", "note": "★ SnowLuma 的 Web 控制台地址。默认 5099 取证自它自己的 config/runtime.json 里的 webuiPort（那是它的用户设置，所以做成可配、不写死）。「拉起」按钮两步合一：先探这个地址，通了 = 已经在跑（不重复启动）；不通才用 launchCmd 真的启动进程" },
-      { "key": "snowluma.probeTimeoutMs", "type": "number", "default": 1500, "note": "探测 SnowLuma 是否在线的超时" },
-      { "key": "usage.enabled", "type": "boolean", "default": true, "note": "用量记账（概览页的用量卡片）。token 数是 DSH 实测，不是估算" },
-      { "key": "usage.costEnabled", "type": "boolean", "default": false, "note": "★ 默认关：DSH 不提供价格，价目表（prices.json）要人工维护。没维护时显示「—」而不是 ¥0.00" },
-      { "key": "usage.pricesFile", "type": "string", "default": "prices.json", "note": "价目表路径。★ 改它不需要重启桥接（就是不放进 config.json 的原因）" },
-      { "key": "ui.logFile", "type": "string", "default": "logs/bridge.log" },
-      { "key": "ui.verbose", "type": "boolean", "default": false },
-      { "key": "ui.apiEnabled", "type": "boolean", "default": true, "note": "是否提供本地配置接口（给配置 UI 用）。关掉不影响机器人本体" },
-      { "key": "ui.apiPort", "type": "number", "default": 3410, "note": "配置接口端口；只监听 127.0.0.1" }
+      {
+        "key": "dsh.cliPath",
+        "type": "string",
+        "default": "自动查找",
+        "note": "留空则按 invariants.portability 的候选顺序找"
+      },
+      {
+        "key": "dsh.searchPaths",
+        "type": "string[]",
+        "default": "[]",
+        "note": "**额外的** DSH 安装根候选（相对包根解析），按顺序在 vendor/dsh、环境变量之后参与查找。存在的意义：DSH 装在非标准位置时不用改代码，也不用把路径写进 cliPath（那个会覆盖自动发现）"
+      },
+      {
+        "key": "dsh.workspace",
+        "type": "string",
+        "default": "workspace-qq",
+        "constraints": "不能是盘符根、不能是用户主目录",
+        "note": "★ 它是权限沙箱的根"
+      },
+      {
+        "key": "dsh.provider",
+        "type": "string",
+        "default": "deepseek-official"
+      },
+      {
+        "key": "dsh.model",
+        "type": "string",
+        "default": "deepseek-flash"
+      },
+      {
+        "key": "dsh.reasoningEffort",
+        "type": "string",
+        "default": ""
+      },
+      {
+        "key": "dsh.apiKey",
+        "type": "secret",
+        "default": "",
+        "optional": true,
+        "note": "★ 模型 API key。**可选**：留空则回退到环境变量 DEEPSEEK_API_KEY、再回退到 $DSH_HOME/.credentials.yaml（DSH 桌面版「模型」页填的那份）。三处用的是同一把账号级 key。**API 返回时被删除**，只回 hasApiKey 布尔；界面传 null 表示显式清除（空串仍是「保持原样」）。★ 标 optional 的理由：桥接侧 `normalizeConfig` 对缺字段会回退成空串（有测试），所以 config.json 里不写它也能正常跑 —— 它是「可选键」而不是「必须存在的键」；`verify-manifest` 的取值核对会自动跳过 optional 键"
+      },
+      {
+        "key": "dsh.permissionMode",
+        "type": "enum",
+        "values": [
+          "read-only",
+          "workspace-write",
+          "danger-full-access"
+        ],
+        "default": "workspace-write",
+        "note": "★ 默认值不得改成 danger-full-access"
+      },
+      {
+        "key": "onebot.wsUrl",
+        "type": "string",
+        "default": "ws://127.0.0.1:3001",
+        "note": "收事件"
+      },
+      {
+        "key": "onebot.httpUrl",
+        "type": "string",
+        "default": "http://127.0.0.1:3000",
+        "note": "发消息"
+      },
+      {
+        "key": "onebot.wsToken",
+        "type": "string",
+        "note": "★ 与 httpToken 是两个不同的 token（SnowLuma 特性）"
+      },
+      {
+        "key": "onebot.httpToken",
+        "type": "string"
+      },
+      {
+        "key": "onebot.selfId",
+        "type": "string",
+        "note": "留空则从 get_login_info 学习"
+      },
+      {
+        "key": "access.adminUsers",
+        "type": "string[]",
+        "default": "[]",
+        "note": "★ 空 = 谁都不能用（fail-closed，刻意如此）。管理员=满权限，可以命令机器人做有实际修改的动作"
+      },
+      {
+        "key": "access.dmAllowlist",
+        "type": "string[]",
+        "default": "[]",
+        "note": "★ 私聊白名单（普通用户：能聊天、**不能**触发修改类动作）。应在机器人的**好友列表**里选。空 = **只有管理员能私聊**（fail-closed，刻意不退回「谁都能私聊」）"
+      },
+      {
+        "key": "access.groupAllowlist",
+        "type": "string[]",
+        "default": "[]",
+        "note": "★ 群白名单。应在机器人的**群列表**里选。空 = 所有群都不回。群聊**不再以用户权限作为回复条件**，而是由这张表决定；群里的权限仍由 adminUsers 决定"
+      },
+      {
+        "key": "trigger.private",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "trigger.mention",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "trigger.keyword",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "trigger.groupEnabled",
+        "type": "boolean",
+        "default": false,
+        "note": "★ 群聊总开关，**fail-closed（缺省关）**。开启后群聊**只有两种唤醒方式：被 @ 或命中关键词**，其余一律不回且零成本（连关键词都不扫）。群聊涉及账号风控风险 —— 上一个 QQ 号就是因此被处置的"
+      },
+      {
+        "key": "trigger.keywords",
+        "type": "string[]",
+        "note": "包含匹配；单字或群聊高频词会被 lintKeywords 警告"
+      },
+      {
+        "key": "send.minGapMs",
+        "type": "number",
+        "default": 1000,
+        "note": "拟人间隔下限"
+      },
+      {
+        "key": "send.maxGapMs",
+        "type": "number",
+        "default": 3000
+      },
+      {
+        "key": "send.maxPerMinute",
+        "type": "number",
+        "default": 8
+      },
+      {
+        "key": "send.maxPerHour",
+        "type": "number",
+        "default": 500
+      },
+      {
+        "key": "send.dedupeWindowMs",
+        "type": "number",
+        "default": 8000,
+        "note": "同内容去重窗口"
+      },
+      {
+        "key": "send.maxCharsPerMessage",
+        "type": "number",
+        "default": 1500,
+        "note": "超出按自然边界分片"
+      },
+      {
+        "key": "turn.timeoutMs",
+        "type": "number",
+        "default": 600000,
+        "note": "单轮超时；超时会结算并告知用户，不会挂死"
+      },
+      {
+        "key": "humanize.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "★ 人味层总开关。这是账号存活相关配置，不是体验优化"
+      },
+      {
+        "key": "humanize.reactMinMs",
+        "type": "number",
+        "default": 1500,
+        "note": "基础反应时间下限（看到消息到开始打字）"
+      },
+      {
+        "key": "humanize.reactMaxMs",
+        "type": "number",
+        "default": 5000
+      },
+      {
+        "key": "humanize.speed",
+        "type": "enum",
+        "values": [
+          "fast",
+          "balanced",
+          "careful"
+        ],
+        "default": "balanced",
+        "note": "★ 回应速度档位：fast≈1秒(≈秒回，风险最高) / balanced≈8秒(推荐) / careful≈20秒(风险最低)。档位展开成下面五个参数，显式写的字段会覆盖档位"
+      },
+      {
+        "key": "humanize.charsPerSecond",
+        "type": "number",
+        "default": 5,
+        "note": "打字速度（字数折算）"
+      },
+      {
+        "key": "humanize.typingMaxMs",
+        "type": "number",
+        "default": 3000,
+        "note": "★ 打字时间的**单独**上限。只靠 maxDelayMs 不够：5 字/秒下 200 字要打 40 秒"
+      },
+      {
+        "key": "humanize.maxDelayMs",
+        "type": "number",
+        "default": 9000,
+        "note": "总延迟上限（均衡档）"
+      },
+      {
+        "key": "humanize.chunkChars",
+        "type": "number",
+        "default": 300,
+        "note": "超过该长度就分条发送（真人不会把 800 字糊在一条里）"
+      },
+      {
+        "key": "humanize.quietHours.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "静默时段"
+      },
+      {
+        "key": "humanize.quietHours.start",
+        "type": "string",
+        "default": "02:00"
+      },
+      {
+        "key": "humanize.quietHours.end",
+        "type": "string",
+        "default": "07:00",
+        "note": "支持跨午夜区间（如 23:00–07:00）"
+      },
+      {
+        "key": "humanize.quietDelayMinMs",
+        "type": "number",
+        "default": 45000,
+        "note": "静默时段【不拒答，只大幅延迟】——拒答会让人以为机器人坏了"
+      },
+      {
+        "key": "humanize.quietDelayMaxMs",
+        "type": "number",
+        "default": 150000
+      },
+      {
+        "key": "humanize.interim",
+        "type": "object",
+        "note": "长任务\"先应一声\"这一组（含下面五项）"
+      },
+      {
+        "key": "humanize.interim.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "★ 长任务期间先应一声（实测有一轮 40 秒、20 次工具调用期间完全静默，使用者会以为机器人坏了）"
+      },
+      {
+        "key": "humanize.interim.afterMs",
+        "type": "number",
+        "default": 8000,
+        "note": "回合超过这个时长就先发一条"
+      },
+      {
+        "key": "humanize.interim.messages.thinking",
+        "type": "string[]",
+        "note": "「在思考」时的话术（回合超时且**没调工具**）"
+      },
+      {
+        "key": "humanize.interim.messages.searching",
+        "type": "string[]",
+        "note": "「联网搜索」时的话术。★ 只有这一类才可以说「在搜」。旧键名 `web` 仍能读入（归一化时做别名）"
+      },
+      {
+        "key": "humanize.interim.messages.tooling",
+        "type": "string[]",
+        "note": "「调用其它工具」时的话术（读文件/跑命令/QQ 工具）。**不要说「搜」** —— 那是不诚实的。旧键名 `working` 仍能读入"
+      },
+      {
+        "key": "humanize.interim.messages.blocked",
+        "type": "string[]",
+        "note": "「权限受阻」时的话术（有审批被拒/越界）"
+      },
+      {
+        "key": "session.salt",
+        "type": "string",
+        "note": "留空用 DSH_HOME"
+      },
+      {
+        "key": "session.instance",
+        "type": "string",
+        "note": "★ 一般留空。留空 = 每次启动自动换新（必须如此，否则重启必撞 already exists，详见 invariants.sessionLifecycle）。填固定值 = 复用同一会话号，只用于观察错误"
+      },
+      {
+        "key": "persona.callerName",
+        "type": "string",
+        "note": "仅用于提示词里标注是谁在说话"
+      },
+      {
+        "key": "persona.preset",
+        "type": "enum",
+        "values": [
+          "mermaid",
+          "mermaid-lite",
+          "none"
+        ],
+        "default": "mermaid-lite",
+        "note": "★ mermaid-lite=精简版（388 字，当前用），mermaid=完整版（761 字），none=不用人设"
+      },
+      {
+        "key": "persona.custom",
+        "type": "string",
+        "default": "",
+        "note": "自己写的人设，非空即优先于 preset"
+      },
+      {
+        "key": "memory.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "★ 跨重启记忆：让 agent 在工作区里自己记笔记。关掉则重启后真的什么都不记得"
+      },
+      {
+        "key": "image.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "看图总开关。关掉则图片只显示成 [图片]，且**一次网络请求都不会发**"
+      },
+      {
+        "key": "image.mode",
+        "type": "enum",
+        "values": [
+          "on-demand",
+          "auto"
+        ],
+        "default": "on-demand",
+        "note": "★ on-demand=只把图存进工作区并把路径写进提示词，模型自己按需调 read_image（省钱；QQ 里表情包很多，自动注入等于每个表情包都花 vision token 且会进历史重复计费）；auto=直接把图片塞进模型（更快更准，每张图都计 vision token）。★ 非法值不会被改写掉（否则校验看不到、用户以为生效了），行为上只有精确等于 auto 才自动注入"
+      },
+      {
+        "key": "image.maxCount",
+        "type": "number",
+        "default": 4,
+        "note": "单条消息最多处理几张图。DSH 附件库单条消息上限 20 张，超过会被整批拒绝"
+      },
+      {
+        "key": "image.maxBytes",
+        "type": "number",
+        "default": 10485760,
+        "note": "单张图片字节上限（默认 10MB）。DSH 附件库单张上限 20MB，配更大没有意义"
+      },
+      {
+        "key": "image.timeoutMs",
+        "type": "number",
+        "default": 15000,
+        "note": "单张图片的下载超时"
+      },
+      {
+        "key": "image.maxRedirects",
+        "type": "number",
+        "default": 3,
+        "note": "最多跟随几次重定向。★ 每一跳都会重新校验目标地址（只在第一跳查等于没查）"
+      },
+      {
+        "key": "image.retentionHours",
+        "type": "number",
+        "default": 72,
+        "note": "★ inbox 里图片的保留小时数。这是**唯一**的清理机制：图片必须落在工作区内才能被 read_image 读到，所以清理只能由桥接负责。填 0/负数等于不清理"
+      },
+      {
+        "key": "image.maxTotalBytes",
+        "type": "number",
+        "default": 104857600,
+        "note": "inbox 总占用上限（默认 100MB），超过就按最旧的开始删"
+      },
+      {
+        "key": "mcp.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "★ QQ 工具（MCP）：把 SnowLuma 动作暴露给模型（戳一戳/表情/撤回/查成员…）。关掉则模型只能用文字回复"
+      },
+      {
+        "key": "mcp.toolTimeoutMs",
+        "type": "number",
+        "default": 20000,
+        "note": "单个 QQ 动作的超时"
+      },
+      {
+        "key": "snowluma.installDir",
+        "type": "string",
+        "default": "",
+        "note": "★ SnowLuma 装在哪个目录，相对路径按 PKG_ROOT 解析。**留空 = 交给自动发现**（vendor/snowluma → snowluma.searchPaths → 环境变量 SNOWLUMA_HOME）。填了会**覆盖**自动发现，所以要么留空要么填对。★ 本包不分发 SnowLuma（其许可证 §5.4 禁止并入第三方安装包）"
+      },
+      {
+        "key": "snowluma.searchPaths",
+        "type": "string[]",
+        "default": "[]",
+        "note": "**额外的**候选安装目录（相对包根），一行一个。与 installDir 的区别：它是补充候选而非覆盖，找不到就继续往下找。★ 代码里**不再有**写死的参考项目路径（`D:\\QQagent_DeepSeek\\snowluma`）—— 那条兜底会启动错的那一份、导致全部 401。需要额外位置就写在这里"
+      },
+      {
+        "key": "snowluma.launchCmd",
+        "type": "string",
+        "default": "",
+        "note": "留空 = 自动用 installDir 下的 launcher.bat（推荐路径）。要填就填文件不是文件夹"
+      },
+      {
+        "key": "snowluma.launchCwd",
+        "type": "string",
+        "default": "",
+        "note": "启动时的工作目录；留空则用 launchCmd 所在目录"
+      },
+      {
+        "key": "snowluma.consoleUrl",
+        "type": "string",
+        "default": "http://127.0.0.1:5099/",
+        "note": "★ SnowLuma 的 Web 控制台地址。默认 5099 取证自它自己的 config/runtime.json 里的 webuiPort（那是它的用户设置，所以做成可配、不写死）。「拉起」按钮两步合一：先探这个地址，通了 = 已经在跑（不重复启动）；不通才用 launchCmd 真的启动进程"
+      },
+      {
+        "key": "snowluma.probeTimeoutMs",
+        "type": "number",
+        "default": 1500,
+        "note": "探测 SnowLuma 是否在线的超时"
+      },
+      {
+        "key": "usage.enabled",
+        "type": "boolean",
+        "default": true,
+        "note": "用量记账（概览页的用量卡片）。token 数是 DSH 实测，不是估算"
+      },
+      {
+        "key": "usage.costEnabled",
+        "type": "boolean",
+        "default": false,
+        "note": "★ 默认关：DSH 不提供价格，价目表（prices.json）要人工维护。没维护时显示「—」而不是 ¥0.00"
+      },
+      {
+        "key": "usage.pricesFile",
+        "type": "string",
+        "default": "prices.json",
+        "note": "价目表路径。★ 改它不需要重启桥接（就是不放进 config.json 的原因）"
+      },
+      {
+        "key": "ui.logFile",
+        "type": "string",
+        "default": "logs/bridge.log"
+      },
+      {
+        "key": "ui.verbose",
+        "type": "boolean",
+        "default": false
+      },
+      {
+        "key": "ui.apiEnabled",
+        "type": "boolean",
+        "default": true,
+        "note": "是否提供本地配置接口（给配置 UI 用）。关掉不影响机器人本体"
+      },
+      {
+        "key": "ui.apiPort",
+        "type": "number",
+        "default": 3410,
+        "note": "配置接口端口；只监听 127.0.0.1"
+      },
+      {
+        "key": "send.stickers",
+        "type": "object",
+        "default": {},
+        "note": "表情表（名字 → QQ 表情 id），给 [sticker:名字] 标记用。默认空 = 不发表情；值必须是数字，别的形状会被 normalizeStickerTable 丢掉（不报错、不猜）",
+        "optional": true
+      }
     ]
   },
-
   "invariants": {
     "_说明": "这些是实测得出的约束，破坏它们会导致静默失效或直接崩，改代码前必须理解。",
-
     "permissions": {
       "rule": "权限 = 两道独立防线：谁能触发（access.adminUsers）+ 能碰什么（DSH_PERMISSION_MODE=workspace-write 沙箱）。",
       "evidence": "实测：模型试图写工作区外文件，DSH 返回 `sandbox: file access denied under workspace-write mode`，模型如实报告被拒。",
       "note": "workspace-write 自带 ask 审批策略；sdk profile 里无人能应答审批，所以越界操作落成 unavailable（自动拒绝）且不卡死。这是刻意利用的行为，不要\"修\"它。"
     },
-
     "sessionLifecycle": {
       "rule": "同一个进程内可复用 sessionId；**进程重启后必须换新 id**。因此 `session.instance` 留空时默认取「本进程启动时刻」，而不是某个固定值。",
       "evidence": "① 第二次运行报 `session \"qq-xxx\" already exists`。根因见 dsh-sdk-jsonrpc-server/lib/index.js:203-231 —— getOrCreateSession 只查内存 map，重启后必然走 agents.create，而磁盘上已有同名会话时会抛错；SDK 未暴露 resume。② **实测复发**：默认值一度用「当天日期」，结果 2026-09-25 当天多次重启时反复撞名（日志里 session qq-579284c0cf47 already exists）。",
       "consequence": "重启后 DSH 侧不记得之前的对话。这是已知取舍，不是 bug。跨重启的长期记忆由工作区里的 MEMORY.md 负责（agent 自己读回来），不依赖会话历史。",
       "antiPattern": "⚠️ 绝不要把 instance 默认值改成「当天日期」「固定字符串」这类**跨重启不变**的值 —— 那会导致「当天第一次启动正常、第二次起全部失败」，而且错误信息对使用者没有指向性。"
     },
-
     "portability": {
       "rule": "所有路径从**文件自身位置**往上推（src/local.mjs），绝不用 process.cwd()，绝不写死盘符。",
       "why": "双击启动时 Windows 给的\"起始位置\"常不是包目录；用 cwd 会解析到不存在的目录，而且**不报错**，只表现为\"什么都加载不到\"。",
-      "dshLookupOrder": ["vendor/dsh/", "环境变量 DSH_DESKTOP_APP", "DSH 桌面版默认安装位置"],
+      "dshLookupOrder": [
+        "vendor/dsh/",
+        "环境变量 DSH_DESKTOP_APP",
+        "DSH 桌面版默认安装位置"
+      ],
       "note": "DSH 本体刻意不复制（约 275 MB / 15000 文件）。"
     },
-
     "dependencies": {
       "rule": "运行期依赖不走 npm，由 setup.mjs 复制到 vendor/node_modules，经 src/vendor.mjs 用 createRequire 加载。",
       "why": "包内有什么一眼可见；不受 npm 缓存/软链/清理策略影响；整个包可整体搬走。",
       "onlyDependency": "ws（纯 JS，无原生模块）"
     },
-
     "triggerSemantics": {
       "rule": "被 @ / 私聊 / 命中关键词 → **必须回答**；其余不回答（零 token 消耗）。没有\"触发后选择沉默\"这条路径。",
       "why": "用户明确要求不潜水。这消掉了与模型博弈的哨兵机制。",
       "consequence": "命中关键词必然产生一次模型调用，所以关键词表要克制。"
     },
-
     "behavioralRisk": {
       "rule": "回复必须经过拟人延迟（humanize 模块），不得退回\"收到即回复\"。",
       "evidence": "真实日志实测：收到消息到回复发出只隔 1 秒（782ms / 2896ms）。秒回 + 7×24 在线是行为风控最典型的特征向量，上一个 QQ 号被处置的最可能原因即此。",
@@ -257,11 +1008,9 @@
       "tradeoff": "静默时段**不拒答、只延迟** —— 拒答会让使用者以为机器人坏了。宁可慢，也不要坏。",
       "note": "错误提示类消息（#safeSend）刻意不加延迟：那是\"出问题了\"的信号，尽快到达比像人重要。"
     },
-
     "secretHygiene": {
       "rule": "config.json 含 SnowLuma 的 accessToken 明文与模型 API key（dsh.apiKey）明文。分享这个包之前必须清空这两者，并在 SnowLuma 里把 token 作废重发。"
     },
-
     "uiDocSync": {
       "rule": "★ **任何会影响 UI 的改动，都必须同步更新 `CONFIG-UI.md`**（用户明确要求，且对后续所有改动生效）。",
       "whatCounts": [
@@ -278,27 +1027,77 @@
       "why": "UI 是照着 CONFIG-UI.md 生成的（由 KIMI 完成）。文档落后于代码 = UI 会做出错误的东西，而且排查时两边各说各话。"
     }
   },
-
   "knownFailureSignatures": [
-    { "symptom": "HTTP 426 Upgrade Required", "cause": "httpUrl 填成了 WebSocket 端口", "fix": "SnowLuma 默认 3000=HTTP、3001=WS" },
-    { "symptom": "连上但从不回复", "cause": "历史 bug：漏了把 session.event 接到会话路由器上；或 DSH 子进程已退出", "fix": "看 logs/bridge.log；桥接现在会在子进程退出时明确告警" },
-    { "symptom": "谁发都不回", "cause": "access.adminUsers 为空（fail-closed）", "fix": "填你自己的 QQ 号" },
-    { "symptom": "缺少依赖「ws」", "cause": "没跑 setup.mjs", "fix": "node setup.mjs" },
-    { "symptom": "session \"...\" already exists", "cause": "session.instance 机制失效", "fix": "把 session.instance 改成任意新值后重启" },
-    { "symptom": "Cannot convert argument to a ByteString", "cause": "token 里混进了非 ASCII 字符（复制粘贴带了中文标点）", "fix": "doctor 现在会直接指出第几个字符有问题" },
-    { "symptom": "WS 握手报成功但其实连不上", "cause": "SnowLuma 拒绝未授权的方式是\"先升级再用 close(4401) 踢掉\"", "fix": "doctor 用 400ms 观察窗识别这种情况" },
-    { "symptom": "留下 .tmp-* 目录", "cause": "Windows 上 dsh 退出后文件句柄未立即释放", "fix": "无害；node mocks/verify-live.mjs --clean，或下次运行自动清掉" },
-    { "symptom": "包根下冒出名为 [object Object] 的目录（里面有 profiles/ sessions/ storages/）", "cause": "有人把 process.env.DSH_HOME 赋成了 resolveDshHome() 返回的**对象**而不是 .home —— 环境变量只收字符串，对象被隐式 String() 成 \"[object Object]\"，DSH 子进程就把它当 home，在 cwd（= 包根）下现建了一整套，还按 profile 装了整套依赖", "fix": "删掉该目录；确认 index.mjs 写的是 `process.env.DSH_HOME = resolved.home`。verify-manifest.mjs 现在有一条断言盯着这个写法与这个目录，所以再犯会直接报错。★ 为什么危险：不报错、机器人照常回话，只是凭据文件与 profiles 全找不到 —— 下一步就是「不输出内容」" },
-    { "symptom": "start.bat 启动了 SnowLuma，但不是你以为的那个入口（用了系统 node、还带 console 窗口）", "cause": "config.json 里 snowluma.launchCmd 非空 → **完全覆盖**自动发现（`const useAuto = !launchCmd`）。自动发现本来是优先 index.mjs + 包内 node", "fix": "把 snowluma.launchCmd 留空即可。verify-manifest.mjs 有断言盯着「两处 startSnowluma 调用都传 detect」，CONFIG-UI.md §2.7 也写清了「填了会跳过自动发现」" },
-    { "symptom": "★★★ 机器人不在线：桥接在跑、SnowLuma 也在跑，但 OneBot 一律 401（日志 `rejected unauthorized WebSocket upgrade` / `HTTP 401`）", "cause": "**跑起来的是另一份 SnowLuma 安装**（`D:\\QQagent_DeepSeek\\snowluma`，另一套 token）。两个缺陷叠加：① `startSnowluma` 的默认 `locateSnowluma` 写成 `() => findSnowluma()`，**把 `{ installDir }` 丢掉了** → `snowluma.installDir` 形同虚设，`findSnowluma()` 一路走到候选表最后的 D: 兜底；② 设了 `launchCmd` 时 `cwd` 取的是 `locate.cwd`（发现到的安装目录）而不是**入口自己所在目录**，于是 `launcher.bat` 里的 `node ./index.mjs`（相对路径）在错的目录里解析、真的跑了那份代码", "fix": "默认实现改成 `({ installDir } = {}) => findSnowluma({ installDir })`；并且**显式给了 launchCmd 时 cwd 就用入口所在目录**。两条都有回归测试。★ 为什么极难查：父进程命令行里那个 `launcher.bat` 路径**看起来完全正确**（它确实是项目里那份），要把 cwd 和「批处理里的相对路径相对谁」连起来才想得到 —— 判别方法是看哪一份的 `data\\<uin>\\*.db-shm` 在被写" },
-    { "symptom": "★★★ SnowLuma 在跑、QQ 也登录着，但 3000/3001 端口就是不监听（桥接报 Unable to connect / 401）", "cause": "**SnowLuma 没钩住 QQ**。它靠把原生模块注入正在运行的 QQ 客户端、再用命名管道通信；**只有钩上才会启动 OneBot 服务**。两个前提缺一个都不行：① SnowLuma 自己的 `config/runtime.json` 里 `hookAutoLoad` 必须为 `true`（默认为 **false**，此时永远不会自动注入）；② **必须先起 SnowLuma 再启动 QQ** —— 注入挂在 `pipeWatcher.on(\"process-discovered\")`（管道发现事件）上，不是定时扫进程，所以 QQ 已经在跑时等不到事件", "fix": "① 把 SnowLuma 的 `hookAutoLoad` 改成 true（或设环境变量 `SNOWLUMA_HOOK_AUTOLOAD=1`）后重启 SnowLuma；② 保证启动顺序是 SnowLuma → QQ；顺序反了就**重启一次 QQ**。★ 判别：SnowLuma 日志里有 `hook auto-load enabled: every discovered QQ process will be injected`（开关生效）与 `[Hook] login detected: PID=… UIN=…` + `[Hook] pipe connected`（真的钩上了）；三行缺任何一行都不行。★ 界面上的「协议端」页签必须把「5099 在、3000 不在」显示成 **「SnowLuma 在跑但没钩住 QQ」**，而不是「SnowLuma 没在跑」—— 两者排查方向完全不同" },
-    { "symptom": "★★★ 权限被「贴错标签」：一个**非管理员**在记忆里被记成「管理员」（实测：`workspace-qq/memory/group-700000001.md` 里写着「100000002……管理员，会来更正记录」，而 config 的 adminUsers 里没有他）", "cause": "`bridge.mjs` 的 `#buildPrompt` 里那段**来源标注写死了「（管理员）」** —— 只要配了 callerName 就标「（…，管理员）」，否则一律标「（管理员）」。也就是说**每个在群里说话的人**都被贴上了管理员标签。于是：① 模型照着这行字把说话人写进记忆；② 更严重的是这一行是**系统侧的可信信息**，与按 adminUsers 判定的权限段自相矛盾，模型看到两个来源打架时更信「贴在人身上的标签」，可能因此答应本该拒绝的请求 —— 权限判定被从代码层泄漏成了提示词层的猜测", "fix": "来源标注按**真实 tier** 生成：管理员才标「（管理员）」，普通用户标「（普通用户，只读）」（措辞与 `buildPermissionInstructions` 一致）。另外 `memory.mjs` 的共用规则加了第 4 条**硬规则**：绝对不要记录任何「谁是什么身份/有什么权限」的判断，并以系统给的权限说明为准 —— 因为记忆是「谁都能影响」的内容，而权限只能由代码判定。回归测试在 `mocks/verify-onebot.mjs` 用例 5d（断言来源标注里不含「管理员」，且非管理员被标成「普通用户，只读」）★ 教训：这条缺陷长期没被发现，是因为**测试从没断言过那段来源标注**" }
+    {
+      "symptom": "HTTP 426 Upgrade Required",
+      "cause": "httpUrl 填成了 WebSocket 端口",
+      "fix": "SnowLuma 默认 3000=HTTP、3001=WS"
+    },
+    {
+      "symptom": "连上但从不回复",
+      "cause": "历史 bug：漏了把 session.event 接到会话路由器上；或 DSH 子进程已退出",
+      "fix": "看 logs/bridge.log；桥接现在会在子进程退出时明确告警"
+    },
+    {
+      "symptom": "谁发都不回",
+      "cause": "access.adminUsers 为空（fail-closed）",
+      "fix": "填你自己的 QQ 号"
+    },
+    {
+      "symptom": "缺少依赖「ws」",
+      "cause": "没跑 setup.mjs",
+      "fix": "node setup.mjs"
+    },
+    {
+      "symptom": "session \"...\" already exists",
+      "cause": "session.instance 机制失效",
+      "fix": "把 session.instance 改成任意新值后重启"
+    },
+    {
+      "symptom": "Cannot convert argument to a ByteString",
+      "cause": "token 里混进了非 ASCII 字符（复制粘贴带了中文标点）",
+      "fix": "doctor 现在会直接指出第几个字符有问题"
+    },
+    {
+      "symptom": "WS 握手报成功但其实连不上",
+      "cause": "SnowLuma 拒绝未授权的方式是\"先升级再用 close(4401) 踢掉\"",
+      "fix": "doctor 用 400ms 观察窗识别这种情况"
+    },
+    {
+      "symptom": "留下 .tmp-* 目录",
+      "cause": "Windows 上 dsh 退出后文件句柄未立即释放",
+      "fix": "无害；node mocks/verify-live.mjs --clean，或下次运行自动清掉"
+    },
+    {
+      "symptom": "包根下冒出名为 [object Object] 的目录（里面有 profiles/ sessions/ storages/）",
+      "cause": "有人把 process.env.DSH_HOME 赋成了 resolveDshHome() 返回的**对象**而不是 .home —— 环境变量只收字符串，对象被隐式 String() 成 \"[object Object]\"，DSH 子进程就把它当 home，在 cwd（= 包根）下现建了一整套，还按 profile 装了整套依赖",
+      "fix": "删掉该目录；确认 index.mjs 写的是 `process.env.DSH_HOME = resolved.home`。verify-manifest.mjs 现在有一条断言盯着这个写法与这个目录，所以再犯会直接报错。★ 为什么危险：不报错、机器人照常回话，只是凭据文件与 profiles 全找不到 —— 下一步就是「不输出内容」"
+    },
+    {
+      "symptom": "start.bat 启动了 SnowLuma，但不是你以为的那个入口（用了系统 node、还带 console 窗口）",
+      "cause": "config.json 里 snowluma.launchCmd 非空 → **完全覆盖**自动发现（`const useAuto = !launchCmd`）。自动发现本来是优先 index.mjs + 包内 node",
+      "fix": "把 snowluma.launchCmd 留空即可。verify-manifest.mjs 有断言盯着「两处 startSnowluma 调用都传 detect」，CONFIG-UI.md §2.7 也写清了「填了会跳过自动发现」"
+    },
+    {
+      "symptom": "★★★ 机器人不在线：桥接在跑、SnowLuma 也在跑，但 OneBot 一律 401（日志 `rejected unauthorized WebSocket upgrade` / `HTTP 401`）",
+      "cause": "**跑起来的是另一份 SnowLuma 安装**（`D:\\QQagent_DeepSeek\\snowluma`，另一套 token）。两个缺陷叠加：① `startSnowluma` 的默认 `locateSnowluma` 写成 `() => findSnowluma()`，**把 `{ installDir }` 丢掉了** → `snowluma.installDir` 形同虚设，`findSnowluma()` 一路走到候选表最后的 D: 兜底；② 设了 `launchCmd` 时 `cwd` 取的是 `locate.cwd`（发现到的安装目录）而不是**入口自己所在目录**，于是 `launcher.bat` 里的 `node ./index.mjs`（相对路径）在错的目录里解析、真的跑了那份代码",
+      "fix": "默认实现改成 `({ installDir } = {}) => findSnowluma({ installDir })`；并且**显式给了 launchCmd 时 cwd 就用入口所在目录**。两条都有回归测试。★ 为什么极难查：父进程命令行里那个 `launcher.bat` 路径**看起来完全正确**（它确实是项目里那份），要把 cwd 和「批处理里的相对路径相对谁」连起来才想得到 —— 判别方法是看哪一份的 `data\\<uin>\\*.db-shm` 在被写"
+    },
+    {
+      "symptom": "★★★ SnowLuma 在跑、QQ 也登录着，但 3000/3001 端口就是不监听（桥接报 Unable to connect / 401）",
+      "cause": "**SnowLuma 没钩住 QQ**。它靠把原生模块注入正在运行的 QQ 客户端、再用命名管道通信；**只有钩上才会启动 OneBot 服务**。两个前提缺一个都不行：① SnowLuma 自己的 `config/runtime.json` 里 `hookAutoLoad` 必须为 `true`（默认为 **false**，此时永远不会自动注入）；② **必须先起 SnowLuma 再启动 QQ** —— 注入挂在 `pipeWatcher.on(\"process-discovered\")`（管道发现事件）上，不是定时扫进程，所以 QQ 已经在跑时等不到事件",
+      "fix": "① 把 SnowLuma 的 `hookAutoLoad` 改成 true（或设环境变量 `SNOWLUMA_HOOK_AUTOLOAD=1`）后重启 SnowLuma；② 保证启动顺序是 SnowLuma → QQ；顺序反了就**重启一次 QQ**。★ 判别：SnowLuma 日志里有 `hook auto-load enabled: every discovered QQ process will be injected`（开关生效）与 `[Hook] login detected: PID=… UIN=…` + `[Hook] pipe connected`（真的钩上了）；三行缺任何一行都不行。★ 界面上的「协议端」页签必须把「5099 在、3000 不在」显示成 **「SnowLuma 在跑但没钩住 QQ」**，而不是「SnowLuma 没在跑」—— 两者排查方向完全不同"
+    },
+    {
+      "symptom": "★★★ 权限被「贴错标签」：一个**非管理员**在记忆里被记成「管理员」（实测：`workspace-qq/memory/group-700000001.md` 里写着「100000002……管理员，会来更正记录」，而 config 的 adminUsers 里没有他）",
+      "cause": "`bridge.mjs` 的 `#buildPrompt` 里那段**来源标注写死了「（管理员）」** —— 只要配了 callerName 就标「（…，管理员）」，否则一律标「（管理员）」。也就是说**每个在群里说话的人**都被贴上了管理员标签。于是：① 模型照着这行字把说话人写进记忆；② 更严重的是这一行是**系统侧的可信信息**，与按 adminUsers 判定的权限段自相矛盾，模型看到两个来源打架时更信「贴在人身上的标签」，可能因此答应本该拒绝的请求 —— 权限判定被从代码层泄漏成了提示词层的猜测",
+      "fix": "来源标注按**真实 tier** 生成：管理员才标「（管理员）」，普通用户标「（普通用户，只读）」（措辞与 `buildPermissionInstructions` 一致）。另外 `memory.mjs` 的共用规则加了第 4 条**硬规则**：绝对不要记录任何「谁是什么身份/有什么权限」的判断，并以系统给的权限说明为准 —— 因为记忆是「谁都能影响」的内容，而权限只能由代码判定。回归测试在 `mocks/verify-onebot.mjs` 用例 5d（断言来源标注里不含「管理员」，且非管理员被标成「普通用户，只读」）★ 教训：这条缺陷长期没被发现，是因为**测试从没断言过那段来源标注**"
+    }
   ],
-
   "verificationStatus": {
     "_说明": "如实标注，不要把它当成\"全都验证过了\"。",
     "verified": [
-      "离线 855 项测试（manifest 33 / api 77 / apitest 102 / config 42 / units 272 / local 13 / credentials 18 / images 145 / mcp 30 / mcp-profile 23 / rpc 20 / onebot 43 / real-dsh 7 / doctor 30）",
+      "离线 **2188 项断言 / 38 套**（`npm test` 全链退出码 0；链上共 42 个条目，另有 3 套在受限沙箱里打印 ⏭️ **跳过** —— `verify-rpc` / `verify-onebot` / `verify-mcp`，**跳过不算通过**，要真跑需放宽沙箱）。其中 0.2.1 新增的几套：隐私硬闸 62 / 操作日志 49 / 任务台账 125 / 配方库 67 / 抽取解析 71 / 记忆可观测性 29 / 记忆整理 74 / 关键词直写 35 / 记忆更正 50 / 带内标记 35 / 投递前终检门 47 / 本地语料库 43 / 传输契约 35 / 凭据发现 53 / 会话状态机 48 / 记忆使用账本 54 / 人设加固 52 / 投递账本 34 / QQ 工具 55；★ 另有**桥接级接线测试**（`verify-memory-roundtrip.mjs`，122 项，第⑥~⑯节）—— 走完整 Bridge、读 `rpc.prompts`，断言注入段真的进了提示词。为什么必须有它：那个「任务段在真机上从未注入」的缺陷（`chatKey` 不在作用域、被空 catch 吞掉），124 项纯函数断言**一个都没抓到**；第⑫节又抓到同一类的一个（`noteUser` 把「悬着的话头」提前清空 → 那句指令在真机上一次也渲染不出来）；第⑯节再抓一个同类（发送**还在进行中**时账本里就该有 pending —— 即「落账在发送之前」）",
       "★ 真实 QQ 端到端（2026-09-25 实测）：管理员的真实私聊消息 → 桥接 → DSH → 模型 → QQ 回复，全程无人工干预",
       "★ 真实环境下的工具使用：要求它创建 smoke-test.txt，它调用 2 次工具并正确写入内容 'hello from qq'",
       "真实端到端（假协议端）连续 3 轮：真模型读到工作区文件、越界被沙箱拒绝、如实报告",
@@ -315,7 +1114,14 @@
       "★★ 「拉起 SnowLuma」两条路的防重复启动已对齐：`startSnowluma` 的第②步（端点上应答的是不是**正确的那份**）**只**依赖调用方传 `detect`，不传就 `typeof detect !== 'function'` 静默跳过。实测 `start.bat` 走的 `--snowluma` 分支**漏传了** detect（界面按钮那条路传了）—— 于是 start.bat 只剩控制台探测这一道防线，一旦控制台端口改过（consoleUrl 默认 5099）就会重复 spawn 出第二个实例。已修：抽出唯一实现 `makeLaunchDetect`，两条路共用；新增断言（manifest 查「每处 startSnowluma 调用都传 detect」「index.mjs 不再直接调 detectSnowluma」；apitest 查行为：connected/up-not-logged-in 都不重复启动、auth-failed 必须继续启动，并**显式记录「漏传 detect 时确实会启动」**这个代价）",
       "★ `up-not-logged-in` 也必须短路（新增行为）：以前只有 `connected` 会短路，这个状态会掉到下面去 spawn —— 那会开出第二个实例。一个进程「没登录」和「没在跑」是两件事，提示语现在明说「不要再启动一个，去控制台扫码」",
       "★★★ 「机器人不在线」已定位到根因并修复（2026-09-26，症状＝桥接在跑、SnowLuma 也在跑，但 OneBot 一律 401）。**根因是两个缺陷叠加**：① `startSnowluma` 的默认 `locateSnowluma` 写成 `() => findSnowluma()`，**把 `{ installDir }` 丢掉了** → `snowluma.installDir` 形同虚设，`findSnowluma()` 一路走到候选表最后的 `D:\\QQagent_DeepSeek\\snowluma` 兜底；② 设了 `launchCmd` 时 `cwd` 取 `locate.cwd` 而不是**入口自己所在的目录**，于是 `launcher.bat` 里的 `node ./index.mjs`（相对路径）在错的目录里解析 —— 真的跑了 D: 那份代码、用 D: 的 token。★ 取证链：`findSnowluma({installDir})` → 项目那份 / `findSnowluma()` → **D: 那份**（实跑对照）；D: 的 `data\\200000001\\*.db-shm` 在 10:40:25 被写而项目那份冻结在 03:48；D: 的日志逐条记录 `[OneBot.WS-Server] rejected unauthorized WebSocket upgrade`，时间与桥接的重连节奏（:14/:16/:20/:28/:44…）逐条对上。★ 修法与回归测试：默认实现改为转发 `installDir`；显式 `launchCmd` 时 cwd 用入口所在目录。新增 6 条断言，并且**做了反向证明** —— 把修复回退后测试确实变红，报出的正是 `cmd=D:\\QQagent_DeepSeek\\snowluma\\index.mjs`、`cwd=D:\\QQagent_DeepSeek\\snowluma`、`来源=常见外部位置（参考项目）`",
-      "★ 教训（为什么这个 bug 极难查）：父进程命令行里那个 `launcher.bat` 路径**看起来完全正确**（它确实是项目里那份），所以「入口对不对」这个检查会通过。真正的判据是 **cwd**，以及「批处理里的相对路径相对谁」。所以排查这类问题的正确方法是看**哪一份安装的 `data\\<uin>\\*.db-shm` 在被写**，而不是看命令行里的路径"
+      "★ 教训（为什么这个 bug 极难查）：父进程命令行里那个 `launcher.bat` 路径**看起来完全正确**（它确实是项目里那份），所以「入口对不对」这个检查会通过。真正的判据是 **cwd**，以及「批处理里的相对路径相对谁」。所以排查这类问题的正确方法是看**哪一份安装的 `data\\<uin>\\*.db-shm` 在被写**，而不是看命令行里的路径",
+      "★★★ **7 轮真实对话把三个缺陷全炸出来了**（2026-09-26 22:24~22:36，用户在 QQ 里连着查资料）：① 自动抽取的解析器解不了真机输出（模型在 JSON 里**多写了两个 `}`**），整条抽取被静默丢弃 —— 已修（`dropPrematureRootClose` + `firstBalancedSpan`，真机原文存成 fixture）；② ★★★ 【当前任务】段**在真机上从未注入过** —— `#buildPrompt` 里的 `chatKey` 是 `#runTurn` 的局部变量，`readTask` 每轮抛 `ReferenceError` 被**空 catch 吞掉**，而 124 项纯函数断言全绿（错在接线）；已修并加了桥接级接线测试（把修复注释掉测试立刻红）；③ 用户一句「原来如此，太棒了」把任务目标冲掉（注入成了「对方最近的要求：太棒了」，抽取也照着这句理解）—— 已改成「只有这一轮真的动手了才覆盖目标」。取证手段：`mocks/session-grep.mjs` 从 DSH 会话落盘里读模型**实际收到的提示词**。★ 结论：**离线测试全绿 ≠ 功能是通的**，真实运行一次不能省。",
+      "★ 自动沉淀（R4）已真机跑通并入库：`--recipes --extract` 手动跑一次 → 5473ms → 产出「多源搜索+抓正文的实时情报核实」（`source: auto`）→ 用自然说法能匹配上（0.53）。平时它自己每 5 轮在后台跑一次（不 await、60s 超时、失败只记一行日志但**必带原文片段**）。",
+      "★ **定时整理记忆（H2）已接线并部署**：桥接每小时在**空闲时**整理一次记忆（`createConsolidateScheduler`，`attach()` 启动 / `close()` 停掉 / `unref()` / 忙时跳过 / 只在有变更时记日志）。离线断言含「能力已就绪但没人触发」的接线、忙时跳过、间隔下限、unref 被调用，并有一条**桥接级**断言（attach 后手动触发真的把重复条目合并了）。真机证据：重启后的日志里出现 `[memory] 定时整理已开启（每 60 分钟一次，只在桥接空闲时动手）`。",
+      "★★ **记忆更正（H4 / R10）已落地并部署**：旧条目不删、只加 `〔已被更正：… · 日期〕` 标注并**停止注入**；整理时原样保留、不参与合并。★ 判据是被**实测**逼出来的：第一版「更正措辞 + 相似度 ≥0.35」被证伪 —— 真更正 0.273 与「同一主体的另一件事」0.286 **只差 0.013**，阈值放哪都会错一边。现在只认两种无歧义信号：模型显式 `fix` 档、自指式措辞（纠正一下/我之前说错了）；`换成/改成/其实` 刻意排除。边界如实记录：纯陈述式覆盖不会被自动标注（两条都保留都注入，与升级前一致）。离线 50 项（含边界断言与「标注后不被篡改检测回滚」）。",
+      "★★ **H7 本地语料库 + 中文全文检索已落地并部署**：每条消息落 `runtime/corpus.sqlite`（FTS5 + trigram），**2 字以内中文自动走 LIKE 回退**（实测 trigram 对 1~2 个汉字无效）；结果带 `[mid:]` 与 H6 的 `[reply:]` 闭环；新增 MCP 工具 `qq_search_history`（**fail-closed**：必须显式给 kind+peerId，否则拒绝 —— 不带会话过滤就等于把别的会话读进当前上下文）与 CLI `--corpus`。三条用户确认的边界都在测试里盯着：**七类隐私不落库**（写之前拦 + 审计只记类别长度）、**30 天 TTL**（默认预演）、**不存媒体本体与路径**。离线 43 项。",
+      "★★ **H8 凭据/端点发现加固已落地并部署**：新增 `src/token-discovery.mjs`（保守读）—— **显式账号找不到就绝不复用别的账号的 token**（安全底线）、只采纳 enabled 且回环的服务器、拒符号链接/超大文件/超长 token/**含控制字符的 token**；回退到 config.json 时**说明原因**（过去是静默回退）。★ 一处**刻意不照搬**参考项目：它的「http 与 ws token 不一致就放弃猜测」在我们这里会让正常配置失效 —— 我们两条通道是同时使用、各用各的凭据，改为\"不静默地报出来\"。离线 47 项。",
+      "★★ **H9 传输契约已落地并部署**：新增 `src/transport.mjs` —— 表驱动分类（`retryable` 一等字段、认证/配置类给可执行提示、**不认识的错误不猜成可重试**）、投递幂等键（**带会话**，修掉\"同一句话发给两个会话时第二个被误判重复\"）、断线缺口标注（\"宁可标缺口，也不假装连续\"，且明说**不要猜**对方刚才说了什么）。桥接侧：`gap` → 一次性注入下一轮提示词；`SendQueue` 按会话去重。离线 35 项 + 桥接级 1 组。"
     ],
     "notVerified": [
       "群聊回复（已实现并配置放行，但**真机仍未跑过**：需要一条真实群消息；目前跑通的只有管理员私聊）",
@@ -324,10 +1130,12 @@
       "看图**真机未跑过**：离线 145 项全绿，但「真实 QQ 图片 → SnowLuma 的 data.url → 下载 → 模型真的看见」这条端到端还没有一条真实图片验证过。最可能出问题的是两处：① SnowLuma 事件里 data.url 的实际形态（rkey 有效期、是否需要额外请求头）② auto 模式下真实 JPEG/大图经过 DSH 附件库时是否被接受",
       "看图当前默认 on-demand，所以「模型确实会去调 read_image」这一步只是在提示词层面成立，**没有在真实对话里观察到它真的读了图**",
       "清空 `snowluma.launchCmd` 之后的启动路径**还没真机跑过**：下一次 start.bat 应该会走自动发现（`installDir` 下的 `index.mjs` + 包内 `vendor\\node\\node.exe`、不出窗口）。验证方法是看新起的 node 进程命令行里是不是包内 node 的完整路径，而不是裸 `node`",
-      "「不重复启动」的第②步在**真实端口争用场景**下没验过：离线测试用的是注入的假 detect / 假控制台，真实的「换过 WebUI 端口 + 错实例占着 3000」组合没有复现过"
+      "「不重复启动」的第②步在**真实端口争用场景**下没验过：离线测试用的是注入的假 detect / 假控制台，真实的「换过 WebUI 端口 + 错实例占着 3000」组合没有复现过",
+      "隐私**输出侧**拦截：代码已接在发送之前，但至今**没有任何内容触发过**它（需要真的让它往外说一段含隐私的话才会验到）",
+      "回退（回到第 N 步）的**桥接侧触发**：逻辑与 125 项离线断言都在，但真机上**至今没人说过这句话**",
+      "长会话（≥50 轮）里【当前任务】段是否始终在 —— 需要一条很长的真实对话；目前最长实测 7 轮"
     ]
   },
-
   "roadmap": {
     "done": [
       "P0 协议端就位",
@@ -365,8 +1173,6 @@
       "★★★ **修了一个真实丢消息的缺陷**：`shutdown` 原先**第一件事就是 `onebot.close()`**，而回复可能还在拟人延迟里排队 —— 实测有一条回复因「静默时段」被延迟 **116 秒**，使用者在它发出前重启桥接，通道当场断开，那条**已经生成好**的回复永远丢了（日志表现：`拟人延迟 116 秒后再发` 紧接 `=== 桥接退出（收到 1 条私聊，回复 0 条）===`）。现在：① 延迟可被收尾打断（`#sleepUnlessClosing`）；② `Bridge.close()` 会**跳过剩余延迟立刻把在途回复发出去**并等它们结束（最多 8 秒）；③ `shutdown` 改成**先 `await bridge.close()` 再 `onebot.close()`**。宁可拟人节奏打折，也不要丢整条回复",
       "★ **对话栏可以显示思考过程**了：`listConversations()` 的 `messages[].role` 新增 **`thinking`**（机器人的 reasoning）。它**只进镜像、不发到 QQ**（有断言盯着这一点）。UI 规格见 CONFIG-UI.md §2.9：默认折叠、淡化处理、可能很长、**一轮可能没有**（没有就整块不显示）",
       "★ **记忆的两层范围**（三层名单落地后的实际语义）：`MEMORY.md`=全局（**只有私聊会话可见**，跨人共享）；`memory/private-<QQ号>.md`=某个人的私聊记忆（**跨该人的所有私聊**，但**不跨群**）；`memory/group-<群号>.md`=**某个群专属**，群里要求记住的东西只写在这里，别的群与私聊都看不到。★ 一次性迁移问题：`memory/` 目录在重构前不存在，所以**旧记忆全在全局 MEMORY.md 里**（实测：管理员昵称、一条约定、store/ 与贪吃蛇任务都在）。新会话只看自己那份 → 会以为没记忆。所以提示词里加了指引：个人文件不存在时，先把全局里属于本人的条目搬过去再新建",
-
-
       "★ `GET /api/roster` 已实现：拉真实好友/群列表，并把配置里的号码与真实名单**对照**，标出 `unknownAdmins` / `unknownDmUsers` / `unknownGroups`（号码打错是这类配置最常见的错误，且症状静默）。★ 两个刻意的设计：① 走缓存（好友/群不会秒变，而每次都要连协议端几百毫秒），`?refresh=1` 强制重拉；② **协议端连不上时不整体失败**，仍返回 200 但 `friends`/`groups` 为空且 `warnings` 说明原因，并有 `friendsKnown`/`groupsKnown` 标志 —— 因为界面若把「列表为空」直接显示成「你没有好友」会误导，而实际只是 SnowLuma 没在跑。同理，名单没拿到时**不做「号码找不到」的比对**（否则会报出一个自相矛盾的结果：既说找不到、又给空列表）",
       "★ 死代码清理（审查时发现）：`bridge.mjs` 里的 `pickInterimText` 与 `DEFAULT_INTERIM` 已被 `src/interim.mjs` 取代但还留着（会误导后来者以为有两个实现）；`#isAllowed` 在名单逻辑重构进 `roster.mjs` 后已无调用者；`TIER` 导入未使用。都已删除。★ 连带修正两处**测试的脆弱写法**：① 契约测试原先是**文本扫描** `bridge.mjs` 里 `#isAllowed` 的方法体来验 fail-closed —— 方法搬走后它就失效了；现在改成**行为断言**（直接造 roster 看它怎么判），不再受措辞/文件位置影响，并补了「名单填上就放行」的对照（否则一个恒返回 false 的实现也能通过）。② 「先应一声」的分类断言原先靠**关键词猜内容**（漏了「翻翻」、又漏了「核实」两次），现在只断言「取自对应那一组」，分类正确性交给 `classifyInterim`",
       "★ 群聊实测踩到的配置陷阱：`send.maxPerMinute`（默认 8）会被**单条长回复**用光 —— 一条 1870 字的回复按 chunkChars=300 会切成 8 条，正好占满这一分钟的额度，于是紧接着的第二轮**全部被静默丢弃**（日志只有「跳过发送：每分钟上限已达」）。测试里因此把配额放大并让两轮内容不同；生产环境若开群聊，这个值值得复核。",
@@ -375,7 +1181,8 @@
       "★★ 实测缺陷（Node v24.9.0 / Windows）：`rmSync(path)` 删**单个文件**会**静默失败** —— 不抛错、返回正常，但 `existsSync` 仍是 true；同一环境下 `unlinkSync` 正常。所以记忆删除必须用 unlinkSync，并在调用后**复核文件真的没了**（否则接口会回 `{deleted:true}` 而文件还在，是谎报）。这条是被「删除后必须读不到」的断言抓出来的",
       "★ 用量口径取证（2026-09-25，真实 SDK 桥接会话 qq-eff12cd760f2，一轮 15 步）：inputTokens + cacheReadTokens + cacheWriteTokens + outputTokens === totalTokens **每步都成立**（所以 inputTokens 是【未缓存】输入）。该轮实测 input=25,049 / cacheRead=223,744 / output=3,625 / 命中率 89.9% / 空闲价 ¥0.0440；★ 缓存命中占 token 量 89% 但只占费用 10% —— 这就是为什么界面必须把「未缓存输入」和「缓存命中」分开显示。★ totalTokens 是每步的上下文**快照**、不可求和（并非因为数值更大：本条实测两者恰好都等于 252,418，但单位不同，遇到 compaction 会立刻分道扬镳）",
       "⚠️ DSH **不提供人民币价目表**：dsh-token-meter 里的 pricing 是视觉 token 折算，dsh-llm-deepseek 里没有单价。所以成本必须由本项目按 prices.json 估算，且只能叫「估算」",
-      "★ 长任务\"先应一声\"：回合超过 8 秒就先发一条（按实际工具调用选措辞，不谎称动作）。实测有一轮 40.8 秒 / 20 次工具调用期间完全静默"
+      "★ 长任务\"先应一声\"：回合超过 8 秒就先发一条（按实际工具调用选措辞，不谎称动作）。实测有一轮 40.8 秒 / 20 次工具调用期间完全静默",
+        "★★★ 0.2.1 记忆与提示词专项（H1–H10，逐阶段执行，每阶段都带离线测试与真机部署；完整记录见 `docs/0.2.1-hermes-borrow-plan.md` §11–§17）：① **「记住 X」必落盘**（关键词直写，零模型调用）+ 未完成/被取代轮次的记忆三分类 + 变更审计（**不记原文**）；② **每小时蒸馏**（能力早就有，缺的只是「谁来按这个按钮」）；③ **更正用 supersede 不覆盖**（旧条目不删只标注、不再注入；判据被实测逼窄到「显式 fix + 自指措辞」）；④ **投递前终检门**（工具 JSON / 注入标记 / 沙箱原始报错都到不了用户手里，且正常中文一个字不动）；⑤ **带内标记** `[reply:id]` / `[sticker:名]`（此前提示词一直在教一个**根本不存在**的引用通道）；⑥ **本地语料库 + 中文全文检索**（FTS5 trigram，2 字自动回退 LIKE；七类隐私不落库 + 30 天 TTL）；⑦ **凭据发现加固**（真机上抓出「最新账号文件 = 使用者的账号」会导致 401 + 机器人完全不说话）；⑧ **传输契约 + 断线缺口**（`retryable` 成一等字段、去重键带会话）；⑨ **会话状态机 H10**：与任务台账**两条轴**（防复读 vs 防重复劳动），并在接线级测试里抓出两个纯函数测试看不见的缺陷（话头被提前清空、进度按消息条数渲染）"
     ],
     "todo": [
       "P5 插件/技能两型扩展系统（当前所有功能都在核心里，没有扩展点）",

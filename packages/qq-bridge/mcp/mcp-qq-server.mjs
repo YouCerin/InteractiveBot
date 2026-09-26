@@ -40,6 +40,7 @@
 
 import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
+import { pathToFileURL } from 'node:url'
 
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
@@ -75,9 +76,36 @@ const BLOCKED_ACTIONS = {
 }
 
 // ── 工具定义（写给模型的说明；措辞直接影响它用不用、怎么用） ─────────────
+//
+// ★★ H14：**批量注入的提示**（不每个 docstring 重写一遍，避免漂移）
+//
+// 为什么必须写进**工具描述**而不是只写在提示词里：模型的工具表是它决定"调不调"的
+// 直接依据，而人设/权限段离得很远。两类提示各管一件事：
+//   · `ADMIN_ONLY_HINT`：**权限**。普通用户是只读的，而工具本身不区分调用者 ——
+//     所以要在描述里说清"这是管理员才能做的事，对方不是管理员时别做，直说做不了"。
+//   · `HONESTY_HINT`：**如实**。工具返回失败就是没做成；本项目第 6 条铁律是
+//     "失败必须让用户知道"，而模型最常见的失败模式恰恰是——调用失败了还回"好的已经做了"。
+//
+// ⚠️ 判据是每个工具自带的 `adminOnly` 标记，不是靠名字猜（`qq_api` 是万能口，
+//    必须算写入侧；`qq_search_history` 只读，不该被限制）。
+const ADMIN_ONLY_HINT =
+  '【权限】这是**写入/互动类**动作，只有管理员可以让我做。' +
+  '如果当前说话的人不是管理员，就直说"这个我做不了"，不要偷偷做、也不要假装做过。'
+const READONLY_HINT =
+  '【权限】只读动作，普通用户也可以用（但**不能**用它读取与他无关的会话内容）。'
+const HONESTY_HINT =
+  '【如实】这个工具返回失败就是**没做成** —— 照实说失败原因，不要回"好的已经做了"。'
+
+/** 把提示拼进描述（`tools/list` 时统一应用，保证不会漏掉某个工具）。 */
+function described(tool) {
+  const hints = `${tool.adminOnly ? ADMIN_ONLY_HINT : READONLY_HINT}${HONESTY_HINT}`
+  return `${tool.description}\n${hints}`
+}
+
 const TOOLS = [
   {
     name: 'qq_poke',
+    adminOnly: true,
     description:
       '戳一戳某个 QQ 用户（就是 QQ 里那个"戳一戳"）。私聊里戳对方，或群里戳某个群成员。' +
       '这是轻互动，别连续戳同一个人。',
@@ -96,6 +124,7 @@ const TOOLS = [
   },
   {
     name: 'qq_send_sticker',
+    adminOnly: true,
     description: '在会话里发一张 QQ 表情（表情 id，例如 1、4、13）。和文字分开用。',
     inputSchema: {
       type: 'object',
@@ -116,6 +145,7 @@ const TOOLS = [
   },
   {
     name: 'qq_recall',
+    adminOnly: true,
     description: '撤回一条消息。用于"说错了/发错了"时自己收回来。',
     inputSchema: {
       type: 'object',
@@ -126,6 +156,7 @@ const TOOLS = [
   },
   {
     name: 'qq_group_members',
+    adminOnly: false,
     description: '查群成员列表（昵称、群名片、角色）。想知道群里都有谁时用。',
     inputSchema: {
       type: 'object',
@@ -136,6 +167,7 @@ const TOOLS = [
   },
   {
     name: 'qq_message_detail',
+    adminOnly: false,
     description: '查某条消息的详情（用于看清引用的是哪句话）。',
     inputSchema: {
       type: 'object',
@@ -146,6 +178,7 @@ const TOOLS = [
   },
   {
     name: 'qq_group_history',
+    adminOnly: false,
     description: '查群聊历史消息。想了解"刚才群里在聊什么"时用。',
     inputSchema: {
       type: 'object',
@@ -166,7 +199,164 @@ const TOOLS = [
     }),
   },
   {
+    // ★ H7：**本地语料库检索**（不是问协议端要历史，而是搜桥接自己落的库）
+    //
+    // 与 `qq_group_history` 的分工：那个是"现拉最近 N 条"（实时、不能检索、
+    // 协议端一重启就没了）；这个是"用关键词搜过去"（本地、有索引、带 mid）。
+    //
+    // ⚠️ **必须显式指定会话**（kind + peerId）：语料库里存着所有人所有会话的消息，
+    //    不带会话过滤就等于把别的群/别人的私聊内容读进当前上下文 ——
+    //    模型再顺口说出来就是**跨会话泄露**。所以缺参数时**拒绝执行**（fail-closed），
+    //    而不是"默认搜全部"。
+    name: 'qq_search_history',
+    adminOnly: false,
+    description:
+      '在本机保存的聊天记录里**用关键词搜索过去说过的话**（支持中文与英文）。' +
+      '想引用搜到的某条消息时，用它给出的 [mid:数字] 写 `[reply:数字]`。' +
+      '★ 必须显式给出 kind 与 peerId（就是当前会话的来源标注里那串号码）—— ' +
+      '不能跨会话搜索。' +
+      '★ **不许编造消息 id**：只能引用这个工具真的返回过的 mid；编的 id 不会生效。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '要搜的关键词（中文/英文都行；越具体越好）' },
+        kind: { type: 'string', enum: ['private', 'group'], description: '会话类型（必填）' },
+        peerId: { type: 'string', description: 'QQ 号或群号（必填，就是来源标注里那个号码）' },
+        limit: { type: 'number', description: '最多返回几条（默认 8，上限 100）' },
+      },
+      required: ['query', 'kind', 'peerId'],
+    },
+    // 这个工具**不走 OneBot**，在本地读语料库（见 handle() 里的特判）
+    local: 'corpus',
+  },
+  {
+    // ★ H14：**轻量社交**。真人之间的"给这条消息点个赞/贴个表情回应"——
+    //   比回一句话更省、更不打扰，适合"看到了，表示一下"的场合。
+    //   ⚠️ 动作名 `set_msg_emoji_like` 是**真机探针验过的**（见 mocks/probe-onebot-actions.mjs）：
+    //      空参调用返回 `message_id: is required`，说明动作存在、只是缺参数。
+    name: 'qq_emoji_like',
+    adminOnly: true,
+    description:
+      '给某条消息贴一个 QQ 表情回应（就是手机 QQ 长按消息的那个"表情回应"）。' +
+      '适合"看到了、表示一下"的场合，比回一句话更轻。' +
+      'emojiId 不填就是默认的点赞（128077）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageId: { type: 'string', description: '要回应的消息 id' },
+        emojiId: { type: 'string', description: '表情 id（默认 128077 = 👍）' },
+      },
+      required: ['messageId'],
+    },
+    build: ({ messageId, emojiId }) => ({
+      action: 'set_msg_emoji_like',
+      params: { message_id: Number(messageId), emoji_id: String(emojiId ?? '128077'), set: true },
+    }),
+  },
+  {
+    // ★ H14：**"正在输入"**。拟人节奏的一部分：长篇回复前先让对方看到"它在打字"。
+    //   ⚠️ 慎用：这是**状态类**动作，频繁调用没有意义（真人也不会一直显示正在输入）。
+    name: 'qq_typing',
+    adminOnly: false,
+    description:
+      '把"对方正在输入"的状态打开一会儿（就是 QQ 里那个"正在输入…"）。' +
+      '只在你要花一段时间才回得出话时用一次，别反复调。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        peerId: { type: 'string', description: '目标 QQ 号' },
+        eventType: { type: 'number', description: '1 = 正在输入（默认）' },
+      },
+      required: ['peerId'],
+    },
+    build: ({ peerId, eventType }) => ({
+      action: 'set_input_status',
+      params: { user_id: Number(peerId), event_type: Number(eventType ?? 1) },
+    }),
+  },
+  {
+    // ★ H14：**人设化转述转发**。
+    //
+    // 两件事分开做（而不是硬塞进一条消息里）：先**转发原消息**（对方能看到原文，
+    // 不用信我的转述），再补一句 `note` 作为我自己的话 —— 这样"我说的"和
+    // "原文说的"在聊天里是分开的两条，不会被当成同一句话。
+    // ⚠️ 动作名 `forward_friend_single_msg` / `forward_group_single_msg` 也是**探针验过的**。
+    name: 'qq_forward_msg',
+    adminOnly: true,
+    description:
+      '把**某一条消息**转发给某人/某个群（转发的是原文，不是我的转述）。' +
+      '可以在转发之后补一句 note 作为你自己的话（写你想说的话，别复述原文）。' +
+      '注意：转发会把**别人说的话**搬给第三方看 —— 只在确实合适时用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageId: { type: 'string', description: '要转发的消息 id' },
+        toId: { type: 'string', description: '转发给谁：QQ 号或群号' },
+        toKind: { type: 'string', enum: ['private', 'group'], description: '目标是私聊还是群' },
+        note: { type: 'string', description: '转发之后你自己补的一句话（可选）' },
+      },
+      required: ['messageId', 'toId', 'toKind'],
+    },
+    build: ({ messageId, toId, toKind }) => ({
+      action: toKind === 'group' ? 'forward_group_single_msg' : 'forward_friend_single_msg',
+      params: {
+        message_id: Number(messageId),
+        [toKind === 'group' ? 'group_id' : 'user_id']: Number(toId),
+      },
+    }),
+    // 转发之后的 `note` 要**另发一条**，所以这个工具需要多步（见 runTool 的特判）
+    followUp: ({ toId, toKind, note }) =>
+      note && String(note).trim()
+        ? {
+            action: toKind === 'group' ? 'send_group_msg' : 'send_private_msg',
+            params: {
+              [toKind === 'group' ? 'group_id' : 'user_id']: Number(toId),
+              message: [{ type: 'text', data: { text: String(note).trim() } }],
+            },
+          }
+        : null,
+  },
+  {
+    // ★ H14：**把搜到的历史打包成"合并转发"发出去**（配合 H7 语料库）。
+    //
+    // 与 `qq_forward_msg` 的区别：那个转发**一条**消息，这个把**多条**合成一个
+    // "聊天记录"卡片 —— 适合"上次大家讨论的那几条，我给你打包"。
+    // ★ 它**只从本会话的本地语料库**取（fail-closed：kind + peerId 必填），
+    //   所以不会把别的群/别人的私聊内容打包发出去。
+    name: 'qq_forward_log',
+    adminOnly: true,
+    description:
+      '把本会话里搜到的若干条历史消息**打包成一张"聊天记录"卡片**发给某人/某个群。' +
+      '适合"上次讨论的那几条，我给你打包过去"。' +
+      '★ 必须给出本会话的 kind 与 peerId（来源标注里那串号码）—— 只打包本会话的内容。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '用关键词挑要打包的消息' },
+        kind: { type: 'string', enum: ['private', 'group'], description: '本会话类型（必填）' },
+        peerId: { type: 'string', description: '本会话号码（必填）' },
+        toId: { type: 'string', description: '发给谁：QQ 号或群号' },
+        toKind: { type: 'string', enum: ['private', 'group'], description: '目标是私聊还是群' },
+        limit: { type: 'number', description: '最多打包几条（默认 10，上限 20）' },
+      },
+      required: ['query', 'kind', 'peerId', 'toId', 'toKind'],
+    },
+    local: 'forwardLog',
+  },
+  {
+    name: 'qq_at_all_remain',
+    adminOnly: false,
+    description: '查某个群今天还能 @全体成员 几次（群主/管理员才有这个额度）。',
+    inputSchema: {
+      type: 'object',
+      properties: { groupId: { type: 'string', description: '群号' } },
+      required: ['groupId'],
+    },
+    build: ({ groupId }) => ({ action: 'get_group_at_all_remain', params: { group_id: Number(groupId) } }),
+  },
+  {
     name: 'qq_api',
+    adminOnly: true,
     description:
       '直接调用任意 SnowLuma/OneBot 动作。当上面那些具名工具没覆盖你要做的事时用这个。' +
       '常见可用动作（不限于这些）：send_private_msg、send_group_msg、send_msg、' +
@@ -240,10 +430,114 @@ async function callOneBot(action, params = {}) {
   }
 }
 
+/**
+ * 本地语料库检索（H7）。
+ *
+ * ⚠️ **fail-closed**：`kind` 与 `peerId` 缺一不可 —— 语料库里存着**所有**会话的消息，
+ *    不带会话过滤就等于把别的群/别人的私聊读进当前上下文，模型再顺口说出来
+ *    就是**跨会话泄露**。所以缺参数时**拒绝执行**，而不是"默认搜全部"。
+ */
+async function runCorpusSearch({ query, kind, peerId, limit } = {}) {  if (!config?.workspace) {
+    return { isError: true, text: '这条路走不通：桥接没有把工作区告诉这个工具（H7 的配置没生效）。' }
+  }
+  const k = String(kind ?? '').trim()
+  const peer = String(peerId ?? '').trim()
+  const q = String(query ?? '').trim()
+  if (!q) return { isError: true, text: '要搜什么？把关键词给我（query）。' }
+  if ((k !== 'private' && k !== 'group') || !peer) {
+    return {
+      isError: true,
+      text:
+        '搜历史**必须指定会话**（kind 用 private/group，peerId 用 QQ 号或群号，' +
+        '就是你这轮来源标注里那串数字）—— 我不能跨会话搜索，那是别人的隐私。',
+    }
+  }
+  try {
+    // 只读打开：桥接是唯一写入方，工具进程只读（避免两个进程同时写同一个库）
+    const { createCorpus, renderSearchResults } = await import('../src/corpus.mjs')
+    const c = createCorpus({ workspace: config.workspace, readOnly: true, log: () => {} })
+    const r = c.search({ query: q, chatKey: `${k}:${peer}`, limit: limit ?? 8 })
+    c.close()
+    if (!r.ok) return { isError: true, text: `搜不了：${r.why ?? '语料库不可用'}` }
+    if (r.rows.length === 0) {
+      return { isError: false, text: `本会话里没有搜到「${q}」。（也可能这条消息早于语料库启用，或者已经被 30 天 TTL 清掉了。）` }
+    }
+    return { isError: false, text: renderSearchResults({ rows: r.rows, query: q, mode: r.mode }) }
+  } catch (error) {
+    return { isError: true, text: `搜历史时出错：${error?.message ?? error}` }
+  }
+}
+
+/** 动态加载语料库模块的旧入口（已改为 `await import`，保留是为了不改变调用方形状）。 */
+
+/**
+ * ★ H14：把本会话搜到的历史打包成一张"合并转发"卡片发出去。
+ *
+ * 两条纪律：
+ *   ① **只从本会话的本地语料库取**（`kind` + `peerId` 必填）—— 否则就是把
+ *      别的群/别人的私聊打包发给第三方，那是不可挽回的泄露；
+ *   ② 节点条数**夹到上限**（默认 10、最多 20）：合并转发卡片塞几百条没人看，
+ *      而且会撑爆协议端的请求体。
+ */
+async function runForwardLog({ query, kind, peerId, toId, toKind, limit } = {}) {
+  if (!config?.workspace) {
+    return { isError: true, text: '这条路走不通：桥接没有把工作区告诉这个工具（H7 的配置没生效）。' }
+  }
+  const k = String(kind ?? '').trim()
+  const peer = String(peerId ?? '').trim()
+  const q = String(query ?? '').trim()
+  const tId = String(toId ?? '').trim()
+  const tKind = String(toKind ?? '').trim()
+  if (!q) return { isError: true, text: '要用什么关键词挑消息？把 query 给我。' }
+  if ((k !== 'private' && k !== 'group') || !peer) {
+    return {
+      isError: true,
+      text: '打包历史**必须指定本会话**（kind 用 private/group，peerId 用来源标注里那串号码）—— 我不能把别的会话的内容打包出去。',
+    }
+  }
+  if ((tKind !== 'private' && tKind !== 'group') || !tId) {
+    return { isError: true, text: '要发给谁？toId 与 toKind（private/group）都要给。' }
+  }
+  const cap = Math.min(20, Math.max(1, Number(limit) || 10))
+  try {
+    const { createCorpus } = await import('../src/corpus.mjs')
+    const c = createCorpus({ workspace: config.workspace, readOnly: true, log: () => {} })
+    const r = c.search({ query: q, chatKey: `${k}:${peer}`, limit: cap })
+    c.close()
+    if (!r.ok) return { isError: true, text: `搜不了：${r.why ?? '语料库不可用'}` }
+    if (!r.rows?.length) {
+      return { isError: false, text: `本会话里没有搜到「${q}」，所以没有打包任何东西。` }
+    }
+    const nodes = r.rows.slice(0, cap).map((row) => ({
+      type: 'node',
+      data: {
+        // 合并转发卡片里的"谁说的"：语料库有人名就用人名，没有就用号码
+        name: String(row.senderName ?? row.senderId ?? (row.isBot ? '我' : '某人')),
+        uin: String(row.senderId ?? config.selfId ?? '0'),
+        content: String(row.text ?? '').slice(0, 500),
+      },
+    }))
+    const sent = await callOneBot('send_forward_msg', {
+      [tKind === 'group' ? 'group_id' : 'user_id']: Number(tId),
+      message_type: tKind,
+      messages: nodes,
+    })
+    if (!sent.ok) return { isError: true, text: `打包发送失败：${sent.error}` }
+    return { isError: false, text: `已把本会话里「${q}」相关的 ${nodes.length} 条打包发出去（合并转发）。` }
+  } catch (error) {
+    return { isError: true, text: `打包历史时出错：${error?.message ?? error}` }
+  }
+}
+
 /** 执行一个工具调用，返回 MCP 的 content 数组。 */
 async function runTool(name, args) {
   const tool = TOOLS.find((t) => t.name === name)
   if (!tool) return { isError: true, text: `没有这个工具：${name}` }
+
+  // ── H7：本地语料库检索（**不走 OneBot**，也不经过 build/黑名单那条路）──────
+  if (tool.local === 'corpus') return runCorpusSearch(args ?? {})
+  // ── H14：本地语料库打包成合并转发 ──────────────────────────────────────
+  if (tool.local === 'forwardLog') return runForwardLog(args ?? {})
 
   let built
   try {
@@ -266,10 +560,25 @@ async function runTool(name, args) {
   const result = await callOneBot(built.action, built.params)
   if (!result.ok) return { isError: true, text: result.error }
 
+  // ★ H14：有些动作是**多步**的（转发之后补一句 note）。第二步失败**必须说出来** ——
+  //   否则"转发成功了但我的话没发出去"会看起来像"我说了那句话"。
+  let followUpNote = ''
+  if (typeof tool.followUp === 'function') {
+    try {
+      const second = tool.followUp(args ?? {})
+      if (second) {
+        const r2 = await callOneBot(second.action, second.params)
+        followUpNote = r2.ok ? '' : `\n⚠️ 但后面那句补充的话**没发出去**：${r2.error}`
+      }
+    } catch (error) {
+      followUpNote = `\n⚠️ 但后面那句补充的话**没发出去**：${error?.message ?? error}`
+    }
+  }
+
   // 结果可能很大（群成员列表能到几百条），截断以免把上下文塞爆
   let payload = JSON.stringify(result.data)
   if (payload.length > 8000) payload = payload.slice(0, 8000) + `…（已截断，共 ${payload.length} 字符）`
-  return { isError: false, text: `${built.action} 成功：${payload}` }
+  return { isError: false, text: `${built.action} 成功：${payload}${followUpNote}` }
 }
 
 // ── JSON-RPC 主循环 ───────────────────────────────────────────────────────
@@ -289,7 +598,9 @@ async function handle(frame) {
       return reply(id, {
         tools: TOOLS.map((t) => ({
           name: t.name,
-          description: t.description,
+          // ★ H14：描述统一经 `described()` 拼上权限提示与"如实"提示 ——
+          //   写在这里而不是每个工具手抄一遍，避免漏掉某个工具、也避免两处措辞漂移。
+          description: described(t),
           inputSchema: t.inputSchema,
         })),
       })
@@ -321,32 +632,53 @@ function loadConfig() {
   return parsed
 }
 
-try {
-  config = loadConfig()
-} catch (error) {
-  log(`配置加载失败：${error.message}`)
-  process.exit(1)
+/** 给测试用：直接塞一份配置（不读文件、不启动主循环）。 */
+export function __setConfig(cfg) {
+  config = cfg
 }
 
-log(`已启动，OneBot 端点 ${config.httpUrl}，工具 ${TOOLS.length} 个，黑名单 ${Object.keys(BLOCKED_ACTIONS).length} 项`)
-
-const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
-rl.on('line', (line) => {
-  const text = line.trim()
-  if (!text) return
-  let frame
+/** 启动主循环（DSH 以脚本方式拉起时走这里）。 */
+function startServer() {
   try {
-    frame = JSON.parse(text)
-  } catch {
-    log(`收到非 JSON 输入，已忽略：${text.slice(0, 120)}`)
-    return
+    config = loadConfig()
+  } catch (error) {
+    log(`配置加载失败：${error.message}`)
+    process.exit(1)
   }
-  handle(frame).catch((error) => {
-    log(`处理出错：${error?.message ?? error}`)
-    if (frame?.id !== undefined) replyError(frame.id, -32603, String(error?.message ?? error))
+
+  log(`已启动，OneBot 端点 ${config.httpUrl}，工具 ${TOOLS.length} 个，黑名单 ${Object.keys(BLOCKED_ACTIONS).length} 项`)
+
+  const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
+  rl.on('line', (line) => {
+    const text = line.trim()
+    if (!text) return
+    let frame
+    try {
+      frame = JSON.parse(text)
+    } catch {
+      log(`收到非 JSON 输入，已忽略：${text.slice(0, 120)}`)
+      return
+    }
+    handle(frame).catch((error) => {
+      log(`处理出错：${error?.message ?? error}`)
+      if (frame?.id !== undefined) replyError(frame.id, -32603, String(error?.message ?? error))
+    })
   })
-})
-rl.on('close', () => {
-  log('stdin 关闭，退出')
-  process.exit(0)
-})
+  rl.on('close', () => {
+    log('stdin 关闭，退出')
+    process.exit(0)
+  })
+}
+
+// ★★ 只有**被当作脚本直接拉起**时才启动主循环。
+//
+// 为什么加这个判断：DSH 是以脚本方式 spawn 本文件的（那才是生产路径），
+// 但"能被 import"让工具定义、提示拼接、参数构造这些**纯逻辑**可以在
+// **不需要子进程**的环境里被测到 —— 本项目实测过：受限沙箱里带管道的 spawn 会 EPERM，
+// 于是 `verify-mcp.mjs` 只能整份跳过（跳过不算通过）。把纯逻辑与启动分开之后，
+// 那一半至少永远测得到。生产路径**一个字都没变**。
+const invokedDirectly =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (invokedDirectly) startServer()
+
+export { TOOLS, BLOCKED_ACTIONS, described, runTool, runCorpusSearch, runForwardLog }

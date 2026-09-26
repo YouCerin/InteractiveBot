@@ -40,11 +40,18 @@ const MARK_END = '# <<< qq-bridge: qq tools (MCP) <<<'
  *   · 只写到 cache 目录，不进 git（见 .gitignore）
  *   · 不写进 workspace（那里会被 agent 读到，而 agent 不该看到 token）
  */
-export function writeMcpConfig({ cacheDir, httpUrl, httpToken, timeoutMs }) {
+export function writeMcpConfig({ cacheDir, httpUrl, httpToken, timeoutMs, workspace = null }) {
   mkdirSync(cacheDir, { recursive: true })
   const path = join(cacheDir, 'mcp-qq.config.json')
+  // ★ `workspace` 是 H7 加的：`qq_search_history` 工具要读工作区里的语料库
+  //   （`runtime/corpus.sqlite`）。它**不含密钥**，所以放进这份配置是安全的
+  //   （这份配置本来就在 cache/ 里、不进工作区；见上面的注释）。
   const body =
-    JSON.stringify({ httpUrl, httpToken, timeoutMs: timeoutMs ?? 20_000 }, null, 2) + '\n'
+    JSON.stringify(
+      { httpUrl, httpToken, timeoutMs: timeoutMs ?? 20_000, ...(workspace ? { workspace } : {}) },
+      null,
+      2,
+    ) + '\n'
   writeJsonIfChanged(path, body)
   return path
 }

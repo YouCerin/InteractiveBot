@@ -28,6 +28,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { discoverOnebotConfig, listAccountNames } from './token-discovery.mjs'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { findSnowluma, findNodeBinary, PKG_ROOT } from './local.mjs'
@@ -68,39 +69,21 @@ const DEFAULT_PROBE_MS = 1500
  *
  * @returns {{httpToken: string|null, wsToken: string|null, source: string|null, file: string|null}}
  */
-export function readSnowlumaTokens({ installDir, selfId } = {}) {
-  if (!installDir) return { httpToken: null, wsToken: null, source: null, file: null }
-  const cfgDir = join(installDir, 'config')
-  if (!existsSync(cfgDir)) return { httpToken: null, wsToken: null, source: null, file: null }
-
-  /** 候选文件名：优先按 UIN 精确匹配，其次取目录里唯一那个。 */
-  const candidates = []
-  const uin = String(selfId ?? '').trim()
-  if (uin) candidates.push(join(cfgDir, `onebot_${uin}.json`))
-  try {
-    for (const name of readdirSync(cfgDir)) {
-      if (/^onebot_\d+\.json$/.test(name)) {
-        const full = join(cfgDir, name)
-        if (!candidates.includes(full)) candidates.push(full)
-      }
-    }
-  } catch {
-    /* 读不到目录就只试 UIN 那个 */
+export function readSnowlumaTokens({ installDir, selfId, knownTokens = {} } = {}) {
+  // ★ H8：真正的读+校验搬到了 `token-discovery.mjs`（保守读：拒符号链接、体积/token 长度上限、
+  //   拒控制字符、只采纳 enabled 且回环的服务器、**显式账号找不到就绝不复用别的账号**）。
+  //   这里保持原有返回形状，另外把 `why` / `picked` / `accounts` 透出去给排查用。
+  const d = discoverOnebotConfig({ installDir, selfId, knownTokens })
+  return {
+    httpToken: d.httpToken,
+    wsToken: d.wsToken,
+    source: d.ok ? d.source : null,
+    file: d.file,
+    why: d.why,
+    picked: d.picked,
+    accounts: d.accounts,
+    warn: d.warn ?? '',
   }
-
-  for (const file of candidates) {
-    try {
-      const cfg = JSON.parse(readFileSync(file, 'utf8'))
-      const http = cfg?.networks?.httpServers?.[0]?.accessToken ?? null
-      const ws = cfg?.networks?.wsServers?.[0]?.accessToken ?? null
-      if (http || ws) {
-        return { httpToken: http, wsToken: ws, source: 'SnowLuma 自己的配置', file }
-      }
-    } catch {
-      /* 换下一个候选 */
-    }
-  }
-  return { httpToken: null, wsToken: null, source: null, file: null }
 }
 
 /**
@@ -110,13 +93,25 @@ export function readSnowlumaTokens({ installDir, selfId } = {}) {
  */
 export function resolveOnebotTokens({ config, installDir }) {
   const cfg = config?.onebot ?? {}
-  const fromSnowluma = readSnowlumaTokens({ installDir, selfId: cfg.selfId })
+  // ★★ H8：把 config.json 里现有的 token 当作"已知凭据"传下去 ——
+  //   多个账号时，**与它一致的那个账号才是我们自己的**（比"取最新"可靠得多）。
+  //   真机取证：本机有两个账号文件，最新的是**使用者的** QQ，只按 mtime 挑会挑错。
+  const fromSnowluma = readSnowlumaTokens({
+    installDir,
+    selfId: cfg.selfId,
+    knownTokens: { httpToken: cfg.httpToken, wsToken: cfg.wsToken },
+  })
   if (fromSnowluma.httpToken || fromSnowluma.wsToken) {
     return {
       httpToken: fromSnowluma.httpToken || cfg.httpToken || '',
       wsToken: fromSnowluma.wsToken || cfg.wsToken || '',
       source: fromSnowluma.source,
       file: fromSnowluma.file,
+      // ★ H8：一侧缺失时的原因（例如"那个通道的条目 enabled=false 或 host 不是回环"）
+      why: fromSnowluma.why ?? '',
+      picked: fromSnowluma.picked ?? 'none',
+      accounts: fromSnowluma.accounts ?? [],
+      warn: fromSnowluma.warn ?? '',
       // 两者不一致时说清楚 —— 这正是过去静默失败的地方
       differsFromConfig:
         Boolean(cfg.httpToken) && fromSnowluma.httpToken !== cfg.httpToken
@@ -130,6 +125,12 @@ export function resolveOnebotTokens({ config, installDir }) {
     source: 'config.json',
     file: null,
     differsFromConfig: false,
+    // ★ H8：**为什么没用 SnowLuma 自己的配置**（没装？没那个账号的文件？token 不合法？）
+    //   过去这是一段静默回退，而"静默回退到可能过期的 token"正是 401 的源头。
+    why: fromSnowluma.why ?? '',
+    picked: fromSnowluma.picked ?? 'none',
+    accounts: listAccountNames(installDir),
+    warn: fromSnowluma.warn ?? '',
   }
 }
 

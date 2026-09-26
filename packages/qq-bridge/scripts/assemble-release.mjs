@@ -30,6 +30,8 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { auditReleaseInputs, classifyDeleteTarget, renderProtectedList } from '../src/protected-files.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG_ROOT = resolve(HERE, '..')
 const REPO_ROOT = resolve(PKG_ROOT, '..', '..')
@@ -156,6 +158,39 @@ const existing = existsSync(join(REPO_ROOT, '_release'))
   ? readdirSync(join(REPO_ROOT, '_release')).filter((n) => n.startsWith('InteractBot-'))
   : []
 if (existing.length) log(`   （_release 里已有：${existing.join('、')}）`)
+
+// ── ②-b ★★ 受保护路径门禁（H16）：用户数据绝不能被打进包 ─────────────────
+//
+// 为什么要有这道门：`COPY_DIRS` / `COPY_FILES` 是**手写清单**，往里面多写一行
+// （比如顺手加上 `workspace-qq` 或 `logs`）就会把某个真实使用者的**聊天记忆、
+// 日志、token**打进发布包 —— 而且**不会有任何报错**（zip 里多两个目录而已）。
+// 清单本身也可能被别人改，所以这里做成**可执行的门禁**，而不是文档里的一句叮嘱。
+log('')
+log('── ②-b 受保护路径门禁（用户数据不许入包）──')
+{
+  const audit = auditReleaseInputs({ dirs: COPY_DIRS, files: COPY_FILES })
+  if (!audit.ok) {
+    bad(
+      '要拷进包的东西里**含受保护的用户数据**：\n' +
+        audit.problems.map((p) => `   · ${p.rel} —— ${p.why}`).join('\n') +
+        '\n   请把它们从 COPY_DIRS / COPY_FILES 里去掉。**这一条没有 --force 可绕过**。',
+    )
+    process.exit(1)
+  }
+  log(`   ✅ ${COPY_DIRS.length + COPY_FILES.length} 项拷贝输入都不在受保护清单里`)
+
+  // 目标目录删除前的检查：只允许删"我们自己的产物"
+  const target = classifyDeleteTarget({
+    dir: OUT,
+    markerFiles: [join(OUT, 'config.example.json'), join(OUT, 'package.json')],
+    exists: (p) => existsSync(p ?? OUT),
+    hasFiles: existsSync(OUT) && readdirSync(OUT).length > 0,
+  })
+  if (existsSync(OUT) && !target.ok) {
+    bad(`拒绝删除既有目录：${OUT}\n   ${target.why}\n   （确认它是我们的产物再手动处理，脚本不替你删）`)
+    process.exit(1)
+  }
+}
 
 // ── ③ 逐项校验要拷的东西都在 ──────────────────────────────────────────────
 log('')

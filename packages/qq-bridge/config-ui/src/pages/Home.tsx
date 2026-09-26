@@ -331,6 +331,28 @@ export default function Home() {
           </InlineNote>
         )}
 
+        {/* ★ 构建溯源（CONFIG-UI.md「界面产物与源码是不是同一份」）：
+            不是 fresh 就必须明说"你看到的是旧界面"并给出可执行的修法 ——
+            使用者拿着旧界面报 bug，排查会从完全错误的前提出发。
+            三种状态分开：stale = 源码改了没重新构建；unstamped = 没有标记、无法自证来源
+            （重新构建也没用，要删掉重建）。 */}
+        {!demo && status?.ui && status.ui.status !== 'fresh' && (
+          <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3">
+            <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-amber-900">
+              <CircleAlert className="h-4 w-4" />
+              你看到的是旧界面（构建溯源：{status.ui.status === 'stale' ? '源码改了没重新构建' : status.ui.status === 'unstamped' ? '没有构建标记，无法自证来源' : status.ui.status}）
+            </div>
+            <p className="text-sm text-amber-900">
+              {status.ui.why && <>{status.ui.why}。</>}
+              {status.ui.advice && (
+                <>
+                  修法：<code className="rounded bg-white/60 px-1.5 py-0.5 text-xs">{status.ui.advice}</code>
+                </>
+              )}
+            </p>
+          </div>
+        )}
+
         {fatalList.length > 0 && (
           <div className="mb-4 rounded-md border border-red-300 bg-red-50 px-4 py-3">
             <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-red-800">
@@ -393,6 +415,7 @@ export default function Home() {
             <ConversationsTab
               botName={status?.login?.nickname}
               groupEnabled={status?.groupEnabled ?? false}
+              demo={demo}
             />
           </TabsContent>
           <TabsContent value="persona">
@@ -427,6 +450,7 @@ export default function Home() {
               askConfirm={setConfirmReq}
               apiKey={apiKey}
               setApiKey={setApiKey}
+              demo={demo}
             />
           </TabsContent>
         </Tabs>

@@ -21,7 +21,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createProcessGuard, readInstanceArg, REGISTRY_REL, summarizeProcesses } from '../src/process-guard.mjs'
+import { createProcessGuard, readInstanceArg, REGISTRY_REL, summarizeProcesses, runningBridges } from '../src/process-guard.mjs'
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -114,6 +114,76 @@ async function main() {
     g.release()
   }
 
+  // ── ③-b 已确认死掉的同 profile 条目**不算冲突** ────────────────────────
+  //
+  // ★ 复现的是实测遇到的一个假警告：杀完旧实例后，`--processes` 的列表显示
+  //   `23404 dead` + `28312 alive` 两条，**下面却照样报"有 1 个其它桥接在跑"**，
+  //   并指引去 kill 一个已经不存在的 pid。
+  //   根因：`claim()` 只按 `profile` 相等就推 conflicts（含 state='dead'），
+  //   而 `list()` 的冲突过滤是 `alive || stale` —— 两处口径不一致。
+  //
+  // ⚠️ 这一段**刻意排在 spawn 闸门之前**：它不需要新进程，
+  //    用 `process.pid`（确定活着、心跳新鲜）当"另一个桥接"就够了。
+  //    放在闸门之后的话，受限环境会整段被跳过 —— 而那正是最需要它的环境。
+  section('③-b 已死的同 profile 条目不算冲突（这曾是假警告的来源）')
+  {
+    // 「活着的那条」必须满足两个条件，缺一条这段就白测：
+    //   ① **不是当前进程**（否则会被 `claim()` 当自己的旧条目跳过 —— 这里踩过）
+    //   ② 心跳新鲜 → 分类走 `alive` 那一支，**不必读命令行**
+    //      （受限环境读不到命令行，会掉进 suspect；而这一段要在受限环境也能跑）
+    // ⚠️ 不要用 `process.kill(pid, 0)` 来"确认它存在" —— 沙箱会以 EPERM 抛出，
+    //    于是断言变成"它不存在"而失败（这里踩过）。判据用下面的 `state === 'alive'` 即可，
+    //    那正是被测代码自己的口径，也更贴题。
+    const LIVE_PID = 4 // Windows 上 pid 4 = System，跨版本都在
+    check('前提：选用的"活着"的 PID 不是当前进程', LIVE_PID !== process.pid)
+    writeReg([
+      // 一个确认不存在的 pid，且 profile 与本进程相同
+      { pid: 999998, profile: 'bridge', instanceId: 'gone', updatedAtMs: Date.now(), port: 3410 },
+      // 一个真的活着、心跳新鲜的"另一个桥接"
+      { pid: LIVE_PID, profile: 'bridge', instanceId: 'aaaa1111', updatedAtMs: Date.now(), port: 3411 },
+    ])
+    const g = createProcessGuard({ pkgRoot: ROOT, port: 3410 })
+    const r = g.claim()
+    check('前提：选用的 PID 被分类为 alive（否则下面那条断言不成立）',
+      r.conflicts.some((c) => c.pid === LIVE_PID && c.state === 'alive'),
+      JSON.stringify(r.conflicts))
+    check('★★ 死条目不进 conflicts（否则会指引人去杀一个不存在的 pid）',
+      !r.conflicts.some((c) => c.pid === 999998), JSON.stringify(r.conflicts))
+    check('死条目仍然被清掉（清理与冲突是两件事）',
+      r.cleaned.some((c) => c.pid === 999998))
+    check('★ 活着的那个仍然被报成冲突（别为了修假警告把真警告也修没了）',
+      r.conflicts.some((c) => c.pid === LIVE_PID), JSON.stringify(r.conflicts))
+    check('conflicts 里的每一条都不是 dead 状态',
+      r.conflicts.every((c) => c.state !== 'dead'), JSON.stringify(r.conflicts.map((c) => c.state)))
+    g.release()
+  }
+
+  section('③-c runningBridges：CLI 冲突判定必须按**数量**，不能按 isSelf')
+  {
+    // ★ 复现实测遇到的第二个假警告：进程表清干净后只剩**唯一一个**桥接，
+    //   `--processes` 却仍报「有 1 个其它桥接在跑」并指引去 kill 它。
+    //   根因：CLI 是另一个进程，`isSelf` 对它恒为 false，所以
+    //   `!isSelf && alive` 会把唯一那个也当成"其它"。
+    //   正确口径：**1 条 = 正常，≥2 条 = 真冲突**。
+    // 入参形状对齐 `list()` 的返回：{ pid, profile, state, isSelf }
+    const mk = (pid, state, isSelf = false) => ({ pid, profile: 'bridge', state, isSelf })
+
+    check('★ 只有一条在跑 → 不算冲突（这是那个假警告的复现点）',
+      runningBridges([mk(35092, 'alive', false)]).length === 1)
+    check('两条在跑 → 两条都算（真的会抢事件流）',
+      runningBridges([mk(1, 'alive'), mk(2, 'alive')]).length === 2)
+    check('alive + stale 都算在跑（卡住的那个也在抢）',
+      runningBridges([mk(1, 'alive'), mk(2, 'stale')]).length === 2)
+    check('dead 不算在跑（PID 都没了）',
+      runningBridges([mk(1, 'dead'), mk(2, 'alive')]).length === 1)
+    check('suspect 不算在跑（读不到命令行，无法确认；保守不报，避免又指错人）',
+      runningBridges([mk(1, 'suspect')]).length === 0)
+    check('别的 profile（如 snowluma 协议端）不算桥接冲突',
+      runningBridges([{ pid: 9, profile: 'snowluma', state: 'alive' }]).length === 0)
+    check('空表 / 非数组入参都不抛',
+      runningBridges([]).length === 0 && runningBridges(null).length === 0)
+  }
+
   section('③ 活的"另一个桥接"必须被报成冲突（但不许自动杀）')
   {
     const spawned = await spawnIdle('aaaa1111')
@@ -138,6 +208,7 @@ async function main() {
     check('★ 另一个桥接被判为冲突并**报告**', r.conflicts.some((c) => c.pid === other.pid), JSON.stringify(r.conflicts))
     check('冲突条目的状态是 alive', r.conflicts[0]?.state === 'alive', r.conflicts[0]?.state)
     check('★ 没有把它从登记里删掉（不臆断别人死了）', readReg().some((e) => e.pid === other.pid))
+
 
     section('④ killEntry：PID + instanceId 双重匹配，防误杀')
     {

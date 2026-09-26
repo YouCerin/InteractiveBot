@@ -19,6 +19,7 @@
  */
 
 import { assertVendored, vendorRequire } from './vendor.mjs'
+import { classifyTransport, deliveryKey, describeGap } from './transport.mjs'
 
 // `ws` 从 vendor/node_modules 加载（不是标准 node_modules）—— 这样整个包
 // 换地方也能跑。细节见 src/vendor.mjs 的注释。
@@ -38,9 +39,28 @@ const SLOW_ACTIONS = new Set([
 const CALL_TIMEOUT_MS = 15_000
 const SLOW_TIMEOUT_MS = 90_000
 
+/**
+ * 造一个**带结构化描述符**的错误（H9）。
+ *
+ * 为什么挂在 error 上而不是换一种返回风格：调用方现在到处是 try/catch，
+ * 改返回值就等于改所有调用点。挂一个字段则**完全向后兼容**，
+ * 而需要判"能不能重试"的地方（将来）直接读 `error.transport.retryable`。
+ */
+function transportError(descriptor, message = null) {
+  const hint = descriptor?.hint ? ` ${descriptor.hint}` : ''
+  const err = new Error(message ?? `${descriptor?.message ?? 'OneBot 调用失败'}${hint}`)
+  err.transport = descriptor
+  return err
+}
+
 export class OneBotClient extends EventTarget {
   #ws = null
   #closed = false
+  /**
+   * 断线时刻（H9）：重连成功时用它算缺口时长；`null` = 当前没断。
+   * 「宁可显式标出缺口，也不假装连续」—— 见 `describeGap`。
+   */
+  #disconnectedAt = null
   #reconnectTimer = null
   #attempt = 0
   #rpcSeq = 0
@@ -94,6 +114,19 @@ export class OneBotClient extends EventTarget {
     ws.on('open', () => {
       this.#attempt = 0
       this.log('[onebot] 事件通道已连接')
+      // ── H9：断线缺口要**显式标出来**（"宁可标缺口，也不假装连续"）──────────
+      //   `describeGap` 会滤掉太短的抖动（<5 秒）；够长的缺口派一个 `gap` 事件，
+      //   由桥接把它带进**下一轮提示词** —— 否则模型会把掉线前后的两句话当成连续对话，
+      //   然后基于一个错误的前提回答。
+      if (this.#disconnectedAt) {
+        const since = this.#disconnectedAt
+        const ms = Date.now() - since
+        this.#disconnectedAt = null
+        if (describeGap({ ms })) {
+          this.log(`[onebot] ⚠️ 断线缺口约 ${Math.round(ms / 1000)} 秒（这期间的消息收不到）`)
+          this.dispatchEvent(new CustomEvent('gap', { detail: { ms, since } }))
+        }
+      }
       this.dispatchEvent(new CustomEvent('connected'))
     })
 
@@ -116,6 +149,9 @@ export class OneBotClient extends EventTarget {
 
     ws.on('close', (code) => {
       this.log(`[onebot] 事件通道断开 code=${code}`)
+      // ★ H9：记下断开时刻（重连成功时用它算缺口时长）。
+      //   只在第一次断开时记 —— 反复断开时"缺口起点"应该是最初那一次。
+      if (!this.#disconnectedAt) this.#disconnectedAt = Date.now()
       this.dispatchEvent(new CustomEvent('disconnected', { detail: { code } }))
       this.#scheduleReconnect()
     })
@@ -165,13 +201,16 @@ export class OneBotClient extends EventTarget {
 
       if (response.status === 426) {
         // 426 Upgrade Required 是最经典的配置错误：把 HTTP 端口填成了 WS 端口。
-        throw new Error(
+        // ★ H9：措辞仍**逐字保留**（它是排查时最有用的一句话），同时把结构化描述符挂在 error 上
+        //   —— 上层想做"要不要重试"的判断时**不必再去匹配错误字符串**。
+        throw transportError(
+          classifyTransport({ action, httpStatus: 426 }),
           `OneBot ${action} 失败：HTTP 426（Upgrade Required）。` +
             `几乎可以肯定 httpUrl 指向了 WebSocket 端口，请检查 SnowLuma 的 3000（HTTP）/3001（WS）是否填反。`,
         )
       }
       if (!response.ok) {
-        throw new Error(`OneBot ${action} 失败：HTTP ${response.status}`)
+        throw transportError(classifyTransport({ action, httpStatus: response.status }))
       }
 
       const text = await response.text()
@@ -184,15 +223,25 @@ export class OneBotClient extends EventTarget {
 
       const ok = body.status === 'ok' || body.retcode === 0
       if (!ok) {
-        throw new Error(
-          `OneBot ${action} 失败：retcode=${body.retcode ?? '?'} ${body.wording ?? body.msg ?? ''}`.trim(),
+        throw transportError(
+          classifyTransport({
+            action,
+            retcode: body.retcode ?? null,
+            wording: body.wording ?? body.msg ?? '',
+          }),
         )
       }
       return body.data ?? null
     } catch (error) {
       if (error?.name === 'AbortError') {
-        throw new Error(`OneBot ${action} 超时（${Math.round(limit / 1000)} 秒未返回）`)
+        throw transportError(
+          classifyTransport({ action, errorName: 'AbortError' }),
+          `OneBot ${action} 超时（${Math.round(limit / 1000)} 秒未返回）`,
+        )
       }
+      // 连接层错误（fetch 抛的那些）：挂上分类结果再抛
+      if (error?.transport) throw error
+      if (error?.code) throw transportError(classifyTransport({ action, errorCode: error.code, message: error.message }))
       throw error
     } finally {
       clearTimeout(timer)
@@ -270,17 +319,36 @@ export class OneBotClient extends EventTarget {
 
   /**
    * 发送消息。
+   *
+   * ── 为什么参数是"段"而不是纯文本 ────────────────────────────────────────
+   * 从 0.2.1 起机器人能**引用回复**（`[reply:id]`）和**发表情**（`[sticker:名]`），
+   * 而这两件事在 OneBot 里都是**消息段**，不是文本：
+   *   · 引用 → `{ type:'reply', data:{ id } }`（必须排在正文**之前**）
+   *   · 表情 → `{ type:'face',  data:{ id } }`（排在正文之后）
+   * ⚠️ 三段的顺序不能乱：OneBot/QQ 只认"reply 在最前"，放后面就不显示引用气泡。
+   *
    * @param {'private'|'group'} kind
    * @param {string|number} peerId
    * @param {string} text
+   * @param {{replyTo?: string|number|null, faceId?: string|number|null}} [opts]
+   *   `replyTo` 必须是**校验过**的消息 id（校验在 bridge 里做，见 markers.mjs）
+   * @returns {Promise<object>} 协议端的返回值（含 `message_id`，但我们目前不用它）
    */
-  async send(kind, peerId, text) {
+  async send(kind, peerId, text, { replyTo = null, faceId = null } = {}) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg'
     const key = kind === 'private' ? 'user_id' : 'group_id'
-    return this.call(action, {
-      [key]: Number(peerId),
-      message: [{ type: 'text', data: { text: String(text ?? '') } }],
-    })
+    const segments = []
+    if (replyTo != null && String(replyTo) !== '') {
+      segments.push({ type: 'reply', data: { id: String(replyTo) } })
+    }
+    const body = String(text ?? '')
+    if (body !== '') segments.push({ type: 'text', data: { text: body } })
+    if (faceId != null && String(faceId) !== '') {
+      segments.push({ type: 'face', data: { id: String(faceId) } })
+    }
+    // 全空 = 什么都不发（调用方本该拦住，这里兜一层，免得发一条空消息出去）
+    if (segments.length === 0) return { status: 'ok', retcode: 0, data: null, skipped: 'empty' }
+    return this.call(action, { [key]: Number(peerId), message: segments })
   }
 
   close() {
@@ -334,13 +402,18 @@ export class SendQueue {
    * 检查是否可以发送。
    * @returns {{ ok: boolean, reason?: string, waitMs?: number }}
    */
-  check(text) {
+  check(text, key = null) {
     const now = Date.now()
+    // ★ H9：去重键由调用方给（= `deliveryKey({chatKey, text, replyTo, faceId})`）。
+    //   为什么不再用**裸文本**：队列是**整个桥接共用一个**的，于是
+    //   "同一句话在 8 秒内发给两个不同的会话"时，第二个会被**误判成重复而丢弃**
+    //   —— 把会话（以及引用/表情）编进键里，这种跨会话误判就不存在了。
+    const dedupeKey = key ?? text
 
     // ── 去重 ──
     // 只在**发送成功后**才记账（见 markSent）。若在检查时就记账，
     // 一次合法重试会被误判成重复而丢失。
-    const lastSame = this.#recent.get(text)
+    const lastSame = this.#recent.get(dedupeKey)
     if (lastSame !== undefined && now - lastSame < this.dedupeWindowMs) {
       return { ok: false, reason: `内容重复（${Math.round((now - lastSame) / 1000)} 秒前刚发过）` }
     }
@@ -363,11 +436,11 @@ export class SendQueue {
   }
 
   /** 发送成功后调用，记账。 */
-  markSent(text) {
+  markSent(text, key = null) {
     const now = Date.now()
     this.#lastSentAt = now
     this.#window.push(now)
-    this.#recent.set(text, now)
+    this.#recent.set(key ?? text, now)
     // 清理过期的去重记录，防止无限增长
     if (this.#recent.size > 200) {
       for (const [key, at] of this.#recent) {

@@ -53,13 +53,36 @@ npm test                         # 全部离线套件（实测：所有套件退
 
 # 想单独跑某几套（下面括号里是**离线环境**下的断言条数；条目声明见 PROJECT.json）
 node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（33 项）
+node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）
+node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、接线断言（33 项）
 node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制（89 项）
+node mocks/verify-api-h13.mjs    # ★★ H13 四个接口（真起 HTTP 服务）：漏 await、token 泄露、跨会话检索、**畸形返回不拖垮进程**（29 项）
 node mocks/verify-config.mjs     # 配置解析与校验（42 项）
 node mocks/verify-units.mjs      # 纯逻辑：文本/唤醒/会话/防自环/人味层/人设/记忆
+node mocks/verify-persona.mjs    # ★★ 人设加固：反注入拦得住、正常人设不许误伤、名字表真的能唤醒（52 项）
 node mocks/verify-images.mjs     # 看图：SSRF 防护 + 防 DoS（145 项）
 node mocks/verify-identity.mjs   # ★ 身份核实：谁在说话、会话名、"身份不得变成权限"、权限判据自解释（57 项）
 node mocks/verify-memory-store.mjs # 记忆存储层：分档、内容过滤、篡改回滚（78 项）
-node mocks/verify-memory-roundtrip.mjs # ★ 记忆全链路：提议→落盘→剥离→回执→下轮注入（25 项）
+node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线** + **段顺序快照 / 逐字基线**（130 项）
+node mocks/verify-session-state.mjs # ★★ 会话状态机：与任务台账**两条轴**、水位（旧回合作废的显式形式）、话头恰好活一轮（48 项）
+node mocks/verify-memory-stats.mjs # ★★ 记忆可观测性：计数、零写入告警、体检漏报修复（29 项）
+node mocks/verify-memory-supersede.mjs # ★★ 记忆更正：旧条目不删只标注、注入里不再出现、"换成/其实"不许误判（50 项）
+node mocks/verify-corpus.mjs      # ★★ 本地语料库：中文 2 字走 LIKE 回退、隐私不落库、TTL 只预演（43 项）
+node mocks/verify-transport.mjs    # ★★ 传输契约：失败分类带 retryable、去重键带会话、断线缺口要标注（35 项）
+node mocks/verify-token-discovery.mjs # ★★ 凭据发现：显式账号找不到就绝不复用别的账号、只认回环、拒控制字符（53 项）
+node mocks/verify-markers.mjs       # ★★ 带内标记：[reply:id]/[sticker:名] 的解析与剥离、没有的东西不教（35 项）
+node mocks/verify-delivery-gate.mjs # ★★★ 投递前终检门：内部泄漏拦得住、正常回复一个字不动（47 项）
+node mocks/verify-memory-keyword.mjs # ★★★ 关键词直写：用户说「记住 X」必落盘、问句与自己人回忆不许误认（35 项）
+node mocks/verify-memory-consolidate.mjs # ★★ 记忆整理：幂等性、多行条目、前缀摘除、**定时整理接线**（74 项）
+node mocks/verify-memory-usage.mjs # ★★ 记忆使用侧车：只提示不降权（D9）、"没有数据≠没被用过"、新记忆不许被上限挤掉（54 项）
+node mocks/verify-delivery-ledger.mjs # ★★ 投递账本：发送前落账、pid@启动时刻、**绝不自动重发**（30 项）
+node mocks/verify-mcp-tools.mjs    # ★★ QQ 工具纯逻辑：动作名真机验过、权限提示不漏、本地工具 fail-closed（55 项）
+node mocks/verify-privacy.mjs     # ★★ 隐私硬闸：七类拦得住、**真实记忆 60 条零误拦**、审计不含原文（62 项）
+node mocks/verify-oplog.mjs       # ★★ 操作日志：参数与结果都记下、参数先解析再截值、超时回合也留痕（49 项）
+node mocks/verify-tasks.mjs       # ★★ 任务台账 + 回到第N步：零模型参与也完整、连续回退能恢复、闲置要降级（125 项）
+node mocks/verify-recipes.mjs     # ★★ 配方库：长尾匹配要命中、置信度用平滑、requiredActions 不自动执行（67 项）
+node mocks/verify-extract.mjs     # ★★ 抽取解析：真实 headless 输出（裸词 / 多两个 `}`）都要能解析（71 项）
+node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线**（任务段/配方段真的进提示词）
 node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）
 node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 需要能起子进程）
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
@@ -68,8 +91,21 @@ node mocks/verify-doctor.mjs     # 体检工具自身的准确性（30 项）
 node mocks/verify-live.mjs       # ★ 真实端到端（会调用模型，有少量费用）
 node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
 
+# 提示词取证（不是测试）：从 DSH 落盘的会话记录里搜出「模型这一轮实际收到了什么」。
+# 改过提示词文本之后**只有这个办法能证明它真的生效了** —— 桥接拼完就交给 DSH，中间没有日志。
+node mocks/session-grep.mjs "直接写事实"   # 搜最近 3 个会话；没命中就退 1
+node mocks/probe-ui-bundle.mjs       # 界面产物探针：**正在伺服的那份 UI** 有没有本轮新功能（改了 React 忘了 build 不会报错）
+node mocks/probe-memory-search.mjs   # 记忆检索接口探针：501 与 200 能分开（依赖名写错会伪装成"未实现"）
+node mocks/probe-h13-endpoints.mjs   # H13 四个接口探针（含 preflight / 日志流 / 账号 / 语料检索）
+node mocks/session-grep.mjs --list        # 只列有哪些会话、多大、什么时候写的
+
 # ⑤ 体检（真正检查连接是否可用，强烈建议先跑）
 start.bat --doctor
+
+# 📄 0.2.1 更新汇总（给人看的：这次改了什么、怎么验、刻意不做什么、还差什么）
+#   docs/0.2.1-release-notes.md        ← 先看这一份
+#   docs/0.2.1-hermes-borrow-plan.md   ← 逐阶段过程记录（含踩过的坑与被推翻的判断）
+#   docs/0.2.1-runtime-memory-verification.md ← 真机取证（哪些有硬证据、哪些还没有）
 
 # ⑤-b 记忆体检（只读；机器人正在跑的时候也能执行）
 #   ★「它说记住了」和「它真的记住了」是两件事 —— 这条命令回答后者。
@@ -77,6 +113,106 @@ start.bat --doctor
 node src/index.mjs --memory           # 记了什么 + 下一轮按会话会注入什么
 node src/index.mjs --memory --full    # 注入内容整段打印
 node src/index.mjs --memory --json    # 给脚本/界面用
+
+# ⑤-b1b 记忆使用账本（H3，**只读、只提示**）：哪条记忆已经很久没进过上下文了
+#   ★ 动机：记忆只增不减，而注入有 25 条上限 —— 死条目会吃掉预算，我们却无从知道。
+#   ★★ 它**不降权、不归档、不删**（设计决策 D9：不做强度浮点衰减），只把事实摆出来。
+#   ★ 注意用词：我们能看到的是"**被注入**"，不是"**被用上**"（模型依赖了哪条观测不到）。
+node src/index.mjs --memory --usage   # 最久没进过上下文的条目（含"从没进过"的那些）
+
+# ⑤-b1c 投递账本（H15，**只读**）：哪些回复正在投递、有没有没发完的
+#   ★ 来自真实事故：一条已经生成好的回复在拟人延迟期间因重启而永远消失，当时无人知道。
+#   ★★ 我们**不自动重发**（崩溃可能发生在"已发出但没标上"那一瞬间，无法区分 →
+#      自动重发会产生重复回复，而重复回复比漏一条更糟）。补不补由人决定。
+node src/index.mjs --delivery         # 最近 30 条 + 上一次没发完的
+
+# ⑤-b2 记忆写入统计（只读）：到底写了没有、什么时候写的、要不要报警
+#   ★★ 为什么有这条命令：实测聊了几十轮**一条记忆都没写**，而**没有任何地方报警**
+#      —— 发现它靠人工去解 DSH 的会话落盘记录。详见 docs/0.2.1-memory-diagnosis.md
+node src/index.mjs --memory --stats   # 每会话 轮数/提议/接受/拒绝/去重 + 最后落盘时间
+node src/index.mjs --memory --stats --reset   # 清空统计（memory/.stats.json）
+
+# ⑤-b3 记忆整理（规则版）：把模型写的"流水账"收敛成可用的记忆
+#   ★ **默认预演、不写盘**；要真改加 --apply（会先备份，再刷新快照基准 ——
+#     不刷新的话下次读记忆会被 verifyAndRestoreMemory 回滚）
+#   做四件事：标点归一 / 摘掉行首冗余的日期与"他说"前缀 / 合并高度相似条目 /
+#   解析多行条目（保留分节结构，不拍平）
+node src/index.mjs --memory --compact            # 预演：只算不写
+node src/index.mjs --memory --compact --apply    # 真改（带备份 + 快照刷新）
+node src/index.mjs --memory --compact --file memory/private-123.md   # 只处理一个文件
+
+# ⑤-b4 隐私扫描（只读）：现有记忆里有没有该被拦的东西
+#   ★ 隐私是**双侧硬闸**：写入侧拒绝落盘 + 输出侧拒绝发送。
+#     七类：身份证 / 手机号 / 银行卡 / 密码密钥 / 住址 / 健康医疗 / 生物特征。
+#     **QQ 号、群昵称、群名片、群号不是隐私**（它们是公开标识，拦了记忆系统就死了）。
+#   ★ 先扫再装闸门 —— 装完才发现它把正常记忆全拦了，比不装更糟。
+node src/index.mjs --memory --privacy
+
+# ⑤-b5 记忆变更审计（只读）：这条是**谁**在**什么时候**、通过**哪条通道**写进去的
+#   ★ 写入通道有四条（关键词直写 / 模型标记 / 管理员手段 / 整理合并），
+#     而日志只有一行"接受 N 条" —— 不说是哪一条、也不说是哪条通道。
+#   ★★ 审计**只记长度、不记原文**：它若也存一份内容，自己就成了第二个泄露面。
+node src/index.mjs --memory --audit              # 最近 50 条
+node src/index.mjs --memory --audit --limit 200  # 看更多
+
+# ⑤-b6 本地语料库（H7）：**搜"过去说过什么"**（机器人也能搜，见 MCP 工具 qq_search_history）
+#   ★ 在此之前回看历史只能"现拉"（qq_group_history），不能检索、协议端一重启就没了。
+#   ★ 三条边界：**七类隐私不落库**（写之前拦）、**30 天 TTL**、**不存媒体本体与路径**。
+node src/index.mjs --corpus                                   # 统计
+node src/index.mjs --corpus --search "霸王茶" --inject group:700000001 --limit 8
+node src/index.mjs --corpus --prune                           # 预演（只算不删）
+node src/index.mjs --corpus --prune --apply                   # 真删
+node src/index.mjs --corpus --rebuild                         # 重建 FTS 索引
+#   输出里还会列出拦截审计（memory/privacy-audit.jsonl）——
+#   审计**只记类别与字数，不记原文**，否则拦截本身就成了泄露通道。
+
+# ⑤-b5 操作日志（只读）：它**自己干过什么**
+#   ★ 数据是**桥接从事件流自己写的**，不问模型（诊断已证明"让模型报告自己
+#     做过什么"漏报率极高）。每次工具调用的参数、每条结果的状态/字节/摘要都在。
+#   ★ 只留结果摘要（300 字），全文在 DSH 的会话记录里 ——
+#     操作日志是"干了什么"的索引，不是内容仓库。
+node src/index.mjs --ops                       # 看最近的流水
+node src/index.mjs --ops --inject group:700000001 --limit 100
+node src/index.mjs --ops-prune                 # TTL 清理预演（默认不删）
+node src/index.mjs --ops-prune --apply         # 真删（保留 7 天）
+
+# ⑤-b6 任务台账（只读）：它"正在干什么、干到哪了" + **注入预览**
+#   ★ 这是"**不丢主线的锚**"：DSH 的会话上下文我们够不到（SDK 没有 resume、
+#     也控制不了压缩），长会话里早期内容被挤出时模型就丢主线。
+#     改不了它，就在里面钉一个锚 —— 把"当前任务"每轮注入。
+#   ★ 目标取**用户原话**、步骤从操作流水机械提炼 —— **零模型参与也完整**
+#     （"靠模型自觉记一笔"那条路已被实测证伪两次）。
+node src/index.mjs --tasks                    # 看台账 + 模型每轮看到的原文
+node src/index.mjs --tasks --inject group:700000001
+node src/index.mjs --tasks-archive [--apply]  # 归档过期台账（默认预演，是移走不是删除）
+node src/index.mjs --tasks --forget group:700000001
+
+# ⑤-b7 回到第 N 步
+#   ★ 三件如实说明（做不到的必须说清，否则就是个骗人的功能）：
+#     · **DSH 的会话上下文不会回退** —— 实测 17 种事件类型里零条
+#       checkpoint/fork/revert/resume，模型仍然"记得"那些步骤。
+#       我们唯一的手段是在提示词里**声明作废**（是声明，不是清除）。
+#     · **副作用不回退** —— 已发出的 QQ 消息、已写入的文件都不会回滚。
+#     · **越界不猜** —— 报错并给出可用范围。
+#   ★ 触发词**本地匹配**（「回到第3步」「撤销这一步」「回到上一步」），
+#     不让模型插手 —— 同记忆写入的教训：靠模型自觉的路漏报率极高。
+#   ★ 在群里/私聊直接说「回到第3步」也会被识别并当场生效。
+node src/index.mjs --tasks --rollback 3 --inject group:700000001
+node src/index.mjs --tasks --rollback 3 --inject group:700000001 --mode retry --note "那步读出来是乱码"
+
+# ⑤-b8 配方库：沉淀"怎么做"、同类任务直接套用
+#   ★ 与任务台账是两个轴：台账说"我正在干什么"（当下），配方说"这种事一般怎么做"（积累）。
+#   ★ 匹配是**零模型成本**的本地打分（子串命中 + 命中率），阈值内的才注入。
+#   ★ 置信度用拉普拉斯平滑 (ok+1)/(used+2)，60 天半衰期**只降权不删** ——
+#     过时的做法仍可检索，只是不再自动注入。
+node src/index.mjs --recipes                          # 列出（按置信度）
+node src/index.mjs --recipes --match "帮我查个品牌"     # ★ 预览会命中哪条 + 注入原文
+node src/index.mjs --recipes --show 调研品牌可信度
+node src/index.mjs --recipes --add --file 配方.json     # ★ 推荐 --file（--json 易被 shell 搅坏）
+node src/index.mjs --recipes --disable 调研品牌可信度    # 停用/启用/删除
+node src/index.mjs --recipes --extract --inject private:<QQ> [--dry]
+                                  # ★ 手动跑一次"自动沉淀"（调试用；会调用一次模型，--dry 不入库）
+                                  #   平时它自己每 5 轮在后台跑一次，不必手动执行
 
 # ⑤-c 界面新鲜度（只读）：这份 dist 是不是当前源码构建的？
 #   ★ 界面分两条路出货（开发路径与发布包路径），**脱钩过一次**且测试全绿。
@@ -91,7 +227,7 @@ start.bat                        # 双击；或 node src/index.mjs
 # start.bat 现在会先拉起 SnowLuma，再起桥接。跳过 SnowLuma：start.bat --no-snowluma
 ```
 
-当前状态：**离线 19 套全部退出码 0**；真实 QQ 端到端实测通过（含 QQ 原生工具调用）。
+当前状态：**离线 2188 项断言 / 38 套全部退出码 0**（链上 42 个条目，另有 3 套在受限沙箱里**跳过**，见下）；真实 QQ 端到端实测通过（含 QQ 原生工具调用）。
 
 > ⚠️ 标了「★ 需要能起子进程」的几套，在受限沙箱里会 **EPERM**。
 > 那种情况下它们会**明确打印「跳过」并说明这不是通过**（跑不了就说跑不了），

@@ -260,6 +260,16 @@ export function createApiHandler(deps) {
     dropMemorySnapshot,
     // 工作区绝对根路径（取图用 —— 对话里的图片只从 workspace/inbox 出）
     workspaceRoot,
+    // ── H13 的四组（同样是可选的：不传就回 501）──────────────────────────
+    preflight, // 启动前置条件门控：返回 {gates:[{id,ok,level,title,hint,action}]}
+    listAccounts, // 协议端账号**摘要**（绝不回 token）
+    searchCorpus, // 本地语料检索（fail-closed：必须带会话）
+    searchMemory, // 记忆条目检索（只读，不需要会话参数 —— 文件名已经分了档）
+    // ── 0.2.1 记忆观测面（统计 + 隐私；全部只读，不做重置/开关）────────────
+    memoryStats, // 记忆写入统计 + 零写入告警（阈值在后端 STATS_DEFAULTS，不是配置项）
+    privacyAudit, // 隐私拦截审计（只回时间/侧/类别/字数 —— 审计里本来就没有原文）
+    scanMemoryPrivacy, // 扫描盘上记忆里的隐私条目（只回文件+行号+类别，不回原文）
+    logStream, // 日志流（SSE）
   } = deps
 
   return async function handle(req) {
@@ -597,6 +607,144 @@ export function createApiHandler(deps) {
         })
       }
 
+      // ══════════════════════════════════════════════════════════════════
+      // H13：界面要的四组后端能力（**都是只读或"只回摘要"**）
+      // ══════════════════════════════════════════════════════════════════
+
+      // ── ① 启动前置条件门控：**失败要给可操作的话**，而不是静默 ────────────
+      //
+      // 计划里这条与我们第 6 条铁律（失败必须让用户知道）直接对应：
+      // 以前"机器人不说话"的典型原因是"协议端没登录/用错了那份配置"，而界面上
+      // **什么都没说**。现在把每个前置条件变成一条 `{id, ok, level, title, hint, action}`，
+      // 界面只要照着渲染就行 —— 判据都在后端，界面不重复实现（避免两处判断漂移）。
+      if (method === 'GET' && path === '/api/preflight') {
+        if (!preflight) return notImplemented('启动前置条件检查')
+        // ★ `await`：它是异步的（要真的去问一次协议端）。
+        //   漏掉 await 的后果不是报错，而是返回一个 Promise → 序列化成 `{}` ——
+        //   界面上"什么都没显示"而不报错，是最难查的一种。
+        return ok(await preflight())
+      }
+
+      // ── ② 账号发现：**只回摘要，绝不回 token** ───────────────────────────
+      //
+      // 界面上要能"选一个账号"，但**绝不能**把 token 送到浏览器 ——
+      // 那等于把机器人的登录凭据复制到每一个能打开这个页面的地方。
+      // 所以这里只回：有哪些账号、哪个是当前在用的、以及**为什么**这么判定。
+      if (method === 'GET' && path === '/api/snowluma/accounts') {
+        if (!listAccounts) return notImplemented('列出协议端账号')
+        try {
+          const raw = listAccounts() ?? {}
+          // ★★ **字段白名单**（纵深防御）：不直接把依赖的返回值转出去。
+          //    为什么不能"信任依赖只回摘要"：凭据是这个项目里最敏感的东西，
+          //    而"某天有人在那个函数里加一个字段"是完全可能的（比如为了排查方便带回 token）。
+          //    白名单让"泄露 token"在**结构上不可能**，而不是靠每个实现者记得。
+          //    测试里故意让依赖返回一个 `httpToken`，断言它到不了响应里。
+          return ok({
+            installDir: String(raw.installDir ?? ''),
+            current: raw.current == null ? null : String(raw.current),
+            why: String(raw.why ?? ''),
+            matchedByConfig: raw.matchedByConfig === true,
+            accounts: (Array.isArray(raw.accounts) ? raw.accounts : []).map((a) => ({
+              uin: String(a?.uin ?? ''),
+              file: String(a?.file ?? ''),
+              isCurrent: a?.isCurrent === true,
+            })),
+          })
+        } catch (error) {
+          return fail(500, `列账号失败：${error?.message ?? error}`)
+        }
+      }
+
+      // ── ③ 本地语料检索：给"我上次说的那个…"用 ───────────────────────────
+      //
+      // ★ **fail-closed**：必须显式给 kind 与 peerId。语料库里存着**所有会话**的消息，
+      //   不带会话过滤就等于把别的群/别人的私聊读进这个页面 —— 界面上看一眼就泄露了。
+      //   （与 MCP 工具 `qq_search_history` 同一条纪律，两处必须一致。）
+      if (method === 'GET' && path === '/api/corpus/search') {
+        if (!searchCorpus) return notImplemented('检索本地语料库')
+        const q = String(queryParam(req, 'q') ?? '').trim()
+        const kind = String(queryParam(req, 'kind') ?? '').trim()
+        const peerId = String(queryParam(req, 'peerId') ?? '').trim()
+        const limit = Number(queryParam(req, 'limit')) || 20
+        if (!q) return fail(400, '要搜什么？给一个 q 参数')
+        if ((kind !== 'private' && kind !== 'group') || !peerId) {
+          return fail(400, '检索必须指定会话：kind=private|group 且 peerId=QQ号或群号（不跨会话检索）')
+        }
+        try {
+          return ok(searchCorpus({ query: q, chatKey: `${kind}:${peerId}`, limit }))
+        } catch (error) {
+          return fail(500, `检索失败：${error?.message ?? error}`)
+        }
+      }
+
+      // ── ③-b 记忆检索：在**沉淀下来的事实**里找条目 ──────────────────────
+      //
+      // 与语料检索（③）的分工：语料是"说过什么"（消息流水 + TTL），
+      // 记忆是"记住的事实"（条目 + 跨重启生效）。这里**不需要会话参数** ——
+      // 记忆文件本身就是按会话分档命名的（`MEMORY.md` / `private-*.md` / `group-*.md`），
+      // 而"这一个文件属于谁"从文件名就能看出来，不存在"把别的会话内容混进来"的问题。
+      if (method === 'GET' && path === '/api/memory/search') {
+        if (!searchMemory) return notImplemented('检索记忆')
+        const q = String(queryParam(req, 'q') ?? '').trim()
+        if (!q) return fail(400, '要搜什么？给一个 q 参数')
+        try {
+          return ok(searchMemory({ query: q, limit: Number(queryParam(req, 'limit')) || 50 }))
+        } catch (error) {
+          return fail(500, `检索记忆失败：${error?.message ?? error}`)
+        }
+      }
+
+      // ── ③-c 记忆写入统计 + 零写入告警（0.2.1）────────────────────────────
+      //
+      // 为什么必须有：实测事故 —— 聊了两天几十轮、一条记忆都没写，而没有任何
+      // 地方报警。四列（轮数/提议/接受/拒绝/去重）必须都给：proposed=0 与
+      // ignored 高是两种不同故障，合成一个数字会把排查方向带偏。
+      // ★ 只读：不提供"改计数"（伪造观测），也不提供重置（只会让告警重新沉默）。
+      if (method === 'GET' && path === '/api/memory/stats') {
+        if (!memoryStats) return notImplemented('记忆写入统计')
+        try {
+          return ok(memoryStats())
+        } catch (error) {
+          return fail(500, `读取记忆统计失败：${error?.message ?? error}`)
+        }
+      }
+
+      // ── ③-d 隐私拦截审计 + 盘上扫描（0.2.1）──────────────────────────────
+      //
+      // ★★ 两条纪律（与 CONFIG-UI.md 对齐）：
+      //   1. 绝不回原文 —— 审计只记类别与字数（刻意的），扫描只回**位置**。
+      //      界面也不许想办法展示原文，否则拦截本身就成了泄露通道。
+      //   2. 不做"关闭隐私闸门"的开关 —— 做成开关就等于给了静默关掉的入口。
+      if (method === 'GET' && path === '/api/memory/privacy') {
+        if (!privacyAudit) return notImplemented('隐私拦截审计')
+        try {
+          return ok(privacyAudit({ limit: Number(queryParam(req, 'limit')) || 20 }))
+        } catch (error) {
+          return fail(500, `读取隐私审计失败：${error?.message ?? error}`)
+        }
+      }
+
+      // 扫描是 POST 而不是 GET：它要遍历工作区里所有记忆文件，可能比读接口慢，
+      // 且语义上是"发起一次检查动作"。仍然是**只读**的 —— 不改任何文件。
+      if (method === 'POST' && path === '/api/memory/privacy/scan') {
+        if (!scanMemoryPrivacy) return notImplemented('扫描记忆隐私')
+        try {
+          return ok(await scanMemoryPrivacy())
+        } catch (error) {
+          return fail(500, `扫描失败：${error?.message ?? error}`)
+        }
+      }
+
+      // ── ④ 日志流（SSE）：把"正在发生什么"给界面看 ────────────────────────
+      //
+      // ★ 只读、只跟一个**已存在的**日志文件；不新建、不改写。
+      // ★ 依赖没注入时回 501（界面按"未实现"容错），而不是挂一个空连接。
+      if (method === 'GET' && path === '/api/logs/stream') {
+        if (!logStream) return notImplemented('日志流')
+        // ★ 别忘了 `ok()`：真机上这条路由就是漏了它，把整个进程带下线的（见上面收口校验的说明）
+        return ok(logStream({ since: Number(queryParam(req, 'since')) || 0, limit: Number(queryParam(req, 'limit')) || 200 }))
+      }
+
       return fail(404, `没有这个接口：${method} ${path}`)
     } catch (error) {
       // 任何未预料的异常都要变成结构化错误，而不是让请求挂死
@@ -756,6 +904,28 @@ export function serveApi({ port = 3410, host = '127.0.0.1', handler, staticDir, 
       } catch (error) {
         result = { status: 500, headers: JSON_HEADERS, body: { ok: false, error: String(error?.message ?? error) } }
       }
+
+      // ★★ H13：**收口校验** —— 一条路由返回了畸形结果，绝不能拖垮整个进程。
+      //
+      // 真机事故（2026-09-27）：新加的一条路由忘了用 `ok()` 包结果，直接返回了自己的对象，
+      // 于是 `result.status` 是 `undefined` → `res.writeHead(undefined)` 抛
+      // `RangeError [ERR_HTTP_INVALID_STATUS_CODE]`，**而它发生在 `req.on('end')` 的
+      // async 回调里**，所以没人接住 → 未处理的 Promise 拒绝 → 进程按既定策略收尾退出。
+      // 结果：**一个新接口写错，整个机器人下线**（而且症状是"连不上 3410"，看起来像端口问题）。
+      //
+      // 所以这里做一次结构校验：不符合 `{status: number}` 一律变成 500 并**留下证据**，
+      // 而不是把畸形值交给 `writeHead`。
+      if (!result || typeof result.status !== 'number' || !Number.isInteger(result.status)) {
+        const shape = result === undefined ? 'undefined' : Array.isArray(result) ? 'array' : typeof result
+        log?.(`❌ [api] 路由返回了畸形结果（type=${shape}，status=${result?.status ?? '?'}）→ 当成 500。` +
+          '这是**代码缺陷**：路由必须返回 ok(...) / fail(...)')
+        result = {
+          status: 500,
+          headers: JSON_HEADERS,
+          body: { ok: false, error: '接口内部错误：这条路由返回了畸形结果（已记日志，不影响其它接口）' },
+        }
+      }
+
       res.writeHead(result.status, result.headers ?? JSON_HEADERS)
       // rawBody 是原始字节（图片等二进制内容），**不能** JSON.stringify
       res.end(result.rawBody !== undefined ? result.rawBody : JSON.stringify(result.body))

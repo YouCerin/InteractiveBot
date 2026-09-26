@@ -18,13 +18,13 @@
  *   node src/index.mjs --check         # 只做配置自检，不连任何东西
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, statSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { SdkRpcClient } from './sdk-rpc.mjs'
-import { INSTANCE_ARG_PREFIX, createProcessGuard } from './process-guard.mjs'
+import { INSTANCE_ARG_PREFIX, createProcessGuard, runningBridges } from './process-guard.mjs'
 import { OneBotClient, SendQueue } from './onebot.mjs'
 import { SessionRouter } from './session-bridge.mjs'
 import { Bridge } from './bridge.mjs'
@@ -44,6 +44,14 @@ import { resolveModelCredentials } from './credentials.mjs'
 //   目的就是让"两条调用路径传的判据一致"变成结构上必然成立（见该函数的注释）。
 import { startSnowluma, openSnowlumaConsole, resolveOnebotTokens, makeLaunchDetect } from './snowluma.mjs'
 import { createSnowlumaLogReader } from './snowluma-log.mjs'
+// ★ H13：账号发现（**只回摘要，绝不回 token**）与本地语料检索
+import { discoverOnebotConfig, listAccountNames } from './token-discovery.mjs'
+import { createCorpus } from './corpus.mjs'
+import { sliceLogLines, splitLogText } from './log-tail.mjs'
+import { searchMemoryFiles } from './memory-search.mjs'
+import { readAllStats, STATS_DEFAULTS } from './memory-stats.mjs'
+import { readPrivacyAudit, scanPrivacy, PRIVACY_CATEGORIES } from './privacy.mjs'
+import { inspectMemory } from './memory-inspect.mjs'
 
 // ── 日志：同时写控制台和文件 ──────────────────────────────────────────────
 let logFile = null
@@ -259,6 +267,69 @@ async function main() {
   }
 
 
+  // ── 投递账本（H15，**只读**）──────────────────────────────────────────
+  //
+  // 它回答的是一个真机上真实发生过的问题：一条**已经生成好**的回复在拟人延迟期间
+  // 因为重启而永远消失，而当时没有任何地方能说清"丢的是哪条、给谁的"。
+  //   node src/index.mjs --delivery                 # 看最近 30 条 + 未完成投递
+  //   node src/index.mjs --delivery --resend <id>   # 看某一条的详情（人显式决定）
+  //
+  // ★★ 位置纪律（**踩过一次，代价是启动了一个多余的桥接进程**）：
+  //    `--memory` 下面的 `--audit` / `--usage` 都**嵌在** `--memory` 分支的 async 块里，
+  //    所以新增的**顶层**命令如果顺手插在那附近，它会落在那个块内部 ——
+  //    直接跑 `--delivery` 时分支不命中，程序**继续往下走真的去启动桥接**
+  //    （进程守护只给了一句"建议先停掉一个"的警告）。一个只读命令**不该有启动服务这种副作用**。
+  //    → 新增顶层命令一律放在**这一段之上**，并且跑一次确认它不会走到启动路径。
+  if (process.argv.includes('--delivery')) {
+    ;(async () => {
+      const { readLedger, renderLedger, orphanedDeliveries, inFlightDeliveries, renderOrphans, renderInFlight, LEDGER_REL } =
+        await import('./delivery-ledger.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位投递账本')
+        process.exit(2)
+      }
+      const ledger = readLedger({ workspace, log: (m) => console.log(`  ${m}`) })
+
+      const ri = process.argv.indexOf('--resend')
+      const targetId = ri >= 0 ? String(process.argv[ri + 1] ?? '').trim() : ''
+      if (targetId) {
+        const row = (ledger.rows ?? []).find((r) => r.id === targetId)
+        if (!row) {
+          console.error(`❌ 账本里没有 id 为 ${targetId} 的记录。用 --delivery 看一遍 id。`)
+          process.exit(2)
+        }
+        const body = (row.chunks ?? []).map((c) => c.preview).join('')
+        console.log('')
+        console.log(`这一条：【${row.chatKey}】（${row.total} 片，已发出 ${(row.chunks ?? []).filter((c) => c.sent).length} 片）`)
+        console.log(`  正文预览：${body}${body.length >= 40 ? '…' : ''}`)
+        console.log('')
+        console.log('⚠️ 账本里**只存了每片的前 40 字**（它是排查用的，不是第二份聊天记录）——')
+        console.log('   所以这里**不做自动补发**：补发需要完整正文，而正文在 DSH 的会话里；')
+        console.log('   要重新发一次，就让对方再说一句（那一轮会重新生成）。')
+        console.log('')
+        process.exit(0)
+      }
+
+      const orphans = orphanedDeliveries({ workspace, log: () => {} })
+      const inFlight = inFlightDeliveries({ workspace, log: () => {} })
+      console.log('')
+      console.log(`投递账本（${LEDGER_REL}）：共 ${(ledger.rows ?? []).length} 条记录`)
+      console.log('')
+      console.log(renderLedger({ ledger, limit: 30 }))
+      if (inFlight.length) {
+        console.log('')
+        console.log(renderInFlight(inFlight))
+      }
+      if (orphans.length) {
+        console.log('')
+        console.log(renderOrphans(orphans))
+      }
+      console.log('')
+      process.exit(0)
+    })()
+  }
+
   // ── 记忆体检（只读，可以在机器人正在跑的时候执行）────────────────────
   //
   // ★ 为什么要有这个入口（"它说记住了"和"它真的记住了"是两件事）：
@@ -269,6 +340,7 @@ async function main() {
   // 用法：
   //   node src/index.mjs --memory
   //   node src/index.mjs --memory --inject private:100000001 --inject group:700000001
+  //   node src/index.mjs --memory --audit [--limit N]   ← 变更审计（谁/何时/来源/档位）
   if (process.argv.includes('--memory')) {
     ;(async () => {
       const { inspectMemory, formatMemoryReport } = await import('./memory-inspect.mjs')
@@ -277,6 +349,60 @@ async function main() {
         console.error('❌ 配置里没有 dsh.workspace，无法定位记忆目录')
         process.exit(2)
       }
+
+      // ── 变更审计（**只读**）：回答"这条是谁在什么时候、通过哪条通道写进去的"──
+      //
+      // 为什么单独给一个入口：记忆现在有**四条写入通道**（模型标记 / 关键词直写 /
+      // 管理员手段 / 整理合并），出问题时"到底是谁写的"是第一个要回答的问题，
+      // 而 `logs/bridge.log` 只有一行 `[memory] 记忆写入：接受 N 条`，不说是哪一条。
+      // ⚠️ 审计里**没有原文**（只记长度）—— 它不能变成第二个泄露面。
+      if (process.argv.includes('--audit')) {
+        const { readAuditEntries, formatAuditRow, AUDIT_REL } = await import('./memory-audit.mjs')
+        const li = process.argv.indexOf('--limit')
+        const limit = li >= 0 ? Number(process.argv[li + 1]) || 50 : 50
+        const rows = readAuditEntries({ workspace, limit })
+        console.log('')
+        console.log(`记忆变更审计（最近 ${rows.length} 条；文件 ${AUDIT_REL}）`)
+        console.log(`工作区：${workspace}`)
+        console.log('')
+        if (rows.length === 0) {
+          console.log('  （还没有任何变更记录 —— 审计从这次升级之后才开始记）')
+        } else {
+          for (const r of rows) console.log(`  ${formatAuditRow(r)}`)
+        }
+        console.log('')
+        console.log('  说明：审计**只记长度、不记原文**（否则它会变成第二个泄露面）。')
+        console.log('        要查内容请直接看记忆文件；`--memory` 看落盘与注入。')
+        console.log('')
+        process.exit(0)
+      }
+
+      // ── 使用账本（H3，**只读、只提示**）：回答"这条记忆多久没进过上下文了"──
+      //
+      // ★ 它的动机：记忆**只增不减**，而注入有条数上限（25 条）—— 死条目会吃掉预算，
+      //   我们却无从知道哪条还在参与对话。这个入口把"最久没进过上下文"的条目列出来。
+      // ⚠️ 它**只提示**：不自动降权、不自动归档、不删（设计决策 D9：不做强度浮点衰减）。
+      // ⚠️ 我们观测到的是"**被注入**"而不是"**被用上**" —— 字段名与文案都按这个说。
+      if (process.argv.includes('--usage')) {
+        const { readUsage, staleEntries, renderUsageReport, STALE_DAYS } = await import('./memory-usage.mjs')
+        const usage = readUsage({ workspace, log: (m) => console.log(`  ${m}`) })
+        const stale = staleEntries({ workspace, usage })
+        const total = Object.keys(usage.entries ?? {}).length
+        console.log('')
+        console.log(renderUsageReport({
+          stale,
+          total,
+          neverInjected: stale.filter((s) => s.lastInjectedAt === null).length,
+          days: STALE_DAYS,
+          startedAt: usage.startedAt,
+        }))
+        console.log('')
+        console.log(`  工作区：${workspace}`)
+        console.log('  说明：账本只记时间与次数，**不记内容**；条目按归一化文本的 hash 认人。')
+        console.log('')
+        process.exit(0)
+      }
+
       // 要预览注入的会话：显式给就用显式的；否则默认列配置里的白名单。
       const injectArgs = []
       for (let i = 0; i < process.argv.length; i += 1) {
@@ -295,6 +421,208 @@ async function main() {
         return { kind, peerId }
       })
       const report = inspectMemory({ workspace, conversations })
+      if (process.argv.includes('--privacy')) {
+        // ── 隐私扫描（**只读**）：现有记忆里有没有该被拦的东西 ──────────────
+        //
+        // ★ 为什么先扫再装闸门：闸门装完才发现它把正常记忆全拦了，
+        //   比不装更糟（表现成"记忆突然全不工作了"）。所以先看清现状，再定阈值。
+        //   本命令**不改任何文件**，机器人跑着也能执行。
+        const { scanPrivacy, PRIVACY_CATEGORIES, readPrivacyAudit } = await import('./privacy.mjs')
+        const fs = await import('node:fs')
+        const path = await import('node:path')
+
+        console.log('')
+        console.log('隐私扫描（只读；不会改动任何文件）')
+        console.log(`工作区：${workspace}`)
+        console.log('')
+
+        // 要扫的文件：记忆库 + 运行态文件（都在工作区内）
+        const targets = []
+        for (const rel of report.files.map((f) => f.rel)) targets.push(rel)
+        for (const rel of ['memory/.stats.json', 'memory/privacy-audit.jsonl']) {
+          if (fs.existsSync(path.join(workspace, rel))) targets.push(rel)
+        }
+
+        let hitLines = 0
+        let scanned = 0
+        const byCategory = {}
+        for (const rel of targets) {
+          const abs = path.join(workspace, rel)
+          let text = ''
+          try {
+            text = fs.readFileSync(abs, 'utf8')
+          } catch {
+            continue
+          }
+          const lines = text.split('\n')
+          const fileHits = []
+          for (let i = 0; i < lines.length; i += 1) {
+            const t = lines[i].replace(/^-\s*/, '').trim()
+            if (!t || t.startsWith('#')) continue
+            scanned += 1
+            const r = scanPrivacy(t)
+            if (!r.hit) continue
+            hitLines += 1
+            fileHits.push({ line: i + 1, categories: r.categories, preview: t.slice(0, 50) })
+            for (const c of r.categories) byCategory[c] = (byCategory[c] ?? 0) + 1
+          }
+          if (fileHits.length > 0) {
+            console.log(`  ⚠️ ${rel}`)
+            for (const h of fileHits) {
+              console.log(
+                `       第 ${String(h.line).padStart(3)} 行  [${h.categories.join(',')}]  ${h.preview}…`,
+              )
+            }
+          }
+        }
+
+        console.log('')
+        console.log(`  扫了 ${scanned} 条，命中 ${hitLines} 条`)
+        if (hitLines === 0) {
+          console.log('  ✅ 现有记忆里没有发现七类隐私')
+        } else {
+          console.log('  按类别：')
+          for (const [c, n] of Object.entries(byCategory)) {
+            console.log(`       ${PRIVACY_CATEGORIES[c] ?? c}  ${n} 条`)
+          }
+          console.log('')
+          console.log('  ⚠️ 这些条目**不会被新写入**（写入侧已拦），但**已经在盘上了**。')
+          console.log('     处理办法：在控制台「记忆」页签里手动删掉，然后跑一次')
+          console.log('       node src/index.mjs --memory --compact --apply')
+          console.log('     让格式归一并刷新快照基准。')
+        }
+
+        // 拦截审计：**只记类别与长度，没有原文** —— 这里也如实说清
+        const audit = readPrivacyAudit({ workspace, limit: 20 })
+        console.log('')
+        console.log(`  隐私拦截审计（memory/privacy-audit.jsonl，最近 ${audit.length} 条）`)
+        if (audit.length === 0) {
+          console.log('       （还没有拦截记录）')
+        } else {
+          for (const a of audit) {
+            const when = new Date(a.ts).toISOString().slice(0, 19).replace('T', ' ')
+            console.log(
+              `       ${when}  ${a.side === 'store' ? '写入侧' : '输出侧'}  ` +
+                `[${(a.categories ?? []).map((c) => PRIVACY_CATEGORIES[c] ?? c).join('、')}]  ${a.length} 字`,
+            )
+          }
+          console.log('       ★ 审计只记**类别与字数**，不记原文 —— 否则拦截本身就成了泄露通道。')
+        }
+        console.log('')
+        process.exit(0)
+      }
+      if (process.argv.includes('--compact')) {
+        // ── 记忆整理（规则版）─────────────────────────────────────────────
+        //
+        // ★ **默认预演、不写盘**：要真改必须显式加 `--apply`。
+        //   理由：记忆是长期资产，一次误合并的代价远大于"多打一个参数"的不便。
+        //   预演和实做的**走同一段代码**（`consolidateFile` 只差一个 apply 开关），
+        //   所以"预演看到的"就是"真做出来的"，不会两套逻辑分叉。
+        const { consolidateFile } = await import('./memory-consolidate.mjs')
+        const { saveSnapshot } = await import('./memory-store.mjs')
+        const apply = process.argv.includes('--apply')
+        const only = (() => {
+          const i = process.argv.indexOf('--file')
+          return i >= 0 ? process.argv[i + 1] : null
+        })()
+        const targets = report.files.map((f) => f.rel).filter((rel) => !only || rel === only)
+        if (targets.length === 0) {
+          console.log(only ? `没有这个记忆文件：${only}` : '没有找到任何记忆文件')
+          process.exit(0)
+        }
+        console.log('')
+        console.log(`记忆整理（规则版）${apply ? '【实做】' : '【预演 —— 不写盘，加 --apply 才真改】'}`)
+        console.log(`工作区：${workspace}`)
+        let totalBefore = 0
+        let totalAfter = 0
+        let changedFiles = 0
+        for (const rel of targets) {
+          const r = consolidateFile({ workspace, rel, apply, saveSnapshot })
+          if (!r.ok) {
+            console.log(`\n  ❌ ${rel}：${r.why}`)
+            continue
+          }
+          totalBefore += r.before
+          totalAfter += r.after
+          if (r.changed) changedFiles += 1
+          const mark = r.changed ? '→' : '·'
+          console.log(`\n  ${mark} ${rel}  ${r.before} 条 → ${r.after} 条`)
+          if (r.plan.droppedDuplicates.length > 0) {
+            console.log(`     完全重复 ${r.plan.droppedDuplicates.length} 条（只留最早那条）`)
+            for (const d of r.plan.droppedDuplicates.slice(0, 5)) {
+              console.log(`       - 丢：${d.text.replace(/\n/g, ' ').slice(0, 60)}`)
+            }
+          }
+          if (r.plan.merged.length > 0) {
+            console.log(`     合并相似 ${r.plan.merged.length} 组（保留信息更多的那条）`)
+            for (const m of r.plan.merged.slice(0, 5)) {
+              console.log(`       [相似度 ${m.score}] 留：${m.kept.replace(/\n/g, ' ').slice(0, 50)}`)
+              console.log(`                      并掉：${m.mergedAway.replace(/\n/g, ' ').slice(0, 50)}`)
+            }
+          }
+          if (r.changed) {
+            console.log('     整理后：')
+            for (const line of r.plan.kept) {
+              for (const l of String(line).split('\n')) console.log(`       - ${l.slice(0, 70)}`)
+            }
+          } else {
+            console.log('     （已经是干净的，无需改动）')
+          }
+        }
+        console.log('')
+        console.log(
+          `  合计：${targets.length} 个文件，${totalBefore} 条 → ${totalAfter} 条` +
+            `（${changedFiles} 个文件有改动）`,
+        )
+        if (apply && changedFiles > 0) {
+          console.log('  ✅ 已写回，并刷新了快照基准（否则下次读记忆会把整理结果回滚）')
+        } else if (!apply && changedFiles > 0) {
+          console.log('  要真的写回：在上面那条命令末尾加 --apply')
+        }
+        console.log('')
+        process.exit(0)
+      }
+      if (process.argv.includes('--stats')) {
+        // ── 计数视图：回答"到底写了没有" ────────────────────────────────────
+        // 为什么独立成一个开关：① 体检默认输出已经很长；② 排查"一条没记"时
+        // 先看的就是这四个数（提议/接受/拒绝/去重），不用先读一堆文件明细。
+        const { readAllStats, resetStats } = await import('./memory-stats.mjs')
+        if (process.argv.includes('--reset')) {
+          resetStats(workspace)
+          console.log('已清空记忆统计（memory/.stats.json）')
+          process.exit(0)
+        }
+        const rows = readAllStats(workspace)
+        console.log('')
+        console.log('记忆写入统计（只读；数据来自 memory/.stats.json）')
+        console.log(`工作区：${workspace}`)
+        console.log('')
+        if (rows.length === 0) {
+          console.log('   （还没有任何会话记录 —— 说明桥接还没跑过带记忆的回合）')
+        } else {
+          console.log('   会话                     轮数  提议  接受  拒绝  去重   最后落盘')
+          for (const r of rows) {
+            const last = r.lastWriteAt ? new Date(r.lastWriteAt).toISOString().slice(0, 19).replace('T', ' ') : '—'
+            console.log(
+              `   ${String(r.chatKey).padEnd(22)} ${String(r.turns).padStart(4)}  ` +
+                `${String(r.proposed).padStart(4)}  ${String(r.applied).padStart(4)}  ` +
+                `${String(r.ignored).padStart(4)}  ${String(r.deduped).padStart(4)}   ${last}`,
+            )
+          }
+        }
+        const alerts = rows.filter((r) => r.alert)
+        console.log('')
+        if (alerts.length > 0) {
+          console.log('   ⚠️ **零写入告警**（跑了足够多轮却一条都没落盘）：')
+          for (const a of alerts) console.log(`      ${a.chatKey}：${a.alertWhy}`)
+          console.log('      排查顺序：① --memory 看落盘与注入 ② 看日志里的 [memory] 行')
+          console.log('                ③ 看 docs/0.2.1-memory-diagnosis.md')
+        } else {
+          console.log('   ✅ 没有零写入告警')
+        }
+        console.log('')
+        process.exit(0)
+      }
       if (process.argv.includes('--json')) {
         console.log(JSON.stringify(report, null, 2))
       } else {
@@ -310,7 +638,547 @@ async function main() {
     return
   }
 
+  // ── 配方库：沉淀"怎么做" ──────────────────────────────────────────────────
+  //
+  //   --recipes                                   列出（按置信度）
+  //   --recipes --extract --inject <会话> [--dry]   ★ **手动跑一次自动抽取**（可重复验证）
+  //   --recipes --match "帮我查个品牌"              看这段文本会命中哪条（匹配预览）
+  //   --recipes --show <id>                       看一条的全文
+  //   --recipes --add --json '<json>'              人工加一条
+  //   --recipes --enable/--disable <id>            启用/停用
+  //   --recipes --forget <id>                     删掉
+  // ── 本地语料库（H7）：搜"过去说过什么" ────────────────────────────────────
+  //
+  //   --corpus                              统计（条数/会话分布/占用/超期数）
+  //   --corpus --search <关键词> [--inject <会话>] [--limit N]
+  //   --corpus --prune [--apply] [--days N] 按 TTL 清理（**默认预演**）
+  //   --corpus --rebuild                    重建 FTS 索引（怀疑索引不一致时）
+  //
+  // ★ 隐私边界（用户确认过）：七类隐私**不落库**；30 天 TTL；不存媒体本体。
+  if (process.argv.includes('--corpus')) {
+    ;(async () => {
+      const { createCorpus, renderSearchResults } = await import('./corpus.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位语料库')
+        process.exit(2)
+      }
+      const argOf = (name) => {
+        const i = process.argv.indexOf(name)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+      const corpus = createCorpus({ workspace, log: (m) => console.log(m) })
+
+      if (process.argv.includes('--search')) {
+        const query = argOf('--search')
+        const chatKey = argOf('--inject')
+        const limit = Number(argOf('--limit')) || 8
+        if (!query) {
+          console.error('❌ 用法：--corpus --search <关键词> [--inject private:<QQ>|group:<群号>] [--limit N]')
+          process.exit(2)
+        }
+        const r = corpus.search({ query, chatKey, limit })
+        if (!r.ok) {
+          console.error(`❌ 检索失败：${r.why}`)
+          process.exit(1)
+        }
+        console.log('')
+        console.log(`检索「${query}」${chatKey ? `（仅 ${chatKey}）` : '（全部会话）'}：命中 ${r.rows.length} 条，方式 ${r.mode}`)
+        console.log('')
+        if (r.rows.length === 0) console.log('  （没有命中）')
+        for (const row of r.rows) {
+          const when = new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false })
+          console.log(`  [mid:${row.messageId ?? '?'}] ${when} ${row.isBot ? '（机器人）' : ''}${row.chatKey} ${row.senderName ?? row.userId ?? ''}`)
+          console.log(`      ${row.preview.replace(/\n/g, ' ')}`)
+        }
+        console.log('')
+        corpus.close()
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--prune')) {
+        const apply = process.argv.includes('--apply')
+        const days = Number(argOf('--days')) || undefined
+        const r = corpus.prune({ days, apply })
+        if (!r.ok) {
+          console.error(`❌ 清理失败：${r.why}`)
+          process.exit(1)
+        }
+        console.log('')
+        console.log(
+          apply
+            ? `已清理 ${r.removed} 条（保留最近 ${r.days} 天）`
+            : `预演：将有 ${r.wouldRemove} 条超过 ${r.days} 天被清理（加 --apply 才真删）`,
+        )
+        console.log('')
+        corpus.close()
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--rebuild')) {
+        const r = corpus.rebuild()
+        console.log(r.ok ? '✅ FTS 索引已重建' : `❌ 重建失败：${r.why}`)
+        corpus.close()
+        process.exit(r.ok ? 0 : 1)
+      }
+
+      const st = corpus.stats()
+      console.log('')
+      console.log('本地语料库（H7）')
+      console.log(`工作区：${workspace}`)
+      console.log('')
+      if (!st.ok) {
+        console.error(`❌ 读不到统计：${st.why}`)
+        process.exit(1)
+      }
+      console.log(`  文件：${st.file}（${Math.round(st.bytes / 1024)} KB）`)
+      console.log(`  消息：${st.total} 条（其中机器人自己说的 ${st.botMessages} 条）`)
+      console.log(`  时间范围：${st.oldestAt ? new Date(st.oldestAt).toLocaleString('zh-CN') : '（空）'} ~ ${st.newestAt ? new Date(st.newestAt).toLocaleString('zh-CN') : '（空）'}`)
+      console.log(`  超期（>${st.ttlDays} 天）：${st.expired} 条 → 用 --corpus --prune [--apply] 清理`)
+      if (st.byChat.length) {
+        console.log('  按会话：')
+        for (const c of st.byChat) console.log(`    ${c.chatKey}  ${c.count} 条`)
+      }
+      console.log('')
+      corpus.close()
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 语料库操作失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+  // ── 配方库：沉淀"怎么做" ──────────────────────────────────────────────────
+  if (process.argv.includes('--recipes')) {
+    ;(async () => {
+      const R = await import('./recipes.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位配方库目录')
+        process.exit(2)
+      }
+      const argOf = (name) => {
+        const i = process.argv.indexOf(name)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+
+      // ── 手动跑一次自动抽取（R4 的**可重复验证入口**）────────────────────
+      //
+      // 为什么必须有它：自动抽取是"每 5 轮在后台跑一次、失败静默"的路径 ——
+      // 出问题时既等不起 5 轮，也没法只跑一次看原文。而**它第一次上真机就失败了**
+      // （模型多写了两个 `}`，见 extract.mjs 的 dropPrematureRootClose）。
+      // 当时是靠"临时脚本 + 手动去翻 DSH 落盘的抽取会话"才把原文捞回来的 ——
+      // 这一条把那次的手工动作固化成一个命令。
+      //
+      // ⚠️ 会**真的调用一次模型**（有少量费用），且必须能起子进程。
+      if (process.argv.includes('--extract')) {
+        const E = await import('./extract.mjs')
+        const T = await import('./tasks.mjs')
+        const O = await import('./oplog.mjs')
+        const chatKey = argOf('--inject')
+        if (!chatKey) {
+          console.error('❌ 用法：--recipes --extract --inject <会话> [--dry]')
+          console.error('   例：--recipes --extract --inject private:100000001')
+          console.error('   （--dry = 只看抽取结果，不入库；会真的调一次模型）')
+          process.exit(2)
+        }
+        const cliPath = config.dsh?.cliPath
+        if (!cliPath) {
+          console.error('❌ 没找到 dsh CLI —— 检查 config.json 的 dsh.searchPaths')
+          process.exit(2)
+        }
+        const kind = String(chatKey).startsWith('group:') ? 'group' : 'private'
+        const task = T.readTask({ workspace, chatKey })
+        const ops = O.readOps({ workspace, chatKey, limit: 40 })
+        const prompt = E.buildExtractPrompt({ task, ops, kind })
+        console.log(`会话 ${chatKey}｜台账步骤 ${task?.steps?.length ?? 0} 条｜操作流水 ${ops.length} 条`)
+        console.log('正在跑 headless 抽取（会调用一次模型）…')
+        const t0 = Date.now()
+        const r = await E.runHeadless({ cliPath, prompt, cwd: workspace, timeoutMs: 90_000 })
+        console.log(`headless：${r.ok ? 'ok' : '失败'}（${Date.now() - t0}ms）${r.why ? `｜${r.why}` : ''}`)
+        if (!r.ok) process.exit(1)
+        console.log(`\n原文（${r.text.length} 字）：\n${r.text.slice(0, 1500)}`)
+        const parsed = E.parseLooseJson(r.text)
+        if (!parsed) {
+          console.error('\n❌ 解析不出 JSON（原文见上）—— 这正是最该留证据的失败')
+          process.exit(1)
+        }
+        if (parsed.skip === true) {
+          console.log('\n模型判定这件事不值得沉淀（skip）—— 正常结果，不入库')
+          process.exit(0)
+        }
+        const norm = R.normalizeRecipe(parsed, { source: 'auto' })
+        if (!norm) {
+          console.error('\n❌ 解析出来了，但过不了字段校验（没有标题 / 既没步骤也没关键词）→ 不入库')
+          process.exit(1)
+        }
+        console.log(`\n解析出的配方：\n${JSON.stringify(norm, null, 2)}`)
+        if (process.argv.includes('--dry')) {
+          console.log('\n（--dry：没有入库）')
+          process.exit(0)
+        }
+        const up = R.upsertRecipe({ workspace, recipe: parsed, source: 'auto' })
+        console.log(`\n入库：${JSON.stringify(up)}`)
+        process.exit(up.ok ? 0 : 1)
+      }
+
+      if (argOf('--add')) {
+        // ★ 优先 `--file`：`--json` 要穿过 shell 的引号解析，而配方里全是中文与引号，
+        //   PowerShell 下实测很容易被搅坏（报错还很难看懂）。`--file` 把它绕开。
+        const file = argOf('--file')
+        const raw = file ? null : argOf('--json')
+        if (!file && !raw) {
+          console.error('❌ 用法：')
+          console.error("     --recipes --add --file <配方.json>        ← **推荐**（避开 shell 引号问题）")
+          console.error('     --recipes --add --json \'{"title":"...","trigger":{"keywords":[...]},"steps":[...]}\'')
+          process.exit(2)
+        }
+        let parsed = null
+        if (file) {
+          try {
+            const fs = await import('node:fs')
+            let text = fs.readFileSync(file, 'utf8')
+            // ⚠️ 必须剥 BOM：Windows 上 `Out-File` / 记事本写的 UTF-8 **带 BOM**，
+            //    而 `JSON.parse` 遇到 BOM 直接抛 `Unexpected token ''`。
+            //    项目里所有 `readJson`（memory-store / tasks / oplog / recipes）
+            //    都有这一句；这个 CLI 入口是漏网的那个（实测被它咬了一次）。
+            if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+            parsed = JSON.parse(text)
+          } catch (e) {
+            console.error(`❌ 读不了 / 解析不了 ${file}：${e.message}`)
+            process.exit(2)
+          }
+        } else {
+          try {
+            parsed = JSON.parse(raw)
+          } catch (e) {
+            console.error(`❌ --json 不是合法 JSON：${e.message}`)
+            console.error('   （中文与引号很容易被 shell 搅坏 —— 建议改用 --file）')
+            process.exit(2)
+          }
+        }
+        const r = R.upsertRecipe({ workspace, recipe: parsed, source: 'manual' })
+        if (!r.ok) {
+          console.error(`❌ ${r.why}`)
+          process.exit(1)
+        }
+        console.log(`✅ ${r.merged ? '已合并进' : '已新增'} ${r.id}`)
+        process.exit(0)
+      }
+
+      const one = argOf('--show') ?? argOf('--enable') ?? argOf('--disable') ?? argOf('--forget')
+      if (one) {
+        const id = one
+        if (process.argv.includes('--enable') || process.argv.includes('--disable')) {
+          const r = R.setRecipeEnabled({ workspace, id, enabled: process.argv.includes('--enable') })
+          if (!r.ok) {
+            console.error(`❌ ${r.why}`)
+            process.exit(1)
+          }
+          console.log(`✅ ${id} 已${r.recipe.enabled ? '启用' : '停用'}`)
+          process.exit(0)
+        }
+        if (process.argv.includes('--forget')) {
+          const ok = R.removeRecipe({ workspace, id })
+          console.log(ok ? `✅ 已删掉 ${id}` : `（没有这条配方：${id}）`)
+          process.exit(ok ? 0 : 1)
+        }
+        const rec = R.readRecipe({ workspace, id })
+        if (!rec) {
+          console.error(`❌ 没有这条配方：${id}`)
+          process.exit(1)
+        }
+        console.log('')
+        console.log(`${rec.title}${rec.enabled === false ? '  **已停用**' : ''}`)
+        console.log(`  来源 ${rec.source} · 置信 ${R.confidenceOf(rec).toFixed(2)} · 用过 ${rec.stats?.used ?? 0} 次（成功 ${rec.stats?.succeeded ?? 0} / 失败 ${rec.stats?.failed ?? 0}）`)
+        console.log(`  触发关键词：${(rec.trigger?.keywords ?? []).join('、') || '（无）'}`)
+        if (rec.trigger?.intent) console.log(`  意图：${rec.trigger.intent}`)
+        console.log('  步骤：')
+        for (const s of rec.steps ?? []) console.log(`    ${s}`)
+        if ((rec.pitfalls ?? []).length) {
+          console.log('  坑：')
+          for (const p of rec.pitfalls) console.log(`    ${p}`)
+        }
+        if (rec.verify) console.log(`  验收：${rec.verify}`)
+        if ((rec.requiredActions ?? []).length) console.log(`  通常需要：${rec.requiredActions.join('、')}（只提示，不自动执行）`)
+        console.log('')
+        process.exit(0)
+      }
+
+      const text = argOf('--match')
+      const all = R.listRecipes({ workspace })
+      console.log('')
+      console.log(`配方库（${all.length} 条）`)
+      console.log(`工作区：${workspace}`)
+      console.log('')
+      if (all.length === 0) {
+        console.log('   （还没有配方）')
+        console.log('   ★ 自动沉淀需要一次额外的模型调用，而本项目**没有直连模型 API 的代码**')
+        console.log('     （全程通过 DSH 的 session/prompt 说话），本机也没有 headless profile。')
+        console.log('     所以自动沉淀**尚未接通** —— 现在可以先人工加：')
+        console.log('       node src/index.mjs --recipes --add --json \'{"title":"...","trigger":{"keywords":["..."]},"steps":["..."]}\'')
+      } else {
+        for (const r of all) console.log(`  · ${R.summarizeRecipe(r)}`)
+      }
+      if (text) {
+        console.log('')
+        console.log(`匹配预览：「${text}」`)
+        const scored = all
+          .map((r) => ({ r, score: R.matchScore(r, text), conf: R.confidenceOf(r) }))
+          .sort((a, b) => b.score - a.score)
+        for (const s of scored.slice(0, 5)) {
+          console.log(`   ${s.score >= R.MATCH_THRESHOLD ? '✓' : '·'} ${s.score.toFixed(2)}  ${s.r.title}`)
+        }
+        const picked = R.pickRecipes(all, text)
+        console.log('')
+        if (picked.length === 0) {
+          console.log(`   → 都不注入（阈值 ${R.MATCH_THRESHOLD}，且置信度需 ≥ ${R.INJECT_MIN_CONFIDENCE}）`)
+        } else {
+          console.log('   → 会注入下面这段：')
+          for (const l of R.renderRecipeBlock(picked).split('\n')) console.log(`     ${l}`)
+        }
+      }
+      console.log('')
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 配方库操作失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+  // ── 任务台账：它"正在干什么、干到哪了" ──────────────────────────────────
+  //
+  //   --tasks [--inject <会话>]        看台账（含注入预览 —— 同一份渲染函数）
+  //   --tasks --rollback <N> [--mode]  回到第 N 步
+  //   --tasks-archive [--apply]        归档过期台账（**默认预演**）
+  //   --tasks --forget <会话>          删掉某会话的台账
+  if (process.argv.includes('--tasks') || process.argv.includes('--tasks-archive')) {
+    ;(async () => {
+      const {
+        listTasks, readTask, renderTaskBlock, archiveStaleTasks, forgetTask,
+        rollbackTask, ROLLBACK_MODES,
+      } = await import('./tasks.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位任务台账目录')
+        process.exit(2)
+      }
+      const argOf = (name) => {
+        const i = process.argv.indexOf(name)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+
+      // ── 回到第 N 步 ──────────────────────────────────────────────────────
+      if (argOf('--rollback') !== null) {
+        const chatKey = argOf('--inject')
+        if (!chatKey) {
+          console.error('❌ 用法：--tasks --rollback <N> --inject <会话> [--mode replay|retry|abandon]')
+          process.exit(2)
+        }
+        const r = rollbackTask({
+          workspace,
+          chatKey,
+          step: argOf('--rollback'),
+          mode: argOf('--mode') ?? 'replay',
+          note: argOf('--note') ?? '',
+        })
+        if (!r.ok) {
+          console.error(`❌ ${r.why}`)
+          process.exit(1)
+        }
+        console.log('')
+        console.log(`✅ 已回退到第 ${r.task.checkpoint.step} 步（${ROLLBACK_MODES[r.task.redo.mode]}）`)
+        console.log(`   ${r.target?.action ?? ''}`)
+        console.log('')
+        console.log('   ⚠️ 两点如实说明：')
+        console.log('      · **DSH 的会话上下文不会回退** —— 模型仍然"记得"那些步骤的内容，')
+        console.log('        我们唯一能做的是在下一轮提示词里**声明它们作废**（不是清除）。')
+        console.log('      · **副作用不回退** —— 已发出的 QQ 消息、已写入工作区的文件都不会回滚。')
+        console.log('')
+        console.log('   下一轮注入会变成：')
+        for (const l of renderTaskBlock(r.task).split('\n')) console.log(`     ${l}`)
+        console.log('')
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--tasks-archive')) {
+        const apply = process.argv.includes('--apply')
+        const r = archiveStaleTasks({ workspace, apply })
+        console.log('')
+        console.log(`任务台账归档${apply ? '【实做】' : '【预演 —— 不写盘，加 --apply 才真移】'}`)
+        console.log(`工作区：${workspace}`)
+        console.log(`  要归档 ${r.moved.length} 个，保留 ${r.kept.length} 个`)
+        for (const f of r.moved) console.log(`     → ${f}`)
+        console.log('  （归档 = 移到 runtime/archive/，**不是删除**）')
+        console.log('')
+        process.exit(0)
+      }
+
+      if (argOf('--forget')) {
+        const key = argOf('--forget')
+        const ok = forgetTask({ workspace, chatKey: key })
+        console.log(ok ? `✅ 已删掉 ${key} 的任务台账` : `（${key} 没有台账）`)
+        process.exit(0)
+      }
+
+      const chatKey = argOf('--inject') ?? null
+      const files = listTasks({ workspace })
+      console.log('')
+      console.log('任务台账（只读）：它"正在干什么、干到哪了"')
+      console.log(`工作区：${workspace}`)
+      console.log('')
+      if (files.length === 0) {
+        console.log('   （还没有台账 —— 说明还没有回合被记下来）')
+      }
+      const keys = chatKey ? [chatKey] : files.map((f) => f.replace(/^runtime\/tasks\//, '').replace(/\.json$/, ''))
+      for (const key of keys) {
+        const task = readTask({ workspace, chatKey: key })
+        if (!task) {
+          console.log(`  · ${key}：没有台账`)
+          continue
+        }
+        const age = Math.round((Date.now() - Number(task.lastActiveAt ?? 0)) / 60000)
+        console.log(`  ── ${key} ──`)
+        console.log(`     状态 ${task.status} · ${task.turns ?? 0} 轮 · 最后活动 ${age} 分钟前`)
+        if (task.goal) console.log(`     目标（${task.goalSource ?? '?'}）：${task.goal}`)
+        console.log(`     步骤 ${task.steps?.length ?? 0} 条，失败 ${task.tried?.length ?? 0} 条，被挡 ${task.blocked?.length ?? 0} 条`)
+        for (const s of (task.steps ?? []).slice(-8)) {
+          const mark = s.outcome === 'ok' ? '✓' : s.outcome === 'failed' ? '✗' : s.outcome === 'blocked' ? '🔒' : '…'
+          console.log(`       ${mark} ${s.action}${s.result ? ` → ${String(s.result).slice(0, 50)}` : ''}`)
+        }
+        const block = renderTaskBlock(task)
+        console.log('')
+        console.log('     注入预览（模型每轮看到的就是这段）：')
+        for (const l of block.split('\n')) console.log(`       ${l}`)
+        console.log('')
+      }
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 读任务台账失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+  // ── 操作日志（oplog）：agent"自己干过什么" ────────────────────────────────
+  //
+  // 两个入口（都在工作区的 runtime/oplog/ 下）：
+  //   --ops [--inject <会话>] [--limit N]   看流水
+  //   --ops-prune [--apply]                 按 TTL 清理（**默认预演**）
+  if (process.argv.includes('--ops') || process.argv.includes('--ops-prune')) {
+    ;(async () => {
+      const { readOps, pruneOplogs, listOplogs, OPLOG_TTL_DAYS } = await import('./oplog.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位操作日志目录')
+        process.exit(2)
+      }
+      const argOf = (name) => {
+        const i = process.argv.indexOf(name)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+      const chatKey = argOf('--inject') ?? null
+
+      if (process.argv.includes('--ops-prune')) {
+        const apply = process.argv.includes('--apply')
+        const r = pruneOplogs({ workspace, apply })
+        console.log('')
+        console.log(`操作日志清理${apply ? '【实做】' : '【预演 —— 不写盘，加 --apply 才真删】'}`)
+        console.log(`工作区：${workspace}`)
+        console.log(`保留 ${OPLOG_TTL_DAYS} 天（早于 ${r.cutoff} 的删掉）`)
+        console.log('')
+        console.log(`  要删 ${r.removed.length} 个，保留 ${r.kept.length} 个` +
+          (r.skipped.length ? `，${r.skipped.length} 个认不出日期**不动**` : ''))
+        for (const f of r.removed.slice(0, 20)) console.log(`     - ${f}`)
+        if (r.removed.length > 20) console.log(`     …还有 ${r.removed.length - 20} 个`)
+        if (r.skipped.length) {
+          console.log('  认不出日期的（保守起见不删）：')
+          for (const f of r.skipped.slice(0, 10)) console.log(`     · ${f}`)
+        }
+        console.log('')
+        process.exit(0)
+      }
+
+      const limit = Math.max(1, Number(argOf('--limit')) || 40)
+      const rows = readOps({ workspace, chatKey, limit })
+      console.log('')
+      console.log('操作日志（只读；回答"它自己干过什么"）')
+      console.log(`工作区：${workspace}`)
+      if (chatKey) console.log(`会话  ：${chatKey}`)
+      console.log('')
+      const files = listOplogs({ workspace, chatKey })
+      if (files.length === 0) {
+        console.log('   （还没有操作日志 —— 说明还没有回合被记下来）')
+        console.log('   （oplog 在每次回合结束后由桥接写入，不依赖模型报告）')
+      } else {
+        console.log(`   文件 ${files.length} 个，最近 ${rows.length} 条：`)
+        console.log('')
+        // ⚠️ 列对齐按 `turn/step` 后的**那一列**算，但那一列**只有工具类记录才有内容**：
+        //    `assistant`（💬 说话）与 `turn/end`（⏹ 结束）都不是工具调用，
+        //    没有工具名可显示。第一版照搬工具格式，结果说明列空着、看着像"数据缺失"。
+        //    现在把这一列的内容各按语义填：工具名 / "我说话" / "本轮结束"。
+        for (const r of rows) {
+          const t = new Date(r.ts).toTimeString().slice(0, 8)
+          const pos = `t${r.turn ?? '?'}s${r.step ?? '?'}`
+          if (r.type === 'tool/call') {
+            const a = r.args && typeof r.args === 'object' ? JSON.stringify(r.args) : String(r.args ?? '')
+            console.log(`   ${t} ${pos.padEnd(8)} → ${r.name}  ${a.slice(0, 70)}`)
+          } else if (r.type === 'tool/result') {
+            const mark = r.ok === true ? '✓' : r.ok === false ? '✗' : '?'
+            console.log(`   ${t} ${pos.padEnd(8)}   ${mark} ${`${r.bytes ?? 0} 字`}  ${String(r.excerpt ?? '').replace(/\s+/g, ' ').slice(0, 55)}`)
+          } else if (r.type === 'approval' || r.type === 'approval/decided') {
+            console.log(`   ${t} ${pos.padEnd(8)}   🔒 ${r.toolName ?? ''} ${r.outcome ?? ''} ${String(r.reason ?? '').slice(0, 36)}`)
+          } else if (r.type === 'assistant') {
+            console.log(`   ${t} ${pos.padEnd(8)}   💬 说了 ${r.chars ?? 0} 字`)
+          } else if (r.type === 'turn/end') {
+            const u = r.usage ?? {}
+            const used = u.input || u.output
+              ? `，用 ${u.input ?? 0}+${u.cacheRead ?? 0} 入 / ${u.output ?? 0} 出`
+              : ''
+            console.log(`   ${t} ${pos.padEnd(8)}   ⏹ 本轮结束（${r.reason?.kind ?? r.reason ?? '?'}${used}）`)
+          } else {
+            console.log(`   ${t} ${pos.padEnd(8)}   ${r.type}`)
+          }
+        }
+        console.log('')
+        console.log('   ★ 只留结果摘要（截断），全文在 DSH 的会话记录里 ——')
+        console.log('     操作日志是"干了什么"的索引，不是内容仓库。')
+      }
+      console.log('')
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 读操作日志失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
   const killArgIdx = process.argv.findIndex((a) => a === '--kill')
+  // ══════════════════════════════════════════════════════════════════════════
+  // ⚠️ `--kill` 必须**排在 `--processes` 前面**（这里修过一个死代码 bug）
+  // ══════════════════════════════════════════════════════════════════════════
+  // 原顺序是先判 `--processes` 再判 `--kill`，而前者结尾就 `process.exit(0)` ——
+  // 于是按提示语写的 `--processes --kill <pid>` **永远只打列表、从不真杀**，
+  // 而它自己打印的提示恰恰就是那句命令。使用者会以为杀掉了，
+  // 实际上旧进程还在抢 OneBot 事件流（同一句话被回两次）。
+  //
+  // 契约：**同时给出两者时，`--kill` 优先**（带 pid 的动作用意图最明确）。
+  if (killArgIdx >= 0) {
+    const pid = process.argv[killArgIdx + 1]
+    if (!pid) {
+      console.error('❌ 用法：node src/index.mjs --kill <pid>（或先 --processes 看列表）')
+      process.exit(2)
+    }
+    const r = guard.killEntry(pid)
+    if (r.ok) console.log(`✅ 已停掉 pid ${r.pid}`)
+    else {
+      console.error(`❌ 未能停掉 pid ${pid}：${r.error}`)
+      process.exit(1)
+    }
+    process.exit(0)
+  }
   if (listProcesses) {
     const entries = guard.list()
     console.log('\n进程登记（cache/processes.json）：')
@@ -321,29 +1189,24 @@ async function main() {
           `${e.state.padEnd(8)} ${e.isSelf ? '（当前进程）' : ''} ${e.reason ?? ''}`,
       )
     }
-    const conflicts = entries.filter((e) => !e.isSelf && (e.state === 'alive' || e.state === 'stale'))
-    if (conflicts.length > 0) {
+    // ── 冲突判定用"在跑的桥接**数量**"，不能用 `!isSelf` ────────────────────
+    //
+    // ⚠️ 这里踩过一次：原本写成 `!e.isSelf && (alive || stale)`。
+    //   而 `--processes` 是**另起的一个进程**，对它来说 `isSelf` 恒为 false ——
+    //   于是哪怕**只有唯一一个桥接在跑**，也会报「有 1 个其它桥接在跑」，
+    //   并指引去 kill 那个唯一条目（实测：清干净后列表只剩一条 alive，警告照旧）。
+    //
+    //   正确口径是数量：1 条 = 正常，≥2 条 = 真冲突（两个在抢同一份事件流）。
+    //   判定逻辑抽在 `runningBridges()` 里，有单测盯着（纯函数，可测）。
+    const running = runningBridges(entries)
+    if (running.length > 1) {
       console.log(
-        `\n⚠️ 有 ${conflicts.length} 个**其它**桥接在跑：同时跑两个会抢同一个 OneBot 事件流` +
-          '（同一句话可能被回两次）。',
+        `\n⚠️ 有 ${running.length} 个桥接在跑：同时跑两个会抢同一个 OneBot 事件流` +
+          '（同一句话可能被回两次）。建议停掉多余的那些。',
       )
       console.log(`   要停掉某个：node src/index.mjs --processes --kill <pid>`)
     }
     console.log('')
-    process.exit(0)
-  }
-  if (killArgIdx >= 0) {
-    const pid = process.argv[killArgIdx + 1]
-    if (!pid) {
-      console.error('❌ 用法：node src/index.mjs --processes --kill <pid>')
-      process.exit(2)
-    }
-    const r = guard.killEntry(pid)
-    if (r.ok) console.log(`✅ 已停掉 pid ${r.pid}`)
-    else {
-      console.error(`❌ 未能停掉 pid ${pid}：${r.error}`)
-      process.exit(1)
-    }
     process.exit(0)
   }
 
@@ -500,6 +1363,8 @@ async function main() {
         httpUrl: config.onebot.httpUrl,
         httpToken: config.onebot.httpToken,
         timeoutMs: config.mcp?.toolTimeoutMs ?? 20_000,
+        // ★ H7：`qq_search_history` 要读工作区里的语料库（不含密钥，放进这份配置是安全的）
+        workspace: config.dsh?.workspace ?? null,
       })
 
       // 定位 DSH_HOME（profiles/ 在它下面）。
@@ -560,9 +1425,14 @@ async function main() {
   //    这类"日志写了但看不到"的问题和"没写日志"一样糟。
   //
   // 缺 key 时的表现**只是"没输出"**：不抛异常、不报错，排查极费时间。
+  //
+  // ★ H13：自检结果**留一份给启动前置条件门控**（`/api/preflight`）——
+  //   界面要能回答"为什么它不说话"，而判据只能有一份。
+  let credentialInfo = null
   {
     const dshHome = process.env.DSH_HOME ?? resolveDshHome({ cliPath: config.dsh.cliPath })?.home
     const cred = resolveModelCredentials({ dshHome, env: process.env, apiKey: config.dsh.apiKey })
+    credentialInfo = { ok: Boolean(cred.env.DEEPSEEK_API_KEY), source: cred.source, warning: cred.warning ?? '' }
     if (cred.env.DEEPSEEK_API_KEY) {
       log(`🔑 模型凭据：已就绪（来源：${cred.source}）`)
     } else {
@@ -717,6 +1587,212 @@ async function main() {
       // 取图路由用：对话里的图片只从 workspace/inbox 出。
       // config.dsh.workspace 在归一化阶段已是绝对路径（resolveInPackage）。
       workspaceRoot: config.dsh.workspace,
+
+      // ══════════════════════════════════════════════════════════════════
+      // H13：界面的四组后端能力
+      // ══════════════════════════════════════════════════════════════════
+
+      // ① 启动前置条件门控：每条都带**可操作的话**。
+      //
+      // ★ 为什么放在后端而不是界面里各写一遍：判据只有一份才不会漂移 ——
+      //   界面自己判断"协议端活没活"时用的是**另一个**探测（通常是 /api/status 的缓存值），
+      //   于是出现"界面说正常、实际没登录"这种最费时间的分歧。
+      preflight: async () => {
+        const gates = []
+        const push = (id, ok, level, title, hint = '', action = '') =>
+          gates.push({ id, ok: ok === true, level, title, hint, action })
+
+        // 配置：有没有阻断级问题
+        let problems = []
+        try {
+          problems = validateConfig(config)?.problems ?? []
+        } catch (error) {
+          problems = [`配置校验本身出错：${error?.message ?? error}`]
+        }
+        push('config', problems.length === 0, problems.length ? 'blocker' : 'info',
+          problems.length ? `配置有 ${problems.length} 处问题` : '配置校验通过',
+          problems.slice(0, 3).join('；'), 'node src/index.mjs --check')
+
+        // 管理员名单：空 = fail-closed（谁都不能用）——这是**故意的**，但要让人知道
+        const adminCount = config.access?.adminUsers?.length ?? 0
+        push('admins', adminCount > 0, adminCount > 0 ? 'info' : 'blocker',
+          adminCount > 0 ? `管理员 ${adminCount} 人` : '管理员名单为空（fail-closed：所有私聊都不会回）',
+          adminCount > 0 ? '' : '不知道填谁就先发一条私聊，日志里的 QQ 号就是它',
+          'node src/index.mjs --ui → 访问控制')
+
+        // 协议端：真的去问一次（不看缓存）
+        //
+        // ⚠️ 判据是"**抛不抛**"：`onebot.call()` 成功时返回 `body.data`、失败时**抛**。
+        //    第一版这里写成 `r.status === 'ok' || r.retcode === 0` —— 而 `r` 是 data
+        //    （`get_status` 的 data 里没有 `status`/`retcode`），于是**明明通了也报"不可达"**。
+        //    真机上就是这个现象，被 `mocks/probe-h13-endpoints.mjs` 抓到。
+        let probe = { ok: false, why: '还没探' }
+        try {
+          const data = await onebot.call('get_status', {})
+          probe = { ok: true, data }
+        } catch (error) {
+          const t = error?.transport
+          probe = {
+            ok: false,
+            why: `${error?.message ?? error}${t ? `（层：${t.layer ?? '?'}${t.retryable ? '，可重试' : '，重试没用'}）` : ''}`,
+          }
+        }
+        push('onebot', probe.ok, probe.ok ? 'info' : 'blocker',
+          probe.ok ? '协议端可达' : '协议端不可达',
+          probe.ok ? '' : probe.why, 'start.bat（或 start.bat --doctor）')
+
+        const loggedIn = Boolean(probe.login || loginInfo)
+        push('login', loggedIn, loggedIn ? 'info' : 'blocker',
+          loggedIn ? `已登录：${(probe.login ?? loginInfo)?.nickname ?? '（无昵称）'}` : '尚未登录 QQ',
+          loggedIn ? '' : '协议端在跑但没登录 —— 去它的控制台扫码', 'start.bat')
+
+        // DSH 子进程
+        push('dsh', rpc.alive === true, rpc.alive ? 'info' : 'blocker',
+          rpc.alive ? 'DSH 子进程就绪' : 'DSH 子进程没起来（模型调不了）',
+          rpc.alive ? '' : '看 logs/bridge.log 里的 [rpc] 行', 'node src/index.mjs --doctor')
+
+        // 凭据：来源要能自证
+        const credLine = credentialInfo?.ok ? `模型凭据就绪（来源：${credentialInfo.source}）` : ''
+        push('credentials', Boolean(credLine), credLine ? 'info' : 'warn',
+          credLine || '没有取到模型凭据',
+          credLine ? '' : (credentialInfo?.warning || '模型调用会以 MISSING_CREDENTIAL 立刻失败（症状只有"回合结束但无文本"）'),
+          'node src/index.mjs --doctor')
+
+        return {
+          ok: gates.every((g) => g.ok || g.level !== 'blocker'),
+          blockers: gates.filter((g) => !g.ok && g.level === 'blocker').length,
+          gates,
+        }
+      },
+
+      // ② 账号发现：**只回摘要，绝不回 token**（凭据永远不出本机进程）
+      listAccounts: () => {
+        const dir = config.snowluma?.installDir
+          ? resolveInPackage(config.snowluma.installDir)
+          : join(PKG_ROOT, 'vendor', 'snowluma')
+        const names = listAccountNames(dir)
+        const found = discoverOnebotConfig({
+          installDir: dir,
+          selfId: config.onebot?.selfId ?? '',
+          knownTokens: { httpToken: config.onebot?.accessToken, wsToken: config.onebot?.wsToken },
+        })
+        const pickedFile = String(found.picked ?? '')
+        return {
+          installDir: dir,
+          // ★ 只给"有哪些账号 + 谁是当前在用的"，**一个字符的 token 都不给**。
+          // ⚠️ 第一版这里写错了：`pickedFile.includes(String(n.file ?? n.name ?? ''))`，
+          //    而 `listAccountNames()` 返回的是**账号号字符串**（不是对象）——
+          //    于是 `String(undefined ?? undefined ?? '')` = `''`，而
+          //    **`任何字符串.includes('')` 都是 true** → 两个账号**都**被标成"当前在用"。
+          //    这种错误不报错、界面看起来还挺正常，只有对着输出数一遍才发现。
+          accounts: names.map((uin) => {
+            const file = `onebot_${uin}.json`
+            return { uin: String(uin), file, isCurrent: file.length > 'onebot_.json'.length && pickedFile.includes(file) }
+          }),
+          current: pickedFile || null,
+          why: found.why ?? '',
+          // 判定依据里可能含文件名（账号号属于公开标识），但**不含 token**
+          matchedByConfig: /matched-config/.test(pickedFile),
+        }
+      },
+
+      // ③ 本地语料检索（fail-closed 已经在路由里做了；这里只负责真的去搜）
+      searchCorpus: ({ query, chatKey, limit }) => {
+        const c = createCorpus({ workspace: config.dsh.workspace, readOnly: true, log: () => {} })
+        try {
+          const r = c.search({ query, chatKey, limit })
+          return {
+            ok: r.ok === true,
+            mode: r.mode ?? null,
+            why: r.why ?? null,
+            // ⚠️ 字段名按语料库**真实的**形状来（第一版按 `row.text` / `row.at` 取，
+            //    结果全空 —— 真实字段是 `preview`（已截断）与 `createdAt`）。
+            // ★ 这里叫 `preview` 而不是 `text`：语料库返回的**本来就是截断预览**，
+            //   把预览叫成正文是一种小小的谎话（界面会以为拿到的是全文）。
+            rows: (r.rows ?? []).map((row) => ({
+              mid: row.messageId ?? null,
+              at: row.createdAt ?? null,
+              chatKey: row.chatKey ?? chatKey,
+              sender: row.senderName ?? row.userId ?? (row.isBot ? '（机器人）' : ''),
+              isBot: row.isBot === true,
+              preview: row.preview ?? '',
+            })),
+          }
+        } finally {
+          c.close()
+        }
+      },
+
+      // ③-b 记忆检索（H13）：在**记忆文件**里按关键词找条目。
+      //
+      // 与语料检索的分工：语料库是"**说过什么**"（消息流水，带 TTL）；
+      // 记忆是"**沉淀下来的事实**"（条目、跨重启生效）。两者都要能搜 ——
+      // 以前记忆只能靠界面逐个文件点开看，条目攒到几十条之后就没人翻得动了。
+      //
+      // ★ 实现在 `src/memory-search.mjs`（纯函数、文件系统可注入）：
+      //   实现与测试用**同一份**代码，避免"测试里照着再写一遍"那种迟早分叉的二次实现。
+      searchMemory: ({ query, limit }) => searchMemoryFiles({ workspace: config.dsh.workspace, query, limit }),
+
+      // ③-c 记忆写入统计（0.2.1）：四列 + 零写入告警。
+      // 阈值从 STATS_DEFAULTS 带给界面 —— 它是**后端常量不是配置项**，
+      // 界面拿到后只做展示（"满 N 轮才判定"），不要做成可编辑输入框。
+      memoryStats: () => ({
+        threshold: STATS_DEFAULTS.zeroWriteAfterTurns,
+        rows: readAllStats(config.dsh.workspace),
+      }),
+
+      // ③-d 隐私拦截审计：两侧**分开计数**（写入侧多 = 老想记隐私；
+      // 输出侧多 = 想往外说隐私，后者更值得报警）。只回类别与字数 ——
+      // 审计里本来就没有原文，这里也不从别处捞。
+      privacyAudit: ({ limit = 20 } = {}) => {
+        const recent = readPrivacyAudit({ workspace: config.dsh.workspace, limit })
+        const all = readPrivacyAudit({ workspace: config.dsh.workspace, limit: 10000 })
+        return {
+          recent,
+          storeCount: all.filter((a) => a.side === 'store').length,
+          outputCount: all.filter((a) => a.side !== 'store').length,
+          categories: PRIVACY_CATEGORIES,
+        }
+      },
+
+      // ③-d-b 扫描盘上记忆（**只读**，与 CLI `--memory --privacy` 同一份判定逻辑）。
+      // ★ 只回**位置**（文件 + 行号 + 类别），不回原文、不回预览 ——
+      //   使用者在记忆页签的编辑器里自己去看那一行。
+      scanMemoryPrivacy: async () => {
+        const report = inspectMemory({ workspace: config.dsh.workspace, conversations: [] })
+        const targets = report.files.map((f) => f.rel)
+        const hits = []
+        let scanned = 0
+        const byCategory = {}
+        for (const rel of targets) {
+          let text = ''
+          try {
+            text = readFileSync(join(config.dsh.workspace, rel), 'utf8')
+          } catch {
+            continue
+          }
+          const lines = text.split('\n')
+          for (let i = 0; i < lines.length; i += 1) {
+            const t = lines[i].replace(/^-\s*/, '').trim()
+            if (!t || t.startsWith('#')) continue
+            scanned += 1
+            const r = scanPrivacy(t)
+            if (!r.hit) continue
+            hits.push({ rel, line: i + 1, categories: r.categories })
+            for (const c of r.categories) byCategory[c] = (byCategory[c] ?? 0) + 1
+          }
+        }
+        return { scanned, hitCount: hits.length, hits, byCategory, categories: PRIVACY_CATEGORIES }
+      },
+
+      // ④ 日志流：按游标增量取（**轮询，不是 SSE** —— 见 CONFIG-UI.md 里的说明与理由）
+      logStream: ({ since = 0, limit = 200 } = {}) => {
+        const rel = join(PKG_ROOT, 'logs', 'bridge.log')
+        if (!existsSync(rel)) return { lines: [], cursor: since, total: 0, eof: true, why: '还没有日志文件' }
+        // ★ 切片逻辑在 `src/log-tail.mjs`（纯函数）：实现与测试用**同一份**代码，
+        //   避免"测试里照着再写一遍"那种迟早分叉的二次实现。
+        return sliceLogLines({ lines: splitLogText(readFileSync(rel, 'utf8')), since, limit })
+      },
       onConfigSaved: () => log('配置已通过接口保存（需重启桥接才生效）'),
       // 停止/重启：动作本身由 api.mjs 延后执行（先响应 UI 再动进程）。
       // shutdown 在下方定义，这里只是闭包引用，调用时早已初始化。
@@ -895,6 +1971,38 @@ async function main() {
     log('   → 未处理拒绝说明有失败路径没被接住，进程状态不可信，主动收尾退出')
     void shutdown('unhandledRejection', { exitDelayMs: 200 })
   })
+
+  // ── 启动时把**凭据来源**说清楚（H8）────────────────────────────────────
+  //
+  // 为什么值得多读两个小 JSON：token 是"存在两处必然漂移"的东西，
+  // 而漂移的症状是**令牌被拒 + 机器人完全不说话** —— 启动时不说，
+  // 等到用户抱怨"它怎么不理我"时才查，代价大得多。
+  // ★ 只说来源与原因，**绝不打印 token 本身**。
+  try {
+    const tokens = resolveOnebotTokens({
+      config,
+      installDir: config.snowluma?.installDir || undefined,
+    })
+    if (tokens.warn) log(`⚠️ ${tokens.warn}`)
+    if (tokens.why) log(`[凭据] 没有采用 SnowLuma 自己的配置：${tokens.why}`)
+    if (tokens.differsFromConfig) {
+      log(
+        `⚠️ config.json 里的 token 与 SnowLuma 自己的配置不一致，实际用的是【${tokens.source}】那一组` +
+          `（挑中的账号文件：${tokens.picked}）。`,
+      )
+    } else if (tokens.source === 'SnowLuma 自己的配置') {
+      // ★ 一行"一切正常"的正面证据。为什么值得占一行日志：
+      //   "现在到底用的是哪一组 token"过去要**两次事故**才查得出来，
+      //   而启动时一行就能回答（仍然只报来源与账号，**不含 token 本身**）。
+      log(
+        `[凭据] 来源：SnowLuma 自己的配置（${tokens.picked}${tokens.accounts?.length > 1 ? `，共 ${tokens.accounts.length} 个账号` : ''}；与 config.json 一致）`,
+      )
+    } else {
+      log(`[凭据] 来源：config.json（没有读到 SnowLuma 自己的配置）`)
+    }
+  } catch (error) {
+    log(`[凭据] 启动自检失败（不影响运行）：${error?.message ?? error}`)
+  }
 
   log('桥接已启动，等待消息…（Ctrl+C 退出）')
 }

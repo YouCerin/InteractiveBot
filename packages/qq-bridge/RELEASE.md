@@ -86,6 +86,23 @@ npm test
 
 ## 2. 打包内容
 
+> ★★ **受保护路径清单**（H16）：下面是**可执行的数据**，不是文档里的叮嘱 ——
+> 由 `src/protected-files.mjs` 定义、`scripts/assemble-release.mjs` 在**组装之前**强制检查
+> （不通过就退出，**没有 `--force` 后门**），并由 `mocks/verify-release-hygiene.mjs` 盯着接线。
+> 为什么要这么较真：发布脚本是**按清单拷贝**的，往 `COPY_DIRS` / `COPY_FILES` 里多写一行
+> （比如顺手加上 `workspace-qq` 或 `logs`）就会把某个真实使用者的**聊天记忆、日志、token**
+> 打进 zip —— 而这**不会有任何报错**（zip 里多两个目录而已）。
+>
+> | 类别 | 路径 | 规矩 |
+> |---|---|---|
+> | **user**（使用者的数据） | `config.json`、`workspace-qq`、`logs`、`cache`、`snowluma` | 不许进包、不许覆盖、**任何脚本都不许删** |
+> | **artifact**（我们自己的产物） | `node_modules`、`_release` | 不进包；可以重生成，所以允许删 |
+> | **junk**（临时残留） | `.tmp-probe-dsh`、`.tmp-verify-mcp` | 不进包；可以清掉 |
+>
+> ⚠️ 判定**忽略大小写**（Windows 上 `LOGS` 与 `logs` 是同一个目录 —— 只按区分大小写比对，
+> `LOGS` 就能悄悄绕过清单）。要改这份清单，请同时改 `src/protected-files.mjs` 里的**理由**：
+> 只写路径名的话，下一个人不知道它为什么不能动。
+
 **要的：**
 
 ```

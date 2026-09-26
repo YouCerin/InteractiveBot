@@ -5,6 +5,7 @@ import { getStr } from '@/lib/config'
 import { cn } from '@/lib/utils'
 import { Inbox, MessageSquareReply, Zap, Ban, SkipForward, CircleX } from 'lucide-react'
 import { UsagePanel } from '@/sections/UsagePanel'
+import { PreflightBanner } from '@/sections/PreflightCard'
 
 const STAT_ITEMS = [
   { key: 'received', label: '收到', icon: Inbox, color: 'text-sky-600' },
@@ -36,6 +37,10 @@ export function OverviewTab({
       : `✅ 只有本进程（pid ${procs.selfPid ?? '?'}）`
   return (
     <div className="space-y-4">
+      {/* ★ H13：启动前置条件门控放在**最上面** —— 它回答的是"它为什么不说活"，
+          而那是使用者打开这个页面时最可能想知道的事（后端判据，界面不重复判断）。 */}
+      <PreflightBanner demo={demo} />
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {STAT_ITEMS.map(({ key, label, icon: Icon, color }) => (
           <Card key={key}>

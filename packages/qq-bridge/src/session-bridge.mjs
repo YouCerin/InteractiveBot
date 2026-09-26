@@ -47,6 +47,87 @@ export function reasoningOfAssistantMessage(data) {
 }
 
 /**
+ * 从 `tool/result` 事件里取出**可读的结果摘要**与元信息。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么需要它（"记住自己干过什么"的原料就在这里）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 事件形状（本机实测，跨工具一致）：
+ *
+ *   { type:'tool/result', data:{ turn, step, message:{ source:{ kind:'tool', callId },
+ *     content:[{ type:'tool-result', toolCallId, content:[{type:'text',text}, …],
+ *                isError?:boolean }] } } }
+ *
+ * 实测覆盖：`pwsh`/`read`/`edit`/`write`/`glob`/`grep`/`web_search`/`web_fetch`/
+ * `job_output` 都是**纯 text 块**；`read_image` 是 `text+image`（图片块没有 text，
+ * 所以要单独标出来，否则会显示成"结果为空"）。
+ *
+ * ⚠️ 截断是**刻意**的：结果动辄上万字（实测一次 web_fetch 就是整篇文章）。
+ *    操作日志是"干了什么"的索引，不是内容仓库 —— 全文留在 DSH 的会话记录里。
+ *    所以这里只留前 `excerpt` 字。
+ *
+ * @param {object} data `tool/result` 事件的 data
+ * @param {{excerpt?: number}} [opts]
+ * @returns {{callId: string|null, text: string, bytes: number, hasImage: boolean, isError: boolean|null}}
+ */
+export function resultOfToolResult(data, { excerpt = 300 } = {}) {
+  const wrapped = data?.message?.content
+  const block = Array.isArray(wrapped) ? wrapped.find((b) => b?.type === 'tool-result') ?? wrapped[0] : null
+  const inner = Array.isArray(block?.content) ? block.content : []
+  const text = inner
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+  const hasImage = inner.some((b) => b && b.type === 'image')
+  return {
+    callId: block?.toolCallId ?? data?.message?.source?.callId ?? null,
+    text: text.length > excerpt ? `${text.slice(0, excerpt)}…` : text,
+    bytes: text.length,
+    hasImage,
+    // `isError` 缺席 = 不知道（**不补 false**：false 是"明确成功"，null 是"没测到"）
+    isError: typeof block?.isError === 'boolean' ? block.isError : null,
+  }
+}
+
+/**
+ * 从 `tool/call` 事件里取出工具名与**参数**。
+ *
+ * ⚠️ `arguments` 是 **JSON 字符串**（实测：`"{\"queries\": [...]}"`），不是对象。
+ *
+ * ── 超长参数怎么截（这个顺序很重要）────────────────────────────────────
+ * 先**解析**再截**值**，不是先截字符串再解析：
+ *   · 先截字符串 → JSON 必然解析失败 → 只能留下半个对象（读了没用）
+ *   · 先解析再截值 → **结构完整**，只是长字符串字段被截断（例如 `write` 的
+ *     `content` 可能几千字，截断后仍能看出"它往哪个文件的什么位置写了什么开头"）
+ * 实测 `write` 的参数里 `content` 动辄上千字，这个区别很实际。
+ *
+ * 解析失败（真的不是 JSON）才退化成"留原始字符串"—— 宁可留一段看不懂的，
+ * 也不要丢掉"模型当初到底传了什么"这个最关键的线索。
+ */
+export function callOfToolCall(data, { argChars = 300 } = {}) {
+  const raw = data?.arguments
+  let args = null
+  if (raw && typeof raw === 'object') {
+    args = raw
+  } else if (typeof raw === 'string') {
+    try {
+      args = JSON.parse(raw)
+    } catch {
+      args = raw.length > argChars ? `${raw.slice(0, argChars)}…` : raw
+    }
+  }
+  // 逐个字符串值截断（结构不动）
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    const cut = {}
+    for (const [k, v] of Object.entries(args)) {
+      cut[k] = typeof v === 'string' && v.length > argChars ? `${v.slice(0, argChars)}…` : v
+    }
+    args = cut
+  }
+  return { name: data?.name ?? '?', callId: data?.callId ?? null, args }
+}
+
+/**
  * 一个回合（turn）的收集器。
  *
  * 用法：
@@ -71,6 +152,21 @@ export class TurnCollector {
     // 而"这个回合到底有没有用量"用 `steps` 判断更明确（steps=0 就是没测到）。
     this.usage = {}
     this.toolCalls = []
+    /**
+     * ★★ 操作流水（`docs/0.2.1-runtime-memory-design.md` §2.2 的原料）。
+     *
+     * ⚠️ 这里修的是一个**真缺口**：`toolCalls` 原先只 push `{ name, callId }`
+     *    （见下），于是**参数与结果全丢了**。后果是"记住自己干过什么"
+     *    这一条连原料都没有 —— 桥接明明收到了完整事件，却在收集时扔掉了。
+     *
+     * 每条形如：
+     *   `{ at, turn, step, type:'tool/call',    name, callId, args }`
+     *   `{ at, turn, step, type:'tool/result', callId, ok, bytes, excerpt, hasImage }`
+     *   `{ at, turn, step, type:'approval',    toolName, outcome, reason }`
+     *   `{ at, turn, step, type:'assistant',   chars }`
+     *   `{ at, turn, step, type:'turn/end',    reason, usage }`
+     */
+    this.ops = []
     this.approvals = []
     /**
      * 被拒绝的审批数量。
@@ -116,10 +212,30 @@ export class TurnCollector {
         //   · 四个**可累加**的量分别求和；
         //   · `lastContextTokens` 只取**最后一步**的值（那是真正的上下文占用）。
         this.#accumulateUsage(data.usage, data.message?.source)
+        this.#pushOp(data, {
+          type: 'assistant',
+          chars: text.length,
+          // 只记"这一轮有多大"，**不记正文** —— 正文就是要发给 QQ 的那条，
+          // 它已经在会话镜像里了，oplog 再存一份等于把隐私面复制一遍。
+        })
         break
       }
       case 'tool/call': {
-        this.toolCalls.push({ name: data.name ?? '?', callId: data.callId ?? null })
+        const call = callOfToolCall(data)
+        this.toolCalls.push({ name: call.name, callId: call.callId })
+        this.#pushOp(data, { type: 'tool/call', ...call })
+        break
+      }
+      case 'tool/result': {
+        const r = resultOfToolResult(data)
+        this.#pushOp(data, {
+          type: 'tool/result',
+          callId: r.callId,
+          ok: r.isError === null ? null : !r.isError,
+          bytes: r.bytes,
+          excerpt: r.text,
+          hasImage: r.hasImage,
+        })
         break
       }
       case 'approval/asked': {
@@ -128,6 +244,12 @@ export class TurnCollector {
           toolName: data.toolName ?? '?',
           reason: data.reason ?? '',
           outcome: null,
+        })
+        this.#pushOp(data, {
+          type: 'approval',
+          toolName: data.toolName ?? '?',
+          outcome: null,
+          reason: String(data.reason ?? '').slice(0, 200),
         })
         break
       }
@@ -141,15 +263,45 @@ export class TurnCollector {
         // `unavailable` = 无人可答（自动拒绝）；`rejected` = 有人明确拒绝。
         // 对使用者来说两种都是"做不了"，所以都算。
         if (outcome === 'unavailable' || outcome === 'rejected') this.deniedApprovals += 1
+        this.#pushOp(data, { type: 'approval/decided', outcome })
         break
       }
       case 'turn/end': {
         this.endReason = data.reason ?? null
+        this.#pushOp(data, { type: 'turn/end', reason: data.reason ?? null, usage: this.usage })
         this.#settle({})
         break
       }
       default:
         break
+    }
+  }
+
+  /**
+   * 记一条操作流水。**绝不抛异常** —— 流水是观测手段，不能反过来弄挂回合。
+   *
+   * @param {object} data 事件 data（取 turn/step）
+   * @param {object} rest 该条的具体字段
+   */
+  #pushOp(data, rest) {
+    try {
+      // ⚠️ `turn/end` 事件**不带 step**（只有 `{turn, reason}`），而 `turn/start`
+      //    我们根本没在处理。若直接写 `step: null`，"--ops 里最后那条结束记录
+      //    停在第几步"就查不到了。所以 step 缺席时**继承上一条** ——
+      //    这是"回合在第 N 步结束"的自然含义。
+      const step = Number(data?.step)
+      const prevStep = this.ops.length > 0 ? this.ops[this.ops.length - 1].step : null
+      this.ops.push({
+        at: Date.now(),
+        turn: Number(data?.turn) || null,
+        step: Number.isFinite(step) && step > 0 ? step : prevStep,
+        ...rest,
+      })
+      // 上限保护：一个回合正常最多几十步。若因为某种原因疯狂增长，
+      // 宁可丢掉最早的也不要把内存吃掉（这是一种"可观测性自己把进程弄挂"的风险）。
+      if (this.ops.length > 2000) this.ops.splice(0, this.ops.length - 2000)
+    } catch {
+      /* 观测失败不影响回合 */
     }
   }
 
@@ -218,6 +370,7 @@ export class TurnCollector {
       thinking: this.thinking.trim(),
       usage: this.usage,
       toolCalls: this.toolCalls,
+      ops: this.ops,
       approvals: this.approvals,
       deniedApprovals: this.deniedApprovals,
       endReason: this.endReason,

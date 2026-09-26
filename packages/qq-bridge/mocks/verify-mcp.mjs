@@ -137,6 +137,16 @@ async function main() {
   for (const want of ['qq_poke', 'qq_send_sticker', 'qq_recall', 'qq_group_members', 'qq_api']) {
     check(`包含工具 ${want}`, names.includes(want))
   }
+  // ★ H14：新增的四个（动作名都是**真机探针**验过的，见 mocks/probe-onebot-actions.mjs）
+  for (const want of ['qq_emoji_like', 'qq_typing', 'qq_forward_msg', 'qq_forward_log', 'qq_at_all_remain']) {
+    check(`包含 H14 新增工具 ${want}`, names.includes(want))
+  }
+  check('★★ 每个工具的**描述里都带着**权限提示（写入/只读分开）+ 如实提示',
+    tools.every((t) => {
+      const d = t.description ?? ''
+      const perm = d.includes('只有管理员可以让我做') !== d.includes('只读动作，普通用户也可以用')
+      return perm && d.includes('没做成')
+    }), tools.filter((t) => !(t.description ?? '').includes('没做成')).map((t) => t.name).join(',') || '（都带了）')
   check('★ 每个工具都有 description（模型靠它决定用不用）',
     tools.every((t) => typeof t.description === 'string' && t.description.length > 10))
   check('★ 每个工具都有 inputSchema（否则模型不知道怎么传参）',

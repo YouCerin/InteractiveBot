@@ -29,7 +29,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { readMemoryForPrompt, listMemoryFiles } from './memory-store.mjs'
+import { readMemoryForPrompt, listMemoryFiles, snapshotNameOf } from './memory-store.mjs'
 
 /** 递归列出目录下的文件（相对路径），用于快照目录、回执目录。 */
 function listFilesRel(root, sub) {
@@ -69,14 +69,19 @@ function countEntries(root, rel) {
  * 检查"真实文件"与"桥接快照"是否一致 —— 这就是 `verifyAndRestoreMemory`
  * 用的判据。**本函数只报告，不回滚**（回滚是桥接启动/读记忆时的行为）。
  *
- * @returns {{rel: string, same: boolean}[]}
+ * ⚠️ 快照路径必须走 `snapshotNameOf`（`memory-store.mjs` 里的唯一口径）。
+ *    这里原来自己拼 `rel.replace(/^memory\//, 'memory__')` —— 对根目录的
+ *    `MEMORY.md` 恰好也对（它不含 `memory/` 前缀），但那是**巧合**；
+ *    一旦文件布局变化就会与 `saveSnapshot` 分叉，表现成"体检说一致、实际不一致"。
+ *
+ * @returns {{rel: string, same: boolean|null, why?: string}[]}
  */
 export function checkSnapshots(workspace) {
   const root = String(workspace ?? '')
   const out = []
   for (const rel of listMemoryFiles(root)) {
     const actual = join(root, rel)
-    const snap = join(root, 'memory', '.snapshots', rel.replace(/^memory\//, 'memory__'))
+    const snap = join(root, 'memory', '.snapshots', snapshotNameOf(rel))
     if (!existsSync(snap)) {
       out.push({ rel, same: null, why: '还没有快照（这条是桥接之前写入的，或从未经桥接写过）' })
       continue

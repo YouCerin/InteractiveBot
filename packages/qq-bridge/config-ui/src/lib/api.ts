@@ -32,6 +32,20 @@ export interface ApiStatus {
     denied: number
     failed: number
   }
+  /**
+   * 界面构建溯源（CONFIG-UI.md「界面产物与源码是不是同一份」）。
+   * fresh = 与当前源码一致；stale = 源码改了没重新构建；unstamped = 没有标记、无法自证来源。
+   * ★ 不是 fresh 时界面必须明确提示"你看到的是旧界面"并给出 advice ——
+   *   使用者拿着旧界面报 bug，排查会从完全错误的前提出发。
+   */
+  ui?: {
+    status: 'fresh' | 'stale' | 'unstamped' | string
+    distDir?: string
+    stamp?: { name?: string; pkgVersion?: string; builtAt?: string; sourceHash?: string } | null
+    expectedHash?: string
+    why?: string
+    advice?: string
+  }
 }
 
 export interface DoctorRow {
@@ -384,6 +398,176 @@ export const api = {
   /** 删除记忆文件（§2.5 界面要求；接口文档暂未列，按 404/501 容错）。 */
   memoryDelete: (path: string) =>
     request<{ deleted: boolean }>('DELETE', `/api/memory/file?path=${encodeURIComponent(path)}`),
+
+  // ── H13：四项（规格见 CONFIG-UI.md §5.x）────────────────────────────────
+  /** 启动前置条件门控。★ 它会**真的去问一次协议端**，所以慢 1~2 秒，要有 loading 态。 */
+  preflight: () => request<Preflight>('GET', '/api/preflight'),
+  /** 协议端账号**摘要**（永远没有 token —— 后端做了字段白名单，别设计"显示 token"的功能）。 */
+  snowlumaAccounts: () => request<AccountsResult>('GET', '/api/snowluma/accounts'),
+  /** 桥接日志增量：带上上次的 cursor 只取新增的行。 */
+  logStream: (q: { since?: number; limit?: number } = {}) => {
+    const p = new URLSearchParams()
+    if (q.since !== undefined) p.set('since', String(q.since))
+    if (q.limit !== undefined) p.set('limit', String(q.limit))
+    const qs = p.toString()
+    return request<LogChunk>('GET', `/api/logs/stream${qs ? `?${qs}` : ''}`)
+  },
+  /** 本地语料检索。★★ **必须带会话**（缺了会 400 —— 那是故意的 fail-closed，不跨会话）。 */
+  corpusSearch: (q: { q: string; kind: 'private' | 'group'; peerId: string; limit?: number }) => {
+    const p = new URLSearchParams({ q: q.q, kind: q.kind, peerId: q.peerId })
+    if (q.limit !== undefined) p.set('limit', String(q.limit))
+    return request<CorpusResult>('GET', `/api/corpus/search?${p}`)
+  },
+  /** 记忆条目检索（只读）。★ 与语料检索不同：记忆是"沉淀的事实"，语料是"说过的话"。 */
+  memorySearch: (q: string, limit?: number) => {
+    const p = new URLSearchParams({ q })
+    if (limit !== undefined) p.set('limit', String(limit))
+    return request<MemorySearchResult>('GET', `/api/memory/search?${p}`)
+  },
+
+  // ── 0.2.1 记忆观测面（CONFIG-UI.md §2.5，全部只读）────────────────────────
+  /** 记忆写入统计 + 零写入告警。阈值是后端常量（不是配置项），界面只展示。 */
+  memoryStats: () => request<MemoryStatsResult>('GET', '/api/memory/stats'),
+  /** 隐私拦截审计。★ 只有时间/侧/类别/字数 —— 审计里本来就没有原文，别想办法展示。 */
+  memoryPrivacy: (limit?: number) =>
+    request<PrivacyAuditResult>('GET', `/api/memory/privacy${limit ? `?limit=${limit}` : ''}`),
+  /** 扫描盘上记忆里的隐私条目（只读）。★ 只回位置（文件+行号+类别），不回原文。 */
+  memoryPrivacyScan: () => request<PrivacyScanResult>('POST', '/api/memory/privacy/scan'),
+}
+
+// ── 0.2.1 记忆观测面的类型（字段与后端一一对应）────────────────────────────
+
+export interface MemoryStatsRow {
+  chatKey: string
+  turns: number
+  proposed: number
+  applied: number
+  ignored: number
+  deduped: number
+  lastWriteAt: number
+  lastProposeAt: number
+  /** 零写入告警：真的达到阈值才为 true（落过盘、轮数不够都不报） */
+  alert: boolean
+  alertWhy: string
+}
+
+export interface MemoryStatsResult {
+  /** 告警阈值（后端 STATS_DEFAULTS.zeroWriteAfterTurns，**不是配置项**） */
+  threshold: number
+  rows: MemoryStatsRow[]
+}
+
+export interface PrivacyAuditEntry {
+  ts: number
+  at: string
+  /** store = 写入侧（想记隐私被拦）；其它 = 输出侧（想往外说被拦，更值得报警） */
+  side: string
+  categories: string[]
+  /** 被拦内容的字数 —— 只有字数，没有原文（刻意的） */
+  length: number
+  chatKey?: string
+}
+
+export interface PrivacyAuditResult {
+  recent: PrivacyAuditEntry[]
+  /** 两侧分开计数：写入侧多 = 老想记隐私；输出侧多 = 想往外说隐私 */
+  storeCount: number
+  outputCount: number
+  /** 类别码 → 中文名 */
+  categories: Record<string, string>
+}
+
+export interface PrivacyScanHit {
+  rel: string
+  line: number
+  categories: string[]
+}
+
+export interface PrivacyScanResult {
+  scanned: number
+  hitCount: number
+  /** ★ 只有位置（文件+行号+类别），没有原文 —— 去记忆编辑器里看那一行 */
+  hits: PrivacyScanHit[]
+  byCategory: Record<string, number>
+  categories: Record<string, string>
+}
+
+export interface MemorySearchRow {
+  rel: string
+  line: number
+  /** ★ 行**预览**（不是全文） */
+  preview: string
+  /** 已被更正的条目：仍在文件里，但不再作为事实使用 */
+  superseded: boolean
+}
+
+export interface MemorySearchResult {
+  ok: boolean
+  query: string
+  /** 一共扫了几个记忆文件（让人知道搜索范围） */
+  files: number
+  rows: MemorySearchRow[]
+}
+
+// ── H13 的类型（字段与后端一一对应，见 CONFIG-UI.md §5.x）──────────────────
+
+export interface PreflightGate {
+  id: 'config' | 'admins' | 'onebot' | 'login' | 'dsh' | 'credentials' | string
+  ok: boolean
+  /** blocker = 必须修（否则机器人不会说话）；warn = 建议看；info = 正常 */
+  level: 'blocker' | 'warn' | 'info'
+  title: string
+  hint: string
+  /** ★ 给使用者看的下一步（可直接复制去跑）—— 这条接口存在的理由就是它 */
+  action: string
+}
+
+export interface Preflight {
+  ok: boolean
+  blockers: number
+  gates: PreflightGate[]
+}
+
+export interface AccountSummary {
+  uin: string
+  file: string
+  /** ★ 恰好一个为 true（凭据发现的判定结果） */
+  isCurrent: boolean
+}
+
+export interface AccountsResult {
+  installDir: string
+  accounts: AccountSummary[]
+  current: string | null
+  why: string
+  /** true = 「这个账号的凭据与 config.json 一致」，是最可靠的判定依据 */
+  matchedByConfig: boolean
+}
+
+export interface LogChunk {
+  lines: string[]
+  /** 下次请求带上它，只取新增的行 */
+  cursor: number
+  total: number
+  eof: boolean
+  why?: string
+}
+
+export interface CorpusRow {
+  mid: string | null
+  at: number | null
+  chatKey: string
+  sender: string
+  isBot: boolean
+  /** ★ **截断预览**，不是全文 —— 别当正文显示成"完整消息" */
+  preview: string
+}
+
+export interface CorpusResult {
+  ok: boolean
+  mode: 'fts' | 'like' | null
+  why: string | null
+  rows: CorpusRow[]
 }
 
 // ── 工作区图片（CONFIG-UI.md §2.9）────────────────────────────────────────

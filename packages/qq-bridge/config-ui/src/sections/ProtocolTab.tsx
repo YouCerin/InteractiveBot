@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 import { KeyRound, Loader2, Plug, RefreshCw, Rocket, SquareArrowOutUpRight, X } from 'lucide-react'
 import { SnowlumaTerminal } from '@/sections/SnowlumaTerminal'
 import { AccessCard } from '@/sections/AccessCard'
+import { AccountsCard } from '@/sections/AccountsCard'
 
 export interface TokenDraft {
   wsToken: string
@@ -420,6 +421,10 @@ export function ProtocolTab({
 
   return (
     <div className="space-y-4">
+      {/* ★ H13：协议端账号（只给摘要、**绝不回 token**）。
+          放最前面是因为"用错了哪份凭据"是"机器人完全不说话"的头号原因（踩过两次）。 */}
+      <AccountsCard demo={demo} />
+
       {/* ★ 进程冲突（缺陷 3）：放在最前面，因为它是最容易"看不出问题"的一类故障 ——
           两个桥接同时从同一个 OneBot 收事件，每个实例自己都完全正常，
           合起来表现为"同一句话被回两次"。 */}

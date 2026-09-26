@@ -3,6 +3,7 @@ import { api, workspaceFileUrl, type Conversation, type ConversationsResult } fr
 import { InlineNote } from '@/components/common'
 import { cn } from '@/lib/utils'
 import { ImageOff, Loader2, MessageSquareOff, User, Users } from 'lucide-react'
+import { CorpusSearch } from '@/sections/CorpusSearch'
 
 function fmtTime(ms: number): string {
   const d = new Date(ms)
@@ -171,9 +172,12 @@ function SenderLabel({
 export function ConversationsTab({
   botName,
   groupEnabled,
+  demo = false,
 }: {
   botName?: string
   groupEnabled: boolean
+  /** 演示模式：不连后端（会话检索整块不显示） */
+  demo?: boolean
 }) {
   const [data, setData] = useState<ConversationsResult | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
@@ -314,6 +318,14 @@ export function ConversationsTab({
                   </span>
                 )}
               </div>
+              {/* ★ H13：在本会话里搜历史（"我上次说的那个…"）。
+                  ⚠️ 它**只搜当前打开的会话** —— 语料库里存着所有会话的消息，
+                  不限定会话就等于把别的群/别人的私聊显示在这个页面上。 */}
+              <CorpusSearch
+                kind={active.kind === 'group' ? 'group' : 'private'}
+                peerId={String(active.peerId)}
+                demo={demo}
+              />
               <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
                 {active.messages.map((m, i) => {
                   if (m.role === 'notice') {
