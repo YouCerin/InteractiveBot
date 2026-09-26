@@ -1643,7 +1643,7 @@ SnowLuma 写自己的日志文件用 UTF-8，而 stdout 走**终端编码**。
 
 | 方法 | 路径 | 请求体 | 返回 |
 |---|---|---|---|
-| GET | `/api/status` | — | 运行状态 + 统计（**不含 token**） |
+| GET | `/api/status` | — | 运行状态 + 统计 + **进程登记**（`processes`：有几个桥接在跑、有没有冲突；**不含 token**） |
 | GET | `/api/config` | — | 脱敏后的配置（token 与 `dsh.apiKey` 被**删除**，另给 `hasWsToken` / `hasHttpToken` / `hasApiKey` 布尔） |
 | POST | `/api/config` | 配置补丁 | `{saved:true, restartRequired:true, hint}` |
 | POST | `/api/check` | 可选：待预检的配置 | `{fatal:[], warn:[]}` |
@@ -1681,6 +1681,12 @@ SnowLuma 写自己的日志文件用 UTF-8，而 stdout 走**终端编码**。
   "permissionMode": "workspace-write",
   "workspace": "C:\\...\\workspace-qq",
   "groupEnabled": false,
+  "processes": {
+    "selfPid": 12345,
+    "total": 2,
+    "running": 2,
+    "conflicts": [{ "pid": 9999, "state": "alive", "reason": "心跳 3 秒前" }]
+  },
   "stats": { "received": 3, "triggered": 3, "answered": 2, "skipped": 1, "denied": 0, "failed": 0 }
 }
 ```
@@ -1688,6 +1694,28 @@ SnowLuma 写自己的日志文件用 UTF-8，而 stdout 走**终端编码**。
 > 顶部状态条可以直接用这些字段：`login.nickname` 显示已登录账号，
 > `adminUsers.length === 0` 时显示"没有人能用"警告，
 > `permissionMode` 显示权限档位。
+
+**★ `processes`（进程登记，缺陷 3）—— 界面必须显示，理由如下：**
+
+它回答的是"**现在有几个桥接在跑**"。两个桥接同时从同一个 OneBot 收事件时，
+**每个实例自己看上去都完全正常**，合起来却表现为"同一句话被回答两次" ——
+这是唯一一类"单看每个进程都没毛病、合起来出怪事"的故障，所以必须能一眼看到。
+
+| 字段 | 用途 |
+|---|---|
+| `selfPid` | 当前进程 PID（显示出来，用户才能对照 `--kill`） |
+| `running` | 在运行的桥接数（含自己） |
+| `conflicts` | **非空即冲突**：与本进程同类、且仍在运行的其它进程（`pid` / `state` / `reason`） |
+
+要求：
+
+- 概览页「连接与环境」加一行**进程**：无冲突显示"只有本进程（pid N）"，
+  有冲突显示"另有 N 个在跑"并用警示色；
+- **协议端页签顶部**再加一条醒目提示（比概览更显眼），因为它和"协议端连不上"
+  这类症状出现在同一页，用户会先看这里；
+- 提示里**必须给出停止办法**：`node src/index.mjs --processes --kill <pid>`。
+  只说"检测到冲突"而不给出路，等于把问题丢回给用户。
+- 演示模式（`demo`）下显示 `—`，不要显示真实 PID。
 
 ### 5.1 SnowLuma 进程接口（**已实现**）
 

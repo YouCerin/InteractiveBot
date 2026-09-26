@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { FieldRow, InlineNote, NumInput } from '@/components/common'
-import { api, isNotImplemented, type SnowlumaDetect, type SnowlumaStatus } from '@/lib/api'
+import { api, isNotImplemented, type ApiStatus, type SnowlumaDetect, type SnowlumaStatus } from '@/lib/api'
 import { getBool, getNum, getStr, getStrArr, samePort } from '@/lib/config'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -401,21 +401,41 @@ export function ProtocolTab({
   tokens,
   setTokens,
   demo,
+  status,
 }: {
   cfg: Record<string, unknown>
   patch: (path: string, value: unknown) => void
   tokens: TokenDraft
   setTokens: (t: TokenDraft) => void
   demo: boolean
+  /** 运行状态（含进程登记）。用于显示"是不是还有别的桥接在跑"。 */
+  status?: ApiStatus | null
 }) {
   const wsUrl = getStr(cfg, 'onebot.wsUrl', 'ws://127.0.0.1:3001')
   const httpUrl = getStr(cfg, 'onebot.httpUrl', 'http://127.0.0.1:3000')
   const hasWsToken = getBool(cfg, 'hasWsToken', false)
   const hasHttpToken = getBool(cfg, 'hasHttpToken', false)
   const adminUsers = getStrArr(cfg, 'access.adminUsers', [])
+  const conflicts = status?.processes?.conflicts ?? []
 
   return (
     <div className="space-y-4">
+      {/* ★ 进程冲突（缺陷 3）：放在最前面，因为它是最容易"看不出问题"的一类故障 ——
+          两个桥接同时从同一个 OneBot 收事件，每个实例自己都完全正常，
+          合起来表现为"同一句话被回两次"。 */}
+      {conflicts.length > 0 && (
+        <InlineNote level="danger">
+          <strong>检测到还有别的桥接在跑</strong>（pid {conflicts.map((c) => c.pid).join('、')}）。
+          同时跑两个会抢同一个 OneBot 事件流 —— 同一句话可能被回答两次，而每个实例
+          自己看上去都正常。
+          <br />
+          停掉多余的：
+          <code className="mx-1 rounded bg-white/60 px-1">
+            node src/index.mjs --processes --kill &lt;pid&gt;
+          </code>
+        </InlineNote>
+      )}
+
       {/* 管理员白名单：空 = 谁都不能用，必须醒目 */}
       {adminUsers.length === 0 && (
         <InlineNote level="danger">

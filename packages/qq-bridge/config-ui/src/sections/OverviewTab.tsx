@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { InlineNote } from '@/components/common'
 import type { ApiStatus } from '@/lib/api'
 import { getStr } from '@/lib/config'
 import { cn } from '@/lib/utils'
@@ -24,6 +25,15 @@ export function OverviewTab({
   demo: boolean
 }) {
   const stats = status?.stats
+  // 进程登记（缺陷 3）：演示模式不显示真实 PID，其余情况按登记给结论
+  const procs = status?.processes
+  const conflicts = procs?.conflicts ?? []
+  const hasConflict = conflicts.length > 0
+  const processLabel = demo || !procs
+    ? '—'
+    : hasConflict
+      ? `⚠️ 本进程 pid ${procs.selfPid ?? '?'}，另有 ${conflicts.length} 个在跑`
+      : `✅ 只有本进程（pid ${procs.selfPid ?? '?'}）`
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -66,6 +76,27 @@ export function OverviewTab({
               <dt className="text-muted-foreground">群聊总开关</dt>
               <dd>{status?.groupEnabled ? '已开启' : '已关闭（默认）'}</dd>
             </div>
+            {/* ★ 进程登记（缺陷 3）：两个桥接同时跑时，每个实例自己看上去都正常，
+                合起来却会抢同一个 OneBot 事件流（同一句话可能被回两次）——
+                所以这一行必须在概览上能一眼看到。 */}
+            <div className="flex justify-between gap-4 border-b border-dashed pb-2">
+              <dt className="shrink-0 text-muted-foreground">进程</dt>
+              <dd className={cn(hasConflict && 'font-medium text-amber-700')}>
+                {processLabel}
+              </dd>
+            </div>
+            {hasConflict && (
+              <div className="sm:col-span-2">
+                <InlineNote level="warn">
+                  <strong>检测到还有别的桥接在跑</strong>
+                  （pid {conflicts.map((c) => c.pid).join('、')}）。同时跑两个会抢同一个
+                  OneBot 事件流 —— 同一句话可能被回答两次，而每个实例自己看上去都正常。
+                  停掉多余的：<code className="rounded bg-white/50 px-1">
+                    node src/index.mjs --processes --kill &lt;pid&gt;
+                  </code>
+                </InlineNote>
+              </div>
+            )}
             <div className="flex justify-between gap-4 sm:col-span-2">
               <dt className="shrink-0 text-muted-foreground">工作区（记忆所在）</dt>
               <dd className="truncate font-mono text-xs" title={status?.workspace ?? getStr(cfg, 'dsh.workspace')}>

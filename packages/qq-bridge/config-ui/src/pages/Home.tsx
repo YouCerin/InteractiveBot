@@ -411,7 +411,14 @@ export default function Home() {
             <McpTab cfg={cfg} patch={patch} />
           </TabsContent>
           <TabsContent value="protocol">
-            <ProtocolTab cfg={cfg} patch={patch} tokens={tokens} setTokens={setTokens} demo={demo} />
+            <ProtocolTab
+              cfg={cfg}
+              patch={patch}
+              tokens={tokens}
+              setTokens={setTokens}
+              demo={demo}
+              status={status}
+            />
           </TabsContent>
           <TabsContent value="advanced">
             <AdvancedTab
