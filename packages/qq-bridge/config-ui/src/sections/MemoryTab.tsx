@@ -381,6 +381,26 @@ export function MemoryTab({
         模型有工作区里所有文件的读写权限（那是它干活的必要条件）。
         所以这是<strong>防误伤</strong>（避免它顺手混用），不是防恶意，别把它当成安全边界。
       </InlineNote>
+      <InlineNote level="info">
+        <strong>写入权已经收回到桥接</strong>：模型只能在回复里"提议"记什么
+        （<code className="rounded bg-white/50 px-1">{'<<<MEMORY fact|slang|directive 内容>>>'}</code>），
+        由桥接校验后落盘。三个后果你需要知道：
+        <ul className="mt-1 list-disc pl-5">
+          <li>
+            <strong>这里手动改完会被回滚</strong>：桥接每次写入都留快照，读记忆前比对，
+            不一致（说明有人绕过了桥接）就恢复成桥接那版。想在界面上改，需要先
+            <strong>关掉记忆功能</strong>（<code className="rounded bg-white/50 px-1">memory.enabled</code>）再改。
+          </li>
+          <li>
+            <strong>指令档跨群生效</strong>：只有管理员在<strong>私聊</strong>里说的"以后遇到 X 就这样做"
+            会写进 <code className="rounded bg-white/50 px-1">MEMORY.md</code>，对所有群有效。
+          </li>
+          <li>
+            涉及「谁是管理员/有什么权限」的内容<strong>一律会被拒</strong>并在下一轮回执给模型 ——
+            身份只由配置里的 <code className="rounded bg-white/50 px-1">access.adminUsers</code> 决定。
+          </li>
+        </ul>
+      </InlineNote>
 
       <Card>
         <CardHeader className="pb-2">

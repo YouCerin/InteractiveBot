@@ -18,7 +18,17 @@ import { makeSessionId, defaultInstanceTag } from './session-id.mjs'
 import { decideTrigger, REASON } from './trigger.mjs'
 import { renderSegments, markdownToPlain, splitForQQ } from './text.mjs'
 import { computeReplyDelay, splitIntoMessages } from './humanize.mjs'
-import { buildMemoryInstructions } from './memory.mjs'
+// 记忆：桥接托管（见 memory-store.mjs）。旧的 memory.mjs 仍被 mocks 引用，
+// 但它那段"让模型自己去读写笔记"的指令已经**不再进入提示词**。
+import {
+  applyMemoryItems,
+  buildMemoryInstructionsV2,
+  parseMemoryMarkers,
+  readMemoryForPrompt,
+  takeReceipt,
+  verifyAndRestoreMemory,
+  writeReceipt,
+} from './memory-store.mjs'
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona } from './persona.mjs'
@@ -633,7 +643,7 @@ export class Bridge extends EventTarget {
         const blocks = [
           {
             type: 'text',
-            text: this.#buildPrompt(rendered, reason, {
+            text: await this.#buildPrompt(rendered, reason, {
               kind,
               peerId,
               senderId,
@@ -727,6 +737,37 @@ export class Bridge extends EventTarget {
 
       let answer = markdownToPlain(result.text)
 
+      // ── 记忆标记：剥离 + 落盘（★ 这一步是"写入权归桥接"的落点）────────
+      //
+      // 模型在回复里写的 `<<<MEMORY …>>>` 行：
+      //   ① 从发给 QQ 的正文里**剥掉**（绝不能把标记发给对方）；
+      //   ② 交桥接按发起人身份与来源校验后落盘；
+      //   ③ 结果写成"回执"，下一轮作为提示词的一部分告诉模型到底记上没有。
+      // 注意顺序：先剥离再判断"回复是否为空" —— 否则一条"只说了要记东西"
+      // 的回复会被判成空，然后发出兜底话术，看起来像机器人抽风。
+      if (this.config.memory?.enabled !== false && this.config.dsh?.workspace) {
+        const parsed = parseMemoryMarkers(answer)
+        answer = parsed.clean
+        if (parsed.items.length > 0) {
+          const outcome = applyMemoryItems({
+            workspace: this.config.dsh.workspace,
+            kind,
+            peerId,
+            senderId,
+            tier,
+            items: parsed.items,
+            log: this.log,
+          })
+          writeReceipt({
+            workspace: this.config.dsh.workspace,
+            kind,
+            peerId,
+            applied: outcome.applied,
+            ignored: outcome.ignored,
+          })
+        }
+      }
+
       // ★ 把思考过程记进镜像（**只给界面看，不发到 QQ**）。
       //   放在"兜底回复"之前：即使这一轮模型一个字都没说，它的思考过程
       //   对使用者仍有价值（能看出它到底干了什么、卡在哪）。
@@ -759,7 +800,7 @@ export class Bridge extends EventTarget {
     })
   }
 
-  #buildPrompt(rendered, reason, { kind, peerId, senderId, tier, images = [] } = {}) {
+  async #buildPrompt(rendered, reason, { kind, peerId, senderId, tier, images = [] } = {}) {
     const now = new Date()
     const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
       now.getDate(),
@@ -812,21 +853,25 @@ export class Bridge extends EventTarget {
     // 列出被禁的动作类别（只写"不能修改"太抽象，模型会理解成"尽量别改"）。
     lines.push('', buildPermissionInstructions(tier, kind))
 
-    // ── 跨重启记忆的约定（**按人/按群分开**）────────────────────────────
-    // 关掉它只是少一段指令，不会破坏任何机制 —— 但如果关掉，
+    // ── 记忆（**写入权在桥接，不在模型**）────────────────────────────────
+    // 关掉它只是少一段指令与一段召回，不会破坏任何机制 —— 但如果关掉，
     // 机器人重启后就真的什么都不记得了。
     //
-    // ★ 必须把 `kind` / `peerId` 传进去：记忆是分人的，提示词里给出的
-    //   文件路径随会话变化。不传就会出现"所有人共用一份笔记"的串人问题
-    //   （详见 src/memory.mjs 顶部那段）。
-    //
-    // 注：这一段随会话变化，所以它**不参与提示词前缀缓存**（人设那一段才参与）。
-    //     这是隔离性的必要代价，换来的是"不串人"。
+    // ★ 这一段**不含任何文件路径**（旧版把路径写进来了）。两个理由：
+    //   ① 写入由桥接做，模型不需要路径；
+    //   ② 路径随会话变化，写进提示词就会破坏 DeepSeek 的前缀缓存 ——
+    //      实测本项目缓存命中率 91%~96%，往固定前缀里塞多变内容等于
+    //      把最便宜的那部分 token 变成最贵的。
     if (this.config.memory?.enabled !== false && this.config.dsh?.workspace) {
-      lines.push(
-        '',
-        buildMemoryInstructions({ workspace: this.config.dsh.workspace, kind, peerId }),
-      )
+      const workspace = this.config.dsh.workspace
+      // ★ 先查篡改：模型手里仍有 write 工具，可以绕过标记直接改记忆文件。
+      //   提示词里那句"不要用文件工具写记忆"只是请求；这里才是保证 ——
+      //   发现与快照不一致就回滚（详见 memory-store.mjs 的说明）。
+      verifyAndRestoreMemory({ workspace, log: this.log })
+      const recall = readMemoryForPrompt({ workspace, kind, peerId })
+      // 回执是"上一条消息里的记忆到底记上没有"——读后即删，只出现一次
+      const receipt = takeReceipt({ workspace, kind, peerId })
+      lines.push('', buildMemoryInstructionsV2({ kind, recall, receipt }))
     }
 
     lines.push('', origin, rendered.text)
