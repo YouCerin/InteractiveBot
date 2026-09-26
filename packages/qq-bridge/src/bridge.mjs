@@ -768,10 +768,28 @@ export class Bridge extends EventTarget {
     // ★ 来源标注必须如实区分私聊与群聊。
     //   原先这里写死"来自 QQ 私聊" —— 群聊打开后那就是**错的上下文**，
     //   模型会以为自己在一对一对话里，于是用私聊口吻回群里。
-    const who =
-      this.config.persona?.callerName && reason === REASON.PRIVATE
+    // ★★ 发言人身份标注**必须按真实权限等级**，绝不能写死"管理员"。
+    //
+    // 这里原来是一段写死的 `who`：只要配了 callerName 就标"（…，管理员）"，
+    // 否则一律标"（管理员）" —— 也就是说**每个在群里说话的人都被标注成管理员**。
+    // 后果有两层，第二层更严重：
+    //
+    //   ① 模型会照着这行字把说话人当成管理员，于是把他写进记忆
+    //      （实测就是这样：群里一个普通用户被记成"管理员，会来更正记录"，
+    //        见 workspace-qq/memory/group-*.md）；
+    //   ② 这一行是**系统侧的可信信息**，和真正的权限段（roster 按 adminUsers 判定）
+    //      自相矛盾。模型看到的两个来源打架时，它更信"贴在人身上的标签"，
+    //      于是可能因此答应本该拒绝的请求 —— 也就是把权限判定从代码层
+    //      泄漏成了提示词层的猜测。
+    //
+    // 所以：管理员才标"管理员"，普通用户标"普通用户"。措辞与
+    // buildPermissionInstructions 保持一致（那里用的是「普通用户（只读）」）。
+    const isAdminTier = tier === 'admin'
+    const who = isAdminTier
+      ? this.config.persona?.callerName && reason === REASON.PRIVATE
         ? `（${this.config.persona.callerName}，管理员）`
         : '（管理员）'
+      : '（普通用户，只读）'
     const origin =
       kind === 'group'
         ? `[来自 QQ 群 ${peerId}，发言人 ${senderId ?? '?'}${who}  ${stamp}]`

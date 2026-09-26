@@ -25,6 +25,8 @@ const WS_DIR = join(HERE, '..', '.tmp-verify-onebot')
 
 const ADMIN = '100000001'
 const STRANGER = '1999999999'
+/** 一个**不是**管理员、但在群白名单里能触发机器人的普通用户（用它测权限标注）。 */
+const NON_ADMIN = '100000002'
 const GROUP = '700000002'
 
 let failures = 0
@@ -335,6 +337,46 @@ async function main() {
     const text = (got ?? []).map((s) => s.text).join('\n')
     check('★ 提示词里的来源标注是"群"而不是"私聊"（否则模型会用私聊口吻）',
       text.includes(`[来自 QQ 群 ${GROUP}`), text.slice(0, 80))
+  }
+
+  console.log('\n── 用例 5d：提示词里的发言人身份必须按**真实权限**标注 ───────')
+  {
+    // ★ 这一节是为一个真实缺陷加的：`#buildPrompt` 里那段来源标注曾经**写死**
+    //   "（管理员）" —— 于是每个在群里说话的人都被标成管理员。后果不止是"记错名字"：
+    //   模型因此把一个普通用户的身份写进了记忆（实测：
+    //   workspace-qq/memory/group-*.md 里出现"100000002 …… 管理员"），
+    //   而那一行是**系统侧的可信信息**，与真正的权限段自相矛盾。
+    const nonAdmin = await pushAndWaitForReply(
+      mockServer,
+      groupMessage({ groupId: GROUP, userId: NON_ADMIN, text: '小鲸鱼帮我看下', messageId: 107 }),
+    )
+    const nonAdminText = (nonAdmin ?? []).map((s) => s.text).join('\n')
+    // 只看**来源标注那一行**。不能拿整段提示词去查"管理员"三个字：
+    // 普通用户那段权限说明里本来就会提到"真有必要的操作，让 TA 找管理员"。
+    // （第一版就是这么写错的，于是断言恒为假 —— 又是一条"假断言"。）
+    const nonAdminOrigin = nonAdminText.match(/\[来自 QQ 群[^\]]*\]/)?.[0] ?? ''
+    check('非管理员在群里说话也会被回（群白名单决定能不能用）', nonAdmin !== null)
+    check(
+      '★★ 非管理员的来源标注里**不能**把他标成管理员',
+      nonAdminOrigin !== '' && !nonAdminOrigin.includes('管理员'),
+      nonAdminOrigin || '（没找到来源标注）',
+    )
+    check(
+      '★ 非管理员被如实标成"普通用户，只读"',
+      nonAdminOrigin.includes(`${NON_ADMIN}（普通用户，只读）`),
+      nonAdminOrigin,
+    )
+
+    const asAdmin = await pushAndWaitForReply(
+      mockServer,
+      groupMessage({ groupId: GROUP, userId: ADMIN, text: '小鲸鱼再看下', messageId: 108 }),
+    )
+    const adminText = (asAdmin ?? []).map((s) => s.text).join('\n')
+    check(
+      '★ 管理员仍被标成"管理员"（改这一处不能把真管理员也说成普通用户）',
+      adminText.includes(`${ADMIN}（管理员）`),
+      adminText.match(/\[来自 QQ 群[^\]]*\]/)?.[0] ?? '',
+    )
   }
 
   console.log('\n── 用例 5c：群聊命中关键词 → 必须回 ─────────────────────')
