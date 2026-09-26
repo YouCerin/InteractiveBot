@@ -99,30 +99,86 @@ config.json.bak*          历史备份，含旧密钥
 
 ★ **编码**：`config.json` 必须是**无 BOM 的 UTF-8**。写入时带 BOM 会让配置解析直接失败。
 
+★ 现在这一步是**自动的**：`config.example.json` 已经就是上面那张表的状态
+（每次发版按 §5 直接 `Copy-Item config.example.json config.json` 即可），
+不需要手工去改 `config.json`。`node setup.mjs --release` 会检查模板是否干净、
+以及本机 `config.json` 里是否还留着明文密钥（只报告，不改文件）。
+
 ---
 
-## 4. 快捷方式（可选）
+## 4. 入口与快捷方式
+
+发布包给的是 `启动机器人.bat`（中文名，方便双击）+ `start.bat`（真正干活的）。
 
 `启动机器人.lnk` **不要直接发** —— `.lnk` 里存的是**绝对路径**，换机器必然失效
-（图标会退化成白纸）。两种做法：
-
-- 干脆只发 `start.bat`（最简单）；
-- 或者发一个 `创建快捷方式.bat`，用 `WScript.Shell` 在解压位置现场生成 `.lnk`，
-  图标指向包内 `assets/icon.ico`。
+（图标会退化成白纸）。想要带图标的快捷方式，就让用户自己右键 `启动机器人.bat`
+→「发送到」→「桌面快捷方式」，再改图标指向包内 `assets/icon.ico`。
 
 ---
 
-## 5. 出 zip
+## 5. 组装发布包
+
+打包产物放在**项目之外**（桌面的 `_release\`），这样它既不会混进 git 工作树，
+也不会被误当成项目文件。
 
 ```powershell
-# 用 robocopy 组装 staging（文件多、路径长，Copy-Item 容易出问题）
-robocopy . ..\_release\InteractBot-0.1.0-win-x64 /E /XD node_modules logs cache workspace-qq .tmp-verify .tmp-verify-onebot .tmp-verify-doctor .tmp-live-workspace .tmp-live-outside .tmp-probe-dsh /XF config.json.bak*
+$ws  = '<...>\project_InteractBot\packages\qq-bridge'
+$out = "$env:USERPROFILE\Desktop\_release\InteractBot-0.1.0-win-x64"
+New-Item -ItemType Directory -Path $out -Force | Out-Null
 
-# 压缩（zip 内保留一层版本化目录名，避免用户解压得到一堆散文件）
-Compress-Archive -Path ..\_release\InteractBot-0.1.0-win-x64 -DestinationPath ..\_release\InteractBot-0.1.0-win-x64.zip
+# 只拷发布必需件（不用 /E 拷整个目录再删，避免把运行痕迹带进去）
+foreach ($d in 'src','mcp','assets','config-ui\dist','vendor\node') {
+  robocopy "$ws\$d" "$out\$d" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+}
+robocopy "$ws\vendor\node_modules\ws" "$out\vendor\node_modules\ws" /E /NFL /NDL /NJH /NJS /NP | Out-Null
+foreach ($f in 'start.bat','setup.mjs','prices.json','config.example.json','AGENT.md','PROJECT.json','README.md','RELEASE.md') {
+  Copy-Item "$ws\$f" $out -Force
+}
+
+# ★ 默认的空配置：发布包里必须有一份**空白** config.json，开箱即用
+Copy-Item "$out\config.example.json" "$out\config.json" -Force
 ```
 
-体积参考：解压后约 **88 MB**，zip 后约 **40–45 MB**。
+**发布包的最终形状**（62 个文件 / 约 87 MB）：
+
+```
+InteractBot-0.1.0-win-x64/
+├── 启动机器人.bat          ← 中文名入口（正文纯 ASCII，转调 start.bat）
+├── start.bat
+├── config.json             ← ★ 空白模板（密钥与本机路径全空）
+├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
+├── prices.json
+├── AGENT.md  PROJECT.json  README.md  RELEASE.md  setup.mjs
+├── src/                    桥接代码
+├── mcp/                    QQ 工具服务器
+├── assets/                 icon.ico 等
+├── config-ui/dist/         ★ 只有构建产物 —— config-ui 的**源码与 node_modules 留在项目里**
+└── vendor/
+    ├── node/node.exe       85.6 MB
+    └── node_modules/ws/
+```
+
+不带：`vendor/dsh`（用户自装）、`vendor/snowluma`（许可证不允许）、
+`config-ui/{src,node_modules}`（202 MB，属项目开发资产）、
+`logs` `cache` `workspace-qq` `mocks` `config.json.bak*`。
+
+### 打包后必须跑一次验收脚本
+
+```powershell
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.1.0-win-x64"
+```
+
+它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**
+（DSH/SnowLuma/config-ui 源码/日志/密钥缓存）、**内容里有没有明文密钥与机器专属路径**、
+**体积构成**。退出码 0 才发。
+
+### 出 zip
+
+```powershell
+Compress-Archive -Path $out -DestinationPath "$out.zip"
+```
+
+体积参考：解压后约 **87 MB**，zip 后约 **40–45 MB**（大头是已压缩过的 `node.exe`）。
 
 ★ 包必须放在**可写**位置（用户桌面、D 盘目录都行）：
 `logs/`、`cache/`、`workspace-qq/` 都要写。放在 `C:\Program Files\` 下会失败。
