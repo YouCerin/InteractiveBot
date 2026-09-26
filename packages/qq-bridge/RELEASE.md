@@ -143,7 +143,10 @@ Copy-Item "$out\config.example.json" "$out\config.json" -Force
 
 ```
 InteractBot-0.1.0-win-x64/
-├── 启动机器人.bat          ← 中文名入口（正文纯 ASCII，转调 start.bat）
+├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
+├── 启动机器人.bat           ← 中文名入口（正文纯 ASCII，转调 start.bat）
+├── 检查配置.bat             ← 给小白：双击 = start.bat --check
+├── 体检.bat                 ← 给小白：双击 = start.bat --doctor（真连一次 SnowLuma）
 ├── start.bat
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
@@ -157,6 +160,14 @@ InteractBot-0.1.0-win-x64/
     ├── node/node.exe       85.6 MB
     └── node_modules/ws/
 ```
+
+★ **小白文档不是装饰**：`先读我-首次使用.txt` 是包内唯一一份写给非技术使用者的文档
+（其余 `AGENT.md` / `README.md` / `RELEASE.md` / `PROJECT.json` 分别面向 AI agent、
+开发者和机器校验）。它必须给出四个下载链接、三步配置、五个常见故障对照，
+以及"密钥非官方登录有账号风险"的提示。改动 README/配置项文案时记得同步它。
+
+★ 两个 `*.bat` 引导入口的正文是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，
+含中文会吞掉换行），只转调 `start.bat` 的对应开关 —— 开关的语义只有一处实现。
 
 不带：`vendor/dsh`（用户自装）、`vendor/snowluma`（许可证不允许）、
 `config-ui/{src,node_modules}`（202 MB，属项目开发资产）、

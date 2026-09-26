@@ -37,6 +37,9 @@ const rel = (p) => relative(root, p).replace(/\\/g, '/')
 // ── ① 结构：该有的必须都在 ─────────────────────────────────────────────
 const MUST_EXIST = [
   '启动机器人.bat',
+  '先读我-首次使用.txt',
+  '检查配置.bat',
+  '体检.bat',
   'start.bat',
   'config.json',
   'config.example.json',
