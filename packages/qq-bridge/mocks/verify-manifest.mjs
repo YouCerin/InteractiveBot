@@ -362,6 +362,33 @@ section('仓库完整性：UI 源码不能有文件被 .gitignore 悄悄挡在�
 checkUiSourceTracked()
 
 // ══════════════════════════════════════════════════════════════════════════
+section('版本号只有一个来源（四处必须一致）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ★ 为什么值得一条断言：版本号散在**四个**地方（package.json / PROJECT.json /
+//   MCP server info / RELEASE.md 里的包名），而升级版本时最容易"改了三个忘一个"。
+//   症状是自相矛盾：包名写着 0.2.0、里面报的却是 0.1.0 —— 用户看到之后才会发现。
+{
+  const v = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
+  check('package.json 有版本号', typeof v === 'string' && v.length > 0, String(v))
+
+  const projV = JSON.parse(readFileSync(join(PKG_ROOT, 'PROJECT.json'), 'utf8')).package?.version
+  check('★ PROJECT.json 的 package.version 与 package.json 一致', projV === v, `${projV} vs ${v}`)
+
+  const mcpSrc = readFileSync(join(PKG_ROOT, 'mcp', 'mcp-qq-server.mjs'), 'utf8')
+  const mcpV = /SERVER_INFO\s*=\s*\{[^}]*version:\s*'([^']+)'/.exec(mcpSrc)?.[1]
+  check('★ MCP server info 的 version 与 package.json 一致', mcpV === v, `${mcpV} vs ${v}`)
+
+  const relMd = readFileSync(join(PKG_ROOT, 'RELEASE.md'), 'utf8')
+  const names = [...new Set([...relMd.matchAll(/InteractBot-([0-9][^-\s]*)-win-x64/g)].map((m) => m[1]))]
+  check(
+    '★ RELEASE.md 里的发布包名与 package.json 一致（且只有一种版本）',
+    names.length === 1 && names[0] === v,
+    names.join('、') || '（没找到 InteractBot-*-win-x64）',
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及 UI 的改动就要更新它）')
 // ══════════════════════════════════════════════════════════════════════════
 {

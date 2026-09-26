@@ -43,7 +43,7 @@ import { createInterface } from 'node:readline'
 
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
-const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.1.0' }
+const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.2.0' }
 
 /**
  * ★ 危险动作黑名单（默认放行其余一切）。

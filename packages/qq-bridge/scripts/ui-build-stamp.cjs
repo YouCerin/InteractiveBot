@@ -41,6 +41,21 @@ const PKG_ROOT = resolve(__dirname, '..')
 /** UI 工程根。 */
 const UI_ROOT = join(PKG_ROOT, 'config-ui')
 
+/**
+ * 桥接的版本号（`packages/qq-bridge/package.json`）。
+ *
+ * ⚠️ **不是** `config-ui/package.json` 那个 —— 那份是 Vite 脚手架的，恒为 `0.0.0`。
+ *    第一版取错了，于是标记里写着 `"pkgVersion": "0.0.0"`，而包本身是 0.2.0：
+ *    一个"看起来有字段、其实是错值"的例子。版本号必须只有一个来源。
+ */
+function bridgeVersion() {
+  try {
+    return String(JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version ?? '')
+  } catch {
+    return ''
+  }
+}
+
 /** 参与哈希的源码子目录（相对 UI 根）。 */
 const HASH_DIRS = ['src']
 /** 参与哈希的单文件（相对 UI 根）。构建与类型配置变了也会影响产物。 */
@@ -129,6 +144,7 @@ function readBuildStamp(distDir) {
 module.exports = {
   PKG_ROOT,
   UI_ROOT,
+  bridgeVersion,
   computeUiSourceHash,
   writeBuildStamp,
   readBuildStamp,

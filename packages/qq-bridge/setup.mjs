@@ -41,12 +41,26 @@ const CHECK_ONLY = args.includes('--check')
 const FORCE = args.includes('--force')
 const RELEASE = args.includes('--release')
 const WITH_SNOWLUMA = args.includes('--with-snowluma')
+/**
+ * `--json`：只输出**机器可读**的体检结果，不打印人看的报告。
+ *
+ * ★ 为什么需要它：`scripts/assemble-release.mjs` 要按类别判断"哪类 ❌ 该拦住组装、
+ *   哪类只是提示"，而它**不能靠解析排版文本** —— 试过，代价是两头耦合：
+ *   组装脚本挑 `❌` 前缀，而体检脚本成功时根本不打某些字，于是判通过时假失败。
+ *   结构化输出把这条耦合变成**一份契约**（下面的 JSON 字段名就是契约）。
+ *
+ * 用法：`node setup.mjs --release --json` → stdout 只有一行 JSON
+ */
+const JSON_OUT = args.includes('--json')
 
 /** 取 `--flag <值>` 形式的值（不存在则返回 null）。 */
 function argValue(flag) {
   const i = args.indexOf(flag)
   return i >= 0 && args[i + 1] ? args[i + 1] : null
 }
+
+/** `--json-out <路径>`：把结构化体检结果**写到文件**（绕开管道限制，见下）。 */
+const JSON_OUT_FILE = argValue('--json-out')
 
 const line = (s = '') => console.log(s)
 function mb(bytes) {
@@ -432,6 +446,26 @@ async function auditForRelease() {
   }
 
   // ── 输出 ──
+  if (JSON_OUT || JSON_OUT_FILE) {
+    // 机器可读：`problems` / `warns` 原样给全，让调用方自己决定"哪类算阻断" ——
+    // 判据不塞在这里，因为不同调用方口径不同：
+    //   · 组装发布包：真 config.json 的明文**不算**阻断（组装根本不拷它）
+    //   · 人执行：那当然要清（所以它是 ❌）
+    //
+    // ★ 为什么支持**写文件**（`--json-out <路径>`）而不是只打 stdout：
+    //   受限沙箱禁止"通过管道截获另一个程序的输出"（EPERM），
+    //   调用方（assemble-release.mjs）**拿不到**子进程的 stdout ——
+    //   实测 `execFileSync` 与 `spawnSync` + pipe 都直接 EPERM，
+    //   而报错里既没有退出码也没有输出，看起来毫无头绪。
+    //   写文件走的是普通文件 I/O，不碰管道，在同样环境里是好的。
+    const payload = { ok: problems.length === 0, problems, warns }
+    if (JSON_OUT_FILE) {
+      writeFileSync(JSON_OUT_FILE, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    }
+    if (JSON_OUT) line(JSON.stringify(payload))
+    return problems.length
+  }
+
   line('── 发布前体检（只报告，不改文件）──')
   if (!problems.length && !warns.length) {
     line('  ✅ 没发现问题。')
@@ -451,12 +485,20 @@ async function auditForRelease() {
 
 line('')
 line('── 结果 ──')
-for (const row of describeLayout()) {
-  line(`  ${row.present ? '✅' : '⬜'} ${row.label}`)
+if (JSON_OUT && RELEASE) {
+  // --json + --release：stdout 必须是**纯 JSON**（调用方要 JSON.parse 它），
+  // 所以这一段人看的版面不能打。这里只在 stderr 留一句，不污染 stdout。
+  console.error(
+    `[setup] 依赖就位=${ok ? '是' : '否'}（--json 模式，人看的报告已省略）`,
+  )
+} else {
+  for (const row of describeLayout()) {
+    line(`  ${row.present ? '✅' : '⬜'} ${row.label}`)
+  }
+  line('')
+  line(ok ? '🎉 必需依赖已就位。下一步：node src/index.mjs --check' : '⚠️ 有必需项没准备好，见上面的提示。')
+  line('')
 }
-line('')
-line(ok ? '🎉 必需依赖已就位。下一步：node src/index.mjs --check' : '⚠️ 有必需项没准备好，见上面的提示。')
-line('')
 
 // --release：必备项就位后再跑一次"发布前体检"（退出码反映的是体检结果）
 if (RELEASE) {

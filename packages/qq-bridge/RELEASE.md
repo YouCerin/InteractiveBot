@@ -180,31 +180,40 @@ config.json.bak*          历史备份，含旧密钥
 
 ## 5. 组装发布包
 
-打包产物放在**项目之外**（桌面的 `_release\`），这样它既不会混进 git 工作树，
-也不会被误当成项目文件。
+**用脚本，不要手敲 robocopy。**
 
-```powershell
-$ws  = '<...>\project_InteractBot\packages\qq-bridge'
-$out = "$env:USERPROFILE\Desktop\_release\InteractBot-0.1.0-win-x64"
-New-Item -ItemType Directory -Path $out -Force | Out-Null
-
-# 只拷发布必需件（不用 /E 拷整个目录再删，避免把运行痕迹带进去）
-foreach ($d in 'src','mcp','assets','config-ui\dist','vendor\node') {
-  robocopy "$ws\$d" "$out\$d" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
-}
-robocopy "$ws\vendor\node_modules\ws" "$out\vendor\node_modules\ws" /E /NFL /NDL /NJH /NJS /NP | Out-Null
-foreach ($f in 'start.bat','setup.mjs','prices.json','config.example.json','AGENT.md','PROJECT.json','README.md','RELEASE.md') {
-  Copy-Item "$ws\$f" $out -Force
-}
-
-# ★ 默认的空配置：发布包里必须有一份**空白** config.json，开箱即用
-Copy-Item "$out\config.example.json" "$out\config.json" -Force
+```bash
+cd packages/qq-bridge
+node scripts/assemble-release.mjs --dry-run   # 先看它要做什么
+node scripts/assemble-release.mjs --zip       # 组装 + 压缩
+node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会先删干净再建）
 ```
 
-**发布包的最终形状**（62 个文件 / 约 87 MB）：
+**★ 为什么必须有脚本**：上一次组装是手敲的，结果 `启动机器人.bat` /
+`检查配置.bat` / `体检.bat` **只存在于发布包里、仓库里没有源** ——
+文档的"最终形状"列了它们，而拷贝清单一条都没有，说明当时是手工补进去的，
+然后没人记得。手敲清单必然漏项，而**漏项不会报错**。
+
+脚本做的事（顺序不能换）：
+
+| 步 | 做什么 | 为什么 |
+|---|---|---|
+| ① | 跑 `setup.mjs --release --json-out <文件>`，按**类别**判断哪类 ❌ 该拦住 | **真 config.json 的明文不算阻断** —— 组装根本不拷它（包里那份是 `config.example.json` 的副本）。把"使用者本机的配置"当成发不出去的理由，等于让脚本去改他的工作配置 |
+| ② | 输出目录已存在就**拒绝**（要覆盖得显式 `--force`，且先删干净再建） | 老版本要留着对照；而且 `cpSync` 往已有目录上拷会抛难懂的 EIO |
+| ③ | 清点源文件，缺一个都不组装 | 漏项不报错，所以要在组装**之前**数一遍 |
+| ④ | 组装 + **自校验包里的 config.json 确实是空白** | 光"从模板复制"不够，复制完要再验一次结果 |
+| ⑤ | 跑 `check-release-package.mjs`，看**退出码** | 不要挑它的输出文案判通过 |
+| ⑥ | 可选 `--zip` | 用 `tar -a`（bsdtar），比 `Compress-Archive` 快且条目名用正斜杠 |
+
+版本号**只从 `package.json` 读**（脚本里不写第二遍）。升级版本要改的地方由
+`mocks/verify-manifest.mjs` 的一条断言盯着：**四处必须一致** ——
+`package.json` / `PROJECT.json` 的 `package.version` / MCP server info /
+`RELEASE.md` 里的包名。四处里漏改一处，症状是"包名写着 0.2.0、里面报的却是 0.1.0"。
+
+**发布包的最终形状**（73 个文件 / 解压后约 87 MB / zip 约 32.6 MB）：
 
 ```
-InteractBot-0.1.0-win-x64/
+InteractBot-<版本>-win-x64/
 ├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
 ├── 启动机器人.bat           ← 中文名入口（正文纯 ASCII，转调 start.bat）
 ├── 创建带图标的快捷方式.bat  ← 双击生成带图标的 QQ机器人.lnk（.bat 本身无法显示图标）
@@ -213,16 +222,25 @@ InteractBot-0.1.0-win-x64/
 ├── start.bat
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
-├── prices.json
+├── prices.json  package.json
 ├── AGENT.md  PROJECT.json  README.md  RELEASE.md  setup.mjs
 ├── src/                    桥接代码
 ├── mcp/                    QQ 工具服务器
 ├── assets/                 icon.ico 等
-├── config-ui/dist/         ★ 只有构建产物 —— config-ui 的**源码与 node_modules 留在项目里**
+├── config-ui/dist/         ★ 只有构建产物 + 溯源标记 ui-build.json
 └── vendor/
     ├── node/node.exe       85.6 MB
     └── node_modules/ws/
 ```
+
+**★ 老版本不要删**：`_release/` 里每个版本各留一份目录
+（旧版本与新版本**并存**，文件名前缀一样、只有版本号不同），
+脚本也**不许覆盖同名目录**。zip **不入库**（与同名目录逐字节相同，却要多占约 32 MB）。
+
+> ⚠️ 这份文档里**只允许出现当前版本号**（`InteractBot-<版本>-win-x64`）——
+> `mocks/verify-manifest.mjs` 有一条断言盯着"文案里的版本号与 `package.json` 一致
+> **且只有一种**"。要举例说明"旧版本并存"时用文字描述，不要写出具体的旧版本号，
+> 否则那条断言会红（它没法区分"举例"和"漏改"）。
 
 ★ **小白文档不是装饰**：`先读我-首次使用.txt` 是包内唯一一份写给非技术使用者的文档
 （其余 `AGENT.md` / `README.md` / `RELEASE.md` / `PROJECT.json` 分别面向 AI agent、
@@ -239,7 +257,7 @@ InteractBot-0.1.0-win-x64/
 ### 打包后必须跑一次验收脚本
 
 ```powershell
-node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.1.0-win-x64"
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.0-win-x64"
 ```
 
 它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**

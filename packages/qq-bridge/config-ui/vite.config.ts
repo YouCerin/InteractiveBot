@@ -19,7 +19,7 @@ import { createRequire } from 'node:module'
  *    两边各写一套必然分叉 —— 分叉的表现是"校验说同步、其实是错的"。
  */
 const req = createRequire(__filename)
-const { computeUiSourceHash, writeBuildStamp, PKG_ROOT } = req(
+const { bridgeVersion, computeUiSourceHash, writeBuildStamp } = req(
   path.resolve(__dirname, '../scripts/ui-build-stamp.cjs'),
 )
 
@@ -31,7 +31,8 @@ function uiBuildStamp() {
       try {
         const stamp = {
           name: 'qq-bridge 控制台界面',
-          pkgVersion: req(path.resolve(PKG_ROOT, 'package.json')).version ?? '',
+          // ⚠️ 取**桥接的**版本号，不是 config-ui/package.json 那个（它恒为 0.0.0）
+          pkgVersion: bridgeVersion(),
           builtAt: new Date().toISOString(),
           sourceHash: computeUiSourceHash(),
         }

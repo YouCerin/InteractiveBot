@@ -8,7 +8,7 @@
 
   "package": {
     "name": "qq-bridge",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "purpose": "把 QQ 私聊消息转给一个拥有完整能力的 DSH agent，再把回答发回 QQ。",
     "relationship": "取代 packages/dsh-qq-bot（旧架构：DSH 进程内插件 + 一次性 llm.stream 调用，没有工具循环、沙箱、权限概念）。旧包仅作参考。",
     "runtime": {
@@ -43,6 +43,7 @@
   "commands": [
     { "cmd": "node setup.mjs", "purpose": "把 Node 运行时与 ws 依赖复制进 vendor/", "network": false, "costs": "none", "idempotent": true },
     { "cmd": "node src/index.mjs --check", "purpose": "配置自检", "network": false, "costs": "none" },
+    { "cmd": "node scripts/assemble-release.mjs --zip", "purpose": "★ 组装发布包（staging 目录 + 可选 zip）。**用脚本，不要手敲 robocopy** —— 上一次手敲时把 `启动机器人.bat` / `检查配置.bat` / `体检.bat` 漏了，于是它们只存在于发布包里、仓库里没有源（文档的『最终形状』列了它们，拷贝清单一条都没有）。脚本六步：① 按**类别**判 `setup.mjs --release` 的 ❌（真 config.json 的明文**不算阻断** —— 组装根本不拷它）；② 拒绝覆盖已存在的同名版本目录（老版本要留着对照，`--force` 才会先删干净再建）；③ 清点源文件，缺一个都不组装；④ 组装后**自校验包里的 config.json 确实是空白**；⑤ 跑 `check-release-package.mjs` 并看**退出码**（不挑输出文案判通过）；⑥ 可选 `tar -a` 压缩。版本号**只从 package.json 读**。", "network": "local-only", "costs": "none" },
     { "cmd": "node src/index.mjs --doctor", "purpose": "体检（含真实连接探测）", "network": "local-only", "costs": "none" },
     { "cmd": "node src/index.mjs --ui", "purpose": "★ 界面新鲜度（只读）：这份 `config-ui/dist` 是不是当前源码构建的。存在的理由：界面分**两条路出货**（开发路径与 `_release/<包>/` 里的发布路径），而\"包里那份是不是当前源码构建的\"以前**没有任何东西能判断** —— 实测脱钩过一次（包里源码与 UI 都旧约 5 小时，1100 项测试全绿）。判定 = 构建时写入的源码哈希 vs 现在重算的哈希。三种结果分开：`fresh`(0) / `stale`(1，源码改了没构建) / `unstamped`(1，没有标记、重新构建也没用)。", "network": false, "costs": "none" },
     { "cmd": "node src/index.mjs --memory", "purpose": "★ 记忆体检（只读）：此刻记着什么、下一轮按会话会注入什么、待消费回执、快照一致性。回答的是「它说记住了」与「它真的记住了」之间的差。", "network": false, "costs": "none" },

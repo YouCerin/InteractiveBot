@@ -1,6 +1,6 @@
 {
   "name": "qq-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "QQ <-> DSH bridge: relays triggering QQ messages into a `dsh --profile sdk` agent session and sends the answer back. Replaces the in-process llm.stream design of packages/dsh-qq-bot.",
