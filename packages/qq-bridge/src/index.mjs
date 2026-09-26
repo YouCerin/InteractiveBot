@@ -223,6 +223,42 @@ async function main() {
   // 两个只做进程管理的入口，做完就退出（不启动机器人）
   const listProcesses = process.argv.includes('--processes')
 
+  // ── 界面新鲜度（只读）：这份 dist 是不是当前源码构建的？────────────────
+  //
+  // ★ 为什么要有这个入口：界面分两条路出货（开发路径 config-ui/dist、
+  //   发布路径 _release/<包>/config-ui/dist），而"包里那份是不是当前源码
+  //   构建的"以前没有任何东西能判断 —— 实测脱钩过一次，1100 项测试全绿。
+  //   判定方式：构建时写入的源码哈希 vs 现在重算的哈希。
+  //
+  // 用法：
+  //   node src/index.mjs --ui
+  //   node src/index.mjs --ui --dist <某个包的 config-ui/dist>   （查别人给的那份）
+  if (process.argv.includes('--ui')) {
+    ;(async () => {
+      const { checkUiFreshness, uiFreshnessTitle, defaultUiDist } = await import('./ui-status.mjs')
+      const di = process.argv.indexOf('--dist')
+      const distDir = di >= 0 && process.argv[di + 1] ? process.argv[di + 1] : defaultUiDist()
+      const r = checkUiFreshness({ distDir })
+      if (process.argv.includes('--json')) {
+        console.log(JSON.stringify(r, null, 2))
+      } else {
+        console.log('')
+        console.log(uiFreshnessTitle(r.status))
+        console.log(`  产物：${r.distDir}`)
+        console.log(`  说明：${r.why}`)
+        if (r.advice) console.log(`  怎么办：${r.advice}`)
+        console.log('')
+      }
+      // 退出码：fresh=0，其余=1。**unstamped 也算失败** —— 它同样是"无法确认同一份"。
+      process.exit(r.status === 'fresh' ? 0 : 1)
+    })().catch((error) => {
+      console.error(`❌ 界面检查失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+
   // ── 记忆体检（只读，可以在机器人正在跑的时候执行）────────────────────
   //
   // ★ 为什么要有这个入口（"它说记住了"和"它真的记住了"是两件事）：
@@ -348,6 +384,20 @@ async function main() {
     enabled: config.memory?.enabled !== false,
     log,
   })
+
+  // 界面构建溯源：启动时算一次（只读、很便宜），放进 /api/status。
+  // 它回答"正在伺服的这份 UI 与源码是不是同一份" —— 见 src/ui-status.mjs 的说明。
+  const { checkUiFreshness } = await import('./ui-status.mjs')
+  const uiFreshness = checkUiFreshness({ distDir: join(PKG_ROOT, 'config-ui', 'dist') })
+  if (uiFreshness.status !== 'fresh') {
+    // ★ 不静默，但**也不阻止启动** —— 界面不同步不影响机器人回话。
+    log(
+      `⚠️ 控制台界面与源码不同步（${uiFreshness.status}）：${uiFreshness.why}` +
+        `｜${uiFreshness.advice}`,
+    )
+  } else {
+    log(`控制台界面与源码同步（构建于 ${uiFreshness.stamp?.builtAt ?? '?'}）`)
+  }
   // 名单与权限分级。**与 Bridge 共用同一个实例** —— 缓存的好友/群列表
   // 才能被配置接口复用，而不是各拉一份。
   const roster = createRoster({ config, log })
@@ -604,6 +654,13 @@ async function main() {
             conflicts: others.map((e) => ({ pid: e.pid, state: e.state, reason: e.reason })),
           }
         })(),
+        // ★ 正在伺服的那份界面"是哪来的"（构建溯源）。
+        //   回答的是"你看到的 UI 与源码是不是同一份" —— 界面分两条路出货
+        //   （开发路径与发布包路径），而它们**脱钩过一次**（实测：包里那份旧了
+        //   5 小时，1100 项测试全绿）。所以这里如实报出三种状态，不混成一句
+        //   "不同步"：`stale`（源码改了没构建）与 `unstamped`（无法自证来源）
+        //   的处理方式完全不同，含糊会让人往错的方向修。
+        ui: uiFreshness,
       }),
       // 会话同步：给"同步 QQ 对话界面"用（内存镜像，最近若干条）
       getConversations: () => bridge.listConversations(),

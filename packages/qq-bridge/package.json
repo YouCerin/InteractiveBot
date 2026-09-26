@@ -17,6 +17,7 @@
     "test:memory": "node mocks/verify-memory-store.mjs",
     "test:memory-roundtrip": "node mocks/verify-memory-roundtrip.mjs",
     "memory": "node src/index.mjs --memory",
+    "ui": "node src/index.mjs --ui",
     "test:guard": "node mocks/verify-process-guard.mjs",
     "test:snowluma": "node mocks/verify-snowluma-guard.mjs",
     "test:images": "node mocks/verify-images.mjs",

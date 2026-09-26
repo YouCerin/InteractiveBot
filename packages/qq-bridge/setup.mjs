@@ -298,7 +298,7 @@ try {
  *
  * @returns {number} 问题条数
  */
-function auditForRelease() {
+async function auditForRelease() {
   const problems = []
   const warns = []
   const rel = (p) => p.replace(PKG_ROOT + '\\', '').replace(PKG_ROOT + '/', '')
@@ -371,6 +371,38 @@ function auditForRelease() {
     problems.push('config-ui/dist 缺失 —— 界面改动必须在 config-ui 里跑 npm run build')
   }
 
+  // ⑤-b ★ 界面产物**是不是当前源码构建的**（构建溯源）
+  //
+  // 为什么这一条是发布验收的一部分：界面分两条路出货 —— 开发路径
+  // `config-ui/dist`（已入库）与发布路径 `_release/<包>/config-ui/dist`
+  // （§5 用 robocopy 拷）。而"包里那份是不是当前源码构建的"以前**没有任何
+  // 东西能判断**：上面那条只验 `index.html` 在不在，存在即通过。
+  // 实测脱钩过一次 —— 包里源码与 UI 都比工作区旧约 5 小时，1100 项测试全绿。
+  //
+  // ⚠️ `stale`（源码改了没构建）与 `unstamped`（无法自证来源）**必须分开报**：
+  //    前者的修法是重新构建，后者重新构建也没用。混成一句"不同步"会让人
+  //    往错的方向修。
+  {
+    const { checkUiFreshness } = await import('./src/ui-status.mjs')
+    const ui = checkUiFreshness({ distDir: join(PKG_ROOT, 'config-ui', 'dist') })
+    if (ui.status === 'stale') {
+      problems.push(
+        `config-ui/dist **落后于**当前源码 —— ${ui.why}。${ui.advice}`,
+      )
+    } else if (ui.status === 'unstamped') {
+      problems.push(
+        `config-ui/dist **无法自证来源**（缺 ui-build.json）—— ${ui.why}。${ui.advice}`,
+      )
+    } else if (ui.status === 'missing') {
+      // 上面已经报过一次，这里不重复
+    } else {
+      // 同步是**好消息**，但也值得留一行：发布记录里能对上是哪次构建
+      line('')
+      line(`  ✅ 界面产物与源码同步（构建于 ${ui.stamp?.builtAt ?? '?'}）`)
+      line('')
+    }
+  }
+
   // ⑥ 模板与真实配置的关系（git 不跟踪 config.json，所以模板必须自带、且必须干净）
   const examplePath = join(PKG_ROOT, 'config.example.json')
   if (!existsSync(examplePath)) {
@@ -427,5 +459,8 @@ line(ok ? '🎉 必需依赖已就位。下一步：node src/index.mjs --check' 
 line('')
 
 // --release：必备项就位后再跑一次"发布前体检"（退出码反映的是体检结果）
-if (RELEASE) process.exit(auditForRelease() === 0 && ok ? 0 : 1)
+if (RELEASE) {
+  const bad = await auditForRelease()
+  process.exit(bad === 0 && ok ? 0 : 1)
+}
 process.exit(ok ? 0 : 1)

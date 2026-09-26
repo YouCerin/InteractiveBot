@@ -78,6 +78,12 @@ node src/index.mjs --memory           # 记了什么 + 下一轮按会话会注�
 node src/index.mjs --memory --full    # 注入内容整段打印
 node src/index.mjs --memory --json    # 给脚本/界面用
 
+# ⑤-c 界面新鲜度（只读）：这份 dist 是不是当前源码构建的？
+#   ★ 界面分两条路出货（开发路径与发布包路径），**脱钩过一次**且测试全绿。
+#   详见 RELEASE.md §1 与 CONFIG-UI.md「构建溯源」
+node src/index.mjs --ui               # fresh=0，stale/unstamped=1
+node src/index.mjs --ui --dist <某个包的 config-ui/dist>   # 查别人给的那份
+
 # ⑥ 启动
 start.bat                        # 双击；或 node src/index.mjs
 # 也可以双击带图标的快捷方式：QQbot.lnk

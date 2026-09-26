@@ -28,12 +28,49 @@ cd packages/qq-bridge
 # ① 界面改过就必须重新构建 —— 桥接只伺服 config-ui/dist（src 改了不 build 等于没改）
 cd config-ui && npm run build && cd ..
 
+# ①-b ★ 确认"产物 = 当前源码"（构建溯源；这一步同时是发布门禁）
+node src/index.mjs --ui
+
 # ② 备齐必需项 + 跑发布前体检（只报告，不改文件）
 node setup.mjs --release
 
 # ③ 全量离线测试（不需要 QQ、不花模型钱）
 npm test
 ```
+
+### ★★ 为什么要专门验"用户拿到的 UI 和我这边是同一份"
+
+界面分**两条路出货**，而它们**脱钩过一次**（实测）：
+
+| 路径 | 谁在用 | 在 git 里 |
+|---|---|---|
+| `config-ui/dist` | 开发机桥接直接伺服 | ✅ 已入库（`.gitignore` 里刻意开了例外） |
+| `_release/<包>/config-ui/dist` | **用户拿到的** | ✅ 已入库（`!_release/**` 那段例外） |
+
+那次脱钩的样子：发布包里的桥接源码与 UI 都比工作区旧约 5 小时，
+而**1100 项离线测试全绿** —— 因为没有任何断言/检查去看那个目录。
+根因是"`dist/index.html` 在不在"这种检查**答不了"这份 dist 是不是当前源码构建的"**。
+
+现在的判定方式（`node src/index.mjs --ui`，只读）：
+
+* 构建时把**源码树的内容哈希**写进 `config-ui/dist/ui-build.json`；
+* 校验时重算一次比对。退出码 `fresh=0`，其余 `=1`。
+
+三种结果**必须分开看**（`--ui` 会分开报，不要混成一句"不同步"）：
+
+| 状态 | 含义 | 怎么修 |
+|---|---|---|
+| `fresh` | 与当前源码一致 | 无需处理 |
+| `stale` | 源码改了没重新构建 | `cd config-ui && npm run build` |
+| `unstamped` | 没有标记，**无法自证来源** | **重新构建也没用** —— 这份产物不是本项目构建的，删掉重建 |
+
+★ 哈希逻辑只有一份（`scripts/ui-build-stamp.cjs`），构建侧与校验侧都调它 ——
+两边各写一套必然分叉，而分叉的表现是"校验说同步、其实是错的"。
+★ 哈希前把换行统一成 `\n`：否则同一份源码在 CRLF 环境下会算出不同结果，
+表现是"明明没改却报不同步"，那种红会训练人忽略它。
+
+`setup.mjs --release` 里也接了同一条判定（`stale`/`unstamped` 都算 ❌），
+所以**忘记重新构建会在发布验收这一步被拦住**，而不是等用户看到旧界面。
 
 `setup.mjs --release` 会逐条列出来要清掉的东西。**退出码非 0 = 还有问题**，
 它列出的 ❌ 必须解决、⚠️ 必须逐条判断。典型输出：
@@ -76,9 +113,21 @@ config.json.bak*          历史备份，含旧密钥
 ../dsh-qq-bot（废弃）/     旧架构
 ```
 
-`.gitignore` 里已经排除了 `logs/`、`workspace-qq/`、`vendor/`、`node_modules/`；
-`config-ui/.gitignore` 排除了 `dist/`（注意：**`dist` 是发布必需件**，
-它被 gitignore 只是因为它是构建产物，不是因为它不该发）。
+`.gitignore` 里已经排除了 `logs/`、`workspace-qq/`、`vendor/`、`node_modules/`。
+
+**★ 关于 `dist`（这段以前是错的，已更正）**：`config-ui/dist` **是发布必需件，
+而且现在也进仓库**。以前两处 `.gitignore`（`config-ui/.gitignore` 的 `dist`
+与仓库根的 `dist/`）把它挡在库外，后果是 `git clone` 出来的仓库**没有界面**、
+构建不出 UI（因为 `config-ui/src/lib/` 下的 `api.ts` 等 3 个文件也被一条
+无锚点的 `lib/` 规则误伤、从未入库）。现在：
+
+* `config-ui/src/**` **全部入库**（`verify-manifest` 有一条断言盯着：
+  `config-ui/src` 下每个文件都必须被 git 跟踪 —— 这条检查就是因为那次
+  "`git status` 干干净净、clone 出来的仓库却构建不出界面"加的）；
+* `config-ui/dist/**` **入库**（改了界面忘构建时，`git status` 会直接显示出来）；
+* 例外写在仓库根 `.gitignore` 的**最后**（git 的否定规则对"已被忽略的目录"
+  无效，而且必须排在 `dist/` 那条规则之后 —— 踩过，且 git 不会给任何提示；
+  验证要看 `git check-ignore -v <文件>`，不要只看 `git status`）。
 
 ---
 

@@ -8,7 +8,7 @@
  * 那种错误不会报错、不会崩，只会安静地泄露 —— 所以必须逐项查。
  */
 import { readdirSync, statSync, readFileSync } from 'node:fs'
-import { join, relative, extname } from 'node:path'
+import { join, relative, extname, sep } from 'node:path'
 
 const root = process.argv[2]
 if (!root) {
@@ -54,6 +54,43 @@ const MUST_EXIST = [
 ]
 for (const f of MUST_EXIST) {
   if (!files.some((p) => rel(p) === f)) problems.push(`缺少必需文件：${f}`)
+}
+
+// ── ①-b ★ 界面产物的**构建溯源标记**必须在 ──────────────────────────────
+//
+// 为什么单列这一条而不是塞进 MUST_EXIST：没有它的时候，"`dist/index.html` 在不在"
+// 就够了 —— 而**恰恰是那种检查漏掉了一次真实脱钩**（包里源码与 UI 都比工作区旧
+// 约 5 小时，1100 项测试全绿）。`ui-build.json` 里是构建时的源码哈希，
+// 有了它才能回答"包里这份 UI 是不是当前源码构建的"。
+//
+// ⚠️ 这里**只验它在不在、能不能解析**。真正的"是否同步"要重算源码哈希，
+//    那需要源码树 —— 所以那道判定在 `setup.mjs --release`（跑在工作区里）。
+//    两份检查分工不同：这里管"包里有没有自证材料"，那里管"自证材料对不对"。
+{
+  const stampPath = 'config-ui/dist/ui-build.json'
+  const has = files.some((p) => rel(p) === stampPath)
+  if (!has) {
+    problems.push(
+      `缺少界面构建溯源标记：${stampPath} —— 这份 UI 无法自证来源（重新构建 config-ui 即可生成）`,
+    )
+  } else {
+    try {
+      const stamp = JSON.parse(readFileSync(join(root, stampPath.replace(/\//g, sep)), 'utf8'))
+      for (const k of ['sourceHash', 'builtAt']) {
+        if (!stamp[k]) problems.push(`${stampPath} 缺少字段 ${k}`)
+      }
+      notes.push(
+        `界面构建溯源：sourceHash=${String(stamp.sourceHash ?? '').slice(0, 12)}… 构建于 ${stamp.builtAt ?? '?'}`,
+      )
+      // ★ 标记里**不许**出现机器专属路径：它会被打进分发包，而"哪个开发机
+      //   构建的"属于不该带出去的信息（同 MACHINE 那一组的口径）。
+      if (/[A-Za-z]:[\\/]/.test(JSON.stringify(stamp))) {
+        problems.push(`${stampPath} 里出现了绝对路径（不该带机器专属信息）`)
+      }
+    } catch (error) {
+      problems.push(`${stampPath} 不是合法 JSON：${error?.message ?? error}`)
+    }
+  }
 }
 
 // ── ② 结构：不该有的绝不能有 ───────────────────────────────────────────

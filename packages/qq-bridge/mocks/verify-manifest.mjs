@@ -19,14 +19,80 @@
 import { readFileSync, existsSync, readdirSync, mkdirSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG_ROOT = resolve(HERE, '..')
+/** 仓库根（往上找到 `.git` 所在的那层）。 */
+const REPO_ROOT = resolve(PKG_ROOT, '..', '..')
 
 let failures = 0
 function check(name, ok, detail = '') {
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
   if (!ok) failures += 1
+}
+
+/**
+ * 「仓库里有没有悄悄少文件」——这一类缺陷最阴：`git status` 干干净净，
+ * 而 `git clone` 出来的仓库构建不出界面。
+ *
+ * ★ 这不是假想的：`.gitignore` 里一条无路径锚点的 `lib/`（本意防编译产物）
+ *   把 `config-ui/src/lib/` 整个挡掉了，于是 `api.ts`（界面调用后端的客户端）、
+ *   `config.ts`、`utils.ts` **三个文件不在仓库里**，而 `src/**` 其它 70 多个
+ *   文件都在。没人会发现，直到有人真去 clone。
+ *
+ * 所以断言：`config-ui/src` 下**每一个**文件都必须被 git 跟踪。
+ *
+ * ⚠️ 环境限制：受限沙箱可能不允许 spawn。那种情况下**明确说跳过**，
+ *    不伪装成通过（同 harness.mjs 的口径）。
+ */
+function checkUiSourceTracked() {
+  const srcDir = join(PKG_ROOT, 'config-ui', 'src')
+  const walk = (dir, out = []) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name)
+      if (e.isDirectory()) walk(full, out)
+      else if (e.isFile()) out.push(full)
+    }
+    return out
+  }
+  if (!existsSync(srcDir)) {
+    check('config-ui/src 存在（界面源码在项目里）', false, srcDir)
+    return
+  }
+  const all = walk(srcDir)
+  let tracked
+  try {
+    tracked = new Set(
+      execFileSync('git', ['ls-files', '--', 'packages/qq-bridge/config-ui/src'], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((l) => l.replace(/\\/g, '/')),
+    )
+  } catch (error) {
+    console.log(
+      `\n⏭️  跳过「UI 源码是否入库」检查：本环境跑不了 git（${error?.code ?? error?.message}）。` +
+        `\n   这不是"通过" —— 请在正常环境里重跑。`,
+    )
+    return
+  }
+  const repoPrefix = `${resolve(REPO_ROOT).replace(/\\/g, '/')}/`
+  const missing = all
+    .map((p) => p.replace(/\\/g, '/'))
+    .filter((p) => !tracked.has(p.replace(repoPrefix, '')))
+  check(
+    `★ config-ui/src 下 ${all.length} 个源码文件**全部**被 git 跟踪（clone 才构建得出来）`,
+    missing.length === 0,
+    missing.length
+      ? `没入库：${missing.map((m) => m.replace(/^.*config-ui\//, 'config-ui/')).join('、')}` +
+        '（多半是 .gitignore 里某条无锚点规则误伤；用 git check-ignore -v 看是哪条）'
+      : '',
+  )
 }
 function section(t) {
   console.log(`\n── ${t} ──`)
@@ -289,6 +355,11 @@ section('清单没有声明不存在的源文件（反向核对：src/ 里每个
   check(`src/ 里 ${srcFiles.length} 个模块都在清单里有说明`, undocumented.length === 0,
     undocumented.join(', ') || '（全部已说明）')
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+section('仓库完整性：UI 源码不能有文件被 .gitignore 悄悄挡在库外')
+// ══════════════════════════════════════════════════════════════════════════
+checkUiSourceTracked()
 
 // ══════════════════════════════════════════════════════════════════════════
 section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及 UI 的改动就要更新它）')
