@@ -198,10 +198,41 @@ function probeWebSocket(url, token, timeoutMs = TIMEOUT_MS) {
  * @param {number} [opts.expectedWsPort]   期望的 WS 端口
  * @returns {Promise<{fatal: string[], warn: string[], rows: object[]}>}
  */
-export async function runDoctor({ config, validate, expectedHttpPort, expectedWsPort }) {
+export async function runDoctor({ config, validate, expectedHttpPort, expectedWsPort, processes = null }) {
   const rows = []
   const fatal = []
   const warn = []
+
+  // ── 0. 进程登记：有没有"另一个桥接也在跑"（缺陷 3）──────────────────────
+  // 为什么把它放最前面：这是唯一一类"体检能看出、但症状表现得完全像别的问题"
+  // 的故障 —— 两个桥接同时从同一个 OneBot 收事件时，同一句话可能被回两次，
+  // 而每一个实例自己看上去都完全正常。
+  if (Array.isArray(processes)) {
+    const running = processes.filter((p) => p.state === 'alive' || p.state === 'stale')
+    const others = running.filter((p) => !p.isSelf)
+    rows.push({
+      group: '进程',
+      name: '同时运行的桥接数量',
+      ok: others.length === 0,
+      detail:
+        others.length === 0
+          ? `只有本进程（pid ${processes.find((p) => p.isSelf)?.pid ?? '?'}）`
+          : `**还有 ${others.length} 个**：` +
+            others.map((p) => `pid ${p.pid}（${p.reason ?? p.state}）`).join('、') +
+            '。同时跑两个会抢同一个 OneBot 事件流 —— 用 `node src/index.mjs --processes --kill <pid>` 停掉多余的',
+    })
+    const stale = processes.filter((p) => p.state === 'stale')
+    if (stale.length) {
+      rows.push({
+        group: '进程',
+        name: '心跳过期的登记',
+        ok: false,
+        detail:
+          stale.map((p) => `pid ${p.pid}：${p.reason}`).join('、') +
+          '（进程还在但很久没刷新心跳，可能卡住了）',
+      })
+    }
+  }
 
   // ── 1. 包内依赖 ─────────────────────────────────────────────────────────
   const nodeBin = findNodeBinary()

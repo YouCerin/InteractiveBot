@@ -22,7 +22,9 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, sta
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { SdkRpcClient } from './sdk-rpc.mjs'
+import { INSTANCE_ARG_PREFIX, createProcessGuard } from './process-guard.mjs'
 import { OneBotClient, SendQueue } from './onebot.mjs'
 import { SessionRouter } from './session-bridge.mjs'
 import { Bridge } from './bridge.mjs'
@@ -168,13 +170,20 @@ function respawnBridge(log, { port } = {}) {
   // ★ 把端口告诉新进程：它会在绑定失败时重试（bindApiWithRetry），
   //   这样即使旧进程退得比预期慢，新进程也只是慢一点起来，而不是静默丢掉控制台。
   const env = port ? { ...process.env, DSH_BRIDGE_EXPECT_PORT: String(port) } : process.env
-  const child = spawn(nodeBin, [join(PKG_ROOT, 'src', 'index.mjs')], {
-    cwd: PKG_ROOT,
-    env,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  })
+  // ★ 预生成 instanceId 并写进**命令行**：新进程会沿用它登记，
+  //   于是"这个 PID 还是不是原来那个进程"可以靠读回命令行来确认（防 PID 复用）。
+  const nextInstanceId = randomBytes(6).toString('hex')
+  const child = spawn(
+    nodeBin,
+    [join(PKG_ROOT, 'src', 'index.mjs'), `${INSTANCE_ARG_PREFIX}${nextInstanceId}`],
+    {
+      cwd: PKG_ROOT,
+      env,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    },
+  )
   child.unref()
   // 只"发起"，日志由调用方按顺序补充（见 requestRestart：要先释放端口再报成功）
   return { pid: child.pid, target: join(PKG_ROOT, 'src', 'index.mjs') }
@@ -198,6 +207,56 @@ async function main() {
 
   const { fatal, warn } = validateConfig(config)
   const log = makeLogger(config.ui.verbose)
+
+  // ── 进程登记（缺陷 3）：回答"现在有几个桥接在跑" ──────────────────────
+  // 必须在**任何会占用端口/资源的动作之前**做，这样：
+  //   · 冲突能被尽早报出来（而不是等端口绑不上才发现）；
+  //   · `--processes` / `--kill` 这两个纯查询/管理入口不受启动流程影响。
+  const guard = createProcessGuard({
+    pkgRoot: PKG_ROOT,
+    profile: 'bridge',
+    port: config.ui?.apiPort ?? null,
+    log,
+  })
+
+  // 两个只做进程管理的入口，做完就退出（不启动机器人）
+  const listProcesses = process.argv.includes('--processes')
+  const killArgIdx = process.argv.findIndex((a) => a === '--kill')
+  if (listProcesses) {
+    const entries = guard.list()
+    console.log('\n进程登记（cache/processes.json）：')
+    if (entries.length === 0) console.log('  （空）')
+    for (const e of entries) {
+      console.log(
+        `  pid ${String(e.pid).padEnd(7)} ${e.profile.padEnd(8)} 端口 ${String(e.port ?? '-').padEnd(6)} ` +
+          `${e.state.padEnd(8)} ${e.isSelf ? '（当前进程）' : ''} ${e.reason ?? ''}`,
+      )
+    }
+    const conflicts = entries.filter((e) => !e.isSelf && (e.state === 'alive' || e.state === 'stale'))
+    if (conflicts.length > 0) {
+      console.log(
+        `\n⚠️ 有 ${conflicts.length} 个**其它**桥接在跑：同时跑两个会抢同一个 OneBot 事件流` +
+          '（同一句话可能被回两次）。',
+      )
+      console.log(`   要停掉某个：node src/index.mjs --processes --kill <pid>`)
+    }
+    console.log('')
+    process.exit(0)
+  }
+  if (killArgIdx >= 0) {
+    const pid = process.argv[killArgIdx + 1]
+    if (!pid) {
+      console.error('❌ 用法：node src/index.mjs --processes --kill <pid>')
+      process.exit(2)
+    }
+    const r = guard.killEntry(pid)
+    if (r.ok) console.log(`✅ 已停掉 pid ${r.pid}`)
+    else {
+      console.error(`❌ 未能停掉 pid ${pid}：${r.error}`)
+      process.exit(1)
+    }
+    process.exit(0)
+  }
 
   console.log(`\n配置文件：${configPath}`)
   console.log(`工作区  ：${config.dsh.workspace}`)
@@ -303,7 +362,9 @@ async function main() {
   // （HTTP 请求 + WebSocket 握手），所以能查出"端口填错""token 填反"
   // 这类只有连了才知道的问题。它不发 QQ 消息、不调用大模型。
   if (doctorOnly) {
-    const result = await runDoctor({ config, validate })
+    // 把进程登记一并交给体检 —— "另一个桥接也在跑"是唯一一类
+    // "每个实例自己都正常、合起来却出怪事"的故障，必须能看出来。
+    const result = await runDoctor({ config, validate, processes: guard.list() })
     const allOk = printDoctor(result)
     if (result.fatal.length) process.exit(1)
     process.exit(allOk ? 0 : 2)
@@ -311,6 +372,14 @@ async function main() {
 
   // 工作区必须真实存在：它是沙箱的根，不存在的话 agent 会以奇怪的状态启动
   mkdirSync(config.dsh.workspace, { recursive: true })
+
+  // ── 认领进程：清理死条目 + **报告冲突** + 登记自己 + 开心跳 ─────────────
+  // 放在这里（真正要启动机器人之前）而不是更早：`--check` / `--doctor` 是只读
+  // 体检，不该在登记表里留下痕迹。
+  // ★ 冲突**只报告不擅自杀**：判定依据里含"心跳过期"这种可能误判的信号，
+  //   而误杀一个正在干活的机器人比多跑一个更糟。要停得用 --processes --kill。
+  guard.claim()
+  guard.startHeartbeat()
 
   // ── 把「QQ 工具」挂给模型（必须在起 DSH 之前，否则新进程读不到）────────
   //
@@ -470,6 +539,18 @@ async function main() {
         workspace: config.dsh.workspace,
         groupEnabled: config.trigger.groupEnabled,
         stats: bridge.stats,
+        // 进程登记：让界面能显示"是不是还有别的桥接在跑"（缺陷 3）。
+        // 这里只给"数量 + 冲突项"，不给完整命令行（那里面可能带路径）。
+        processes: (() => {
+          const entries = guard.list()
+          const others = entries.filter((e) => !e.isSelf && (e.state === 'alive' || e.state === 'stale'))
+          return {
+            selfPid: guard.selfPid,
+            total: entries.length,
+            running: entries.filter((e) => e.state === 'alive' || e.state === 'stale').length,
+            conflicts: others.map((e) => ({ pid: e.pid, state: e.state, reason: e.reason })),
+          }
+        })(),
       }),
       // 会话同步：给"同步 QQ 对话界面"用（内存镜像，最近若干条）
       getConversations: () => bridge.listConversations(),
@@ -645,6 +726,9 @@ async function main() {
     closing = true
     log(`收到 ${signal}，开始收尾…`)
     const startedAt = Date.now()
+    // 先摘掉自己的进程登记：之后即便收尾变慢，`--processes` 也不会把它算成"在跑"。
+    // 强杀时这行不会执行 —— 那种情况由 classify() 的"PID 不存在"探活兜底。
+    guard.release()
     let budgetTimer = null
     try {
       await Promise.race([
