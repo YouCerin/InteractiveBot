@@ -345,6 +345,55 @@ export function createProcessGuard({
   return { file, instanceId, selfPid, claim, heartbeat, startHeartbeat, release, list, killEntry }
 }
 
+/**
+ * 登记一个**外部进程**（缺陷 4：桥接自己拉起的 SnowLuma）。
+ *
+ * 与 `claim()` 的区别：claim 登记的是"当前进程自己"（带 instanceId，能靠读回
+ * 命令行确认身份）；而外部进程我们只有 PID，**给不出 instanceId**。
+ * 于是 classify 对它的判定会保守地停在 `suspect`（不判死）——
+ * 这正是我们要的：**宁可留着一条可疑登记，也不要因为判死而漏掉"它还在跑"**。
+ *
+ * @param {object} opts
+ * @param {string} opts.pkgRoot
+ * @param {number} opts.pid
+ * @param {number|null} [opts.port]
+ * @param {string} [opts.profile] 例如 'snowluma'
+ * @param {(msg: string) => void} [opts.log]
+ */
+export function registerExternal({ pkgRoot, pid, port = null, profile = 'external', log = () => {} }) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return { ok: false, error: 'PID 无效' }
+  const file = join(String(pkgRoot), REGISTRY_REL)
+  const reg = readRegistry(file)
+  const entries = reg.entries.filter((e) => Number(e.pid) !== n)
+  entries.push({
+    pid: n,
+    profile,
+    port,
+    // 没有 instanceId：见上面的说明（判定会保守停在 suspect）
+    instanceId: null,
+    startedAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+    argv: `（外部进程，由桥接拉起：${profile}）`,
+  })
+  const ok = writeRegistry(file, { version: 1, entries })
+  if (ok) log(`[guard] 已登记外部进程 ${profile}：pid ${n}`)
+  return { ok }
+}
+
+/**
+ * 摘掉一条外部进程登记（用于"我们发现自己起的那个已经不在了"）。
+ * 注意：**不做任何杀进程的动作** —— 停不停的判断权在调用方。
+ */
+export function unregisterExternal({ pkgRoot, pid }) {
+  const n = Number(pid)
+  if (!Number.isInteger(n)) return { ok: false }
+  const file = join(String(pkgRoot), REGISTRY_REL)
+  const reg = readRegistry(file)
+  const next = reg.entries.filter((e) => Number(e.pid) !== n)
+  return { ok: writeRegistry(file, { version: 1, entries: next }) }
+}
+
 /** 给 CLI 用的一句话摘要。 */
 export function summarizeProcesses(entries) {
   const alive = entries.filter((e) => e.state === 'alive' || e.state === 'stale')

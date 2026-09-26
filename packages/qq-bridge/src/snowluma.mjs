@@ -30,7 +30,9 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { findSnowluma, findNodeBinary } from './local.mjs'
+import { findSnowluma, findNodeBinary, PKG_ROOT } from './local.mjs'
+import { checkPortFree, probeHttpAnswered } from './ports.mjs'
+import { registerExternal } from './process-guard.mjs'
 
 /** 界面用的状态。判定顺序见 `detect()`，**顺序本身就是规则**。 */
 export const SNOWLUMA_STATUS = {
@@ -509,6 +511,12 @@ export async function startSnowluma({
   //    `D:\QQagent_DeepSeek\snowluma` 兜底，**启动了参考项目里的那一份**。
   locateSnowluma = ({ installDir, searchPaths } = {}) => findSnowluma({ installDir, searchPaths }),
   findNode = findNodeBinary,
+  // ★ 第三道防线（缺陷 4）：只看"端口上有没有人应答"，不关心授权。
+  checkPort = checkPortFree,
+  probeAnswered = probeHttpAnswered,
+  // ★ 登记自己拉起的 SnowLuma PID（缺陷 4）：以前只把 PID 写进日志就丢了。
+  register = registerExternal,
+  pkgRoot = PKG_ROOT,
 } = {}) {
   const launchCmd = config?.snowluma?.launchCmd ?? ''
   const consoleUrl = config?.snowluma?.consoleUrl || DEFAULT_CONSOLE_URL
@@ -598,6 +606,68 @@ export async function startSnowluma({
   const useAuto = !launchCmd
   const cmdRaw = useAuto ? locate.cmd : launchCmd
 
+  // ── ③ 第三道防线：**端口上有没有东西**（缺陷 4）──────────────────────
+  //
+  // ★ 位置很关键：必须在"入口能不能找到"之前判断。
+  //   "端口已被占用"是比"找不到安装"更准确、也更该先说的诊断 ——
+  //   端口被占时用户真正需要知道的是"别再起一个"，而不是去修路径。
+  //   （第一版把这段放在入口校验之后，结果端口忙时返回的是"找不到 SnowLuma 安装"，
+  //     被测试抓出来。）
+  //
+  // 前两道防线（探控制台 / 用我们自己的 token 问 OneBot）都只覆盖了
+  // "对面接受我们的 token"这一种情况。如果 3000 上蹲着的是**别的**东西
+  // （另一个 SnowLuma 实例、或任何 HTTP 服务），它答 401/403 —— 于是
+  // "端口有东西"这个事实被当成"没人在跑"，我们再 spawn 一个就撞车了：
+  // 两个实例抢 3000/3001 与 QQ 登录态，而且都不会自己退出。
+  {
+    const portOf = (url) => {
+      try {
+        return Number(new URL(url ?? '').port) || null
+      } catch {
+        return null
+      }
+    }
+    const httpPort = portOf(config?.onebot?.httpUrl)
+    const wsPort = portOf(config?.onebot?.wsUrl)
+
+    const busy = []
+    for (const [label, p] of [
+      ['HTTP', httpPort],
+      ['WebSocket', wsPort],
+    ]) {
+      if (!p) continue
+      const r = await checkPort(p, { timeoutMs: probeTimeoutMs })
+      if (r.inUse) busy.push({ label, port: p, detail: r.detail, method: r.method })
+    }
+
+    if (busy.length > 0) {
+      const probed = httpPort
+        ? await probeAnswered(`http://127.0.0.1:${httpPort}/get_login_info`, probeTimeoutMs)
+        : { answered: false }
+      const who = probed.answered
+        ? `端口上有 HTTP 服务在应答（HTTP ${probed.status ?? '?'}）`
+        : '端口被占用，但对 HTTP 探测没有应答'
+      log(
+        `⚠️ 不再启动新的 SnowLuma：${busy.map((b) => `${b.label} ${b.port}`).join('、')} 已被占用 —— ${who}`,
+      )
+      log('   → 这是刻意的第三道防线：重复启动会让两个实例抢端口与 QQ 登录态，且都不会自己退出。')
+      log('   → 若那确实是你想用的 SnowLuma（只是 token 不匹配），去它的控制台核对 token，不要重启它。')
+      log('   → 若那是残留的旧实例：`node src/index.mjs --processes` 看登记，用 --kill <pid> 停掉它。')
+      return {
+        ok: true,
+        data: {
+          started: false,
+          alreadyRunning: false,
+          portBusy: busy,
+          consoleUrl,
+          hint:
+            `没有启动新的 SnowLuma：${busy.map((b) => `${b.label} 端口 ${b.port}`).join('、')} 已被占用。` +
+            '重复启动会抢端口与登录态，所以这里刻意不动手。',
+        },
+      }
+    }
+  }
+
   if (!cmdRaw) {
     return {
       ok: false,
@@ -676,6 +746,9 @@ export async function startSnowluma({
   const spawnCmd = isMjs ? nodeBin : cmdPath
   const spawnArgs = isMjs ? [cmdPath] : []
 
+  // 注：第三道防线（端口占用检查）在**入口校验之前**（见上面 ── ③ ── 那段）。
+  // 放在那里是因为"端口已被占用"比"找不到安装"更该先说。
+
   try {
     const child = spawn(spawnCmd, spawnArgs, {
       cwd,
@@ -695,6 +768,34 @@ export async function startSnowluma({
         `${useAuto ? `（自动发现：${locate.from}）` : '（来自 snowluma.launchCmd）'}` +
         ` pid ${child.pid ?? '?'}`,
     )
+
+    // ★ 登记这个 PID（缺陷 4）。以前它只出现在这一行日志里 ——
+    //   于是"我起了哪个 SnowLuma"过一会儿就没人知道了，
+    //   更没法回答"要不要停掉它"。现在它进进程登记表，
+    //   可以用 `--processes` 看到、用 `--kill <pid>` 停掉。
+    let registered = false
+    if (child.pid) {
+      try {
+        const r = register({
+          pkgRoot,
+          pid: child.pid,
+          port: (() => {
+            try {
+              return Number(new URL(config?.onebot?.httpUrl ?? '').port) || null
+            } catch {
+              return null
+            }
+          })(),
+          profile: 'snowluma',
+          log,
+        })
+        registered = Boolean(r?.ok)
+      } catch (error) {
+        // 登记失败**不该**影响启动本身：SnowLuma 已经在跑了，那是既成事实。
+        log(`⚠️ 未能登记 SnowLuma 的 PID（不影响它继续运行）：${error?.message ?? error}`)
+      }
+    }
+
     return {
       ok: true,
       data: {
@@ -706,8 +807,12 @@ export async function startSnowluma({
         discoveredBy: useAuto ? locate.from : 'config.snowluma.launchCmd',
         node: isMjs ? nodeBin : null,
         consoleUrl,
+        // 让界面/日志能说清"这个 PID 我已经记下来了，可以用 --kill 停"
+        pidRegistered: registered,
         // ★ 只负责"发起"，不负责"等它连上" —— 界面要轮询 detect。
-        hint: '已发起启动。SnowLuma 需要几秒钟才能接受连接，请等状态变成已连接。',
+        hint: registered
+          ? `已发起启动（pid ${child.pid}，已记入进程登记）。SnowLuma 需要几秒钟才能接受连接，请等状态变成已连接。`
+          : '已发起启动。SnowLuma 需要几秒钟才能接受连接，请等状态变成已连接。',
       },
     }
   } catch (error) {
