@@ -17,6 +17,7 @@ import { ConfirmDialog, FieldRow, InlineNote, NumInput, type ConfirmRequest } fr
 import { MemorySearchCard } from '@/sections/MemorySearchCard'
 import { MemoryStatsCard } from '@/sections/MemoryStatsCard'
 import { PrivacyCard } from '@/sections/PrivacyCard'
+import { ContactsCard } from '@/sections/ContactsCard'
 import { api, ApiError, isNotImplemented, type InboxState, type MemoryEntry, type MemoryTree } from '@/lib/api'
 import { getBool, getNum, getStr, isDangerousWorkspace } from '@/lib/config'
 import { toast } from 'sonner'
@@ -422,6 +423,10 @@ export function MemoryTab({
           一张看"写没写进去"（零写入告警），一张看"拦没拦住"（隐私双侧硬闸）。 */}
       <MemoryStatsCard demo={demo} />
       <PrivacyCard demo={demo} />
+
+      {/* ★ 0.2.2 昵称（按人）：取代旧的全局「它怎么称呼对方」（callUser 已移除）。
+          落在记忆页 —— 它是"关于某人的一条事实"，和记忆同一套生命周期。 */}
+      <ContactsCard demo={demo} />
 
       <Card>
         <CardHeader className="pb-2">

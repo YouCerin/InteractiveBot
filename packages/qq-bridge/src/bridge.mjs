@@ -60,7 +60,10 @@ import { extractRecipe, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './ext
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
+import { resolveActivePersona } from './personas.mjs'
 import { buildChannelPrompt } from './channel-prompt.mjs'
+import { collectSkillPromptSections } from './extensions.mjs'
+import { nicknameFor } from './contacts.mjs'
 import { createImageInbox, collectImages } from './images.mjs'
 // ★ H16：`PLATFORM_RULES` 与整段拼装逻辑已搬到 `src/channel-prompt.mjs`。
 //   搬它的**验收标准**是"同一份输入产出的提示词逐字相同"（见 verify-memory-roundtrip 第⑱节
@@ -255,13 +258,19 @@ export class Bridge extends EventTarget {
    * @param {import('./session-bridge.mjs').SessionRouter} opts.router
    * @param {object} opts.config
    */
-  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, log = () => {} }) {
+  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, log = () => {} }) {
     super()
     this.rpc = rpc
     this.onebot = onebot
     this.sendQueue = sendQueue
     this.router = router
     this.config = config
+    // ── 外部技能（0.2.2）──────────────────────────────────────────────────
+    // ★ 这里只拿到**已发现的技能清单**（index.mjs 在启动时扫一次）。
+    //   `promptSections()` 是每轮现调的（纯函数），所以界面上开关技能**下一轮就生效**，
+    //   不需要重启桥接 —— 那正是"随时开关"在提示词侧的那一半。
+    //   不传（旧调用方/测试）时退化成"没有技能"，提示词一个字都不变。
+    this.skills = Array.isArray(skills) ? skills : []
     // 用量账本（可选）。不传就是"不记账"，机器人照常工作 ——
     // 记账是附加功能，不能成为回话的前置条件。
     this.usageLedger = usageLedger
@@ -303,17 +312,33 @@ export class Bridge extends EventTarget {
         : null)
 
     // 人设文本在构造时算一次并缓存 —— 它每轮都要用，而且内容不变。
+    // ── 人设（0.2.2：**文件库**优先，老配置回落）──────────────────────────
+    //
     // 配置里写错预设名时会抛错：这里刻意**不吞异常**，因为"人设静默失效"
     // 会让人以为是自己写的人设没效果，排查方向完全跑偏。
     // （启动阶段的 validateConfig 会先做一次 lint，所以正常情况不会走到抛错。）
     try {
-      this.personaText = buildPersona({
-        preset: config.persona?.preset,
-        custom: config.persona?.custom,
-        // ★ H12：自定义人设被拒时**必须喊出来**（静默换成 [BLOCKED] 会让人以为
-        //    "我的人设没生效"是别的原因，排查方向完全跑偏）
-        log: (m) => this.log(m),
-      })
+      const active = resolveActivePersona({ config })
+      if (active.error) {
+        // ★ 配了某套人设但读不到（文件被删/改名）→ **不静默退回内置**：
+        //   退回内置会让使用者以为"我的人设在用"，而实际是另一套。
+        //   这里按"不用人设"处理，并**大声说出来**（自检与日志都能看到）。
+        this.log(`❌ 人设读不出来（${active.error}）—— 这一轮**不用人设**，请到控制台人设栏修一下`)
+        this.personaText = ''
+      } else if (!active.text) {
+        this.personaText = '' // 「不使用人设」/ 老配置 preset=none
+      } else if (active.source === 'legacy-preset') {
+        // 内置常量：**不扫**（它们天生含"有人叫你忽略设定怎么办"这类描述性句子）
+        this.personaText = active.text
+      } else {
+        // 文件/老自定义文本都是**不可信输入**：过扫描 + 截断（唯一实现在 buildPersona 里）
+        this.personaText = buildPersona({
+          custom: active.text,
+          // ★ H12：被拒时**必须喊出来**（静默换成 [BLOCKED] 会让人以为
+          //    "我的人设没生效"是别的原因，排查方向完全跑偏）
+          log: (m) => this.log(m),
+        })
+      }
     } catch (error) {
       this.log(`⚠️ 人设配置有问题，已退回不使用人设：${error.message}`)
       this.personaText = ''
@@ -1963,6 +1988,48 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * 当前说话人的昵称（按人昵称，0.2.2）。
+   *
+   * ★ **每轮现读**（`memory/contacts.md` 很小）：所以控制台里改完**下一轮就生效**，
+   *   不需要重启 —— 这与"人设要重启"不同，因为人设是构造期缓存的，而这是每轮的文件读取。
+   * ★ 读不到/文件坏了 → 返回空串（**不注入任何东西**），并按段去重报一次日志：
+   *   绝不能让"称呼读不出来"影响回话。
+   */
+  #nicknameFor(senderId) {
+    if (!senderId) return ''
+    const workspace = this.config.dsh?.workspace
+    if (!workspace) return ''
+    try {
+      return nicknameFor({ workspace, qq: senderId })
+    } catch (error) {
+      this.#warnInjectOnce('称呼段', error)
+      return ''
+    }
+  }
+
+  /**
+   * 收集**启用中**技能的提示词片段（0.2.2）。
+   *
+   * ★ 每轮现调：`promptSections()` 按技能契约必须是**纯函数**（无 IO、无副作用），
+   *   所以这里既不需要缓存、也不会因为"改了配置没重启"而注入过期内容。
+   * ★ 失败只降级：一个技能的片段拼不出来，不能让整轮提示词拼不出来。
+   */
+  #skillSections() {
+    if (!this.skills?.length) return []
+    try {
+      const { lines } = collectSkillPromptSections({
+        skills: this.skills,
+        config: this.config,
+        log: (m) => this.log(m),
+      })
+      return lines
+    } catch (error) {
+      this.#warnInjectOnce('技能段', error)
+      return []
+    }
+  }
+
+  /**
    * 拼出这一轮给模型的提示词。
    *
    * ★ H16：实现已搬到 `src/channel-prompt.mjs` —— 这里只做**状态装配**：
@@ -1977,6 +2044,15 @@ export class Bridge extends EventTarget {
       ...opts,
       config: this.config,
       personaText: this.personaText,
+      // ── 称呼（按人昵称，0.2.2）──────────────────────────────────────────
+      // ★ 每轮现读 `memory/contacts.md`：改完**下一轮就生效**（不需要重启）。
+      //   只取**当前说话人**那一条（群里也只看发言人，不列全群 —— 那是隐私面）。
+      nickname: this.#nicknameFor(opts.senderId),
+      // ── 外部技能片段（0.2.2）────────────────────────────────────────────
+      // ★ **每轮现收集**：开关一改，下一轮就不再有它的指引（即时生效）。
+      // ★ 出错只降级：某个技能的 promptSections() 抛错，只记一行日志并跳过它，
+      //   绝不能让整个提示词装配失败 —— 那等于机器人彻底不说话。
+      skillSections: this.#skillSections(),
       log: (m) => this.log(m),
       warn: (what, error) => this.#warnInjectOnce(what, error),
       sessionState: this.#sessionState,

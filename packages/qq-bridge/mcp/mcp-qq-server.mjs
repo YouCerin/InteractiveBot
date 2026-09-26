@@ -44,7 +44,7 @@ import { pathToFileURL } from 'node:url'
 
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
-const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.2.0' }
+const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.2.2' }
 
 /**
  * ★ 危险动作黑名单（默认放行其余一切）。
@@ -142,6 +142,40 @@ const TOOLS = [
         message: [{ type: 'face', data: { id: String(stickerId) } }],
       },
     }),
+  },
+  {
+    // ★ 0.2.2：**把图片真的发到会话里**（这是第三方技能能不能"发图"的关键一环）。
+    //
+    // ── 为什么不是把 URL 直接交给协议端 ────────────────────────────────────
+    // OneBot 的 `image` 段确实可以填 URL，协议端会自己去取。那样做有三个问题：
+    //   ① SSRF 面转移到了一个我们管不到的进程（它可能在内网、可能没有守卫）；
+    //   ② 防盗链：i.pximg.net 要带 Referer，协议端不会带，必然 403；
+    //   ③ 失败原因回不来（协议端只会说"发送失败"），模型没法如实解释。
+    // 所以这里**自己下载、自己校验、自己带 Referer**，再以 base64 交给协议端。
+    //
+    // 守卫（src/images.mjs）：只 http/https、逐跳校验重定向、按内容嗅探类型、
+    // 大小/超时封顶；**内网/回环地址默认拒绝**，除非管理员打开了
+    // `security.allowPrivateImageHosts`（pixiv 类技能的"本地图片桥"直链就是这个场景）。
+    // 这条判断**每次调用现读 config.json**，所以界面上改完立刻生效。
+    name: 'qq_send_image',
+    adminOnly: true,
+    description:
+      '把一张**图片**发到指定会话里（不是发链接，是真的发图）。' +
+      'url 可以是公网图片直链，也可以是本机/内网地址（需要在配置里打开「允许下载内网/本机图片地址」）。' +
+      '★ 必须显式给出 kind 与 peerId（就是当前会话，见你这轮的来源标注）—— 不能跨会话发图。' +
+      '★ 图中的文字说明用 caption；只有图不想说话就别写 caption。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '图片地址（http/https；也可以用 i.pximg.net 之外的直链）' },
+        kind: { type: 'string', enum: ['private', 'group'], description: '会话类型（必填）' },
+        peerId: { type: 'string', description: '群号或 QQ 号（必填，就是来源标注里那串号码）' },
+        caption: { type: 'string', description: '随图发的一句话（可选）' },
+      },
+      required: ['url', 'kind', 'peerId'],
+    },
+    // 自己下载 + 组装图片段，不走通用的 build（见 runTool 的特判）
+    local: 'sendImage',
   },
   {
     name: 'qq_recall',
@@ -470,6 +504,115 @@ async function runCorpusSearch({ query, kind, peerId, limit } = {}) {  if (!conf
 
 /** 动态加载语料库模块的旧入口（已改为 `await import`，保留是为了不改变调用方形状）。 */
 
+/* ────────────────────────────────────────────────────────────────────────
+ * 0.2.2：发图（qq_send_image）
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 单张**发出**的图片字节上限（默认 8MB）。
+ *
+ * 为什么比入站那个 `image.maxBytes`（10MB）更小：入站是下载到本地磁盘，
+ * 出站要把图 **base64 之后塞进一次 HTTP 请求体**（体积 ×1.34），而协议端的
+ * 请求体上限不由我们决定。所以这里再压一道，并且与 `image.maxBytes` 取**更小**的那个。
+ */
+const SEND_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+
+/**
+ * 现读 config.json（**不缓存**）。
+ *
+ * 为什么要现读：`security.allowPrivateImageHosts` 是"随时开关"的一部分 ——
+ * 缓存在进程里就意味着"界面上打开了，还得重启桥接才生效"，而那正是这一版要消灭的毛病。
+ * 读不到（文件没有 / 被改坏）时返回 null，调用方按**保守**处理（不放行内网、用默认上限）。
+ */
+function readLiveConfig() {
+  if (!config?.configPath) return null
+  try {
+    // 去 BOM：文件是桥接生成的（无 BOM），但手工用记事本改过就会带上，而
+    // `JSON.parse` 遇 BOM 直接抛 —— 表现成"界面上打开了这个开关却没生效"。
+    return JSON.parse(readFileSync(config.configPath, 'utf8').replace(/^\uFEFF/, ''))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * ★ 0.2.2：把一张图片**真的发进会话**。
+ *
+ * 三步，每一步的失败都要能翻译成"人能看懂、且知道下一步怎么办"的中文：
+ *   ① 守卫放行？→ 内网地址被拒时要**明确说清是哪个开关**（否则使用者只会看到"下载失败"）
+ *   ② 取回来的是不是真图片？（按内容嗅探，不信 Content-Type）
+ *   ③ 协议端收不收？（base64 段，避免把 URL 交给另一个进程去取）
+ */
+async function runSendImage({ url, kind, peerId, caption } = {}) {
+  const u = String(url ?? '').trim()
+  const k = String(kind ?? '').trim()
+  const peer = String(peerId ?? '').trim()
+  const cap = String(caption ?? '').trim()
+
+  if (!u) return { isError: true, text: '要发哪张图？把图片地址给我（url）。' }
+  // ★ fail-closed：与 qq_search_history / qq_forward_log 同一条纪律 ——
+  //   会话必须显式给出，否则我可能把图发到别人的会话里（那是不可挽回的）。
+  if ((k !== 'private' && k !== 'group') || !peer) {
+    return {
+      isError: true,
+      text:
+        '发图**必须指定会话**（kind 用 private/group，peerId 用 QQ 号或群号，' +
+        '就是你这轮来源标注里那串数字）—— 我不会往不确定的会话里发东西。',
+    }
+  }
+
+  let images
+  try {
+    images = await import('../src/images.mjs')
+  } catch (error) {
+    return { isError: true, text: `发图能力不可用（模块加载失败）：${error?.message ?? error}` }
+  }
+
+  const live = readLiveConfig()
+  const allowPrivate = live?.security?.allowPrivateImageHosts === true
+  const cfgMax = Number(live?.image?.maxBytes)
+  const maxBytes = Math.min(Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : images.DEFAULT_MAX_BYTES, SEND_IMAGE_MAX_BYTES)
+  const cfgTimeout = Number(live?.image?.timeoutMs)
+
+  const got = await images.fetchImageBytes(u, {
+    allowPrivateHosts: allowPrivate,
+    maxBytes,
+    timeoutMs: Number.isFinite(cfgTimeout) && cfgTimeout > 0 ? cfgTimeout : images.DEFAULT_TIMEOUT_MS,
+  })
+  if (!got.ok) {
+    // ★ "怎么办"必须写在报错里：被守卫拦下是最容易误判成网络故障的一种失败。
+    const isGuard = /内网|回环|localhost/i.test(got.reason)
+    const hint = isGuard && !allowPrivate
+      ? '（这是本机/内网的图片地址，被安全设置挡住了：需要在**控制台 → 扩展 → 给扩展用的安全开关**里打开「允许下载内网/本机图片地址」）'
+      : ''
+    return { isError: true, text: `图没发出去：${got.reason}${hint}` }
+  }
+
+  const media = images.sniffImageMediaType(got.bytes)
+  if (!media) {
+    return {
+      isError: true,
+      text: '那个地址返回的不是支持的图片（只认 PNG/JPEG/WebP/GIF）—— 检查一下直链是不是过期或指向了网页。',
+    }
+  }
+
+  const message = []
+  if (cap) message.push({ type: 'text', data: { text: cap } })
+  message.push({ type: 'image', data: { file: `base64://${Buffer.from(got.bytes).toString('base64')}` } })
+
+  const sent = await callOneBot(k === 'group' ? 'send_group_msg' : 'send_private_msg', {
+    [k === 'group' ? 'group_id' : 'user_id']: Number(peer),
+    message,
+  })
+  if (!sent.ok) {
+    return { isError: true, text: `图取回来了，但**发送失败**：${sent.error}` }
+  }
+  return {
+    isError: false,
+    text: `已发图（${media}，${Math.round(got.bytes.byteLength / 1024)} KB）${cap ? '，附了一句话' : ''}。`,
+  }
+}
+
 /**
  * ★ H14：把本会话搜到的历史打包成一张"合并转发"卡片发出去。
  *
@@ -538,6 +681,8 @@ async function runTool(name, args) {
   if (tool.local === 'corpus') return runCorpusSearch(args ?? {})
   // ── H14：本地语料库打包成合并转发 ──────────────────────────────────────
   if (tool.local === 'forwardLog') return runForwardLog(args ?? {})
+  // ── 0.2.2：发图（自己下载 + 守卫 + base64 段）────────────────────────────
+  if (tool.local === 'sendImage') return runSendImage(args ?? {})
 
   let built
   try {
@@ -681,4 +826,4 @@ const invokedDirectly =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (invokedDirectly) startServer()
 
-export { TOOLS, BLOCKED_ACTIONS, described, runTool, runCorpusSearch, runForwardLog }
+export { TOOLS, BLOCKED_ACTIONS, described, runTool, runCorpusSearch, runForwardLog, runSendImage, readLiveConfig }

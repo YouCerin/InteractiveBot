@@ -1,0 +1,8 @@
+{
+  "name": "pixiv-lookup",
+  "version": "1.1.0",
+  "private": true,
+  "description": "QQ Agent skill: pixiv-lookup（P站查图）。这个文件只有一个作用：把本目录声明成 ES Module，这样 index.js 里的 import 在任何 Node/Electron 环境下都成立，本目录也能脱离宿主单独跑自测。上游真正读的是 skill.json。",
+  "type": "module",
+  "main": "index.js"
+}

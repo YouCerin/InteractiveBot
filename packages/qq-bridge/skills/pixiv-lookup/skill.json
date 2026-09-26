@@ -1,0 +1,216 @@
+{
+  "id": "pixiv-lookup",
+  "name": "pixiv查图插件",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "description": "在 Pixiv（P站）搜插画：按关键词搜索、查作品详情（收藏数/标签/多图原图）、取日榜周榜，并给出可直接发到 QQ 的图片直链。可填 Cookie 解锁 R-18 与更高上限。",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "category": "media",
+  "icon": "🎨",
+  "session": "required",
+  "permissions": {
+    "net": ["www.pixiv.net", "i.pximg.net"],
+    "listen": ["127.0.0.1"],
+    "_说明": "net = 本技能会主动请求的域名；listen = 它会在本机开的端口（本地图片桥，只监听回环）。这两条是**声明性**的：宿主会把它们显示在界面上，让装的人知道自己在装什么。"
+  },
+  "requires": [],
+  "capabilities": [],
+
+  "enabledByDefault": false,
+  "_note_switch": [
+    "开关口径：唯一开关是 config.skills['pixiv-lookup'].enabled。",
+    "enabledByDefault:false = 装好后默认关，由管理员在「控制台 → 扩展 → pixiv 查图插件」里打开，避免刚装就联网。",
+    "注意：enabledByDefault:false 时上游 isEnabled() 会在 available() 之前短路 —— 这是预期行为。",
+    "★ InteractBot 适配：开关**即时生效**（不需要重启桥接）；只有装/卸技能本身才需要重启。"
+  ],
+  "settings": {
+    "enabled": false,
+    "cookie": "",
+    "maxResults": 10,
+    "maxPages": 2,
+    "order": "popular_d",
+    "allowR18": false,
+    "allowInGroup": true,
+    "proxy": "",
+    "timeoutMs": 20000,
+    "breakerEnabled": true,
+    "breakerThreshold": 3,
+    "breakerCooldownSec": 60,
+    "imageBridge": true,
+    "bridgePort": 18717,
+    "bridgeTtlSec": 1800,
+    "bridgeMaxMB": 8
+  },
+
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用 pixiv 查图插件",
+      "description": "打开后模型才会拿到 Pixiv 搜图工具。默认关。"
+    },
+    "cookie": {
+      "type": "string",
+      "label": "Pixiv Cookie",
+      "secret": true,
+      "placeholder": "PHPSESSID=xxxx; p_ab_id=6; ...",
+      "description": "🔒 密文字段：界面上是密码框、保存后不再回显（留空 = 不修改）。填了才能查到 R-18 内容和更完整的结果。获取方法：电脑浏览器登录 pixiv.net → F12 → Application/应用 → Cookies → https://www.pixiv.net → 复制整行 Cookie（至少要有 PHPSESSID）。⚠️ 这条 Cookie 等于你的登录凭证，别截图外发；它按明文存在 data/config.json 里，请自行保管好该文件。"
+    },
+    "maxResults": {
+      "type": "number",
+      "label": "每次返回条数上限",
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "description": "默认 10，上限 50。模型请求的 limit 会被夹到这个范围内，防止一次刷太多。"
+    },
+    "maxPages": {
+      "type": "number",
+      "label": "最大翻页数",
+      "min": 1,
+      "max": 10,
+      "step": 1,
+      "description": "模型可以传 page 翻页，这里限制最多翻到第几页（默认 2）。"
+    },
+    "order": {
+      "type": "enum",
+      "values": ["popular_d", "date_d", "popular", "date", "popular_male_d", "popular_female_d"],
+      "label": "默认排序",
+      "description": "popular_d=按热度（默认）；date_d=按最新。popular* 系列部分需要 Pixiv 会员账号，普通号会自动退回可用排序。"
+    },
+    "allowR18": {
+      "type": "boolean",
+      "label": "允许查询 R-18 内容",
+      "description": "默认关。打开后工具才能查 R-18 标签/榜单，且搜索结果不再过滤 xRestrict 作品。⚠️ 群聊里建议保持关闭。"
+    },
+    "allowInGroup": {
+      "type": "boolean",
+      "label": "允许在群里使用",
+      "description": "关掉后只在私聊可用（群里调用会返回明确的拒绝说明）。"
+    },
+    "proxy": {
+      "type": "string",
+      "label": "代理地址（推荐填 auto）",
+      "placeholder": "auto",
+      "description": "中国大陆直连 pixiv.net 会超时，必须有代理。推荐直接填 auto：插件会自动找出本机代理（先问宿主的 Electron 会话代理设置，再扫常见端口 7890/10809/2080…）——适合 Clash/mihomo 这类每次启动都换端口的客户端。也可以填死地址，例如 http://127.0.0.1:7890（Clash）或 http://127.0.0.1:10809（v2ray）。留空 = 直连。⚠️ 这个代理只作用于本插件自己的请求，绝不影响 QQ Agent 主程序。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "单次请求超时（毫秒）",
+      "min": 3000,
+      "max": 120000,
+      "step": 1000,
+      "description": "默认 20000。走代理时首次握手可能慢，超时了就先调大到 40000 试试。"
+    },
+    "breakerEnabled": {
+      "type": "boolean",
+      "label": "多次查询失败时强制终止（不再空转，直接回话）",
+      "description": "默认开。Pixiv 连不上时每次查询都要等满「单次请求超时」，模型常会换个关键词反复重试，把一整轮的调用预算耗光、群里最后一条回复都没有。打开后：连续失败达到阈值就立刻停止本插件的所有查询，并明确要求模型停止调用工具、直接用中文说明情况。"
+    },
+    "breakerThreshold": {
+      "type": "number",
+      "label": "连续失败几次后终止",
+      "min": 1,
+      "max": 20,
+      "step": 1,
+      "description": "默认 3。只在「上游不行」类失败上计数（超时、DNS、连接被拒、403、429、5xx、风控页）；「作品不存在(404)」「参数不合法」「搜到 0 条」不计入，不会误封。"
+    },
+    "breakerCooldownSec": {
+      "type": "number",
+      "label": "终止后冷却多少秒",
+      "min": 5,
+      "max": 3600,
+      "step": 5,
+      "description": "默认 60。冷却期内所有 pixiv 查询都会被直接拒绝（不再发请求、不再等超时）；冷却结束会自动放行一次试探，成功就恢复正常。"
+    },
+    "imageBridge": {
+      "type": "boolean",
+      "label": "本地图片桥（让宿主能真的发出 P站图）",
+      "description": "默认开。i.pximg.net 有防盗链（要带 Referer）且大陆必须走代理，宿主的发图通道两样都没有，所以老版本只能发链接、发不出图。打开后插件会自己把图取回来，再给宿主一条只监听 127.0.0.1 的本地直链。⚠️ 还需要在「控制台 → 扩展」里打开「允许下载内网/本机图片地址」(security.allowPrivateImageHosts)，否则宿主的安全防护会挡掉这条本地直链。"
+    },
+    "bridgePort": {
+      "type": "number",
+      "label": "图片桥端口（0 = 自动分配）",
+      "min": 0,
+      "max": 65535,
+      "step": 1,
+      "description": "默认 18717。端口被别的程序占用时会自动改用系统随机端口，无需手动处理。"
+    },
+    "bridgeTtlSec": {
+      "type": "number",
+      "label": "图片直链有效期（秒）",
+      "min": 30,
+      "max": 86400,
+      "step": 30,
+      "description": "默认 1800（30 分钟）。模型拿到直链后要在有效期内调用发图工具（mcp__qq__qq_send_image）；过期会提示「请重新查一次」。"
+    },
+    "bridgeMaxMB": {
+      "type": "number",
+      "label": "桥单张图片上限（MB）",
+      "min": 1,
+      "max": 64,
+      "step": 1,
+      "description": "默认 8。比这个大的图（常见于「原图」）会被桥拒收并给出说明；日常发图用的是长边 1200 的大图，一般 0.3~2MB。注意宿主自己还有一个「单张图片上限」（默认 5MB）。"
+    }
+  },
+
+  "prompt": {
+    "source": "runtime",
+    "_说明": "★ InteractBot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关与设置变），所以这里的静态副本已删除。上游宿主两份都读，会出现同一段话两种措辞。"
+  },
+
+  "tools": [
+    {
+      "id": "search",
+      "name": "Pixiv 搜图",
+      "description": "按关键词在 Pixiv 搜插画/漫画，返回作品id + 标题 + 作者 + 标签 + 链接",
+      "category": "media",
+      "icon": "🎨",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keyword": { "type": "string", "description": "搜索关键词" },
+          "limit": { "type": "integer", "description": "最多返回几条" },
+          "order": { "type": "string", "enum": ["date_d", "date", "popular_d", "popular", "popular_male_d", "popular_male", "popular_female_d", "popular_female"], "description": "排序" },
+          "sMode": { "type": "string", "enum": ["s_tag_full", "s_tag", "s_tc"], "description": "匹配方式" },
+          "page": { "type": "integer", "description": "页码" },
+          "r18": { "type": "boolean", "description": "只查 R-18（需设置里打开 allowR18）" }
+        },
+        "required": ["keyword"]
+      }
+    },
+    {
+      "id": "artwork",
+      "name": "Pixiv 作品详情",
+      "description": "按 id 查作品详情：作者/标签/收藏数/简介/多图原图地址",
+      "category": "media",
+      "icon": "🖼️",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ids": { "type": "string", "description": "一个或多个作品 id / artworks 链接" }
+        },
+        "required": ["ids"]
+      }
+    },
+    {
+      "id": "ranking",
+      "name": "Pixiv 排行榜",
+      "description": "取 Pixiv 日榜/周榜/月榜/新人榜/原创榜",
+      "category": "media",
+      "icon": "🏆",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string", "enum": ["daily", "weekly", "monthly", "rookie", "original", "male", "female", "daily_r18", "weekly_r18", "male_r18", "female_r18"], "description": "榜单类型" },
+          "content": { "type": "string", "enum": ["illust", "manga", "ugoira", "complex"], "description": "内容类型" },
+          "limit": { "type": "integer", "description": "返回前几名" },
+          "date": { "type": "string", "description": "日期 yyyymmdd" }
+        },
+        "required": []
+      }
+    }
+  ],
+
+  "_note_tools_is_metadata": "tools[] 是**说明性元数据**（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。id 写 'search'，工具全名由**宿主**拼：上游是 pixiv-lookup__search，InteractBot 是 mcp__skills__pixiv-lookup__search（MCP 客户端按服务器名加前缀）—— 所以 index.js 里的工具名常量改成了由宿主注入。改法与逐处原因见同目录的 README-InteractBot.md，以及仓库根的 docs/0.2.2-pixiv-skill-migration.md（含可直接复算的 diff：docs/0.2.2-pixiv-adaptation.patch）。清单里的 id 与注册的对不上时，宿主会警告「清单声明了却没 registerTool」。"
+}

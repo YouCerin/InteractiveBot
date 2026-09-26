@@ -1,0 +1,78 @@
+{
+  "_fixture_note": "按 https://www.pixiv.net/ajax/illust/{id} 的真实响应形状构造（字段名照抄真实响应，只保留技能会读到的部分；内容为公开示例数据）。",
+  "error": false,
+  "message": "",
+  "body": {
+    "illustId": "100412238",
+    "illustTitle": "ウタゲ＆シデロカ",
+    "illustComment": "サンオイルを塗りたい前衛オペレーターTOP2（自社調べ）<br /><br />おまけ差分→<a href=\"https://example.com/posts/4274904\" target=\"_blank\">https://example.com/posts/4274904</a>",
+    "id": "100412238",
+    "title": "ウタゲ＆シデロカ",
+    "description": "サンオイルを塗りたい前衛オペレーターTOP2（自社調べ）<br /><br />おまけ差分→<a href=\"https://example.com/posts/4274904\" target=\"_blank\">https://example.com/posts/4274904</a>",
+    "illustType": 0,
+    "createDate": "2022-08-11T14:46:14+00:00",
+    "uploadDate": "2022-08-11T14:46:14+00:00",
+    "restrict": 0,
+    "xRestrict": 0,
+    "sl": 6,
+    "urls": {
+      "mini": "https://i.pximg.net/c/48x48/img-master/img/2022/08/11/23/46/14/100412238_p0_square1200.jpg",
+      "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2022/08/11/23/46/14/100412238_p0_square1200.jpg",
+      "small": "https://i.pximg.net/c/540x540_70/img-master/img/2022/08/11/23/46/14/100412238_p0_master1200.jpg",
+      "regular": "https://i.pximg.net/img-master/img/2022/08/11/23/46/14/100412238_p0_master1200.jpg",
+      "original": "https://i.pximg.net/img-original/img/2022/08/11/23/46/14/100412238_p0.png"
+    },
+    "tags": {
+      "authorId": "47196062",
+      "isLocked": false,
+      "tags": [
+        { "tag": "明日方舟", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" },
+        { "tag": "アークナイツ", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" },
+        { "tag": "Arknights", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" },
+        { "tag": "シデロカ(アークナイツ)", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" },
+        { "tag": "铸铁", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" },
+        { "tag": "ウタゲ(アークナイツ)", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" },
+        { "tag": "宴", "locked": true, "deletable": false, "userId": "47196062", "userName": "360" }
+      ],
+      "writable": false
+    },
+    "alt": "360のイラスト",
+    "storableTags": ["EZQqoW9r8g", "-98s6o2-Rp", "2R7RYffVfj"],
+    "userId": "47196062",
+    "userName": "360",
+    "userAccount": "360px",
+    "likeData": false,
+    "width": 2476,
+    "height": 3541,
+    "pageCount": 1,
+    "bookmarkCount": 4011,
+    "likeCount": 2445,
+    "commentCount": 15,
+    "responseCount": 0,
+    "viewCount": 11422,
+    "bookStyle": 0,
+    "isHowto": false,
+    "isOriginal": false,
+    "isBookmarkable": true,
+    "bookmarkData": null,
+    "titleCaptionTranslation": { "workTitle": null, "workCaption": null },
+    "isUnlisted": false,
+    "request": null,
+    "commentOff": 0,
+    "extraData": {
+      "meta": {
+        "title": "#明日方舟 ウタゲ＆シデロカ - 360のイラスト - pixiv",
+        "description": "この作品 「ウタゲ＆シデロカ」 は 「明日方舟」「アークナイツ」 等のタグがつけられた「360」さんのイラストです。",
+        "canonical": "https://www.pixiv.net/artworks/100412238",
+        "ogp": { "image": "https://embed.pixiv.net/decorate.php?illust_id=100412238", "title": "ウタゲ＆シデロカ", "type": "article" }
+      }
+    },
+    "noLoginData": {
+      "breadcrumbs": { "successor": [], "current": { "ja": "ウタゲ＆シデロカ" } },
+      "zengoWorkData": {
+        "nextWork": { "id": "100412239", "title": "バッツの日" },
+        "prevWork": { "id": "100412237", "title": "八重神子＆雷電将軍" }
+      }
+    }
+  }
+}

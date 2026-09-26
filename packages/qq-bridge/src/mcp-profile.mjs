@@ -33,6 +33,10 @@ import { join, dirname } from 'node:path'
 const MARK_BEGIN = '# >>> qq-bridge: qq tools (MCP) — 由桥接自动维护，不要手改这段 >>>'
 const MARK_END = '# <<< qq-bridge: qq tools (MCP) <<<'
 
+/** 第二个受管块：技能工具（0.2.2）。装/卸技能时生成或整块删除。 */
+const SKILL_MARK_BEGIN = '# >>> qq-bridge: skill tools (MCP) — 由桥接自动维护，不要手改这段 >>>'
+const SKILL_MARK_END = '# <<< qq-bridge: skill tools (MCP) <<<'
+
 /**
  * 生成 MCP 服务器需要的配置文件（含 OneBot 端点与 token）。
  *
@@ -40,15 +44,44 @@ const MARK_END = '# <<< qq-bridge: qq tools (MCP) <<<'
  *   · 只写到 cache 目录，不进 git（见 .gitignore）
  *   · 不写进 workspace（那里会被 agent 读到，而 agent 不该看到 token）
  */
-export function writeMcpConfig({ cacheDir, httpUrl, httpToken, timeoutMs, workspace = null }) {
+export function writeMcpConfig({ cacheDir, httpUrl, httpToken, timeoutMs, workspace = null, configPath = null }) {
   mkdirSync(cacheDir, { recursive: true })
   const path = join(cacheDir, 'mcp-qq.config.json')
   // ★ `workspace` 是 H7 加的：`qq_search_history` 工具要读工作区里的语料库
   //   （`runtime/corpus.sqlite`）。它**不含密钥**，所以放进这份配置是安全的
   //   （这份配置本来就在 cache/ 里、不进工作区；见上面的注释）。
+  // ★ `configPath` 是 0.2.2 加的：`qq_send_image` 要现读 `security.allowPrivateImageHosts`，
+  //   而且必须**每次调用现读**（否则界面上打开开关还要重启才生效 —— 那正是这一版在消灭的毛病）。
+  //   config.json 本来就含 token/apiKey，而本进程已经拿到了 httpToken，所以这不扩大暴露面。
   const body =
     JSON.stringify(
-      { httpUrl, httpToken, timeoutMs: timeoutMs ?? 20_000, ...(workspace ? { workspace } : {}) },
+      {
+        httpUrl,
+        httpToken,
+        timeoutMs: timeoutMs ?? 20_000,
+        ...(workspace ? { workspace } : {}),
+        ...(configPath ? { configPath } : {}),
+      },
+      null,
+      2,
+    ) + '\n'
+  writeJsonIfChanged(path, body)
+  return path
+}
+
+/**
+ * 生成**技能工具** MCP 服务器需要的配置文件（0.2.2）。
+ *
+ * 与上面那份的区别：这份**不含 token**，只有"技能目录在哪 / config.json 在哪"。
+ * 技能工具（例如 pixiv 的查图）不需要 QQ 凭证，所以没有理由把 token 递给它 ——
+ * 一份进程要什么就给什么，是这里唯一的安全设计。
+ */
+export function writeSkillsMcpConfig({ cacheDir, skillsDir, configPath, workspace = null }) {
+  mkdirSync(cacheDir, { recursive: true })
+  const path = join(cacheDir, 'mcp-skills.config.json')
+  const body =
+    JSON.stringify(
+      { skillsDir, configPath, ...(workspace ? { workspace } : {}) },
       null,
       2,
     ) + '\n'
@@ -75,12 +108,14 @@ function writeJsonIfChanged(path, body) {
  * @param {string} opts.nodePath         用作 command 的 node 可执行文件
  * @param {string} opts.serverPath       mcp/mcp-qq-server.mjs 的绝对路径
  * @param {string} opts.configPath       上面生成的 MCP 配置文件
- * @returns {{changed: boolean, path: string}}
+ * @param {{serverPath: string, configPath: string, timeoutMs?: number}|null} [opts.skills]
+ *        技能工具服务器（0.2.2）。**null 时整块删除** —— 没装任何技能就不该多起一个进程。
+ * @returns {{changed: boolean, path: string, blocks: number}}
  */
-export function ensureSdkProfilePatch({ profilePatchPath, nodePath, serverPath, configPath }) {
+export function ensureSdkProfilePatch({ profilePatchPath, nodePath, serverPath, configPath, skills = null }) {
   mkdirSync(dirname(profilePatchPath), { recursive: true })
 
-  const block = [
+  const qqBlock = [
     MARK_BEGIN,
     '- insert:',
     '    - id: qq-bridge-tools',
@@ -100,6 +135,36 @@ export function ensureSdkProfilePatch({ profilePatchPath, nodePath, serverPath, 
     MARK_END,
   ].join('\n')
 
+  // ── 技能工具服务器（0.2.2）────────────────────────────────────────────────
+  //
+  // 为什么**单独一个 MCP 服务器**、而不是塞进上面那个 QQ 工具服务器：
+  //   ① 隔离：技能是第三方代码，它崩了不该把 QQ 动作一起带走（两个进程各自 failOnStartupError:false）；
+  //   ② 权限：技能工具不需要 QQ token，所以那份配置里就没有 token；
+  //   ③ 零成本：没装技能时这一块**整块不写**，不多起进程、不多一次握手。
+  //
+  // 超时给到 60 秒：技能经常要联网（pixiv 走代理首次握手就可能十几秒），
+  // 用 QQ 动作那个 30 秒会切掉正常查询。
+  const skillsBlock = skills
+    ? [
+        SKILL_MARK_BEGIN,
+        '- insert:',
+        '    - id: qq-bridge-skill-tools',
+        "      name: '@deepseek-ai/dsh-mcp-client'",
+        '      config:',
+        '        transport: stdio',
+        '        serverName: skills',
+        `        command: ${yamlString(nodePath)}`,
+        '        args:',
+        `          - ${yamlString(skills.serverPath)}`,
+        "          - '--config'",
+        `          - ${yamlString(skills.configPath)}`,
+        '        # 技能经常要联网，给足超时；技能坏了不要连累 DSH 启动',
+        `        toolCallTimeoutMs: ${Number(skills.timeoutMs) > 0 ? Math.trunc(Number(skills.timeoutMs)) : 60000}`,
+        '        failOnStartupError: false',
+        SKILL_MARK_END,
+      ].join('\n')
+    : ''
+
   let existing = ''
   try {
     if (existsSync(profilePatchPath)) existing = readFileSync(profilePatchPath, 'utf8')
@@ -107,7 +172,7 @@ export function ensureSdkProfilePatch({ profilePatchPath, nodePath, serverPath, 
     existing = ''
   }
 
-  // ── 幂等：已有标记就替换标记之间的内容；否则插入 ─────────────────────
+  // ── 幂等：先整块摘掉我们写过的两段，再按当前需要重新追加 ─────────────────
   //
   // ⚠️ 这里踩过一个坑，而且**后果是 DSH 直接起不来**：
   // profile 的 patch 模板内容是**一个空列表 `[]`**。第一版只是在文件末尾
@@ -120,21 +185,31 @@ export function ensureSdkProfilePatch({ profilePatchPath, nodePath, serverPath, 
   // 但根因就是这个"空列表 + 另一个列表"。
   //
   // 正确做法：**把那个空列表替换掉**，而不是追加在它后面。
-  let next
-  const beginIdx = existing.indexOf(MARK_BEGIN)
-  const endIdx = existing.indexOf(MARK_END)
-  if (beginIdx >= 0 && endIdx > beginIdx) {
-    next = existing.slice(0, beginIdx) + block + existing.slice(endIdx + MARK_END.length)
-  } else {
-    // 去掉"空的列表占位符"（`[]`，可能带注释、可能独占一行）
-    const withoutEmptyList = existing.replace(/^\s*\[\]\s*$/m, '')
-    const base = withoutEmptyList.replace(/\s*$/, '')
-    next = (base ? base + '\n\n' : '') + block + '\n'
+  // 0.2.2 起有两段受管内容，所以改成"先摘干净、再统一追加" —— 这样
+  // "装过的技能被删掉"时那一块会被真的移除（否则 profile 里会永远留着一个
+  // 指向不存在目录的服务器）。
+  let body = existing
+  for (const [b, e] of [
+    [MARK_BEGIN, MARK_END],
+    [SKILL_MARK_BEGIN, SKILL_MARK_END],
+  ]) {
+    const i = body.indexOf(b)
+    const j = body.indexOf(e)
+    if (i >= 0 && j > i) {
+      // 连同紧贴前后的空行一起摘掉，避免每摘一次就多一行空行（幂等性靠这个成立）
+      body = body.slice(0, i).replace(/\n+$/, '') + '\n' + body.slice(j + e.length).replace(/^\n+/, '')
+    }
   }
+  // 去掉"空的列表占位符"（`[]`，可能带注释、可能独占一行）
+  body = body.replace(/^\s*\[\]\s*$/m, '')
+
+  const wanted = [qqBlock, skillsBlock].filter(Boolean)
+  const base = body.replace(/\s*$/, '')
+  const next = (base ? base + '\n\n' : '') + wanted.join('\n\n') + '\n'
 
   const changed = next !== existing
   if (changed) writeFileSync(profilePatchPath, next, 'utf8')
-  return { changed, path: profilePatchPath }
+  return { changed, path: profilePatchPath, blocks: wanted.length }
 }
 
 /**

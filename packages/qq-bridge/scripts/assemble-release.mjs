@@ -53,7 +53,10 @@ const DEFAULT_OUT = join(REPO_ROOT, '_release', `InteractBot-${VERSION}-win-x64`
 const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 
 /** 要整目录拷贝的（相对包根）。 */
-const COPY_DIRS = ['src', 'mcp', 'assets', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
+// ★ `personas` 必须在清单里（0.2.2）：它是**出厂默认那两套人设**的文件。
+//   漏了它的后果是「发布包里一套人设都没有」—— 界面人设栏空着，而且**不会报错**
+//   （启动时的 `ensureDefaultPersonas` 只在人员没动过手时补默认，用户自己建过就什么都不补）。
+const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
 /** 要单文件拷贝的（相对包根）。★ `启动机器人.bat` 等三个入口**必须**在这里 —— 上次就是漏了它们。 */
 const COPY_FILES = [
   'package.json',
@@ -230,7 +233,13 @@ for (const d of COPY_DIRS) {
   const from = join(PKG_ROOT, d)
   const to = join(OUT, d)
   mkdirSync(dirname(to), { recursive: true })
-  cpSync(from, to, { recursive: true, force: true })
+  // ★ `skills/node_modules` 是桥接在启动时建的**软链**（指向 vendor/node_modules，见
+  //   src/extensions.mjs 的 ensureSkillNodeModules）。它**绝不能进发布包**：
+  //   链的目标是开发机的绝对路径，换台机器就是死链，而且会让"发布包里夹带 node_modules"
+  //   这条本来就该守住的规则失效。用户拿到包后第一次启动，桥接会自己重建它。
+  const filter =
+    d === 'skills' ? (src) => !/[\\/]node_modules([\\/]|$)/.test(src.slice(from.length)) : undefined
+  cpSync(from, to, { recursive: true, force: true, ...(filter ? { filter } : {}) })
   log(`   📁 ${d}`)
 }
 for (const f of COPY_FILES) {

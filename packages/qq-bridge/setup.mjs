@@ -228,7 +228,39 @@ if (!wsSrc) {
   ok = copyDir(wsSrc, join(DIRS.vendorNodeModules, 'ws'), 'ws 依赖（纯 JS，无需编译）') && ok
 }
 
-// ── 3. DSH 本体：**刻意不复制** ──────────────────────────────────────────
+// ── 3. 技能的 npm 依赖（**可选**：只有要挂代理出网的技能需要）─────────────
+//
+// 0.2.2 起包内可以装外部技能（`skills/<id>/`），而技能用的是**普通的 import('xxx')** ——
+// 它没法像桥接自己那样用 createRequire 指到 vendor（那是宿主内部机制），
+// 所以会在真机上直接 ERR_MODULE_NOT_FOUND。
+// 修法：这里复制到 vendor/node_modules 的包，由桥接启动时**软链**到
+// `skills/node_modules`（见 src/extensions.mjs 的 ensureSkillNodeModules）。
+//
+// 为什么是"可选、缺失只告警"：`ws` 是桥接的命脉，缺了就不能跑；而 `undici` 只被
+// pixiv 那类"要挂代理"的技能用到 —— 缺了它们会**自己报「代理不可用」**，
+// 机器人本体一切正常。把可选依赖做成硬失败，会让"我只想跑机器人"的人卡住。
+const OPTIONAL_SKILL_DEPS = ['undici']
+line('')
+line('ℹ️  技能的 npm 依赖（可选）：' + OPTIONAL_SKILL_DEPS.join('、'))
+for (const dep of OPTIONAL_SKILL_DEPS) {
+  const dest = join(DIRS.vendorNodeModules, dep)
+  if (existsSync(join(dest, 'package.json'))) {
+    line(`    ✅ ${dep} 已就位`)
+    continue
+  }
+  const src =
+    [join(PKG_ROOT, 'node_modules', dep), join(PKG_ROOT, '..', '..', 'node_modules', dep)].find((p) =>
+      existsSync(join(p, 'package.json')),
+    ) ?? null
+  if (!src) {
+    line(`    ⚠️ ${dep} 没找到（不进包）：用得到它的技能会自己报「代理不可用」。`)
+    line(`       需要的话：本目录执行 npm install ${dep}，然后重跑 setup.mjs`)
+    continue
+  }
+  copyDir(src, dest, `${dep}（技能用，可选）`)
+}
+
+// ── 4. DSH 本体：**刻意不复制** ──────────────────────────────────────────
 // 用户已明确："不用复制 DSH"。这不是偷懒，是有理由的取舍：
 //   · 体积：DSH 安装根约 275 MB / 15000 个文件，复制会让包从 86 MB 涨到 360 MB
 //   · 本质：DSH 是**运行时**，和 Node 一样属于"跑这个包所需的环境"，
@@ -237,6 +269,7 @@ if (!wsSrc) {
 //           findDshCli），换机器时只要目标机器装了 DSH，或设一个
 //           DSH_DESKTOP_APP 环境变量即可
 // 所以这里不提供 --with-dsh。
+
 line('')
 line('ℹ️  DSH 本体不复制（这是既定设计）。桥接会自动在这些位置找它：')
 line('      1. vendor/dsh/                          （你若手工放了一份就用它）')
@@ -244,7 +277,7 @@ line('      2. 环境变量 DSH_DESKTOP_APP 指向的安装根')
 line('      3. DSH 桌面版默认安装位置')
 line(`    当前解析结果：${findDshCli() ?? '（没找到，请检查 DSH 是否已安装）'}`)
 
-// ── 4. SnowLuma（可选，**且发布包不要用它**）─────────────────────────────
+// ── 5. SnowLuma（可选，**且发布包不要用它**）─────────────────────────────
 //
 // ★ 许可证提醒：SnowLuma 的 EULA §5.4 禁止"将其并入第三方安装包"，
 //   LICENSE §5 不授予原生组件的再分发权利、§3(d) 要求公开发布衍生版须事先书面许可。
@@ -264,7 +297,7 @@ if (WITH_SNOWLUMA) {
   }
 }
 
-// ── 5. 写一份清单，方便日后再体检 ────────────────────────────────────────
+// ── 6. 写一份清单，方便日后再体检 ────────────────────────────────────────
 //
 // ★ 这里**只记"是什么"和"来源"，不记绝对路径**。
 //   以前 manifest.json 里存的是 `D:\...\vendor\node\node.exe` 这类绝对路径，

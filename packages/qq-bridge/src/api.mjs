@@ -270,6 +270,25 @@ export function createApiHandler(deps) {
     privacyAudit, // 隐私拦截审计（只回时间/侧/类别/字数 —— 审计里本来就没有原文）
     scanMemoryPrivacy, // 扫描盘上记忆里的隐私条目（只回文件+行号+类别，不回原文）
     logStream, // 日志流（SSE）
+    // ── 0.2.2 扩展（技能 / 插件）：全部可选，不传就回 501 ──────────────────
+    //   ★ 这四条与其余路由的**根本差别**：它们是"即时生效"的通道 ——
+    //     实现里既写盘又改活配置对象（见 index.mjs 的 applyExtensionChange），
+    //     所以界面按开关不需要重启。语义与边界见 docs/插件设计规范.md。
+    listExtensions, // GET  /api/extensions            列表（技能 + 插件 + 状态）
+    toggleExtension, // POST /api/extensions/toggle     开/关（即时生效）
+    saveSkillSettings, // POST /api/extensions/settings   改某个技能的设置（密文留空=不改）
+    diagnoseSkill, // GET  /api/extensions/diagnose   技能自诊断（可选导出）
+    // ── 0.2.2 人设库（多文件 + 命名 + 切换）───────────────────────────────
+    // personasList   GET  /api/personas：人设栏要的全部事实（列表/当前生效/回落/模板）
+    // personasAction POST /api/personas：{action:'create'|'save'|'rename'|'delete'|'activate'|'restore-defaults'}
+    //   ★ `personasAction` 只**算**，不写配置：它接收路由传进去的 `config`（盘上那份），
+    //     需要改配置时回一个 `nextActive`，由路由按 /api/config 的纪律落盘（校验 + .bak）。
+    //     这样"配置怎么写"只有一处实现 —— 这也是它能被离线测出来的原因。
+    personasList,
+    personasAction,
+    // ── 0.2.2 联系人昵称（按人）───────────────────────────────────────────
+    contactsList, // GET  /api/contacts：读 memory/contacts.md（含认不出来的行）
+    contactsSave, // POST /api/contacts：{qq, nickname}（空昵称 = 删除）
   } = deps
 
   return async function handle(req) {
@@ -324,6 +343,127 @@ export function createApiHandler(deps) {
           restartRequired: true,
           hint: '已保存。需要重启机器人后生效。',
         })
+      }
+
+      // ── 扩展（技能 / 插件）：0.2.2 ────────────────────────────────────
+      //
+      // ★ 与上面 /api/config 的**关键差别**：这一组是**即时生效**的。
+      //   用户按下一个技能开关，下一轮对话就该看到效果，所以实现里
+      //   既写盘（持久化）也改活配置对象（生效），而不是回一句"请重启"。
+      //   代价与边界（工具表要重启才收敛）写在 docs/插件设计规范.md 里，界面上也照实说。
+      if (method === 'GET' && path === '/api/extensions') {
+        if (typeof listExtensions !== 'function') return notImplemented('扩展列表')
+        return ok(listExtensions())
+      }
+
+      if (method === 'POST' && path === '/api/extensions/toggle') {
+        if (typeof toggleExtension !== 'function') return notImplemented('扩展开关')
+        const type = String(body?.type ?? '')
+        const id = String(body?.id ?? '')
+        const enabled = body?.enabled
+        // 参数校验放在路由层：这样"参数写错"与"语义拒绝"是两种不同的错误码（400 vs 422）
+        if (type !== 'skill' && type !== 'plugin') return fail(400, 'type 只能是 skill 或 plugin')
+        if (!id) return fail(400, '缺少 id')
+        if (typeof enabled !== 'boolean') return fail(400, 'enabled 必须是布尔值（true/false）')
+        const r = await toggleExtension({ type, id, enabled })
+        if (r?.error) return fail(r.status ?? 422, r.error, r.extra ?? {})
+        return ok(r)
+      }
+
+      if (method === 'POST' && path === '/api/extensions/settings') {
+        if (typeof saveSkillSettings !== 'function') return notImplemented('技能设置')
+        const id = String(body?.id ?? '')
+        if (!id) return fail(400, '缺少 id')
+        const patch = body?.patch
+        if (patch !== undefined && (patch === null || typeof patch !== 'object' || Array.isArray(patch))) {
+          return fail(400, 'patch 必须是对象')
+        }
+        const r = await saveSkillSettings({ id, patch: patch ?? {} })
+        if (r?.error) return fail(r.status ?? 422, r.error, r.extra ?? {})
+        return ok(r)
+      }
+
+      if (method === 'GET' && path === '/api/extensions/diagnose') {
+        const id = queryParam(req, 'id')
+        if (!id) return fail(400, '缺少 id')
+        if (typeof diagnoseSkill !== 'function') return notImplemented('技能诊断')
+        const r = await diagnoseSkill(id)
+        if (!r) return fail(404, `没有这个技能，或者它没有提供 diagnose：${id}`)
+        return ok(r)
+      }
+
+      // ── 人设库（0.2.2）──────────────────────────────────────────────
+      //
+      // 形状：**一个文件一套人设**，文件名叫什么，人设栏里就叫什么（`personas/<名字>.md`）。
+      //
+      // ★ 为什么读和写都要经过后端，而不是界面直接读那几个文件：
+      //   ① "当前在用哪一套"是**三处规则**合起来的结果（`persona.active` → 老 `custom`
+      //      → 老 `preset`），界面自己判必然判错，会出现"界面说在用小鲸鱼、实际注入的是别的"；
+      //   ② 改名/删除**会牵着配置走**（删掉正在用的那一套就得同时把 `active` 改掉），
+      //      这种"两处同时改"的事只有一处实现才不会漏。
+      if (method === 'GET' && path === '/api/personas') {
+        if (typeof personasList !== 'function') return notImplemented('人设库')
+        const r = personasList()
+        if (r?.error) return fail(r.status ?? 500, r.error)
+        return ok(r)
+      }
+
+      if (method === 'POST' && path === '/api/personas') {
+        if (typeof personasAction !== 'function') return notImplemented('人设库')
+        const b = body && typeof body === 'object' ? body : {}
+        const action = String(b.action ?? '').trim()
+        // 参数校验留在路由层：这样"参数写错"是 400，"语义拒绝"（重名/名字非法）是 422
+        if (!action) return fail(400, '缺少 action')
+        // 动作要看见**盘上**的配置（与 GET /api/config 同源）—— 界面上改完再改，
+        // 不允许动作拿着一份启动时的旧配置去判"当前在用哪一套"。
+        const raw = readRawConfig()
+        const r = await personasAction({
+          action,
+          config: raw,
+          name: b.name === undefined ? undefined : String(b.name),
+          to: b.to === undefined ? undefined : String(b.to),
+          text: b.text === undefined ? undefined : String(b.text),
+          copyFrom: b.copyFrom === undefined ? undefined : String(b.copyFrom),
+        })
+        if (r?.error) return fail(r.status ?? 422, r.error)
+        // 需要改配置的动作（切换/改名跟随/删了正在用的那一套）：走与 /api/config
+        // **完全同一套纪律** —— 先校验、备份 .bak、再写。这条不许在别处再实现一份。
+        if (r?.nextActive !== undefined) {
+          const current = raw.persona && typeof raw.persona === 'object' ? raw.persona : {}
+          const merged = { ...raw, persona: { ...current, active: r.nextActive } }
+          const { fatal } = validate(normalize(merged))
+          if (fatal.length > 0) return fail(422, '配置有问题，已拒绝保存', { fatal })
+          try {
+            copyFileSync(deps.configPath, `${deps.configPath}.bak`)
+          } catch {
+            /* 备份失败不阻断保存（与 /api/config 一致） */
+          }
+          writeRawConfig(merged)
+          if (typeof onConfigSaved === 'function') onConfigSaved(merged)
+        }
+        const data = { ...r }
+        // `nextActive` 是实现细节（"配置该怎么改"），界面不需要它
+        delete data.nextActive
+        // 一次往返就把新状态带回去（界面不用再 GET 一次，少一个不一致的窗口）
+        if (typeof personasList === 'function') data.shelf = personasList()
+        return ok(data)
+      }
+
+      // ── 联系人昵称（按人，0.2.2）──────────────────────────────────────
+      //
+      // 读写都走 `src/contacts.mjs`：**格式只有一处实现**（界面/CLI 都不许自己拼那几行，
+      // 否则"界面写的格式"和"注入时读的格式"迟早对不上，而那种错是静默的）。
+      // 语义：昵称**空串 = 删除这个号码**（界面上那个「删除」按钮就是这条）。
+      if (method === 'GET' && path === '/api/contacts') {
+        if (typeof contactsList !== 'function') return notImplemented('联系人昵称')
+        return ok(contactsList())
+      }
+      if (method === 'POST' && path === '/api/contacts') {
+        if (typeof contactsSave !== 'function') return notImplemented('联系人昵称')
+        const b = body && typeof body === 'object' ? body : {}
+        const r = contactsSave({ qq: String(b.qq ?? '').trim(), nickname: String(b.nickname ?? '') })
+        if (r?.error) return fail(r.status ?? 400, r.error)
+        return ok(r)
       }
 
       // ── 配置自检 ──────────────────────────────────────────────────────
@@ -743,6 +883,24 @@ export function createApiHandler(deps) {
         if (!logStream) return notImplemented('日志流')
         // ★ 别忘了 `ok()`：真机上这条路由就是漏了它，把整个进程带下线的（见上面收口校验的说明）
         return ok(logStream({ since: Number(queryParam(req, 'since')) || 0, limit: Number(queryParam(req, 'limit')) || 200 }))
+      }
+
+      // ── 已换代的旧人设接口：**大声**回答，不要用 404 ────────────────────
+      //
+      // 0.2.2 把"一套人设三个档 + 一个自定义文本"换成了**人设库**（`personas/<名字>.md`），
+      // 接口随之从 `/api/persona`（读）+ `/api/persona/names`（改名字块）换成
+      // `/api/personas`（见上面那两条）。
+      //
+      // ★ 为什么留着这两条而不是直接删：删掉之后它们会落到最下面的 404 ——
+      //   而 404 的意思是"你路径写错了"，于是调用方（包括**旧版界面**）会去改路径，
+      //   白折腾一轮。这里明确回 `410 Gone` + 新路径，谁看一眼都知道该改什么。
+      //   旧版界面的人设页会因此显示一句"接口已换代"，而不是一个说不清的报错。
+      if (path === '/api/persona' || path === '/api/persona/names') {
+        return fail(410, `接口已换代：${path} → /api/personas`, {
+          gone: true,
+          use: '/api/personas',
+          hint: '0.2.2 起人设改成了「一个文件一套人设」（personas/<名字>.md）。GET /api/personas 读，POST /api/personas 写（action: create/save/rename/delete/activate/restore-defaults）。见 CONFIG-UI.md §5。',
+        })
       }
 
       return fail(404, `没有这个接口：${method} ${path}`)

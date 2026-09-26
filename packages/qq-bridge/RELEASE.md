@@ -274,7 +274,7 @@ InteractBot-<版本>-win-x64/
 ### 打包后必须跑一次验收脚本
 
 ```powershell
-node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.0-win-x64"
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.2-win-x64"
 ```
 
 它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**

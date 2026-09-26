@@ -96,9 +96,13 @@ for (const f of MUST_EXIST) {
 // ── ② 结构：不该有的绝不能有 ───────────────────────────────────────────
 // ★ 注意 `vendor/node_modules/ws` 是**必须带**的（包内自带的纯 JS 依赖）——
 //   第一版规则写成 /(^|\/)node_modules\// 把它一起判成了违规（验收脚本自己误报）。
-//   这里用负向断言精确放行那一个包，其余 node_modules 一律禁止。
+//   ★ 0.2.2 起放行名单多了 `undici`：它是**可选**依赖，只被"要挂代理的技能"用到
+//     （pixiv 插件的代理支持要 ProxyAgent），由 setup.mjs 复制到 vendor/node_modules。
+//   ★★ 但放行必须**精确到 path 前缀**：第一版写的是"名字在白名单里就放行"，
+//     于是 `skills/node_modules/undici`（技能目录下的软链/依赖）也会被放行 ——
+//     那条路径链的是**开发机的绝对路径**，进包就是死链。现在由下面那块单独判。
+const VENDOR_PKG_ALLOW = /^vendor\/node_modules\/(ws|undici)\//
 const FORBIDDEN = [
-  ['node_modules（只允许 vendor/node_modules/ws）', /(^|\/)node_modules\/(?!ws\/)/],
   ['config-ui 源码（只发 dist）', /^config-ui\/(?!dist\/)/],
   ['DSH 本体（用户自装）', /^vendor\/dsh\//],
   ['SnowLuma（许可证不允许随包分发）', /^vendor\/snowluma\//],
@@ -111,6 +115,13 @@ const FORBIDDEN = [
 ]
 for (const p of files) {
   const r = rel(p)
+  // node_modules：只允许 `vendor/node_modules/{ws,undici}` 这两条**精确路径**
+  if (/(^|\/)node_modules(\/|$)/.test(r)) {
+    if (!VENDOR_PKG_ALLOW.test(r)) {
+      problems.push(`不该包含的东西：${r}（node_modules 只允许 vendor/node_modules/{ws,undici}）`)
+    }
+    continue
+  }
   for (const [label, re] of FORBIDDEN) {
     if (re.test(r)) problems.push(`不该包含的东西：${r}（${label}）`)
   }

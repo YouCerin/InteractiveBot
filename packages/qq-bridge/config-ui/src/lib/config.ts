@@ -305,7 +305,7 @@ export const DEMO_CONFIG: Record<string, unknown> = {
     },
   },
   session: { salt: '', instance: '' },
-  persona: { callerName: '', preset: 'mermaid-lite', custom: '' },
+  persona: { callerName: '', callUser: '', preset: 'mermaid-lite', custom: '' },
   memory: { enabled: true },
   // §2.5.1 看图：机器人能不能看图片（取回后落 workspace/inbox）
   image: {

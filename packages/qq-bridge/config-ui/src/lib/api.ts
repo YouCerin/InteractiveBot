@@ -383,6 +383,8 @@ export const api = {
       args,
     ),
   snowlumaDetect: () => request<SnowlumaDetect>('GET', '/api/snowluma/detect'),
+  // ⚠️ 0.2.2 前的旧人设接口（GET /api/persona、POST /api/persona/names）已换代：
+  // 后端回 410 Gone。新人设库走下面的 api.personas / api.personaAction。
   /** 打开 SnowLuma 网页端（不是启动进程；启动已移交 start.bat）。 */
   snowlumaStart: () => request<SnowlumaOpenResult>('POST', '/api/snowluma/start'),
   snowlumaLog: (q: { lines?: number; offset?: number; includeDebug?: boolean }) => {
@@ -433,6 +435,209 @@ export const api = {
     request<PrivacyAuditResult>('GET', `/api/memory/privacy${limit ? `?limit=${limit}` : ''}`),
   /** 扫描盘上记忆里的隐私条目（只读）。★ 只回位置（文件+行号+类别），不回原文。 */
   memoryPrivacyScan: () => request<PrivacyScanResult>('POST', '/api/memory/privacy/scan'),
+
+  // ── 0.2.2 人设库（CONFIG-UI.md §2.2）────────────────────────────────────
+  /** 人设栏要的全部事实（列表/当前生效/回落/模板/上限），一律由后端给 —— 前端硬编码就是第二份真值。 */
+  personas: () => request<PersonaShelf>('GET', '/api/personas'),
+  /** 人设库动作。响应里带 `shelf`（新状态一次往返带回，不用再 GET）。 */
+  personaAction: (body: PersonaActionBody) => request<PersonaActionResult>('POST', '/api/personas', body),
+
+  // ── 0.2.2 扩展页（CONFIG-UI.md §2.10）───────────────────────────────────
+  /** 技能 + 插件 + 状态。★ 它会做文件系统扫描 —— 不要跟着主轮询拉，进页签拉一次即可。 */
+  extensions: () => request<ExtensionsResult>('GET', '/api/extensions'),
+  /** 扩展开关。★ 生效方式以后端回的 `restartRequired` 为准，前端不许写死。 */
+  extensionToggle: (body: { type: 'skill' | 'plugin'; id: string; enabled: boolean }) =>
+    request<ExtensionToggleResult>('POST', '/api/extensions/toggle', body),
+  /** 技能设置（密文留空 = 不修改；清除 = 提交 null）。★ 保存后**立即生效**，别抄成"需要重启"。 */
+  extensionSettings: (body: { id: string; patch: Record<string, unknown> }) =>
+    request<{ saved?: boolean; restartRequired?: boolean; hint?: string }>(
+      'POST',
+      '/api/extensions/settings',
+      body,
+    ),
+  /** 技能自检（最容易的坏法是"静默拿不到数据"）。 */
+  extensionDiagnose: (id: string) =>
+    request<Record<string, unknown>>(`GET`, `/api/extensions/diagnose?id=${encodeURIComponent(id)}`),
+
+  // ── 0.2.2 联系人昵称（CONFIG-UI.md §2.5「昵称（按人）」）───────────────────
+  /** 整表 + 上限 + 认不出来的行（bad 要显示出来，别静默丢）。 */
+  contacts: () => request<ContactsResult>('GET', '/api/contacts'),
+  /** 增改；★ nickname 空串 = 删除这个号码。改了下一轮就生效（restartRequired:false）。 */
+  contactSave: (qq: string, nickname: string) =>
+    request<ContactSaveResult>('POST', '/api/contacts', { qq, nickname }),
+}
+
+// ── 0.2.2 联系人昵称的类型（格式只有后端一处实现，界面不拼文件文本）──────────
+
+export interface ContactEntry {
+  qq: string
+  nickname: string
+}
+
+export interface ContactsResult {
+  rel: string
+  exists: boolean
+  count: number
+  max: number
+  maxChars: number
+  contacts: ContactEntry[]
+  /** 文件里认不出来的行 —— 界面要显示出来，别静默丢 */
+  bad: string[]
+}
+
+export interface ContactSaveResult {
+  saved: boolean
+  restartRequired?: boolean
+  contacts?: ContactEntry[]
+  count?: number
+  [key: string]: unknown
+}
+
+// ── 0.2.2 人设库的类型（字段与后端一一对应，见 CONFIG-UI.md §2.2/§5）────────
+
+export interface PersonaItem {
+  name: string
+  chars: number
+  mtime?: number
+  active: boolean
+  /** 出厂默认两套固定在前（顺序照后端，前端不重排） */
+  isDefault: boolean
+  /** false = 没有名字块 → 叫名字会回落到兜底名（静默失效高发处，必须警告） */
+  hasNameBlock: boolean
+  /** true = 启动时会被整文件拒载（反注入扫描命中）—— 必须标红 */
+  blocked: boolean
+  text: string
+}
+
+export interface PersonaShelf {
+  dir: string
+  /** 配置里 persona.active 的原值（空串 = 走老路径） */
+  active: string
+  /** 'file' | 'legacy-custom' | 'legacy-preset' | 'none' */
+  activeSource: string
+  activeName: string
+  activeChars: number
+  /** 非空 = persona.active 指的那一套找不到（被删/改名），当前按不使用人设在跑 —— 红色说明 */
+  activeError: string
+  /** ★★ true = 当前这套会被整文件拒载，实际注入的是占位文本 —— 必须红字 */
+  activeBlocked: boolean
+  activeBlockReasons: string[]
+  /** 非 null = 配置还是 0.2.2 之前的老写法，列表里那几套都没在用 */
+  legacy: { preset: string; customChars: number } | null
+  maxChars: number
+  /** 新建人设的默认正文（自带名字块骨架） */
+  template: string
+  personas: PersonaItem[]
+}
+
+export interface PersonaActionBody {
+  action: 'create' | 'save' | 'rename' | 'delete' | 'activate' | 'restore-defaults'
+  name?: string
+  to?: string
+  text?: string
+  copyFrom?: string
+}
+
+export interface PersonaActionResult {
+  ok?: boolean
+  changed?: boolean
+  /** ★ 生效方式以后端这个字段为准（人设构造期缓存，切换/改正在用的要重启） */
+  restartRequired?: boolean
+  hint?: string
+  /** 一次往返带回的新状态 */
+  shelf?: PersonaShelf
+  [key: string]: unknown
+}
+
+// ── 0.2.2 扩展页的类型（字段与后端一一对应，见 CONFIG-UI.md §2.10）──────────
+
+export interface SkillSchemaField {
+  type: 'boolean' | 'string' | 'number' | 'integer' | 'enum' | string
+  label?: string
+  description?: string
+  /** 密文：密码框、不回显、留空 = 不修改、清除要二次确认（提交 null） */
+  secret?: boolean
+  placeholder?: string
+  values?: string[]
+  min?: number
+  max?: number
+  step?: number
+}
+
+export interface SkillTool {
+  id: string
+  /** ★ 模型真正看到的名字 —— 排障时可直接复制去搜日志，不许"美化"掉前缀 */
+  fullName: string
+  name: string
+  description?: string
+  permission?: string
+  registered?: boolean
+}
+
+export interface SkillInfo {
+  id: string
+  dirName: string
+  name: string
+  version: string
+  apiVersion?: number
+  description: string
+  category?: string
+  icon?: string
+  author?: string
+  dir?: string
+  enabled: boolean
+  enabledSource?: string
+  ready: boolean
+  reasons: string[]
+  available: { ok: boolean; reason?: string }
+  /** 装是装了但用不了时，原因摊开在这里 */
+  errors: string[]
+  /** ★ 必须显示：设置项没界面、清单里带明文密钥…… 这些都不报错，只会静默失效 */
+  warnings: string[]
+  settings: Record<string, unknown>
+  schema: Record<string, SkillSchemaField>
+  secretFields?: string[]
+  /** 密文字段「已配置/未配置」（GET 不回值，只回这个） */
+  secretSet: Record<string, boolean>
+  tools: SkillTool[]
+  promptSections: { preview: string; chars: number }[]
+  permissions?: { net?: string[]; listen?: string | string[] | boolean }
+}
+
+export interface PluginInfo {
+  id: string
+  name: string
+  icon?: string
+  what?: string
+  /** ★ 界面上直接显示这句原文，不要自己改写 */
+  offEffect: string
+  enabledPath: string
+  /** boolean = 普通开关；enum = 人设（开=默认档，不是"上次那档"）；list = 名单类（不渲染 Switch） */
+  switchKind: 'boolean' | 'enum' | 'list' | string
+  enabled: boolean | null
+  value?: unknown
+  /** true = 即时生效；false = 需要重启（why 里有取证位置，要显示出来） */
+  hot: boolean
+  why: string
+  /** 详细设置仍在原页签；'extensions:qq-tools' = 展开区就在本页 */
+  uiTab: string
+}
+
+export interface ExtensionsResult {
+  skillsDir: string
+  skills: SkillInfo[]
+  plugins: PluginInfo[]
+  counts: { skills: number; skillsEnabled: number; skillsBroken: number; plugins: number; pluginsOn: number }
+  notes: string[]
+}
+
+export interface ExtensionToggleResult {
+  ok?: boolean
+  /** ★ 三种开关语义的判据：false=即时生效；true=要重启（把 why 显示出来） */
+  restartRequired?: boolean
+  hint?: string
+  why?: string
+  [key: string]: unknown
 }
 
 // ── 0.2.1 记忆观测面的类型（字段与后端一一对应）────────────────────────────
@@ -587,3 +792,7 @@ export interface InboxState {
 export function workspaceFileUrl(path: string): string {
   return `/api/workspace-file?path=${encodeURIComponent(path)}`
 }
+
+// ── 人设（CONFIG-UI.md §2.2，0.2.2）──────────────────────────────────────
+// 0.2.2 前的 PersonaPreset / PersonaInfo 类型已随旧接口（410 Gone）一起移除；
+// 人设库的类型在上方「0.2.2 人设库的类型」一节（PersonaShelf / PersonaItem）。

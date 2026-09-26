@@ -1,26 +1,40 @@
 # project_InteractBot
 
-以 **DSH 插件**形式，把**可配置的 QQ 对话机器人**接入 DeepSeek Harness（DSH）。
+把**可配置的 QQ 对话机器人**接到 DeepSeek Harness（DSH）：QQ 消息 → DSH agent → 回答发回 QQ。
 
-目标：`dsh-qq-bot` 插件负责连接 QQ 协议端（OneBot 11：NapCat / Lagrange / go-cqhttp，必要时可换 AstrBot 等框架），把 QQ 消息转发给 DSH Agent，并注册工具让 Agent 回复消息。
+> **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.2）**。它**不是** DSH 插件，
+> 而是"外部进程 + `dsh --profile sdk`"的桥接。
+> `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
 
 ## 目录结构
 
 ```
 project_InteractBot/
-├── .dsh/
-│   └── skills/                    # 已安装的 DSH 插件开发 skill（10 个）
-├── reference/
-│   └── dsh-agent-teams/           # 上游参考仓库（skills 源 + 开发文档 + git 历史）
+├── .dsh/skills/                    # 已安装的 DSH 插件开发 skill（10 个）
+├── reference/                      # 上游参考（只读留档）
+│   ├── dsh-agent-teams/            # skill 源 + 开发文档 + git 历史
+│   └── pixiv-lookup-1.1.0/         # ★ 第三方技能**原件**（适配前的逐字副本）
 ├── packages/
-│   └── dsh-qq-bot/                # QQ 机器人 DSH 插件（脚手架已就绪）
-│       ├── package.json
-│       ├── cordis.patch.yml
-│       ├── tsconfig.json
-│       └── src/index.ts
-├── README.md
-└── .gitignore
+│   ├── qq-bridge/                  # ★ 在维护的那个：QQ ↔ DSH 桥接（详见它自己的 README/AGENT.md）
+│   │   ├── src/                    # 桥接主体（含扩展内核 extensions.mjs / 插件表 plugins.mjs）
+│   │   ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
+│   │   ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
+│   │   ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
+│   │   └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
+│   └── dsh-qq-bot（废弃）/
+├── docs/                           # 版本级文档（设计 / 验收 / 适配存档）
+│   ├── 插件设计规范.md              # ★ 扩展体系的契约（技能清单、生命周期、安全、UI、验收）
+│   ├── 0.2.2-release-notes.md       # 这一版更新了什么
+│   ├── 0.2.2-console-plan.md        # 控制台改造方案（**待指令，未实施**）
+│   └── 0.2.2-pixiv-skill-migration.md + 0.2.2-pixiv-adaptation.patch
+└── README.md
 ```
+
+## 0.2.2 这一版加了什么（一句话）
+
+**扩展系统**：技能（外部能力包，`skills/<id>/`）与插件（桥接内置能力块）两型，**都能随时开关**
+（提示词下一轮生效、工具调用当场 fail-closed；只有装/卸技能要重启）。
+详见 `docs/0.2.2-release-notes.md` 与 `docs/插件设计规范.md`。
 
 ## 已安装的 DSH 插件/skill 开发文件
 

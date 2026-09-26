@@ -1,0 +1,379 @@
+diff --git a/reference/pixiv-lookup-1.1.0/index.js b/packages/qq-bridge/skills/pixiv-lookup/index.js
+index a4e685e..855271d 100644
+--- a/reference/pixiv-lookup-1.1.0/index.js
++++ b/packages/qq-bridge/skills/pixiv-lookup/index.js
+@@ -51,9 +51,16 @@ import {
+ 
+ const HERE = path.dirname(fileURLToPath(import.meta.url))
+ const SKILL_ID = 'pixiv-lookup'
+-const TOOL_SEARCH = `${SKILL_ID}__search`
+-const TOOL_ARTWORK = `${SKILL_ID}__artwork`
+-const TOOL_RANKING = `${SKILL_ID}__ranking`
++// ★ InteractBot 适配①：这三个名字**由宿主注入**（见 setup 里的 hostName）。
++//   上游宿主把工具名拼成 `pixiv-lookup__search`；而 InteractBot 里模型看到的是
++//   `mcp__skills__pixiv-lookup__search`（DSH 的 MCP 客户端会按服务器名加前缀）。
++//   提示词里写死旧名字 ⇒ 模型会去调一个**不存在**的工具，而且失败得很安静（它只会说"查不到"）。
++let TOOL_SEARCH = `${SKILL_ID}__search`
++let TOOL_ARTWORK = `${SKILL_ID}__artwork`
++let TOOL_RANKING = `${SKILL_ID}__ranking`
++// 发图工具同样由宿主提供（InteractBot 那份是 `mcp__qq__qq_send_image`）。
++// ★ 它**必须显式带 kind/peerId**：那个 MCP 进程不知道"当前会话"是谁（见下面各处的调用文案）。
++let TOOL_SEND_IMAGE = 'send_image'
+ 
+ /* ══════════════════════════════════════════════════════════════════════
+    0. 配置与运行时引用
+@@ -64,7 +71,10 @@ let cfgOf = () => ({})
+ let apiWarn = () => {}
+ 
+ const DEFAULTS = {
+-  enabled: true,
++  // ★ InteractBot 适配②：默认**关**。
++  //   清单里写的是 settings.enabled=false 且 enabledByDefault=false，而这里原本是 true ——
++  //   两处不一致时，"只拿到显式配置"的宿主会把技能当成已开启（上游也踩过这条）。
++  enabled: false,
+   cookie: '',
+   maxResults: 10,
+   maxPages: 2,
+@@ -90,7 +100,7 @@ const DEFAULTS = {
+   // 而宿主的图片下载通道既不带 Referer 也不走系统代理 —— 老版本的表现就是
+   // "能给出链接、发不出图"。开了图片桥之后，插件把图自己取回来，
+   // 交给宿主一条 127.0.0.1 的本地直链，宿主就能正常发图了。
+-  // ⚠️ 宿主侧还需要 settings → 安全 里的「允许下载内网/本机图片地址」
++  // ⚠️ 宿主侧还需要在**控制台 → 扩展**里打开「允许下载内网/本机图片地址」
+   //    (security.allowPrivateImageHosts=true)，否则宿主的 SSRF 保护会把
+   //    这条 127.0.0.1 直链挡掉。
+   imageBridge: true,
+@@ -400,7 +410,7 @@ function netErrorText(err, url, ms) {
+     const lines = [
+       `请求 Pixiv 超时（${ms}ms）：${target}`,
+       '可能原因：没开代理 / 代理不稳 / 当前网络连不上 Pixiv。',
+-      '在中国大陆直连 pixiv.net 通常会超时 —— 请在技能设置里填 proxy（如 http://127.0.0.1:7890，或直接填 auto）。',
++      '在中国大陆直连 pixiv.net 通常会超时 —— 请在扩展设置里填 proxy（如 http://127.0.0.1:7890，或直接填 auto）。',
+       '注意：这个代理**只对本次 Pixiv 查询生效**，不会影响 QQ Agent 主程序。',
+     ]
+     // 代理这层出问题时，"当前代理到底是什么状态"是最有用的一条信息：
+@@ -409,7 +419,7 @@ function netErrorText(err, url, ms) {
+     return lines.join('\n')
+   }
+   if (/aborted|AbortError/i.test(code + raw)) {
+-    return `请求 ${target} 被中断（${raw}）。如果是超时导致的，请把技能设置里的 timeoutMs 调大，或检查代理。`
++    return `请求 ${target} 被中断（${raw}）。如果是超时导致的，请把扩展设置里的 timeoutMs 调大，或检查代理。`
+   }
+   if (/ENOTFOUND|EAI_AGAIN/.test(code + raw)) {
+     return `连不上 ${target}：域名解析失败（DNS）。检查网络 / 代理设置。`
+@@ -418,7 +428,7 @@ function netErrorText(err, url, ms) {
+     return [
+       `连不上 ${target}：连接被拒绝或中断（${code || raw}）。`,
+       proxyNote
+-        ? `当前代理：${proxyNote} —— 若代理软件没开或端口不对，请改掉或清空技能设置里的「代理地址」。`
++        ? `当前代理：${proxyNote} —— 若代理软件没开或端口不对，请改掉或清空扩展设置里的「代理地址」。`
+         : '若填了代理地址，确认代理软件正在运行且端口正确。',
+     ].join('\n')
+   }
+@@ -453,7 +463,7 @@ async function httpJson(url, { cookie = '', referer = 'https://www.pixiv.net/',
+         ok: false,
+         userError: true,   // 配置问题，不该把断路器引开
+         error: [
+-          `技能设置里的「代理地址」用不了：${String(cfgObj.proxy).trim()}`,
++          `扩展设置里的「代理地址」用不了：${String(cfgObj.proxy).trim()}`,
+           `原因：${proxyNote || '无法创建代理连接'}`,
+           '请改成正确的代理地址（如 http://127.0.0.1:7890），或清空它走直连。',
+           '（这个代理只影响本插件，不会影响 QQ Agent 主程序。）',
+@@ -506,7 +516,7 @@ async function httpJson(url, { cookie = '', referer = 'https://www.pixiv.net/',
+       status: 403,
+       error: [
+         'Pixiv 返回 403（被拒绝）。常见原因：',
+-        '  · 触发了 Pixiv 的防抓取校验 —— 在技能设置里填一次完整 Cookie（含 PHPSESSID）通常就好了；',
++        '  · 触发了 Pixiv 的防抓取校验 —— 在扩展设置里填一次完整 Cookie（含 PHPSESSID）通常就好了；',
+         '  · 用了机房/公共 IP，或个人账号被限制了访问；',
+         '  · 代理出口 IP 被 Pixiv 风控。',
+       ].join('\n'),
+@@ -598,7 +608,7 @@ let bridge = null
+ 
+ /** 按当前配置确保图片桥已启动；返回端口（0 = 没起来）。 */
+ async function ensureBridge(cfgObj) {
+-  if (!cfgObj || cfgObj.imageBridge === false) { bridgeNote = '已关闭（技能设置里的「本地图片桥」）'; return 0 }
++  if (!cfgObj || cfgObj.imageBridge === false) { bridgeNote = '已关闭（扩展设置里的「本地图片桥」）'; return 0 }
+   if (!bridge) {
+     bridge = createImageBridge({
+       // 延迟取配置：真正取图时用"最近一次查询"的那份设置（代理就在里面）
+@@ -856,7 +866,7 @@ function squeezeSearchItem(it, link) {
+     // 缩略图：Pixiv 图床有防盗链，这个地址**不能**直接发给宿主下载（没 Referer 会 403）
+     out.缩略图 = String(it.url)
+     // 发图直链：本插件把缩略图换算成长边 1200 的大图、自己取回来、再给宿主一条
+-    // 127.0.0.1 的本地直链 —— 这一条才是能喂给 send_image 的。
++    // 127.0.0.1 的本地直链 —— 这一条才是能喂给发图工具（TOOL_SEND_IMAGE）的。
+     const big = masterFromThumb(String(it.url))
+     const local = link ? link(big) : ''
+     if (local) out.发图直链 = local
+@@ -868,7 +878,7 @@ async function doSearch(args, cfgObj) {
+   const keyword = cleanKeyword(args && args.keyword)
+   if (!keyword) return { content: '错误：keyword（搜索关键词）不能为空。', isError: true }
+ 
+-  // 上限口径：管理员在技能设置里定的 maxResults 是**上限**，模型只能在
++  // 上限口径：管理员在扩展设置里定的 maxResults 是**上限**，模型只能在
+   // [1, maxResults] 之间调小；没传就用 maxResults。绝不允许模型传个大的把上限顶掉。
+   // （这里最容易写错：把 clamp 的 dflt 写成 maxResults 之外的表达式，
+   //   结果 limit=999 反而被夹到 50，绕过了管理员设的 10。）
+@@ -879,7 +889,7 @@ async function doSearch(args, cfgObj) {
+   const wantR18 = args && args.r18 === true
+   if (wantR18 && !cfgObj.allowR18) {
+     return {
+-      content: '错误：技能设置里没有打开「允许查询 R-18 内容」（allowR18），本次请求的 r18=true 被拒绝。若确实需要，让管理员在插件设置里打开。',
++      content: '错误：扩展设置里没有打开「允许查询 R-18 内容」（allowR18），本次请求的 r18=true 被拒绝。若确实需要，让管理员在插件设置里打开。',
+       isError: true,
+     }
+   }
+@@ -911,7 +921,7 @@ async function doSearch(args, cfgObj) {
+     const tripped = countsAsBreakerFailure(r) ? noteBreakerFailure(r.error, cfgObj) : false
+     const tail = tripped ? `\n\n${trippedText(cfgObj, `搜索「${keyword}」`)}` : ''
+     return {
+-      content: `搜索 Pixiv 失败（关键词：${keyword}）\n${r.error}\n\n（排查：技能设置里点「Cookie 状态」看有没有填；Pixiv 需要能访问 pixiv.net 的网络环境。）${tail}`,
++      content: `搜索 Pixiv 失败（关键词：${keyword}）\n${r.error}\n\n（排查：扩展设置里点「Cookie 状态」看有没有填；Pixiv 需要能访问 pixiv.net 的网络环境。）${tail}`,
+       isError: true,
+     }
+   }
+@@ -952,9 +962,9 @@ async function doSearch(args, cfgObj) {
+     命中总数: total,
+     返回条数: filtered.length,
+     结果: filtered,
+-    用法提示: '把「标题 + 作者 + 链接」直接发给群友；要发图就把 发图直链 整条照抄给 send_image(url)'
+-      + '（它是本插件生成的本地直链，宿主能直接下载）。'
+-      + '⚠️ 缩略图 那个 i.pximg.net 地址**不能**直接发给 send_image：pximg 有防盗链，宿主没带 Referer，会 403 或下载失败。'
++    用法提示: `把「标题 + 作者 + 链接」直接发给群友；要发图就把 发图直链 整条照抄给 ${TOOL_SEND_IMAGE}(url, kind, peerId)`
++      + '（它是本插件生成的本地直链，宿主能直接下载。kind/peerId 就是当前会话，见来源标注）。'
++      + `⚠️ 缩略图 那个 i.pximg.net 地址**不能**直接发给 ${TOOL_SEND_IMAGE}：pximg 有防盗链，宿主没带 Referer，会 403 或下载失败。`
+       + '要详细资料（收藏数/标签/简介/多图原图）就用 artwork 工具传 id。',
+   }
+   if (dropped > 0) out.已过滤R18条数 = dropped
+@@ -1038,7 +1048,7 @@ async function fetchArtworkDetail(id, cfgObj, link) {
+       缩略图: thumb,
+       大图: big,
+       原图: orig,
+-      说明: 'pximg 图床有防盗链：直接把这些地址喂给 send_image 会 403（没带 Referer）。'
++      说明: `pximg 图床有防盗链：直接把这些地址喂给 ${TOOL_SEND_IMAGE} 会 403（没带 Referer）。`
+         + '要发图请用 发图直链（本插件已经把图取好了，宿主能直接下载）。',
+     }
+     const sendBig = link ? link(big) : ''
+@@ -1116,7 +1126,7 @@ async function doArtwork(args, cfgObj) {
+   const out = {
+     查询条数: items.length,
+     作品: items,
+-    发图提示: '要发图就把「图.发图直链」整条**照抄**给 send_image(url)（或先 send_image(url, preview=true) 看一眼再发）；'
++    发图提示: `要发图就把「图.发图直链」整条**照抄**给 ${TOOL_SEND_IMAGE}(url, kind, peerId)（kind/peerId 取本轮来源标注里的会话）；`
+       + '它指向本插件刚取到的图，宿主能直接下载。'
+       + '⚠️ 不要用 i.pximg.net 的原始地址：pximg 有防盗链，宿主没带 Referer，下载会失败（403/超时）。',
+   }
+@@ -1132,7 +1142,7 @@ async function doRanking(args, cfgObj) {
+   const mode = pickEnum(args && args.mode, RANK_MODES, 'daily')
+   if (/_r18$/.test(mode) && !cfgObj.allowR18) {
+     return {
+-      content: '错误：R-18 榜单需要在技能设置里打开「允许查询 R-18 内容」（allowR18）。',
++      content: '错误：R-18 榜单需要在扩展设置里打开「允许查询 R-18 内容」（allowR18）。',
+       isError: true,
+     }
+   }
+@@ -1196,7 +1206,7 @@ async function doRanking(args, cfgObj) {
+     榜单: `Pixiv ${mode} 榜（${content}${date ? `，${date}` : ''}）`,
+     返回条数: items.length,
+     结果: items,
+-    用法提示: '报给群友时用「第N名 标题 — 作者」的形式，附上链接；要发图就把 发图直链 整条照抄给 send_image(url)。',
++    用法提示: `报给群友时用「第N名 标题 — 作者」的形式，附上链接；要发图就把 发图直链 整条照抄给 ${TOOL_SEND_IMAGE}(url, kind, peerId)。`,
+   }
+   if (before !== items.length) out.已过滤R18条数 = before - items.length
+   return { content: JSON.stringify(out, null, 1) }
+@@ -1217,7 +1227,7 @@ async function doRanking(args, cfgObj) {
+ export function available(context = {}) {
+   const c = cfg(context)
+   if (c.enabled === false) {
+-    return { ok: false, reason: 'pixiv 查图插件开关未打开（技能设置 → pixiv 查图插件 → 启用）' }
++    return { ok: false, reason: 'pixiv 查图插件开关未打开（控制台 → 扩展 → pixiv 查图插件 → 启用）' }
+   }
+   return { ok: true }
+ }
+@@ -1230,6 +1240,21 @@ export function setup(api) {
+   }
+   apiWarn = (...a) => { try { api.warn && api.warn(...a) } catch { /* 日志失败不影响功能 */ } }
+ 
++  // ★ InteractBot 适配③：把**模型实际看到的工具名**从宿主那里拿过来。
++  //   `api.toolName(id)` 是本宿主对上游契约的扩展；拿不到（跑在别的宿主里）就退回上游命名 ——
++  //   所以同一份代码在两个宿主里都能跑，而不是"改成只认 InteractBot"。
++  const hostName = (id, fallback) => {
++    try { return (api.toolName && api.toolName(id)) || fallback } catch { return fallback }
++  }
++  TOOL_SEARCH = hostName('search', TOOL_SEARCH)
++  TOOL_ARTWORK = hostName('artwork', TOOL_ARTWORK)
++  TOOL_RANKING = hostName('ranking', TOOL_RANKING)
++  //   发图工具是**宿主自己的**工具（不属于本技能），所以走另一个出口 `api.hostTool(id)`。
++  const hostTool = (id, fallback) => {
++    try { return (api.hostTool && api.hostTool(id)) || fallback } catch { return fallback }
++  }
++  TOOL_SEND_IMAGE = hostTool('send_image', TOOL_SEND_IMAGE)
++
+   /* ── 工具 1：搜索 ───────────────────────────────────────────────── */
+   api.registerTool({
+     id: 'search',
+@@ -1243,14 +1268,14 @@ export function setup(api) {
+       + '（但 Pixiv 标签以日文/英文为主，中文命中率较低，中文搜不到可以换日文或英文说法再试）。'
+       + `默认按热度排序（popular_d）。想看最新就传 order=date_d；想按标题/简介搜就传 sMode=s_tc。`
+       + `拿到 id 后如果还要收藏数、简介、多图原图，用 ${TOOL_ARTWORK} 补查。`
+-      + '结果里的「发图直链」是能直接喂给 send_image(url) 的地址（本插件已经把图取回来了）；'
++      + `结果里的「发图直链」是能直接喂给 ${TOOL_SEND_IMAGE}(url, kind, peerId) 的地址（本插件已经把图取回来了）；`
+       + '「缩略图」那个 i.pximg.net 地址不能直接发（防盗链会 403）。'
+-      + '只返回作品信息和链接，不要根据成人向作品生成露骨内容；技能设置里没打开 R-18 时，这类结果会被自动过滤。',
++      + '只返回作品信息和链接，不要根据成人向作品生成露骨内容；扩展设置里没打开 R-18 时，这类结果会被自动过滤。',
+     parameters: {
+       type: 'object',
+       properties: {
+         keyword: { type: 'string', description: '搜索关键词（角色名/作品名/题材/画师名，中日英文都可，按对方原话传）' },
+-        limit: { type: 'integer', description: '最多返回几条（默认取技能设置的每页条数，上限 50）' },
++        limit: { type: 'integer', description: '最多返回几条（默认取扩展设置的每页条数，上限 50）' },
+         order: {
+           type: 'string',
+           enum: ORDERS,
+@@ -1261,15 +1286,15 @@ export function setup(api) {
+           enum: S_MODES,
+           description: '匹配方式：s_tag=标签模糊（默认）；s_tag_full=标签精确；s_tc=标题或简介',
+         },
+-        page: { type: 'integer', description: '页码，从 1 开始（默认 1，上限取技能设置）' },
+-        r18: { type: 'boolean', description: 'true=只查 R-18（需要管理员在技能设置里打开 allowR18，否则会被拒绝）' },
++        page: { type: 'integer', description: '页码，从 1 开始（默认 1，上限取扩展设置）' },
++        r18: { type: 'boolean', description: 'true=只查 R-18（需要管理员在扩展设置里打开 allowR18，否则会被拒绝）' },
+       },
+       required: ['keyword'],
+     },
+     async execute(ctx, args) {
+       const c = cfg(ctx)
+       if (c.allowInGroup === false && ctx && ctx.kind === 'group') {
+-        return { content: '错误：pixiv 查图插件被设置为只在私聊可用（技能设置里关掉了群聊）。', isError: true }
++        return { content: '错误：pixiv 查图插件被设置为只在私聊可用（扩展设置里关掉了群聊）。', isError: true }
+       }
+       try { return await doSearch(args, c) } catch (e) {
+         return { content: `搜索出错了：${(e && e.message) || e}`, isError: true }
+@@ -1285,9 +1310,9 @@ export function setup(api) {
+     icon: '🖼️',
+     description:
+       '按作品 id 查 Pixiv 作品的详细信息：标题、作者、标签、收藏/点赞/浏览数、尺寸、页数、简介、'
+-      + '以及缩略图/大图/原图地址，还有**能直接发给 send_image 的「发图直链」**（多图作品还会给出前几页的直链）。'
++      + `以及缩略图/大图/原图地址，还有**能直接发给 ${TOOL_SEND_IMAGE} 的「发图直链」**（多图作品还会给出前几页的直链）。`
+       + 'ids 可以传单个 id、逗号分隔的多个 id，或 https://www.pixiv.net/artworks/123456 这样的链接（一次最多 5 个）。'
+-      + '注意：i.pximg.net 有防盗链，原始图链**不能**直接喂给 send_image（会 403）—— 发图一律用「发图直链」。',
++      + `注意：i.pximg.net 有防盗链，原始图链**不能**直接喂给 ${TOOL_SEND_IMAGE}（会 403）—— 发图一律用「发图直链」。`,
+     parameters: {
+       type: 'object',
+       properties: {
+@@ -1315,8 +1340,8 @@ export function setup(api) {
+     description:
+       '取 Pixiv 排行榜：日榜/周榜/月榜/新人榜/原创榜，以及男性向、女性向榜。'
+       + '适合"今天 P站有什么好图""最近的热门插画"这类请求。'
+-      + '结果里的「发图直链」可以直接喂给 send_image(url) 发出去。'
+-      + 'R-18 榜单（mode 以 _r18 结尾）需要管理员在技能设置里打开 allowR18。',
++      + `结果里的「发图直链」可以直接喂给 ${TOOL_SEND_IMAGE}(url, kind, peerId) 发出去（kind/peerId 取来源标注里的会话）。`
++      + 'R-18 榜单（mode 以 _r18 结尾）需要管理员在扩展设置里打开 allowR18。',
+     parameters: {
+       type: 'object',
+       properties: {
+@@ -1367,17 +1392,17 @@ export function promptSections(context = {}) {
+       `- 拿到 id 后想看收藏数、简介、多图原图地址，用 ${TOOL_ARTWORK} 补查；想看当下热门用 ${TOOL_RANKING}。`,
+       '- 报给群友时用「标题 — 作者 + https://www.pixiv.net/artworks/<id> 链接」这个形式，别只丢一个 id。',
+       '- **要发图就用结果里的「发图直链」**（形如 http://127.0.0.1:端口/i/xxxx）——那是插件已经把图取回来的本地地址，'
+-      + '整条照抄给 send_image(url) 就能发出去（没关掉"发图前先看一眼"的话，先 send_image(url, preview=true) 再发）。'
+-      + '**不要**把 i.pximg.net 的缩略图/原图地址发给 send_image：pximg 有防盗链、还要走代理，宿主自己下必然失败'
++      + `整条照抄给 ${TOOL_SEND_IMAGE}(url, kind, peerId) 就能发出去。**kind 与 peerId 必须带上** —— 它们就是本轮来源标注里那串号码（kind 填 private/group）；不带会被直接拒绝，而且我不会去猜你在哪个会话里。`
++      + `**不要**把 i.pximg.net 的缩略图/原图地址发给 ${TOOL_SEND_IMAGE}：pximg 有防盗链、还要走代理，宿主自己下必然失败`
+       + '（403 或「图片下载失败」）。也**不要**把 pximg 裸链当成"群友点开就能看"的图。',
+-      '- 如果 send_image 报「图片下载失败：域名解析到内网/本机地址，已阻止」或「禁止访问内网/本机地址」，'
+-      + '那是宿主的图片下载安全开关没开（设置 → 安全 → 允许下载内网/本机图片地址）。'
++      `- 如果 ${TOOL_SEND_IMAGE} 报「拒绝内网/回环地址」或提到「被安全设置挡住了」，`
++      + '那是宿主的安全开关没开（**控制台 → 扩展 → 允许下载内网/本机图片地址**）。'
+       + '这时**不要再换图反复试**，用一句中文说明"图被安全设置挡住了，让管理员开一下"即可。',
+       '- **查询失败时不要反复重试**：如果返回里出现「已完成终止」「插件已强制停止后续查询」，说明插件已经连续失败多次'
+       + '（通常是网络到不了 Pixiv），此时**立刻停止调用任何 pixiv 工具**，直接用一句自然的中文把情况告诉对方'
+       + '（例如「P站那边我这边连不上，等会儿再试」），不要编造作品名或链接，也不要把技术报错贴出来。'
+       + '最多在原关键词明显不合适时换一个说法试一次，不要为了"多试几个词"连调多次。',
+-      '- 不要根据成人向（R-18）作品生成露骨内容；技能设置没打开 R-18 时这类结果本来就会被过滤掉，照实说"这类没开"即可。',
++      '- 不要根据成人向（R-18）作品生成露骨内容；扩展设置没打开 R-18 时这类结果本来就会被过滤掉，照实说"这类没开"即可。',
+       groupNote,
+       cookieNote,
+     ].filter(Boolean).join('\n'),
+@@ -1429,7 +1454,7 @@ export function diagnose(context = {}) {
+         : `${c.proxy}（${proxyNote || '尚未发起请求，未生效判定'}）· 仅作用于本插件请求，不影响 QQ Agent 主程序`)
+       : '未配置（本插件走直连；不改动宿主任何全局网络设置）',
+     图片桥: c.imageBridge === false
+-      ? '已关闭（技能设置里的「本地图片桥」）'
++      ? '已关闭（扩展设置里的「本地图片桥」）'
+       : (bs && bs.running
+         ? `${bridgeNote} · 待发直链 ${bs.tickets} 条 · 已缓存 ${bs.cached} 张`
+           + (bs.lastError ? ` · 最近错误：${bs.lastError}` : '')
+diff --git a/reference/pixiv-lookup-1.1.0/skill.json b/packages/qq-bridge/skills/pixiv-lookup/skill.json
+index 61a8a1e..c61a005 100644
+--- a/reference/pixiv-lookup-1.1.0/skill.json
++++ b/packages/qq-bridge/skills/pixiv-lookup/skill.json
+@@ -7,15 +7,22 @@
+   "author": "QQ Agent",
+   "entry": "index.js",
+   "category": "media",
+-  "permissions": [],
++  "icon": "🎨",
++  "session": "required",
++  "permissions": {
++    "net": ["www.pixiv.net", "i.pximg.net"],
++    "listen": ["127.0.0.1"],
++    "_说明": "net = 本技能会主动请求的域名；listen = 它会在本机开的端口（本地图片桥，只监听回环）。这两条是**声明性**的：宿主会把它们显示在界面上，让装的人知道自己在装什么。"
++  },
+   "requires": [],
+   "capabilities": [],
+ 
+   "enabledByDefault": false,
+   "_note_switch": [
+     "开关口径：唯一开关是 config.skills['pixiv-lookup'].enabled。",
+-    "enabledByDefault:false = 装好后默认关，由管理员在「设置 → 扩展」里打开，避免刚装就联网。",
+-    "注意：enabledByDefault:false 时上游 isEnabled() 会在 available() 之前短路 —— 这是预期行为。"
++    "enabledByDefault:false = 装好后默认关，由管理员在「控制台 → 扩展 → pixiv 查图插件」里打开，避免刚装就联网。",
++    "注意：enabledByDefault:false 时上游 isEnabled() 会在 available() 之前短路 —— 这是预期行为。",
++    "★ InteractBot 适配：开关**即时生效**（不需要重启桥接）；只有装/卸技能本身才需要重启。"
+   ],
+   "settings": {
+     "enabled": false,
+@@ -119,7 +126,7 @@
+     "imageBridge": {
+       "type": "boolean",
+       "label": "本地图片桥（让宿主能真的发出 P站图）",
+-      "description": "默认开。i.pximg.net 有防盗链（要带 Referer）且大陆必须走代理，宿主的发图通道两样都没有，所以老版本只能发链接、发不出图。打开后插件会自己把图取回来，再给宿主一条只监听 127.0.0.1 的本地直链。⚠️ 还需要在「设置 → 安全」里打开「允许下载内网/本机图片地址」(security.allowPrivateImageHosts)，否则宿主的安全防护会挡掉这条本地直链。"
++      "description": "默认开。i.pximg.net 有防盗链（要带 Referer）且大陆必须走代理，宿主的发图通道两样都没有，所以老版本只能发链接、发不出图。打开后插件会自己把图取回来，再给宿主一条只监听 127.0.0.1 的本地直链。⚠️ 还需要在「控制台 → 扩展」里打开「允许下载内网/本机图片地址」(security.allowPrivateImageHosts)，否则宿主的安全防护会挡掉这条本地直链。"
+     },
+     "bridgePort": {
+       "type": "number",
+@@ -135,7 +142,7 @@
+       "min": 30,
+       "max": 86400,
+       "step": 30,
+-      "description": "默认 1800（30 分钟）。模型拿到直链后要在有效期内调用 send_image；过期会提示「请重新查一次」。"
++      "description": "默认 1800（30 分钟）。模型拿到直链后要在有效期内调用发图工具（mcp__qq__qq_send_image）；过期会提示「请重新查一次」。"
+     },
+     "bridgeMaxMB": {
+       "type": "number",
+@@ -148,14 +155,8 @@
+   },
+ 
+   "prompt": {
+-    "sections": [
+-      {
+-        "id": "pixiv-lookup-hint",
+-        "title": "Pixiv 查图",
+-        "priority": 35,
+-        "content": "群友想要 P站（Pixiv）的图时用 pixiv-lookup__search 搜（关键词原样传，中日英文都行，中文搜不到可换日文/英文再说一次，但别反复试、别编造 id）；拿到 id 后用 pixiv-lookup__artwork 查收藏数/简介/多图，想看当下热门用 pixiv-lookup__ranking。报给群友用「标题 — 作者 + https://www.pixiv.net/artworks/<id>」。要发图就用结果里的「发图直链」（http://127.0.0.1:端口/i/xxxx，整条照抄给 send_image）；i.pximg.net 的缩略图/原图地址不能直接发（防盗链会 403）。如果 send_image 报「域名解析到内网/本机地址，已阻止」，说明宿主的「允许下载内网/本机图片地址」没开，别反复换图试，直接用中文说明一句。查询失败时不要反复重试：返回里出现「已完成终止」「插件已强制停止后续查询」就说明已连续失败多次，必须立刻停止调用 pixiv 工具，直接用一句自然的中文说明情况，不要编造作品名或链接。不要根据成人向作品生成露骨内容。"
+-      }
+-    ]
++    "source": "runtime",
++    "_说明": "★ InteractBot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关与设置变），所以这里的静态副本已删除。上游宿主两份都读，会出现同一段话两种措辞。"
+   },
+ 
+   "tools": [
+@@ -211,5 +212,5 @@
+     }
+   ],
+ 
+-  "_note_tools_is_metadata": "上游把 tools[] 当**说明性元数据**读，不会自动注册；真正的注册在 index.js 的 api.registerTool。id 写 'search'，上游会自动加 'pixiv-lookup__' 前缀 ⇒ 模型看到的是 pixiv-lookup__search。清单里的 id 与注册的对不上时，上游加载时会警告「清单声明了却没 registerTool」。"
++  "_note_tools_is_metadata": "tools[] 是**说明性元数据**（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。id 写 'search'，工具全名由**宿主**拼：上游是 pixiv-lookup__search，InteractBot 是 mcp__skills__pixiv-lookup__search（MCP 客户端按服务器名加前缀）—— 所以 index.js 里的工具名常量改成了由宿主注入。改法与逐处原因见同目录的 README-InteractBot.md，以及仓库根的 docs/0.2.2-pixiv-skill-migration.md（含可直接复算的 diff：docs/0.2.2-pixiv-adaptation.patch）。清单里的 id 与注册的对不上时，宿主会警告「清单声明了却没 registerTool」。"
+ }

@@ -46,6 +46,13 @@ export const DIRS = {
   src: join(PKG_ROOT, 'src'),
   mocks: join(PKG_ROOT, 'mocks'),
   logs: join(PKG_ROOT, 'logs'),
+  // 外部技能目录（0.2.2）：`skills/<id>/skill.json`。放在**包根**下而不是工作区里 ——
+  // 理由与其它目录一致：包搬走它跟着走；而且技能代码不该落进 agent 有写权限的沙箱。
+  skills: join(PKG_ROOT, 'skills'),
+  // 人设库（0.2.2）：`personas/<名字>.md`，一个文件一套人设，按需切换。
+  // ★ 同样**不放工作区**：人设是会被拼进系统提示词的高优先级位置（H12 的注入面），
+  //   放进工作区等于让 agent 有权限改自己的"人格设定"。
+  personas: join(PKG_ROOT, 'personas'),
   /** agent 的工作区＝workspace-write 沙箱的根。 */
   defaultWorkspace: join(PKG_ROOT, 'workspace-qq'),
 }

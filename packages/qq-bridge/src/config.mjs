@@ -16,6 +16,8 @@
  * adminUsers 默认为空（= 谁都不能用）、humanize 默认开启。
  */
 
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { DIRS, resolveInPackage, findDshCli } from './local.mjs'
 import { lintKeywords } from './trigger.mjs'
 import { lintPersona } from './persona.mjs'
@@ -39,6 +41,39 @@ function normalizePathList(value) {
   return value
     .filter((p) => typeof p === 'string' && p.trim() !== '')
     .map((p) => resolveInPackage(p))
+}
+
+/**
+ * 归一化**技能设置**（`config.skills`）。
+ *
+ * ★ 这里刻意**不做白名单收敛**，理由只有一条：技能是装上去才有的东西，
+ *   它的键集由该技能自己的 `skill.json` 决定，宿主在编译期不可能知道
+ *   （`maxResults` / `cookie` / `bridgePort` …都是 pixiv 那份清单定义的）。
+ *   真正的"默认值填充 + 类型收敛 + 密文脱敏"在 `src/extensions.mjs` 里按清单做。
+ *
+ * 但形状要挡住：值必须是对象。写成 `"skills": ["pixiv-lookup"]` 这种形状时，
+ * 后面每一处 `.skills[id].enabled` 都会读出 undefined —— 表现是"开关按了没反应"。
+ * 所以**非对象一律丢掉**（不报错、不猜：丢了之后 extensions.mjs 会按清单默认值处理，
+ * 而 validateConfig 会给一条警告）。
+ *
+ * `_` 开头的键照旧跳过（那是给人看的注释，不属于配置）。
+ */
+function normalizeSkillSettingsMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out = {}
+  for (const [id, raw] of Object.entries(value)) {
+    if (String(id).startsWith('_')) continue
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const one = {}
+    for (const [k, v] of Object.entries(raw)) {
+      if (String(k).startsWith('_')) continue
+      // 值本身原样保留（类型收敛交给 extensions.mjs，它才有清单）
+      if (v === undefined) continue
+      one[k] = v
+    }
+    out[id] = one
+  }
+  return out
 }
 
 /**
@@ -231,7 +266,12 @@ export function normalizeConfig(c) {
     },
     persona: {
       callerName: src.persona?.callerName || '',
+      // ★ 人设库（0.2.2）：当前生效的是 `personas/<名字>.md` 里的哪一个。
+      //   · 有值 = 用那个文件；`none` = 不用人设；空 = 老配置（走 preset/custom 回落）。
+      active: src.persona?.active || '',
       // 人设：preset 选内置，custom 完全自己写（custom 优先）。
+      // ⚠️ 0.2.2 起这两项是**老路径**：新配置用 `active` 指文件；这两项只在
+      //   `active` 为空时回落使用（保证老 config.json 行为不变）。
       preset: src.persona?.preset || undefined,
       custom: src.persona?.custom || '',
     },
@@ -305,6 +345,27 @@ export function normalizeConfig(c) {
       // 本地配置接口：默认开启，只监听回环。
       apiEnabled: src.ui?.apiEnabled !== false,
       apiPort: src.ui?.apiPort ?? 3410,
+    },
+    // 外部技能（`skills/<id>/`）的设置。**键集由各技能自己的 skill.json 定义**，
+    // 所以这里原样保留（见 normalizeSkillSettingsMap 的长注释）。
+    //
+    // 为什么它必须是配置的一部分、而不是一个独立的 skills.json：
+    //   ① 密文字段（pixiv 的 Cookie）要复用同一套"脱敏 + 留空即不修改"语义，
+    //      另起一份文件就会多出一套语义，迟早不一致；
+    //   ② 保存走同一条通道（校验、.bak、致命项拒绝）才算真的安全。
+    skills: normalizeSkillSettingsMap(src.skills),
+    // 安全相关的开关（**默认全是保守值**）。
+    security: {
+      // ★ 允许把"内网/本机地址"的图片发出去（默认关）。
+      //
+      // 为什么会有这个键：第三方技能（例如 pixiv 插件）常常在自己机器上开一个小端口
+      // 做图片中转 —— 它给模型的"发图直链"是 `http://127.0.0.1:<port>/i/xxx`。
+      // 而桥接的图片守卫（src/images.mjs）**默认拒回环/私网地址**（那是防 SSRF 的），
+      // 于是这类技能"查得到图、发不出去"，而且失败原因看起来像网络故障。
+      //
+      // 打开它 = 明确告诉桥接"我信任本机图源"。语义与 pixiv 插件文档里写的
+      // `security.allowPrivateImageHosts` 一致（那是它对我们提出的要求）。
+      allowPrivateImageHosts: src.security?.allowPrivateImageHosts === true,
     },
   }
 }
@@ -454,6 +515,37 @@ export function validateConfig(config) {
     warn.push(
       `humanize.speed「${config.humanize.speed}」不是有效档位，已按「${DEFAULT_SPEED_PRESET}」处理。` +
         `可选：${Object.keys(SPEED_PRESETS).join(' / ')}`,
+    )
+  }
+
+  // ── 扩展（技能 / 插件）相关 ──────────────────────────────────────────────
+  //
+  // 这里只能做**与清单无关**的检查（config.mjs 刻意不 import 技能发现 —— 那会把
+  // 文件系统扫描带进一处本该是纯函数的地方）。逐技能的清单校验在
+  // `src/extensions.mjs` / `--extensions` 自检里做。
+  const skills = config.skills ?? {}
+  if (Object.keys(skills).length > 0) {
+    for (const [id, settings] of Object.entries(skills)) {
+      // 配置里有、磁盘上没有 = 用户删了技能目录但配置还在（或改过 id）。
+      // 不报错（配置留着不影响运行），但要说出来，否则"我明明开了它"永远查不清。
+      if (!existsSync(join(DIRS.skills, id))) {
+        warn.push(
+          `config.skills 里有「${id}」，但 skills/${id}/ 目录不存在 —— ` +
+            `技能可能已被删除或 id 写错了（这份配置会被忽略）。`,
+        )
+      }
+      if (settings?.enabled === true) {
+        warn.push(`技能「${id}」是**开启**状态：它会把自己的工具给模型，并按自己的说明联网/落盘。确认是你装的。`)
+      }
+    }
+  }
+
+  if (config.security?.allowPrivateImageHosts === true) {
+    warn.push(
+      'security.allowPrivateImageHosts = true：**允许把内网/本机地址的图片发出去**。' +
+        '这是给"本机图片中转"类技能（例如 pixiv 插件的本地图片桥）开的口子 ——' +
+        '打开后，模型给出的 127.0.0.1/内网图片地址也会被真的取回来发出去。' +
+        '只在你知道自己在做什么、且只跑自己装的技能时打开。',
     )
   }
 

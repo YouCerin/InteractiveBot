@@ -239,9 +239,21 @@ async function defaultResolveHost(host) {
 /**
  * 这个 URL 能不能去请求。**只做判断，不发请求。**
  *
+ * ★ 0.2.2 新增 `allowPrivateHosts`：默认 false（保守），打开后**放行内网/回环地址**。
+ *
+ * ── 为什么需要这个口子（以及它到底放开了什么）────────────────────────────
+ * 第三方技能常常在自己机器上开个小端口做图片中转（pixiv 插件就是），
+ * 它给模型的"发图直链"是 `http://127.0.0.1:<port>/i/xxx` —— 按默认守卫必被拒。
+ * 于是"查得到图、发不出去"，而错误看起来像网络故障（实际是我们自己拦的）。
+ *
+ * 这个开关的**准确语义**是"我信任本机/内网的图源"（对应 `security.allowPrivateImageHosts`）：
+ *   · 打开后：内网/回环地址不再被拒（协议/类型/大小/超时仍然照查）；
+ *   · 它**不会**放开协议（仍然只允许 http/https）、不会放开逐跳校验与大小上限。
+ * 风险如实写在配置校验的告警里：打开后，模型给出的内网地址也会被真的取回来发出去。
+ *
  * @returns {Promise<{ok:true, url:URL} | {ok:false, reason:string}>}
  */
-export async function assertFetchableUrl(raw, { resolveHost } = {}) {
+export async function assertFetchableUrl(raw, { resolveHost, allowPrivateHosts = false } = {}) {
   let url
   try {
     url = new URL(String(raw ?? ''))
@@ -255,6 +267,10 @@ export async function assertFetchableUrl(raw, { resolveHost } = {}) {
   const host = url.hostname.replace(/^\[|\]$/g, '')
   const low = host.toLowerCase()
   if (!low) return { ok: false, reason: 'URL 没有主机名' }
+  if (allowPrivateHosts) {
+    // 放行内网/回环：不再做主机名与解析结果判定（仍然必须是 http/https 且有主机名）
+    return { ok: true, url }
+  }
   if (low === 'localhost' || BLOCKED_HOST_SUFFIXES.some((s) => low.endsWith(s))) {
     return { ok: false, reason: `拒绝内网主机名 ${host}` }
   }
@@ -337,6 +353,9 @@ export async function fetchImageBytes(rawUrl, options = {}) {
     maxBytes = DEFAULT_MAX_BYTES,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     maxRedirects = DEFAULT_MAX_REDIRECTS,
+    // 0.2.2：放行内网/回环（`security.allowPrivateImageHosts`）。逐跳校验仍然执行，
+    // 只是每一跳都带着同一个开关过守卫。
+    allowPrivateHosts = false,
   } = options
 
   if (typeof fetchImpl !== 'function') {
@@ -345,7 +364,7 @@ export async function fetchImageBytes(rawUrl, options = {}) {
 
   let current = String(rawUrl ?? '')
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const check = await assertFetchableUrl(current, { resolveHost })
+    const check = await assertFetchableUrl(current, { resolveHost, allowPrivateHosts })
     if (!check.ok) return { ok: false, reason: `地址被拒绝：${check.reason}` }
 
     let res

@@ -18,7 +18,7 @@
  *   node src/index.mjs --check         # 只做配置自检，不连任何东西
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, statSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, statSync, readdirSync, copyFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -33,7 +33,7 @@ import { PKG_ROOT, DIRS, resolveDshHome, resolveInPackage } from './local.mjs'
 import { runDoctor, printDoctor } from './doctor.mjs'
 import { normalizeConfig, validateConfig } from './config.mjs'
 import { createApiHandler, serveApi } from './api.mjs'
-import { writeMcpConfig, ensureSdkProfilePatch } from './mcp-profile.mjs'
+import { writeMcpConfig, ensureSdkProfilePatch, writeSkillsMcpConfig } from './mcp-profile.mjs'
 import { createPriceBook } from './prices.mjs'
 import { createUsageLedger } from './usage.mjs'
 import { createMemoryStore } from './memory-files.mjs'
@@ -50,6 +50,11 @@ import { createCorpus } from './corpus.mjs'
 import { sliceLogLines, splitLogText } from './log-tail.mjs'
 import { searchMemoryFiles } from './memory-search.mjs'
 import { readAllStats, STATS_DEFAULTS } from './memory-stats.mjs'
+import { discoverSkills, loadSkill, describeSkill, callSkillDiagnose, ensureSkillNodeModules, isSkillEnabled, SKILL_API_VERSION } from './extensions.mjs'
+import { createExtensionService } from './extensions-service.mjs'
+import { listPlugins, BUILTIN_PLUGINS } from './plugins.mjs'
+import { describePersonaShelf, applyPersonaAction, ensureDefaultPersonas } from './personas.mjs'
+import { readContacts, writeContacts, summarizeContacts, CONTACTS_REL } from './contacts.mjs'
 import { readPrivacyAudit, scanPrivacy, PRIVACY_CATEGORIES } from './privacy.mjs'
 import { inspectMemory } from './memory-inspect.mjs'
 
@@ -82,8 +87,145 @@ function ensureLogBom(path) {
   }
 }
 
-function makeLogger(verbose) {
-  return (message) => {
+/**
+ * 扫描并装载 `skills/` 里的外部技能（0.2.2）—— **只为提示词片段**。
+ *
+ * ⚠️ 工具的执行发生在**另一个进程**（`mcp/mcp-skills-server.mjs`），那边会自己
+ * 再装载一次。这里装载一次的目的只有一个：拿到 `promptSections()`，好在每轮提示词里
+ * 告诉模型"你还有这些本事"。所以这里传进去的 `registerTool` 是**空实现**。
+ *
+ * ── 为什么坏技能不阻断启动 ────────────────────────────────────────────────
+ * 第三方技能写错是常态（清单少一个字段、入口路径写错、版本不匹配）。
+ * 如果它能让桥接起不来，那"装个技能"就成了危险操作。所以：**坏的跳过并如实报出来**，
+ * 好的照常工作；界面上也会显示"装是装了，但用不了，原因是…"。
+ */
+async function loadSkills({ config, log = () => {} }) {
+  const scan = discoverSkills({ skillsDir: DIRS.skills })
+  if (!scan.exists) return scan
+  for (const skill of scan.skills) {
+    if (!skill.ok) {
+      log(`⚠️ 技能 ${skill.dirName} 装不上（已跳过）：${skill.errors.join('；')}`)
+      continue
+    }
+    // 空实现的 registerTool：工具注册由 MCP 子进程负责，这里只要 promptSections
+    await loadSkill(skill, { config, log: (m) => log(m), registerTool: () => {} })
+    if (!skill.loaded) log(`⚠️ 技能 ${skill.id} 装载失败（已跳过）：${skill.loadError}`)
+    else if (skill.warnings.length > 0) {
+      for (const w of skill.warnings) log(`⚠️ [技能 ${skill.id}] ${w}`)
+    }
+  }
+  const usable = scan.skills.filter((s) => s.ok && s.loaded).length
+  if (scan.skills.length > 0) {
+    log(`扩展技能：发现 ${scan.skills.length} 个，可用 ${usable} 个`)
+  }
+  return scan
+}
+
+/**
+ * `--extensions`：把"装了哪些技能、装了哪些插件、各自什么状态"打出来。
+ *
+ * 为什么需要这个 CLI（而不是只在界面上看）：
+ *   · 排障时机器人可能没在跑（界面也打不开）—— 这时要能一眼看出技能怎么了；
+ *   · 它是"技能装对了吗"这个问题**唯一**的离线答案（含清单告警与工具清单）。
+ */
+async function printExtensions({ config, configPath, log = () => {} }) {
+  // ★ 这里**故意用空日志**装载：本条命令的正文就是完整报告（含每一条告警），
+  //   再让装载过程往上面喷一遍同样的告警，只会让同一句话说两次 ——
+  //   CLI 的噪音也是成本（人会更早开始忽略输出）。
+  const scan = await loadSkills({ config, log: () => {} })
+  const service = createExtensionService({
+    config,
+    configPath,
+    skills: scan.skills,
+    skillsDir: scan.dir,
+    log,
+    validate: validateConfig,
+    normalize: normalizeConfig,
+  })
+  const data = service.list()
+
+  console.log(`\n技能目录：${data.skillsDir}${scan.exists ? '' : '（不存在 —— 还没有装任何技能）'}\n`)
+  console.log(`── 技能（${data.counts.skills} 个，启用 ${data.counts.skillsEnabled} 个）──`)
+  if (data.skills.length === 0) {
+    console.log('  （空。把技能目录放到 skills/<id>/ 下即可，重启后生效。）')
+  }
+  for (const s of data.skills) {
+    const state = !s.ready && s.errors.length > 0 ? '❌ 装不上' : s.enabled ? '✅ 已启用' : '⭕ 已关闭'
+    console.log(`  ${s.icon} ${s.name}（${s.id} v${s.version}）${state}`)
+    if (s.errors.length) for (const e of s.errors) console.log(`      ❌ ${e}`)
+    for (const w of s.warnings) console.log(`      ⚠️ ${w}`)
+    // 状态原因（为什么"开着却用不了"）：例如 MCP 总开关关着、依赖自检不过
+    for (const r of s.reasons ?? []) console.log(`      ⚠️ ${r}`)
+    if (s.tools.length) {
+      console.log(`      工具：${s.tools.map((t) => `${t.fullName}${t.registered ? '' : '（未注册）'}`).join('、')}`)
+    }
+    if (s.promptSections.length) {
+      console.log(`      提示词片段：${s.promptSections.map((p) => `${p.title}(${p.chars}字)`).join('、')}`)
+    }
+    if (s.enabled && s.tools.length === 0) console.log('      ⚠️ 已启用但一个工具都没有 —— 检查 setup() 里的 registerTool')
+  }
+
+  console.log(`\n── 插件（${data.counts.plugins} 个，开启 ${data.counts.pluginsOn} 个）──`)
+  for (const p of data.plugins) {
+    const on = p.enabled === null ? '—（名单类）' : p.enabled ? '✅ 开' : '⭕ 关'
+    const hot = p.switchKind === 'list' ? '' : p.hot ? '｜即时生效' : '｜★ 需重启'
+    console.log(`  ${p.icon} ${p.name}  ${on}${hot}  [${p.enabledPath}]`)
+  }
+  console.log('')
+  for (const n of data.notes) console.log(`  · ${n}`)
+  console.log('')
+  return data
+}
+
+/**
+ * `--personas`：把"装了哪几套人设、现在用哪一套、各自多大"打出来（**只读**）。
+ *
+ * 为什么要有这个 CLI（与 `--extensions` 同样的理由）：
+ *   · 人设是**构造期缓存**的，改完必须重启 —— 排障时机器人常常没在跑（界面也打不开），
+ *     这时"到底哪一套在生效"只能靠命令行回答；
+ *   · `persona.active` 指向一个**读不到的文件**时，桥接会大声报错但只报一行 ——
+ *     这里能把"目录里现在有什么"一起摊开，一眼看出是删了还是改名了。
+ */
+function printPersonas({ config, configPath }) {
+  // 读**盘上**那份配置（界面刚改完的口径）；读不到就回落启动时那份，别让命令整块空白。
+  let raw = config
+  try {
+    raw = JSON.parse(readFileSync(configPath, 'utf8'))
+  } catch {
+    /* 用启动时那份 */
+  }
+  const shelf = describePersonaShelf({ dir: DIRS.personas, config: raw })
+  console.log('')
+  console.log(`人设库：${shelf.dir}`)
+  console.log(
+    `当前在用：${shelf.activeName}（${shelf.activeSource}${shelf.activeChars ? `，${shelf.activeChars} 字` : ''}）`,
+  )
+  if (shelf.activeError) console.log(`⚠️ ${shelf.activeError} —— 按"不用人设"在跑，请到控制台里选一套`)
+  console.log('')
+  if (shelf.personas.length === 0) {
+    console.log('  （一套都没有。控制台 → 人设 里有「恢复默认两套」。）')
+  }
+  for (const p of shelf.personas) {
+    const bar = p.active ? '▸' : ' '
+    const notes = [p.isDefault ? '出厂默认' : '', p.hasNameBlock ? '' : '⚠️ 没有名字块（"叫名字"会回落到兜底名）']
+      .filter(Boolean)
+      .join('｜')
+    console.log(`  ${bar} ${p.name}${notes ? `　[${notes}]` : ''}  —— ${p.chars} 字`)
+  }
+  if (shelf.legacy) {
+    console.log('')
+    console.log('⚠️ 配置里还是 0.2.2 之前的老写法（`persona.active` 为空），所以上面那几套都没在用：')
+    const inUse = shelf.legacy.customChars
+      ? `老的自定义人设（${shelf.legacy.customChars} 字）`
+      : `内置预设 ${shelf.legacy.preset || 'mermaid'}`
+    console.log(`   现在生效的是${inUse}。`)
+    console.log('   要把它纳入人设栏管理：控制台里「新建」一套、把正文粘进去，然后「切换」过去（切换要重启）。')
+  }
+  console.log('')
+  return shelf
+}
+
+function makeLogger(verbose) {  return (message) => {
     const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19)
     const line = `${stamp} ${message}`
     console.log(line)
@@ -266,6 +408,40 @@ async function main() {
     return
   }
 
+
+  // ── 人设库（0.2.2）：首次使用时把**默认那两套**落成文件 ────────────────
+  //
+  // ★ 只在**空目录**时落（`ensureDefaultPersonas` 内部就是这么写的）：使用者把某一套
+  //   删了/改名了，下一次启动**不许**把它变回来 —— 那会让"删除"变成假的。
+  //   （所以这件事不能挂在 `listPersonas` 上：那是每次开控制台都会调的读操作。）
+  {
+    const seeded = ensureDefaultPersonas({ dir: DIRS.personas })
+    if (!seeded.ok) log(`⚠️ 人设库初始化失败：${seeded.error}`)
+    else if (seeded.created.length > 0) log(`人设库：落下了默认的 ${seeded.created.join('、')}`)
+  }
+
+  // ── 人设库离线巡检（0.2.2，只读）──────────────────────────────────────
+  //
+  //   node src/index.mjs --personas
+  //
+  // ★ 与 `--extensions` 同样放在这一段（`--memory` 之上）：顶层命令插到下面去就会
+  //   落到那个块的内部，直接跑时会一路走到**真的启动桥接**（见 --delivery 的注释）。
+  if (process.argv.includes('--personas')) {
+    printPersonas({ config, configPath })
+    return
+  }
+
+  // ── 扩展（技能 / 插件）离线巡检（0.2.2）────────────────────────────────
+  //
+  //   node src/index.mjs --extensions
+  //
+  // ★ 放在这里而不是更靠后：下面 `--memory` 那一大块里嵌着 `--audit` / `--usage`，
+  //   顶层命令插错位置就会落到那个块内部 —— 直接跑时会一路走到**真的启动桥接**
+  //   （`--delivery` 的注释里记着这次事故）。所以新增顶层命令一律放在这一段之上。
+  if (process.argv.includes('--extensions')) {
+    await printExtensions({ config, configPath, log: (m) => console.log(`  ${m}`) })
+    return
+  }
 
   // ── 投递账本（H15，**只读**）──────────────────────────────────────────
   //
@@ -1223,7 +1399,44 @@ async function main() {
     process.exit(1)
   }
 
+  // ── 外部技能：扫一次目录并装载（0.2.2）──────────────────────────────────
+  //
+  // ★ 放在 `--check` 之前：这样"我装的技能到底行不行"可以在**不连任何服务**的情况下问出来
+  //   （`node src/index.mjs --check`），而不是等到机器人跑起来才发现工具没注册。
+  // ★ 也放在所有只读 CLI（--ui/--memory/--delivery…）**之后**：那些入口是查询，
+  //   没有理由为了看个用量就去 import 第三方技能代码。
+  const skillScan = await loadSkills({ config, log })
+  // ★ 0.2.2：QQ 工具总开关关着时，**技能工具也不会挂上去**（两者都走 MCP）。
+  //   这时"开着某个技能"是个自欺状态：工具不存在、提示词指引也不会注入
+  //   （见 extensions.mjs 的 collectSkillPromptSections）。所以起机就说一句，
+  //   而不是等使用者纳闷"我明明开着它，怎么不用"。
+  if (config.mcp?.enabled === false) {
+    const onSkills = skillScan.skills.filter((s) => s.ok && isSkillEnabled(s, config))
+    if (onSkills.length > 0) {
+      log(
+        `⚠️ mcp.enabled = false：QQ 工具与**技能工具**都不会挂给模型，` +
+          `已启用技能（${onSkills.map((s) => s.id).join('、')}）的提示词指引也不会注入。` +
+          `要用技能，请先打开「QQ 原生功能（MCP）」这个总开关。`,
+      )
+    }
+  }
+  const extensionService = createExtensionService({
+    config,
+    configPath,
+    skills: skillScan.skills,
+    skillsDir: skillScan.dir,
+    log,
+    validate: validateConfig,
+    normalize: normalizeConfig,
+  })
+
   if (checkOnly) {
+    // 技能的问题要在自检里说出来（它们是"配置没错但功能没生效"的典型来源）
+    for (const s of skillScan.skills) {
+      for (const e of s.errors) console.log(`⚠️ 技能 ${s.dirName}：${e}`)
+      for (const w of s.warnings) console.log(`⚠️ 技能 ${s.dirName}：${w}`)
+      if (s.ok && !s.loaded) console.log(`⚠️ 技能 ${s.id}：${s.loadError}`)
+    }
     console.log('\n✅ 配置自检通过（--check 模式，未连接任何服务）\n')
     return
   }
@@ -1365,7 +1578,51 @@ async function main() {
         timeoutMs: config.mcp?.toolTimeoutMs ?? 20_000,
         // ★ H7：`qq_search_history` 要读工作区里的语料库（不含密钥，放进这份配置是安全的）
         workspace: config.dsh?.workspace ?? null,
+        // ★ 0.2.2：`qq_send_image` 要**每次调用现读** `security.allowPrivateImageHosts`，
+        //   否则界面上打开那个开关还要重启才生效。
+        configPath,
       })
+
+      // ── 技能工具服务器（0.2.2）────────────────────────────────────────
+      //
+      // ★ 只在**确实有可用技能**时才写这一段：没装技能就不该多起一个进程
+      //   （这条对"零成本"很重要 —— 技能不是所有人都用）。
+      // ★ 删掉技能目录后，下一次启动这里会传 null，profile 里那一段会被**整块移除**
+      //   （否则会永远留着一个指向不存在目录的服务器，日志里天天报错）。
+      let skillsMcp = null
+      const usableSkills = skillScan.skills.filter((s) => s.ok && !s.loadError)
+      if (usableSkills.length > 0) {
+        // 技能的 npm 依赖桥：把它需要的、宿主自带的那几个包软链到 skills/node_modules，
+        // 否则技能里的普通 `import('undici')` 会在真机上 ERR_MODULE_NOT_FOUND
+        // （本包的运行期依赖在 vendor/node_modules，不在 node_modules —— 见 src/vendor.mjs）。
+        const bridged = ensureSkillNodeModules({
+          skillsDir: skillScan.dir,
+          vendorNodeModules: DIRS.vendorNodeModules,
+          log,
+        })
+        if (bridged.missing.length > 0) {
+          log(
+            `⚠️ 技能依赖 ${bridged.missing.join('、')} 不在 vendor/node_modules 里 —— ` +
+              `用得到它的技能（例如 pixiv 插件的代理支持）会自己报「代理不可用」。` +
+              `修法：在本目录 npm install，然后重跑 setup.mjs。`,
+          )
+        }
+        try {
+          const skillsConfigPath = writeSkillsMcpConfig({
+            cacheDir: join(PKG_ROOT, 'cache'),
+            skillsDir: skillScan.dir,
+            configPath,
+            workspace: config.dsh?.workspace ?? null,
+          })
+          skillsMcp = {
+            serverPath: join(PKG_ROOT, 'mcp', 'mcp-skills-server.mjs'),
+            configPath: skillsConfigPath,
+            timeoutMs: 60_000,
+          }
+        } catch (error) {
+          log(`⚠️ 技能工具的 MCP 配置生成失败（技能仍可在离线巡检里看到）：${error?.message ?? error}`)
+        }
+      }
 
       // 定位 DSH_HOME（profiles/ 在它下面）。
       // ⚠️ 不能"从 CLI 路径反推" —— 第一版就是这么错的：DSH 可能是全局安装，
@@ -1395,11 +1652,17 @@ async function main() {
         nodePath: process.execPath,
         serverPath: join(PKG_ROOT, 'mcp', 'mcp-qq-server.mjs'),
         configPath: mcpConfigPath,
+        skills: skillsMcp,
       })
       log(
         changed
           ? `QQ 工具已挂到 sdk profile（重启 DSH 子进程后模型就能调）：${profilePatchPath}`
           : `QQ 工具挂载已是最新：${profilePatchPath}`,
+      )
+      log(
+        skillsMcp
+          ? `技能工具已挂到 sdk profile：${usableSkills.length} 个技能（${usableSkills.map((s) => s.id).join('、')}）`
+          : '没有可用的技能，profile 里的技能工具段已清空',
       )
     } catch (error) {
       log(`⚠️ QQ 工具挂载失败（不影响机器人本体）：${error?.message ?? error}`)
@@ -1467,7 +1730,7 @@ async function main() {
   const onebot = new OneBotClient({ ...config.onebot, log })
   const sendQueue = new SendQueue({ ...config.send, log })
   const router = new SessionRouter({ log })
-  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log })
+  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills })
   bridge.attach(onebot)
 
   // 记下登录信息，供配置接口的 /api/status 使用
@@ -1493,6 +1756,20 @@ async function main() {
   // 端口/开关都在 config.json 的 ui 段里 —— 关掉它不影响机器人本体工作。
   let apiServer = null
   if (config.ui.apiEnabled !== false) {
+    /**
+     * 读**盘上**那份配置（不是启动时缓存的那份）。
+     *
+     * 为什么人设栏要读盘：界面改完配置、或刚点了「切换人设」，人设栏必须马上
+     * 按新配置说话（与 `GET /api/config` 同一个口径）。读不到（文件被删/写坏）就
+     * 回落启动时那份 —— 界面宁可显示旧状态，也不该整块空白。
+     */
+    const readConfigFromDisk = () => {
+      try {
+        return JSON.parse(readFileSync(configPath, 'utf8'))
+      } catch {
+        return config
+      }
+    }
     const apiHandler = createApiHandler({
       configPath,
       readRawConfig: () => JSON.parse(readFileSync(configPath, 'utf8')),
@@ -1575,14 +1852,60 @@ async function main() {
       priceBook,
       usageLedger,
       memoryStore,
+      // ── 扩展（技能 / 插件，0.2.2）────────────────────────────────────────
+      // 这一组是**唯一**会"改配置且不要求重启"的接口 —— 语义与理由见
+      // src/extensions-service.mjs 的文件头（写盘 + 改活配置对象，两件事都要做）。
+      listExtensions: () => extensionService.list(),
+      toggleExtension: (args) => extensionService.toggle(args),
+      saveSkillSettings: (args) => extensionService.saveSettings(args),
+      diagnoseSkill: (id) => extensionService.diagnose(id),
+      // ── 人设库（0.2.2）────────────────────────────────────────────────────
+      // 形状：`personas/<名字>.md` 一个文件一套人设，按需切换（`persona.active`）。
+      //
+      // ★ 读的一侧算的是**"当前实际在用哪一套"**：`active` → 老 `custom` → 老 `preset`
+      //   三条规则的合成结果（`resolveActivePersona`），界面只显示不自己判。
+      // ★ 读的配置是**盘上那份**（与 GET /api/config 同源），不是启动时缓存的那份 ——
+      //   否则界面上刚改完、人设栏却还按旧配置说"当前在用 X"。
+      // ★ 写的一侧：`applyPersonaAction` 只**算**（能离线测），改配置由 api.mjs 的路由
+      //   按与 /api/config 同一套纪律落盘（校验 + .bak）—— 那条纪律只有一份实现。
+      personasList: () => describePersonaShelf({ dir: DIRS.personas, config: readConfigFromDisk() }),
+      personasAction: (args = {}) => applyPersonaAction({ dir: DIRS.personas, ...args }),
+      // ── 联系人昵称（按人，0.2.2）──────────────────────────────────────────
+      // 读写走 src/contacts.mjs（格式只有一处实现）。
+      // ★ 写完**必须刷新记忆快照**：`memory/contacts.md` 落在 `memory/` 下，会被记忆的
+      //   篡改检测扫到；不刷快照的话下一轮就把这次改动**回滚**掉（记忆文件那条路踩过同样的坑）。
+      contactsList: () => summarizeContacts({ workspace: config.dsh?.workspace }),
+      contactsSave: ({ qq, nickname } = {}) => {
+        const workspace = config.dsh?.workspace
+        if (!workspace) return { error: '配置里没有工作区，没法存昵称', status: 422 }
+        const id = String(qq ?? '').trim()
+        if (!/^\d{5,15}$/.test(id)) return { error: `QQ 号不合法：${id || '（空）'}`, status: 400 }
+        const cur = readContacts({ workspace })
+        if (!cur.ok) return { error: cur.error, status: 422 }
+        const rest = (cur.contacts ?? []).filter((c) => c.qq !== id)
+        // 空昵称 = 删除（界面上的「删除」按钮）
+        const list = String(nickname ?? '').trim() === '' ? rest : [...rest, { qq: id, nickname }]
+        const w = writeContacts({ workspace, contacts: list })
+        if (!w.ok) return { error: w.error, status: 422 }
+        try {
+          saveSnapshot({ workspace, rel: CONTACTS_REL })
+        } catch {
+          /* 快照失败不阻断保存（下一轮会报"文件被改过"，但不是坏事） */
+        }
+        return {
+          ...summarizeContacts({ workspace }),
+          saved: true,
+          restartRequired: false,
+          hint: '已保存，**下一轮就生效**（不需要重启）。',
+        }
+      },
       // ★ 控制台保存/删除记忆后**必须刷新快照基准**，否则下一次读记忆会
       //   把它当"绕过桥接的改动"回滚 —— 表现是「界面上删掉的条目自己又回来了」，
       //   而且不报错。取证与边界写在 api.mjs 的 `/api/memory/file` 两个路由上：
       //   篡改检测要防的是**模型绕过桥接**（它手里有 write 工具），
       //   控制台是桥接给主人的界面 —— 主人改自己的记忆被回滚是缺陷，不是安全。
       saveMemorySnapshot: (rel) =>
-        rel ? saveSnapshot({ workspace: config.dsh.workspace, rel }) : false,
-      dropMemorySnapshot: (rel) =>
+        rel ? saveSnapshot({ workspace: config.dsh.workspace, rel }) : false,      dropMemorySnapshot: (rel) =>
         rel ? dropSnapshot({ workspace: config.dsh.workspace, rel }) : false,
       // 取图路由用：对话里的图片只从 workspace/inbox 出。
       // config.dsh.workspace 在归一化阶段已是绝对路径（resolveInPackage）。

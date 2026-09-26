@@ -10,10 +10,9 @@ import { ConfirmDialog, InlineNote, type ConfirmRequest } from '@/components/com
 import { OverviewTab } from '@/sections/OverviewTab'
 import { ConversationsTab } from '@/sections/ConversationsTab'
 import { PersonaTab } from '@/sections/PersonaTab'
-import { TriggerTab } from '@/sections/TriggerTab'
 import { PaceTab } from '@/sections/PaceTab'
 import { MemoryTab } from '@/sections/MemoryTab'
-import { McpTab } from '@/sections/McpTab'
+import { ExtensionsTab } from '@/sections/ExtensionsTab'
 import { ProtocolTab, type TokenDraft } from '@/sections/ProtocolTab'
 import { AdvancedTab } from '@/sections/AdvancedTab'
 import {
@@ -25,14 +24,54 @@ import {
   MemoryStick,
   MessagesSquare,
   Plug,
+  Puzzle,
   Save,
   Settings2,
-  Sparkles,
   Timer,
   UserRound,
-  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+
+/**
+ * 配置前缀 → 页签（0.2.2「未保存的改动要看得见」：给改动过的页签加小圆点）。
+ * 触发已并入人设、QQ 功能已并入扩展 —— 映射跟着新结构走。
+ */
+function pathToTab(path: string): string | null {
+  if (path === 'dsh.workspace') return 'memory' // 工作区目录在记忆页
+  const head = path.split('.')[0]
+  switch (head) {
+    case 'persona':
+    case 'trigger':
+      return 'persona'
+    case 'humanize':
+    case 'send':
+    case 'usage':
+    case 'turn':
+      return 'pace'
+    case 'memory':
+    case 'image':
+      return 'memory'
+    case 'mcp':
+    case 'skills':
+    case 'security':
+      return 'extensions'
+    case 'onebot':
+    case 'snowluma':
+    case 'access':
+      return 'protocol'
+    case 'dsh':
+    case 'session':
+    case 'ui':
+      return 'advanced'
+    default:
+      return null
+  }
+}
+
+/** 未保存改动的小圆点（0.2.2 修正②）：切走也知道哪一页改过。 */
+function DirtyDot() {
+  return <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="这一页有未保存的改动" />
+}
 
 /** 从编辑中的配置里构造保存补丁：剔除 has* 标记；密钥留空则不放字段（后端把空值当"不修改"）。 */
 function buildPatch(
@@ -78,6 +117,8 @@ export default function Home() {
   const [apiKey, setApiKey] = useState('')
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null)
   const [tab, setTab] = useState('overview')
+  // 未保存改动落在哪些页签（小圆点）：切走也知道哪一页改过
+  const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(new Set())
   const [restarting, setRestarting] = useState(false)
   const demoRef = useRef(demo)
   demoRef.current = demo
@@ -93,6 +134,7 @@ export default function Home() {
       setStatus(s)
       setOffline(false)
       setDirty(false)
+      setDirtyTabs(new Set())
       setFatalList([])
     } catch {
       if (!demoRef.current) setOffline(true)
@@ -191,6 +233,8 @@ export default function Home() {
   const patch = useCallback((path: string, value: unknown) => {
     setCfg((prev) => (prev ? setPath(prev, path, value) : prev))
     setDirty(true)
+    const t = pathToTab(path)
+    if (t) setDirtyTabs((prev) => (prev.has(t) ? prev : new Set(prev).add(t)))
   }, [])
 
   const patchMany = useCallback((entries: [string, unknown][]) => {
@@ -201,6 +245,14 @@ export default function Home() {
       return next
     })
     setDirty(true)
+    setDirtyTabs((prev) => {
+      const next = new Set(prev)
+      for (const [p] of entries) {
+        const t = pathToTab(p)
+        if (t) next.add(t)
+      }
+      return next
+    })
   }, [])
 
   const save = async () => {
@@ -214,6 +266,7 @@ export default function Home() {
     try {
       const result = await api.saveConfig(buildPatch(cfg, tokens, apiKey))
       setDirty(false)
+      setDirtyTabs(new Set())
       setTokens({ wsToken: '', httpToken: '' })
       setApiKey('')
       if (result.restartRequired) {
@@ -369,6 +422,9 @@ export default function Home() {
 
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList className="mb-4 flex h-auto flex-wrap justify-start">
+            {/* 0.2.2 加减法：触发并入人设、QQ 功能并入扩展、新增「扩展」页签。
+                页签上不放生效方式徽标（按主人要求保持干净）；保存后需要重启时，
+                由顶部状态条的「有改动待重启生效」角标统一提示（restartRequired 一路接过来的）。 */}
             <TabsTrigger value="overview" className="gap-1.5">
               <LayoutDashboard className="h-3.5 w-3.5" />
               概览
@@ -380,31 +436,33 @@ export default function Home() {
             <TabsTrigger value="persona" className="gap-1.5">
               <UserRound className="h-3.5 w-3.5" />
               人设
-            </TabsTrigger>
-            <TabsTrigger value="trigger" className="gap-1.5">
-              <Zap className="h-3.5 w-3.5" />
-              触发
+              {dirtyTabs.has('persona') && <DirtyDot />}
             </TabsTrigger>
             <TabsTrigger value="pace" className="gap-1.5">
               <Timer className="h-3.5 w-3.5" />
               节奏与成本
               <span className="text-amber-500">★</span>
+              {dirtyTabs.has('pace') && <DirtyDot />}
             </TabsTrigger>
             <TabsTrigger value="memory" className="gap-1.5">
               <MemoryStick className="h-3.5 w-3.5" />
               记忆
+              {dirtyTabs.has('memory') && <DirtyDot />}
             </TabsTrigger>
-            <TabsTrigger value="mcp" className="gap-1.5">
-              <Sparkles className="h-3.5 w-3.5" />
-              QQ 功能
+            <TabsTrigger value="extensions" className="gap-1.5">
+              <Puzzle className="h-3.5 w-3.5" />
+              扩展
+              {dirtyTabs.has('extensions') && <DirtyDot />}
             </TabsTrigger>
             <TabsTrigger value="protocol" className="gap-1.5">
               <Plug className="h-3.5 w-3.5" />
               协议端
+              {dirtyTabs.has('protocol') && <DirtyDot />}
             </TabsTrigger>
             <TabsTrigger value="advanced" className="gap-1.5">
               <Settings2 className="h-3.5 w-3.5" />
               高级
+              {dirtyTabs.has('advanced') && <DirtyDot />}
             </TabsTrigger>
           </TabsList>
 
@@ -419,10 +477,7 @@ export default function Home() {
             />
           </TabsContent>
           <TabsContent value="persona">
-            <PersonaTab cfg={cfg} patch={patch} />
-          </TabsContent>
-          <TabsContent value="trigger">
-            <TriggerTab cfg={cfg} patch={patch} askConfirm={setConfirmReq} />
+            <PersonaTab cfg={cfg} patch={patch} askConfirm={setConfirmReq} />
           </TabsContent>
           <TabsContent value="pace">
             <PaceTab cfg={cfg} patch={patch} patchMany={patchMany} askConfirm={setConfirmReq} />
@@ -430,8 +485,14 @@ export default function Home() {
           <TabsContent value="memory">
             <MemoryTab cfg={cfg} patch={patch} demo={demo} />
           </TabsContent>
-          <TabsContent value="mcp">
-            <McpTab cfg={cfg} patch={patch} />
+          <TabsContent value="extensions">
+            <ExtensionsTab
+              cfg={cfg}
+              patch={patch}
+              demo={demo}
+              askConfirm={setConfirmReq}
+              onNavigateTab={setTab}
+            />
           </TabsContent>
           <TabsContent value="protocol">
             <ProtocolTab
@@ -467,7 +528,9 @@ export default function Home() {
           <Badge variant="outline" className="border-amber-400 text-amber-600">
             有未保存的改动
           </Badge>
-          <span className="text-xs text-muted-foreground">保存后需要重启机器人才会生效</span>
+          <span className="text-xs text-muted-foreground">
+            生效方式以保存后接口返回的提示为准（配置类改动需要重启；扩展页的开关是即时生效的）
+          </span>
           <div className="ml-auto flex gap-2">
             <Button variant="outline" size="sm" onClick={runCheck}>
               检查配置

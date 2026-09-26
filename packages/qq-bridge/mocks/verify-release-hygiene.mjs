@@ -141,6 +141,21 @@ section('⑤ 接线：发布脚本**真的**用了这些检查（纯函数测过
   check('★ 门禁**没有 --force 后门**（否则等于没有这道门）',
     !/audit\.ok[\s\S]{0,200}FORCE/.test(text))
   check('  版本号仍是单一来源（从 package.json 读）', /pkg\.version/.test(text) && !/const\s+VERSION\s*=\s*['"]\d/.test(text))
+
+  // ── 0.2.2：技能目录进包带来的两条新风险，各自钉一条断言 ────────────────
+  //
+  // ① `skills/` 现在会进发布包（里面是外部技能），而桥接启动时会在
+  //    `skills/node_modules/` 里建**软链**（指向 vendor/node_modules）——
+  //    链的是**开发机的绝对路径**，进包就是死链。所以组装时必须排除它。
+  check('★★ 组装 release 时排除了 skills/node_modules（软链不进包）',
+    /d === 'skills'[\s\S]{0,160}node_modules/.test(text))
+  // ② 验收脚本对 node_modules 的放行必须**锚定到 vendor/ 前缀**。
+  //    第一版写的是"包名在白名单里就放行"，于是 `skills/node_modules/undici`
+  //    也会被放行 —— 那正是 ① 想防的东西。这条断言防它再被放松回去。
+  const checkerPath = join(PKG_ROOT, 'scripts', 'check-release-package.mjs')
+  const checker = existsSync(checkerPath) ? readFileSync(checkerPath, 'utf8') : ''
+  check('★★ 验收脚本把 node_modules 限制在 vendor/ 下（锚定前缀，不是按包名放行）',
+    /VENDOR_PKG_ALLOW\s*=\s*\/\^vendor\\\/node_modules/.test(checker) && /\(ws\|undici\)/.test(checker))
 }
 
 console.log('')

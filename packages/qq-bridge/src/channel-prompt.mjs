@@ -28,6 +28,7 @@
  */
 
 import { REASON } from './trigger.mjs'
+import { renderNicknameBlock } from './contacts.mjs'
 import {
   buildMemoryInstructionsV2,
   readMemoryForPrompt,
@@ -81,6 +82,10 @@ const p2 = (n) => String(n).padStart(2, '0')
  * @param {(what: string, error: unknown) => void} ctx.warn 注入失败告警（每段只喊一次，去重在桥接）
  * @param {{read: (k: string) => object|null}|null} ctx.sessionState 会话状态（H10）
  * @param {() => {ms: number, since: number}|null} ctx.consumeGap 取用一次性的断线缺口（H9）
+ * @param {Array<{id: string, content: string, sessionMode?: string}>} ctx.skillSections
+ *        已启用技能的提示词片段（0.2.2）。**由桥接预先收集**（`src/extensions.mjs`），
+ *        本模块只负责按顺序拼进提示词 —— 顺序固定：权限段之后、记忆段之前。
+ * @param {string} ctx.nickname 当前说话人的昵称（按人昵称，0.2.2）。空 = 不注入任何东西。
  */
 export async function buildChannelPrompt({
   now = new Date(),
@@ -100,6 +105,8 @@ export async function buildChannelPrompt({
   warn = () => {},
   sessionState = null,
   consumeGap = () => null,
+  skillSections = [],
+  nickname = '',
 } = {}) {
   const stamp = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`
 
@@ -155,6 +162,33 @@ export async function buildChannelPrompt({
   // ── 权限等级（决定它能不能"动手"）────────────────────────────────────
   lines.push('', buildPermissionInstructions(tier, kind))
 
+  // ── 外部技能（`skills/`）给的指引（0.2.2）──────────────────────────────
+  //
+  // ★ 位置：权限段之后、记忆段之前 —— 与权限段同类（"你会什么、你能做什么"），
+  //   而且**只在管理员开关变化时才变**，所以留在相对静态的那一段里，不吃前缀缓存。
+  //
+  // ★ 内容由桥接预先收集好传进来（`src/extensions.mjs` 的 collectSkillPromptSections）：
+  //   本模块是**纯拼装器**，不碰文件系统、不知道"技能"这种东西怎么装 —— 这样
+  //   `buildChannelPrompt` 继续是一个能被离线测试的纯函数。
+  //
+  // ★ 关掉的技能**一个字都不出现**：工具被关掉之后，提示词里若还留着"用 XX 查"，
+  //   模型会去调一个会被拒绝的工具，然后对用户说"查不到" —— 那比不装这个技能更糟。
+  if (Array.isArray(skillSections) && skillSections.length > 0) {
+    const body = skillSections.map((s) => String(s.content ?? '').trim()).filter(Boolean).join('\n')
+    if (body) {
+      lines.push('', ['【额外本事（来自已启用的扩展技能）】', body].join('\n'))
+      // 声明了"必须知道当前会话"的技能：它们的工具入参会多出 kind/peerId 两个必填项，
+      // 而技能自己的文案不会提这件事（那是宿主加的参数）—— 所以由宿主在这里说清楚。
+      if (skillSections.some((s) => s.sessionMode === 'required')) {
+        lines.push(
+          '（上面这些工具调用时会要求 kind 与 peerId 两个参数：kind 填 private/group，' +
+            'peerId 填**本轮来源标注里那串号码**。这不是可选装饰 —— 缺了会被直接拒绝，' +
+            '我不会拿不准的会话去执行。）',
+        )
+      }
+    }
+  }
+
   // ── 记忆（**写入权在桥接，不在模型**）────────────────────────────────
   //
   // ★ 这一段**不含任何文件路径**：① 写入由桥接做，模型不需要路径；
@@ -174,6 +208,18 @@ export async function buildChannelPrompt({
     // 回执是"上一条消息里的记忆到底记上没有"——读后即删，只出现一次
     const receipt = takeReceipt({ workspace, kind, peerId })
     lines.push('', buildMemoryInstructionsV2({ kind, recall, receipt }))
+  }
+
+  // ── 称呼（按人昵称，0.2.2）────────────────────────────────────────────
+  //
+  // ★ 只注入**当前说话人**那一条 —— 群里也是只看发言人，**不列全群**：那是隐私面
+  //   （"这个群里有谁、他们各自被叫什么"不该因为一次发言就整表进上下文）。
+  // ★ 与记忆段**分开门控**：记忆关掉不等于"连怎么称呼都不知道"，而且这个文件是
+  //   主人显式维护的（不是模型学来的），所以不看 `memory.enabled`。
+  // ★ 没有昵称时**一个字都不产生** —— 提示词逐字基线（prompt-golden）因此不受影响。
+  if (nickname) {
+    const block = renderNicknameBlock(nickname)
+    if (block) lines.push('', block)
   }
 
   // ── 当前任务（**不丢主线的锚**）───────────────────────────────────────

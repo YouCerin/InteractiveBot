@@ -561,6 +561,18 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
       // 名单接口也要注入，否则那条路由在探测里走 notImplemented → 被误报成"文档谎称已实现"
       roster: { fetchLists: async () => ({ friends: [], groups: [] }) },
       onebotCall: async () => [],
+      // 扩展接口（0.2.2）同样要注入 —— 否则那四条路由在探测里走 notImplemented，
+      // 会被报成"文档谎称已实现"（这条检查就是这么抓漏注入的）。
+      listExtensions: () => ({ skills: [], plugins: [], counts: {} }),
+      toggleExtension: async () => ({ hot: true, restartRequired: false }),
+      saveSkillSettings: async () => ({ id: 'probe' }),
+      diagnoseSkill: async () => ({ id: 'probe', report: {} }),
+      // 人设库接口（0.2.2）同样要注入，否则那两条路由在探测里走 notImplemented
+      personasList: () => ({ dir: 'personas', personas: [], active: '', template: '', maxChars: 4000 }),
+      personasAction: async () => ({ ok: true, action: 'create', restartRequired: false }),
+      // 联系人昵称（0.2.2）
+      contactsList: () => ({ rel: 'memory/contacts.md', contacts: [], bad: [], max: 200 }),
+      contactsSave: () => ({ saved: true, restartRequired: false, contacts: [] }),
       requestRestart: () => {},
       requestStop: () => {},
       powerUpdateDelayMs: 0,

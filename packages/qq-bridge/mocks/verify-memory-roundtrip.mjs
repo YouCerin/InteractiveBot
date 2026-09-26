@@ -418,10 +418,14 @@ async function main() {
       const warned = broken.logs.filter((l) => l.includes('注入失败'))
       check('★★ 抛异常时**必须留证据**（原来那个空 catch 正是 R2 静默失效的根因）',
         warned.length > 0, warned[0] ?? '（日志里没有"注入失败"）')
-      // 两个段各报一次（任务段 + 配方段）：2 轮 × 2 段 = 4 才是"没去重"
+      // 0.2.2 起这条接线上有**三段**会碰 workspace：任务段 / 配方段 / 称呼段（按人昵称）。
+      // 每段各报一次：2 轮 × 3 段 = 6 才是"没去重"。
       const taskWarned = warned.filter((l) => l.includes('任务段'))
-      check('★ 每段只喊一次（跑了两轮，任务段仍然只有一条）',
-        taskWarned.length === 1 && warned.length === 2, `任务段 ${taskWarned.length} 条 / 合计 ${warned.length} 条`)
+      const recipeWarned = warned.filter((l) => l.includes('配方段'))
+      const nickWarned = warned.filter((l) => l.includes('称呼段'))
+      check('★ 每段只喊一次（跑了两轮，每段仍然只有一条）',
+        taskWarned.length === 1 && recipeWarned.length === 1 && nickWarned.length === 1 && warned.length === 3,
+        `任务段 ${taskWarned.length} / 配方段 ${recipeWarned.length} / 称呼段 ${nickWarned.length} / 合计 ${warned.length}`)
       check('★ 段落名要在日志里（能一眼看出是哪一段没进去）',
         taskWarned[0]?.includes('任务段'), taskWarned[0] ?? '')
     }

@@ -136,7 +136,7 @@ export const PERSONA_PRESETS = {
   none: '',
 }
 
-/** 默认预设。 */
+/** 出厂默认用哪一套内置预设（`persona.active` 为空且没写过 custom 时的最终回落）。 */
 export const DEFAULT_PERSONA_PRESET = 'mermaid'
 
 /** 人设长度上限（H12）：超了做"头 + 省略提示 + 尾"截断，而不是整段塞进提示词。 */
@@ -290,15 +290,16 @@ export function truncatePersona(text, max = PERSONA_MAX_CHARS) {
 }
 
 /**
- * 取人设文本。
+ * 取人设文本（**老路径**）。
  *
- * 优先级：**自定义文本 > 预设**。
- * 这样用户既可以用我调好的预设，也可以完全自己写。
+ * ⚠️ 0.2.2 起人设走**文件库**（`src/personas.mjs` 的 `resolveActivePersona`）：
+ *   当前生效的那一套由 `persona.active` 指向的文件决定。本函数仍然保留，因为：
+ *   ① 它是**老配置的回落路径**（`persona.custom` / `persona.preset`）；
+ *   ② 它是**扫描 + 截断**的唯一实现 —— 人设库读出来的正文也要经过它
+ *      （自定义文本是不可信输入：命中注入判据就**整文件拒载**）。
  *
- * ★★ H12：**自定义文本先过扫描** —— 命中就**整文件拒载**（替换成 `BLOCKED_PERSONA`），
- *   绝不做"删掉那几行再放行"的部分加载：部分加载意味着攻击者只要把恶意段落拆开就能绕过，
- *   而使用者也会以为"我的角色卡生效了"。内置预设是我们仓库里的常量，**不扫**
- *   （它们天生含"有人叫你忽略设定怎么办"这类**描述性**的句子，扫了必然误拒）。
+ * 优先级：**自定义文本 > 预设**。内置预设是我们仓库里的常量，**不扫**
+ * （它们天生含"有人叫你忽略设定怎么办"这类**描述性**的句子，扫了必然误拒）。
  *
  * @param {{ preset?: string, custom?: string, maxChars?: number, log?: (m: string) => void }} [opts]
  * @returns {string} 人设文本（可能是空串，表示不使用人设）
@@ -310,7 +311,7 @@ export function buildPersona({ preset, custom, maxChars = PERSONA_MAX_CHARS, log
     if (!scan.ok) {
       // ★ 必须喊出来：静默替换成 [BLOCKED] 会让人以为"我的人设没生效，可能是别的问题"
       if (typeof log === 'function') {
-        log(`❌ [persona] persona.custom 被拒绝（整文件不加载）：${scan.reasons.join('；')}`)
+        log(`❌ [persona] 这份人设被拒绝（整文件不加载）：${scan.reasons.join('；')}`)
       }
       return BLOCKED_PERSONA
     }

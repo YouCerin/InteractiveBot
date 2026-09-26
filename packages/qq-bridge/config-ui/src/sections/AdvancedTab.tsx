@@ -195,6 +195,28 @@ export function AdvancedTab({
         </CardContent>
       </Card>
 
+      {/* ★ 说话人标注名（0.2.2 从「人设」页搬过来）
+          —— 它以前挂在人设页、名字还就叫「称呼」，于是最容易被误当成
+          "它怎么称呼对方"。这里把它的真实作用写清楚。 */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">说话人标注名</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <FieldRow
+            label="标注名"
+            hint="提示词里标注「是谁在说话」用的名字（例如「(老板，管理员)」）；私聊的会话列表也用它显示。它**不影响**它怎么称呼对方 —— 那是「人设」页的「它怎么称呼对方」。留空则只标权限等级。"
+          >
+            <Input
+              value={getStr(cfg, 'persona.callerName')}
+              onChange={(e) => patch('persona.callerName', e.target.value)}
+              placeholder="例如：老板"
+              className="max-w-xs"
+            />
+          </FieldRow>
+        </CardContent>
+      </Card>
+
       {/* ★ 权限模式 */}
       <Card className={cn(perm === 'danger-full-access' && 'border-red-400')}>
         <CardHeader className="pb-2">
