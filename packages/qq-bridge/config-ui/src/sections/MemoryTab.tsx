@@ -370,11 +370,13 @@ export function MemoryTab({
       {/* 记忆按人分开（§2.5）：归属说明 + 如实说明隔离强度 */}
       <InlineNote level="info">
         <Users className="mr-1 inline h-3.5 w-3.5" />
-        记忆<strong>按会话分开</strong>：每人的私聊、每个群各有自己的一份笔记
-        （<code className="rounded bg-white/50 px-1">memory/private-QQ号.md</code>、
+        记忆分<strong>两层</strong>：
+        <strong>全局记忆</strong>（<code className="rounded bg-white/50 px-1">MEMORY.md</code>）
+        —— <strong>对所有聊天生效</strong>（每个人的私聊 + 每个群）；
+        以及<strong>本会话专属记忆</strong>（
+        <code className="rounded bg-white/50 px-1">memory/private-QQ号.md</code>、
         <code className="rounded bg-white/50 px-1">memory/group-群号.md</code>）。
-        「全局记忆」（<code className="rounded bg-white/50 px-1">MEMORY.md</code>）只在私聊里可见，
-        <strong>群里看不到</strong>。
+        全局是共享的，所以<strong>别把某人的私事写进去</strong>。
       </InlineNote>
       <InlineNote level="warn">
         隔离是靠<strong>提示词告诉模型只读自己那份</strong>实现的，不是文件系统层面的强制——
@@ -383,7 +385,7 @@ export function MemoryTab({
       </InlineNote>
       <InlineNote level="info">
         <strong>写入权已经收回到桥接</strong>：模型只能在回复里"提议"记什么
-        （<code className="rounded bg-white/50 px-1">{'<<<MEMORY fact|slang|directive 内容>>>'}</code>），
+        （<code className="rounded bg-white/50 px-1">{'<<<MEMORY global|fact|slang|directive 内容>>>'}</code>），
         由桥接校验后落盘。三个后果你需要知道：
         <ul className="mt-1 list-disc pl-5">
           <li>
@@ -392,8 +394,15 @@ export function MemoryTab({
             <strong>关掉记忆功能</strong>（<code className="rounded bg-white/50 px-1">memory.enabled</code>）再改。
           </li>
           <li>
-            <strong>指令档跨群生效</strong>：只有管理员在<strong>私聊</strong>里说的"以后遇到 X 就这样做"
-            会写进 <code className="rounded bg-white/50 px-1">MEMORY.md</code>，对所有群有效。
+            <strong>要跨会话共享就写 global</strong>：模型用{' '}
+            <code className="rounded bg-white/50 px-1">global</code> 档写进{' '}
+            <code className="rounded bg-white/50 px-1">MEMORY.md</code>（所有聊天可见）；
+            只跟某个人/某个群有关的事走 <code className="rounded bg-white/50 px-1">fact</code>。
+          </li>
+          <li>
+            <strong>行为指令另有单独一份</strong>：管理员在<strong>私聊</strong>里说的"以后遇到 X 就这样做"
+            写进 <code className="rounded bg-white/50 px-1">memory/.directives.md</code>，跨群生效，
+            且只有管理员能写。
           </li>
           <li>
             涉及「谁是管理员/有什么权限」的内容<strong>一律会被拒</strong>并在下一轮回执给模型 ——

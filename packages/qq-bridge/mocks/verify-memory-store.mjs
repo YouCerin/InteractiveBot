@@ -103,8 +103,11 @@ function main() {
 
     const ok = write({ tier: 'admin', kind: 'private', entry: '以后遇到问天气就直接说不方便' })
     check('★ 管理员私聊下令 → 采纳', ok.applied.length === 1, JSON.stringify(ok.ignored))
-    check('落到了全局指令文件 MEMORY.md', read('MEMORY.md').includes('（指令）以后遇到问天气'),
-      read('MEMORY.md').trim())
+    // 指令另有单独一份文件（不放 MEMORY.md：那是**全局记忆**，人人可写）；
+    // 名字不能以 `.` 开头 —— 写入走 resolveMemoryPath，它拒绝隐藏文件。
+    check('落到了独立的指令文件 memory/directives.md',
+      read('memory/directives.md').includes('（指令）以后遇到问天气'),
+      read('memory/directives.md').trim())
     check('指令档**跨群可见**（这是它存在的意义）', (() => {
       const seen = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: GROUP })
       return seen.text.includes('以后遇到问天气')
@@ -145,6 +148,49 @@ function main() {
       r.applied[0].rel)
     const seen = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: '999999' })
     check('★ 别的群看不到这个群的记忆', !seen.text.includes('这个群周末有活动'), seen.text.slice(0, 60))
+  }
+
+  section('④b ★ 全局记忆：对所有聊天生效，私聊/群聊另有各自一份')
+  {
+    // 用户明确的目标结构：**全局 + 每会话** 两层。
+    // MEMORY.md 是全局层（所有聊天都注入）；本会话那份仍然只在本会话可见。
+    const r = applyMemoryItems({
+      workspace: WORK,
+      kind: 'group',
+      peerId: GROUP,
+      senderId: NON_ADMIN,
+      tier: 'user',
+      items: [{ scope: SCOPE.GLOBAL, text: '大家都叫我小鲸鱼' }],
+    })
+    check('★ 群聊里也能提议写全局记忆（全局是共享层）', r.applied.length === 1, JSON.stringify(r.ignored))
+    check('落点是 MEMORY.md', r.applied[0]?.rel === 'MEMORY.md', r.applied[0]?.rel)
+    check('文件里带「（全局）」前缀，便于区分来源', read('MEMORY.md').includes('（全局）大家都叫我小鲸鱼'),
+      read('MEMORY.md').trim())
+
+    const inGroup = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: '555555' })
+    const inPrivate = readMemoryForPrompt({ workspace: WORK, kind: 'private', peerId: '666666' })
+    check('★ 另一个群也看得到全局记忆', inGroup.text.includes('大家都叫我小鲸鱼'), inGroup.files.join(','))
+    check('★ 别人的私聊也看得到全局记忆', inPrivate.text.includes('大家都叫我小鲸鱼'), inPrivate.files.join(','))
+    check('全局层的标签写明"对所有聊天都生效"', inGroup.text.includes('对所有聊天都生效'),
+      inGroup.text.slice(0, 50))
+
+    // 私聊提议全局也一样（不该只有群聊能写）
+    const rp = applyMemoryItems({
+      workspace: WORK,
+      kind: 'private',
+      peerId: '123123',
+      senderId: '123123',
+      tier: 'user',
+      items: [{ scope: SCOPE.GLOBAL, text: '这条从私聊写进全局' }],
+    })
+    check('普通用户私聊也能写全局（不是管理员特权）', rp.applied.length === 1, JSON.stringify(rp.ignored))
+
+    // 本会话那份仍然隔离：A 群的 fact 不该出现在 B 群
+    const gA = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: GROUP })
+    const gB = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: '555555' })
+    check('★ 本会话记忆仍然严格隔离（A 群的 fact 不进 B 群）',
+      gA.text.includes('这个群周末有活动') && !gB.text.includes('这个群周末有活动'),
+      gB.text.slice(0, 60))
   }
 
   section('⑤ 去重与上限')

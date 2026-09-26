@@ -638,9 +638,27 @@ function computePeriod(peak, now = new Date()) {
 |---|---|
 | 谁写记忆？ | **桥接**。模型只能提议，判据是代码（`roster` 按 `access.adminUsers` 判定 tier） |
 | 怎么读取？ | 桥接每轮**直接注入**（不再让模型自己去读文件 —— 少一次工具往返，也不会漏读） |
-| 存哪？ | `<工作区>/MEMORY.md`（**指令档**，跨群）+ `memory/`（按人/按群的 facts 与 slang）+ `memory/.snapshots/`（快照）+ `memory/.receipts/`（回执） |
+| 存哪？ | **两层**：全局记忆 `MEMORY.md`（对**所有聊天**生效）+ 本会话专属 `memory/private-<QQ>.md` / `memory/group-<群号>.md` / 黑话 `memory/group-<群号>-slang.md`；另有管理员专属 `memory/directives.md`（行为指令）与内部目录 `memory/.snapshots/`、`memory/.receipts/` |
 | 重启会丢吗？ | **不丢**。工作区是磁盘上的普通目录 |
 | 每轮都注入吗？ | **是**，但内容很短（条数上限 25 条/文件），且**不含路径** —— 保住 DeepSeek 的前缀缓存（实测命中率 91%~96%） |
+
+**★ 四档作用域（写错会串场）**
+
+| 档位 | 落到哪 | 谁可写 | 生效范围 |
+|---|---|---|---|
+| `global` | `MEMORY.md` | **任何人**（全局是共享层） | **所有聊天**（私聊 + 每个群） |
+| `fact` | 本会话那层 | 任何人 | 只在本会话（群聊只本群、私聊只本人） |
+| `slang` | `memory/group-<群号>-slang.md` | 任何人 | 只在本群 |
+| `directive` | `memory/directives.md` | **仅管理员、且仅私聊** | 跨群（改行为，所以判据最严） |
+
+⚠️ **`global` 与 `fact` 的区别是界面必须讲清的**：global 谁都看得到，所以只放
+"普遍成立、且不含任何人私事"的内容；涉及某个人或某个群的事一律走 `fact`。
+否则就是把私事贴到所有群。
+
+⚠️ **指令文件名不能以 `.` 开头**：写入要走 `memory-files.mjs` 的
+`resolveMemoryPath`，它明确拒绝隐藏文件（安全底线）。第一版写成
+`memory/.directives.md`，结果指令**根本写不进去**（报"路径不合法"），被测试抓出。
+（`.snapshots/`、`.receipts/` 能用 `.` 开头，是因为桥接自己直接 fs 写，不走那条校验。）
 
 **★ 硬保证（这几条在代码里，不在提示词里）：**
 

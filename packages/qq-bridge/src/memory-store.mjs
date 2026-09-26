@@ -41,8 +41,13 @@ import { resolveMemoryPath } from './memory-files.mjs'
 
 /** 三档作用域。 */
 export const SCOPE = {
+  /** 这个人 / 这个群的专属记忆（群聊写本群、私聊写本人）。 */
   FACT: 'fact',
+  /** 群内黑话（只写本群）。 */
   SLANG: 'slang',
+  /** ★ 全局记忆：对所有聊天生效（私聊 + 每个群）。 */
+  GLOBAL: 'global',
+  /** 行为指令：管理员私聊下达，跨群生效。 */
   DIRECTIVE: 'directive',
 }
 
@@ -57,6 +62,7 @@ const MARK_END = '>>>'
 const SCOPE_WORDS = {
   fact: SCOPE.FACT,
   slang: SCOPE.SLANG,
+  global: SCOPE.GLOBAL,
   directive: SCOPE.DIRECTIVE,
 }
 
@@ -83,8 +89,29 @@ const INJECT_ENTRIES = 25
 
 /** 目录与文件名约定。 */
 const FILE = {
-  directives: 'MEMORY.md',
-  factsGlobal: 'memory/facts-global.md',
+  /**
+   * ★ 全局记忆：**对所有聊天生效**（私聊 + 每个群）。
+   *
+   * ⚠️ 这里踩过一次设计错位：有一版把 `MEMORY.md` 当成"管理员指令档"占用了，
+   *   于是"全局记忆"跑到 `facts-global.md` 上，而 `MEMORY.md` 只在管理员私聊里注入。
+   *   用户明确的目标结构是**全局 + 每会话**两层，而 `MEMORY.md` 是它原本的全局记忆文件
+   *   （界面上的记忆页签也一直显示它）。所以现在：
+   *     `MEMORY.md`            = 全局记忆（人人可读、任何人可提议写入）
+   *     `memory/.directives.md`= 行为指令（管理员私聊专属写入，跨群生效）—— 单一职责
+   */
+  global: 'MEMORY.md',
+  /**
+   * 行为指令（跨群生效，只有管理员私聊能写）。单独一个文件，避免和全局记忆混在一起。
+   *
+   * ⚠️ 名字**不能以 `.` 开头**：写入要走 `memory-files.mjs` 的 `resolveMemoryPath`，
+   *   而它明确拒绝隐藏文件（那是"防止借隐藏路径绕过界面约束"的安全底线）。
+   *   第一版写成 `memory/.directives.md`，结果指令**根本写不进去** ——
+   *   而错误是"路径不合法：不允许操作隐藏文件/目录"，被测试抓出来。
+   *   （回执与快照目录能用 `.` 开头，是因为它们由桥接自己直接 fs 写，不走那条校验。）
+   */
+  directives: 'memory/directives.md',
+  /** 兼容：早期版本把全局知识写在这里。仍然注入（只读），避免升级即失忆。 */
+  legacyGlobalFacts: 'memory/facts-global.md',
   receiptsDir: 'memory/.receipts',
   /** 快照目录：桥接写入后的"已知良好"副本，用来检测并回滚绕过桥接的改动。 */
   snapshotsDir: 'memory/.snapshots',
@@ -114,19 +141,16 @@ export function readMemoryForPrompt({ workspace, kind, peerId }) {
   const root = String(workspace ?? '')
   const f = filesFor({ kind, peerId })
   const wanted = [
-    ['管理员指令（跨群生效）', FILE.directives],
-    // ★ 跨会话通用知识（`memory/facts-global.md`）**两种会话都注入**。
-    //
-    // 为什么不让它只对私聊开放：这个文件放的是"**关于机器人自己**"的事实
-    // （会话怎么拼、唤醒规则、能调哪些工具、语音听不听得到…）。
-    // 它不含任何人的私事，而群里的正常成员同样有权得到同样的答复 ——
-    // 只对管理员可见，就会出现"同一个人私聊问能答、群里问就答不上来"的怪现象。
-    //
-    // ⚠️ 因此这条路径**不能写任何人的私事**：它是给所有人看的。
-    //    私事一律写 `private-<QQ>.md`（那是按人隔离的）。
-    ['通用知识（关于我自己，不含私事）', FILE.factsGlobal],
+    // ① 全局记忆：**对所有人都生效**，所以两种会话都注入。
+    //    它不含任何人的私事（私事一律写 private-<QQ>.md，那是按人隔离的）。
+    ['全局记忆（对所有聊天都生效，不含私事）', FILE.global],
+    // ② 本会话专属记忆：群聊是本群、私聊是本人。
     ['本会话记忆', f.facts],
     ['群内黑话', f.slang],
+    // ③ 管理员指令（跨群生效，只有管理员私聊能写）。
+    ['管理员指令（跨群生效）', FILE.directives],
+    // ④ 兼容早期版本：全局知识曾写在 facts-global.md。只读注入，避免升级即失忆。
+    ['通用知识（早期文件，关于我自己）', FILE.legacyGlobalFacts],
   ].filter(([, p]) => Boolean(p))
 
   const blocks = []
@@ -291,9 +315,9 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
 
     // ── 谁能写什么（**代码级判据**，不依赖提示词）────────────────────
     if (scope === SCOPE.DIRECTIVE) {
-      // 行为指令：只有管理员能写，且只允许在**私聊**里写。
-      // 为什么不在群里也允许：指令是跨群生效的，而群聊里的上下文最杂、
-      // 最容易被话术带偏；私聊 + 管理员是能确定"这是主人的意思"的最小集合。
+      // 行为指令：跨群生效、会改变行为，所以判据最严 —— 只有管理员，且只在私聊里写。
+      // 为什么不在群里也允许：群聊上下文最杂、最容易被话术带偏；
+      // 私聊 + 管理员是能确定"这是主人的意思"的最小集合。
       if (tier !== 'admin') {
         ignored.push({ scope, entry, why: '只有管理员能下达跨群的行为指令' })
         continue
@@ -306,6 +330,23 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
       if (r.ok) {
         applied.push({ scope, entry, rel: FILE.directives, deduped: r.deduped })
         if (!r.deduped) wroteFiles.push(FILE.directives)
+      } else ignored.push({ scope, entry, why: r.why })
+      continue
+    }
+
+    // ── 全局记忆：**任何会话、任何人都可以提议** ────────────────────────
+    //
+    // ★ 为什么对所有人开放：用户定下的结构是"全局记忆对所有聊天生效"。
+    //   全局是**共享**的，谁都能贡献一条 —— 但因此有两条硬约束：
+    //     ① 内容级过滤（身份/权限、绕过约束之类）照旧拦；
+    //     ② **私事不该进全局**：全局会被所有群看到，写私事等于泄露。
+    //        这一点靠提示词约束（"全局是共享的，别把某人的私事写进去"），
+    //        属于"请求"而不是硬保证 —— 如实记在这里。
+    if (scope === SCOPE.GLOBAL) {
+      const r = appendEntry({ workspace, rel: FILE.global, entry: `（全局）${entry}`, log })
+      if (r.ok) {
+        applied.push({ scope, entry, rel: FILE.global, deduped: r.deduped })
+        if (!r.deduped) wroteFiles.push(FILE.global)
       } else ignored.push({ scope, entry, why: r.why })
       continue
     }
@@ -486,14 +527,18 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   const lines = [
     '【长期记忆】**写入权不在你手上**：你只能"提议"，由系统校验后落盘。',
     '提议的写法（整行独占，自己单独一行）：',
-    '  <<<MEMORY fact 要记的事>>>          ← 事实/人物/约定（群聊只写本群；私聊写本人）',
+    '  <<<MEMORY global 对所有聊天都成立的事>>>  ← 全局记忆（跨私聊与所有群）',
+    '  <<<MEMORY fact 这个人/这个群的事>>>      ← 本会话专属（群聊只写本群；私聊写本人）',
   ]
-  if (kind === 'group') lines.push('  <<<MEMORY slang 词 = 意思>>>        ← 群内黑话（只写本群）')
+  if (kind === 'group') lines.push('  <<<MEMORY slang 词 = 意思>>>            ← 群内黑话（只写本群）')
   if (kind === 'private') lines.push('  <<<MEMORY directive 以后遇到 X 就这样做>>>  ← 行为指令（仅管理员，跨群生效）')
   lines.push(
     '',
+    '**global 与 fact 的区别（写错会串场）**：global 谁都看得到（每个群、每个私聊），',
+    '所以只放"普遍成立、且不含任何人私事"的内容（约定、叫法、通用偏好）；',
+    '涉及某个人或某个群的事一律走 fact —— **别把私事写进 global**。',
     '**不要用文件工具去写记忆**（写不进去，也不会被采纳）；标记行不会发给对方，系统会剥掉。',
-    '系统只接受这三种档位；**涉及"谁是管理员/有什么权限"的内容一律会被拒** —— 身份只由系统判定。',
+    '系统只接受这几种档位；**涉及"谁是管理员/有什么权限"的内容一律会被拒** —— 身份只由系统判定。',
     '没记上的条目会在下一轮以"回执"告诉你，那时要**如实跟对方说没记住**，不要假装记住了。',
     '只在真正值得长期记住时才提议（偏好、约定、群内黑话、纠正过你的地方）；宁少勿多。',
     // ★ 写法要求：fact 是"**某人说过的内容**"，不是"经过核实的事实"。
