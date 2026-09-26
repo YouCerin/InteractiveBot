@@ -1,0 +1,39 @@
+{
+  "name": "qq-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QQ <-> DSH bridge: relays triggering QQ messages into a `dsh --profile sdk` agent session and sends the answer back. Replaces the in-process llm.stream design of packages/dsh-qq-bot.",
+  "main": "src/index.mjs",
+  "scripts": {
+    "setup": "node setup.mjs",
+    "setup:check": "node setup.mjs --check",
+    "start": "node src/index.mjs",
+    "check": "node src/index.mjs --check",
+    "mock:sdk": "node mocks/mock-sdk-server.mjs",
+    "mock:onebot": "node mocks/mock-onebot-server.mjs",
+    "test": "node mocks/verify-manifest.mjs && node mocks/verify-config.mjs && node mocks/verify-units.mjs && node mocks/verify-local.mjs && node mocks/verify-credentials.mjs && node mocks/verify-images.mjs && node mocks/verify-rpc.mjs && node mocks/verify-onebot.mjs && node mocks/verify-mcp.mjs && node mocks/verify-mcp-profile.mjs && node mocks/verify-real-dsh.mjs && node mocks/verify-doctor.mjs && node mocks/verify-api.mjs && node mocks/verify-apitest.mjs",
+    "test:images": "node mocks/verify-images.mjs",
+    "test:credentials": "node mocks/verify-credentials.mjs",
+    "test:manifest": "node mocks/verify-manifest.mjs",
+    "test:config": "node mocks/verify-config.mjs",
+    "test:mcp": "node mocks/verify-mcp.mjs",
+    "test:units": "node mocks/verify-units.mjs",
+    "test:rpc": "node mocks/verify-rpc.mjs",
+    "test:onebot": "node mocks/verify-onebot.mjs",
+    "test:real": "node mocks/verify-real-dsh.mjs",
+    "test:doctor": "node mocks/verify-doctor.mjs",
+    "test:live": "node mocks/verify-live.mjs",
+    "test:clean": "node mocks/verify-live.mjs --clean",
+    "doctor": "node src/index.mjs --doctor"
+  },
+  "comment": {
+    "dependencies": "运行期依赖不走 npm，而是由 setup.mjs 复制到 vendor/node_modules（这样整个包可以整体搬走）。下面的 dependencies 只是给手工 npm install 时作参考。"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

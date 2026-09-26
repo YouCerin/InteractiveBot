@@ -1,0 +1,70 @@
+# 工作区根的忽略规则。
+#
+# ── 为什么要单独有一份（而不是只靠各子目录的 .gitignore）──────────────────
+# 这里很多"不该进仓库"的东西是**运行产物与明文密钥**，它们散落在子目录里，
+# 而子目录的规则未必覆盖得到（实例：packages/qq-bridge/cache/mcp-qq.config.json
+# 里存着 SnowLuma 的 httpToken 明文，长期没被任何规则挡住）。
+# 仓库根放一份显式规则，"什么不该进库"就有一个可读的单一答案。
+#
+# ⚠️ 一个容易忽略的事实：**.gitignore 只能拦住"未跟踪"的文件**。
+#    已经被跟踪的文件，加规则不会让它失效 —— 必须 `git rm --cached <path>`。
+#    所以**第一次提交就要把规则写对**，比事后补救省事得多。
+
+# ── Node ──
+node_modules/
+*.tsbuildinfo
+npm-debug.log*
+# npm/npx 的本地缓存（不只是日志：`.npm-cache/_cacache/` 里是成千上万个
+# content blob，塞进仓库既无意义又让首次提交变得很重）
+.npm-cache/
+.npm/
+.cache/
+
+# ── 旧架构目录（`packages/dsh-qq-bot（废弃）`）──
+# 它已被 qq-bridge 取代，但里面残留了一份 .npm-cache 与 node_modules。
+# 保留目录本身无意义：需要考古时看 README/AGENT.md 的说明即可。
+/packages/dsh-qq-bot（废弃）/.npm-cache/
+/packages/dsh-qq-bot（废弃）/node_modules/
+
+# ── 编译 / 打包产物 ──
+lib/
+dist/
+build/
+*.node
+*.dll
+*.so
+*.exe
+
+# ── 上游参考仓库：它自带 .git（是别人仓库的镜像），不作为本仓库内容 ──
+# 需要时按需重新 clone；把它塞进来只会让本仓库多出几万行不属于我们的文件。
+/reference/dsh-agent-teams/
+
+# ── 编辑器 / 临时文件 ──
+.vscode/
+.idea/
+*.tmp
+*.bak
+*.bak-*
+*~
+*.swp
+
+# ── 运行痕迹（聊天内容、日志、用量记账都可能含隐私）──
+.tmp-*/
+*.log
+
+# ── SnowLuma（第三方 QQ 协议端）：整个目录都不进库 ──
+# 三个理由，任何一个单独都足够：
+#   ① `data/` 里是 **QQ 登录态与消息数据库**（messages.db / media.db / reactions.db）
+#      —— 别人的聊天记录，属于隐私，绝不能进版本库；
+#   ② `config/onebot_<QQ>.json` 里有 **accessToken 明文**（同 config.json 的道理）；
+#   ③ 它本身是第三方发行包（22 MB），且发布包**不允许**包含它（EULA §5.4）。
+# 需要时去官方 Releases 下载，或在 config.json 的 snowluma.searchPaths 里指过去。
+/snowluma/
+
+# ── 明文密钥：宁可多写几条，也不要让它进历史 ──
+# （git 历史里的密钥即使之后删除也仍可被检出，属于"永久泄露"）
+cache/
+config.local.json
+.credentials.yaml
+.env
+*.env

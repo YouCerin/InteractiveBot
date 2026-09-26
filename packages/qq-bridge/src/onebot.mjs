@@ -1,0 +1,329 @@
+/**
+ * OneBot v11 客户端：**WebSocket 只收事件，HTTP 只负责发送**。
+ *
+ * ── 为什么收和发走两条不同的路 ─────────────────────────────────────────
+ * OneBot v11 的两个通道职责是分开的，这是协议规定、不是我们的选择：
+ *
+ *   WebSocket（正向，我们主动连协议端）→ 协议端**推事件**给我们（有人说话）
+ *   HTTP（我们 POST 到协议端）        → 我们**下指令**（发消息、查列表）
+ *
+ * 为什么事件不也用 HTTP？因为事件是"随时可能来"的，HTTP 是"我问你才答"，
+ * 没法被动接收。所以收事件必须用长连接 WebSocket。
+ *
+ * ── ⚠️ SnowLuma 的两个坑（已从它的实际配置读出）────────────────────────
+ *   坑 1：**HTTP 和 WebSocket 用的是两个不同的 accessToken**。
+ *         这与 NapCat 常见做法（两边同一个）不同。填错的表现是
+ *         "连接成功但每次请求都 401"，很容易误判成网络问题。
+ *   坑 2：消息格式是 `array`（消息段数组）。解析时以数组为主路径，
+ *         CQ 字符串只作兜底。
+ */
+
+import { assertVendored, vendorRequire } from './vendor.mjs'
+
+// `ws` 从 vendor/node_modules 加载（不是标准 node_modules）—— 这样整个包
+// 换地方也能跑。细节见 src/vendor.mjs 的注释。
+assertVendored('ws')
+const WebSocket = vendorRequire('ws')
+
+/** 这些 action 会传输较大的响应体，给更宽容的超时。 */
+const SLOW_ACTIONS = new Set([
+  'get_group_list',
+  'get_friend_list',
+  'get_group_member_list',
+  'get_forward_msg',
+  'get_image',
+  'get_record',
+])
+
+const CALL_TIMEOUT_MS = 15_000
+const SLOW_TIMEOUT_MS = 90_000
+
+export class OneBotClient extends EventTarget {
+  #ws = null
+  #closed = false
+  #reconnectTimer = null
+  #attempt = 0
+  #rpcSeq = 0
+
+  /**
+   * @param {object} opts
+   * @param {string} opts.wsUrl         事件通道（正向 WebSocket）
+   * @param {string} opts.httpUrl       发送通道（HTTP API）
+   * @param {string} [opts.wsToken]     WebSocket 的 accessToken
+   * @param {string} [opts.httpToken]   HTTP 的 accessToken（可能与上面不同！）
+   * @param {string|number|null} [opts.selfId]
+   */
+  constructor({ wsUrl, httpUrl, wsToken = '', httpToken = '', selfId = null, log = () => {} }) {
+    super()
+    if (!wsUrl) throw new Error('OneBotClient: wsUrl 必填')
+    if (!httpUrl) throw new Error('OneBotClient: httpUrl 必填')
+    this.wsUrl = wsUrl
+    this.httpUrl = httpUrl.replace(/\/+$/, '')
+    this.wsToken = wsToken
+    this.httpToken = httpToken || wsToken
+    this.selfId = selfId == null ? null : String(selfId)
+    this.log = log
+  }
+
+  get connected() {
+    return this.#ws !== null && this.#ws.readyState === WebSocket.OPEN
+  }
+
+  /** 建立事件通道，并保持自动重连。 */
+  connect() {
+    this.#closed = false
+    this.#open()
+    return this
+  }
+
+  #open() {
+    if (this.#closed) return
+    clearTimeout(this.#reconnectTimer)
+
+    const url = new URL(this.wsUrl)
+    if (this.wsToken && !url.searchParams.has('access_token')) {
+      url.searchParams.set('access_token', this.wsToken)
+    }
+
+    this.log(`[onebot] 连接事件通道 ${url.origin}${url.pathname}`)
+    const ws = new WebSocket(url, {
+      headers: this.wsToken ? { authorization: `Bearer ${this.wsToken}` } : {},
+    })
+    this.#ws = ws
+
+    ws.on('open', () => {
+      this.#attempt = 0
+      this.log('[onebot] 事件通道已连接')
+      this.dispatchEvent(new CustomEvent('connected'))
+    })
+
+    ws.on('message', (raw) => {
+      const text = typeof raw === 'string' ? raw : raw.toString('utf8')
+      let payload
+      try {
+        payload = JSON.parse(text)
+      } catch {
+        this.log(`[onebot] 收到非 JSON 帧，已忽略：${text.slice(0, 120)}`)
+        return
+      }
+      // 事件可以是一个对象，也可以是数组（批量上报）——两种都要支持。
+      if (Array.isArray(payload)) {
+        for (const item of payload) this.#emitEvent(item)
+      } else {
+        this.#emitEvent(payload)
+      }
+    })
+
+    ws.on('close', (code) => {
+      this.log(`[onebot] 事件通道断开 code=${code}`)
+      this.dispatchEvent(new CustomEvent('disconnected', { detail: { code } }))
+      this.#scheduleReconnect()
+    })
+
+    ws.on('error', (error) => {
+      // ws 的 error 之后紧跟 close，所以这里只记日志、不重复调度重连。
+      this.log(`[onebot] 事件通道错误：${error.message}`)
+    })
+  }
+
+  #emitEvent(payload) {
+    if (!payload || typeof payload !== 'object') return
+    this.dispatchEvent(new CustomEvent('event', { detail: payload }))
+  }
+
+  #scheduleReconnect() {
+    if (this.#closed) return
+    this.#attempt += 1
+    // 指数退避，封顶 30 秒：断线初期快速重试，长期断开后不要疯狂重连
+    // （疯狂重连本身也可能被风控盯上）。
+    const delay = Math.min(1000 * 2 ** Math.min(this.#attempt, 5), 30_000)
+    this.log(`[onebot] ${delay}ms 后重连（第 ${this.#attempt} 次）`)
+    this.#reconnectTimer = setTimeout(() => this.#open(), delay)
+  }
+
+  /**
+   * 调用一个 OneBot action（HTTP）。
+   *
+   * 校验逻辑按 OneBot v11 规范：成功时必须 status==='ok' **且** retcode===0。
+   * 只看一个是不够的 —— 有的实现只填其中一个。
+   */
+  async call(action, params = {}, timeoutMs = null) {
+    const limit = timeoutMs ?? (SLOW_ACTIONS.has(action) ? SLOW_TIMEOUT_MS : CALL_TIMEOUT_MS)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), limit)
+
+    try {
+      const response = await fetch(`${this.httpUrl}/${action}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {}),
+        },
+        body: JSON.stringify(params),
+        signal: controller.signal,
+      })
+
+      if (response.status === 426) {
+        // 426 Upgrade Required 是最经典的配置错误：把 HTTP 端口填成了 WS 端口。
+        throw new Error(
+          `OneBot ${action} 失败：HTTP 426（Upgrade Required）。` +
+            `几乎可以肯定 httpUrl 指向了 WebSocket 端口，请检查 SnowLuma 的 3000（HTTP）/3001（WS）是否填反。`,
+        )
+      }
+      if (!response.ok) {
+        throw new Error(`OneBot ${action} 失败：HTTP ${response.status}`)
+      }
+
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        throw new Error(`OneBot ${action} 返回了非 JSON 内容：${text.slice(0, 200)}`)
+      }
+
+      const ok = body.status === 'ok' || body.retcode === 0
+      if (!ok) {
+        throw new Error(
+          `OneBot ${action} 失败：retcode=${body.retcode ?? '?'} ${body.wording ?? body.msg ?? ''}`.trim(),
+        )
+      }
+      return body.data ?? null
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`OneBot ${action} 超时（${Math.round(limit / 1000)} 秒未返回）`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  // ── 常用封装 ──────────────────────────────────────────────────────────
+
+  async getLoginInfo() {
+    const info = await this.call('get_login_info')
+    if (info?.user_id != null) this.selfId = String(info.user_id)
+    return info
+  }
+
+  async getFriendList() {
+    return (await this.call('get_friend_list')) ?? []
+  }
+
+  async getGroupList() {
+    return (await this.call('get_group_list')) ?? []
+  }
+
+  /**
+   * 发送消息。
+   * @param {'private'|'group'} kind
+   * @param {string|number} peerId
+   * @param {string} text
+   */
+  async send(kind, peerId, text) {
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg'
+    const key = kind === 'private' ? 'user_id' : 'group_id'
+    return this.call(action, {
+      [key]: Number(peerId),
+      message: [{ type: 'text', data: { text: String(text ?? '') } }],
+    })
+  }
+
+  close() {
+    this.#closed = true
+    clearTimeout(this.#reconnectTimer)
+    if (this.#ws) {
+      try {
+        this.#ws.close()
+      } catch {
+        /* 关闭失败无所谓 */
+      }
+      this.#ws = null
+    }
+  }
+}
+
+/**
+ * 发送队列：拟人节流 + 去重。
+ *
+ * ── 为什么必须有这个 ───────────────────────────────────────────────────
+ * 这是**账号安全的必需品**，不是优化项：
+ *   · 秒回、连发、固定间隔是行为风控的教科书级特征
+ *   · 模型有时会重复调用发送（超时重发、多轮里说了同样的话）
+ * 所以这里做三件事：间隔拟人化（随机）、限频、短窗口内去重。
+ *
+ * 参数取自同类成熟项目的实测值（minGap 1s / maxGap 3s / 每分 8 条 /
+ * 去重窗口 8 秒），它们是被真实风控"教育"过的数字。
+ */
+export class SendQueue {
+  #lastSentAt = 0
+  #recent = new Map() // 文本 -> 时间戳
+  #window = [] // 最近发送的时间戳，用于限频
+
+  constructor({
+    minGapMs = 1000,
+    maxGapMs = 3000,
+    maxPerMinute = 8,
+    maxPerHour = 500,
+    dedupeWindowMs = 8000,
+    log = () => {},
+  } = {}) {
+    this.minGapMs = minGapMs
+    this.maxGapMs = Math.max(maxGapMs, minGapMs)
+    this.maxPerMinute = maxPerMinute
+    this.maxPerHour = maxPerHour
+    this.dedupeWindowMs = dedupeWindowMs
+    this.log = log
+  }
+
+  /**
+   * 检查是否可以发送。
+   * @returns {{ ok: boolean, reason?: string, waitMs?: number }}
+   */
+  check(text) {
+    const now = Date.now()
+
+    // ── 去重 ──
+    // 只在**发送成功后**才记账（见 markSent）。若在检查时就记账，
+    // 一次合法重试会被误判成重复而丢失。
+    const lastSame = this.#recent.get(text)
+    if (lastSame !== undefined && now - lastSame < this.dedupeWindowMs) {
+      return { ok: false, reason: `内容重复（${Math.round((now - lastSame) / 1000)} 秒前刚发过）` }
+    }
+
+    // ── 限频 ──
+    this.#window = this.#window.filter((t) => now - t < 3600_000)
+    const lastMinute = this.#window.filter((t) => now - t < 60_000).length
+    if (lastMinute >= this.maxPerMinute) {
+      return { ok: false, reason: `每分钟上限 ${this.maxPerMinute} 条已达` }
+    }
+    if (this.#window.length >= this.maxPerHour) {
+      return { ok: false, reason: `每小时上限 ${this.maxPerHour} 条已达` }
+    }
+
+    // ── 拟人间隔 ──
+    const gap = this.minGapMs + Math.floor(Math.random() * (this.maxGapMs - this.minGapMs + 1))
+    const elapsed = now - this.#lastSentAt
+    if (elapsed < gap) return { ok: true, waitMs: gap - elapsed }
+    return { ok: true, waitMs: 0 }
+  }
+
+  /** 发送成功后调用，记账。 */
+  markSent(text) {
+    const now = Date.now()
+    this.#lastSentAt = now
+    this.#window.push(now)
+    this.#recent.set(text, now)
+    // 清理过期的去重记录，防止无限增长
+    if (this.#recent.size > 200) {
+      for (const [key, at] of this.#recent) {
+        if (now - at > this.dedupeWindowMs) this.#recent.delete(key)
+      }
+    }
+  }
+
+  get pendingCount() {
+    return this.#window.filter((t) => Date.now() - t < 60_000).length
+  }
+}

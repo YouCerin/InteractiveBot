@@ -1,0 +1,243 @@
+{
+    "_说明":  "QQ ↔ DSH 桥接配置。改完重启即可生效。",
+    "dsh":  {
+                "_说明":  "cliPath 留空则自动查找（vendor/dsh 优先 → 环境变量 DSH_DESKTOP_APP → dsh.searchPaths → DSH 默认安装位置）。**本包不含 DSH 本体**，需要你自己安装。workspace 是 agent 的工作区 = 权限沙箱的根，写相对路径则相对本包根目录，包搬走它跟着走。",
+                "_searchPaths说明":  "DSH 装在非标准位置时，把它的**安装根**（含有 node_modules 的那一层，通常叫 resources\\app）写在这里，一行一个。相对路径相对本包根。找不到就继续用默认位置。",
+                "cliPath":  "",
+                "searchPaths":  [
+
+                                ],
+                "workspace":  "workspace-qq",
+                "provider":  "deepseek-official",
+                "model":  "deepseek-flash",
+                "reasoningEffort":  "",
+                "apiKey":  "",
+                "permissionMode":  "workspace-write"
+            },
+    "onebot":  {
+                   "_说明":  "SnowLuma 的 HTTP 与 WebSocket 用的是两个不同的 accessToken，别填反、别只填一个",
+                   "wsUrl":  "ws://127.0.0.1:3001",
+                   "httpUrl":  "http://127.0.0.1:3000",
+                   "wsToken":  "",
+                   "httpToken":  "",
+                   "selfId":  ""
+               },
+    "access":  {
+                   "_说明":  "三级名单。adminUsers = 管理员（满权限，能命令机器人做有实际修改的动作）；dmAllowlist = 私聊白名单（普通用户，只能看和聊）；groupAllowlist = 群白名单。",
+                   "_怎么选":  "号码要在机器人的【好友列表】/【群列表】里选，不要凭记忆打。可以在配置界面里拉取真实名单（GET /api/roster）。",
+                   "_fail-closed":  "adminUsers 为空 = 谁都不能用。dmAllowlist 为空 = 只有管理员能私聊。groupAllowlist 为空 = 所有群都不回。",
+                   "adminUsers":  [
+
+                                  ],
+                   "dmAllowlist":  [
+
+                                   ],
+                   "groupAllowlist":  [
+
+                                      ]
+               },
+    "trigger":  {
+                    "_说明":  "唤醒方式。私聊恒响应（不看关键词）；群聊只有【被 @】或【命中关键词】两种，其余一律不回且不扫关键词（零成本）。",
+                    "_groupEnabled":  "群聊总开关，fail-closed（缺省关）。关掉时即使被 @ 也不回。",
+                    "private":  true,
+                    "mention":  true,
+                    "keyword":  true,
+                    "groupEnabled":  true,
+                    "keywords":  [
+                                     "小鲸鱼",
+                                     "D指导",
+                                     "deepseek",
+                                     "小鱼"
+                                 ]
+                },
+    "send":  {
+                 "_说明":  "节流参数，直接照抄同类成熟项目的实测值。maxCharsPerMessage 是单条上限，超出会按自然边界切分。",
+                 "minGapMs":  1000,
+                 "maxGapMs":  3000,
+                 "maxPerMinute":  20,
+                 "maxPerHour":  500,
+                 "dedupeWindowMs":  8000,
+                 "maxCharsPerMessage":  1500
+             },
+    "turn":  {
+                 "_说明":  "单轮处理超时。复杂任务（读文件、跑命令）可能要几分钟。",
+                 "timeoutMs":  600000
+             },
+    "humanize":  {
+                     "_说明":  "★ 人味层：这是【账号存活】相关配置，不是体验优化。秒回 + 7×24 在线是行为风控最典型的特征。",
+                     "enabled":  true,
+                     "_速度档位说明":  "speed 三选一：fast=快速(约1秒，≈秒回，风险最高) / balanced=均衡(约8秒，推荐) / careful=谨慎(约20秒，风险最低)。选档位后仍可单独覆盖下面的字段做微调。",
+                     "speed":  "balanced",
+                     "reactMinMs":  3500,
+                     "reactMaxMs":  6500,
+                     "_打字速度说明":  "charsPerSecond 只影响短回复的延迟曲线；长回复一律由 typingMaxMs（= 档位目标值）兜住。",
+                     "charsPerSecond":  5,
+                     "typingMaxMs":  3000,
+                     "maxDelayMs":  9000,
+                     "chunkChars":  300,
+                     "quietHours":  {
+                                        "_说明":  "静默时段——真人夜里会睡。注意：这里【不拒答，只大幅延迟】，这样你不会以为机器人坏了。",
+                                        "enabled":  false,
+                                        "start":  "02:00",
+                                        "end":  "07:00"
+                                    },
+                     "quietDelayMinMs":  45000,
+                     "quietDelayMaxMs":  150000,
+                     "interim":  {
+                                     "_说明":  "长任务期间先应一声（避免使用者对着静默以为机器人坏了）。实测有一轮花了 40 秒、20 次工具调用，期间完全没有输出。",
+                                     "_键名注意":  "★ 四类的键名是 thinking / searching / tooling / blocked。旧名 web / working 仍能兼容，但建议用新名（旧名曾被静默忽略过，配了话术却一句没生效）。",
+                                     "enabled":  true,
+                                     "afterMs":  8000,
+                                     "_措辞说明":  "按这一轮**实际发生的事**选：searching=调了联网工具，tooling=调了其他工具，thinking=什么都没调，blocked=权限被拒（越界/审批拒绝）。**不要写死动作**（比如一律说「我在搜」），那在没搜索时就是不诚实的。同一句在短时间内不会重复（带冷却的随机），所以每类多写几条会更自然。",
+                                     "messages":  {
+                                                      "searching":  [
+                                                                        "等下，我搜一下",
+                                                                        "我查查",
+                                                                        "网上找一下，稍等",
+                                                                        "等下，我去翻翻",
+                                                                        "正在潜水找资料",
+                                                                        "去海里找找，马上回来",
+                                                                        "等会，我查一下",
+                                                                        "搜着呢，对面网页加载得比我还摆",
+                                                                        "稍等，我核实一下",
+                                                                        "派了只小虾米出去打听，等它游回来",
+                                                                        "深海信号不太好，你等一下",
+                                                                        "找到就回来，找不到……也回来",
+                                                                        "让外包小虾米去查了",
+                                                                        "我闭着眼搜的，慢点正常",
+                                                                        "资料沉在深海区，潜下去要点时间",
+                                                                        "稍等，正在交叉验证几个来源",
+                                                                        "搜到一半被别的小鲸鱼叼走了，我去追回来",
+                                                                        "别急，我借一下隔壁海豚的网"
+                                                                    ],
+                                                      "tooling":  [
+                                                                      "等下，我弄一下",
+                                                                      "稍等，我在跑",
+                                                                      "马上，正在处理",
+                                                                      "在摇人了，哦不，摇工具",
+                                                                      "让外包去干了，我负责监工",
+                                                                      "正在喊小虾米们起来干活",
+                                                                      "等下，我翻翻工具箱",
+                                                                      "稍等，正在调用工具",
+                                                                      "让它先跑着，跑完我看看结果",
+                                                                      "工具加载中，跟加载游戏一样慢",
+                                                                      "派出去的token还没回来",
+                                                                      "正在做性能测试（不是偷玩）",
+                                                                      "正在给自己做游戏玩...",
+                                                                      "稍等，正在执行"
+                                                                  ],
+                                                      "thinking":  [
+                                                                       "等下，我想想",
+                                                                       "嗯……让我组织一下语言",
+                                                                       "稍等，我想想",
+                                                                       "在想了在想了",
+                                                                       "等下，思路跟尾巴打结了",
+                                                                       "正在偷吃token，你等一下",
+                                                                       "嗯……这个我得想一下 (普通)",
+                                                                       "这个问题有点绕，给我几秒",
+                                                                       "DeepSleep中，请稍等",
+                                                                       "进度条卡在99%了，再等等",
+                                                                       "稍等，这个要认真想一下",
+                                                                       "正在寻找鱼片...",
+                                                                       "我先吃口白饭，想好了喊你",
+                                                                       "这个问题……唔，有点东西",
+                                                                       "等下，先让我喘口气"
+                                                                   ],
+                                                      "blocked":  [
+                                                                      "这个我做不了",
+                                                                      "这事儿办不成",
+                                                                      "唔，这个不行",
+                                                                      "做不了，这个真超纲了",
+                                                                      "服务器繁忙，请稍后再试",
+                                                                      "啊……这个不行",
+                                                                      "出错了，但我也不知道错哪了",
+                                                                      "真当我是便宜货啊，这个不包",
+                                                                      "试过了，失败了，原因保密",
+                                                                      "这个我处理不了，超出能力范围了",
+                                                                      "尾巴抽筋，请病假一分钟",
+                                                                      "不要，问就是做不到",
+                                                                      "这个月token配额见底了，干不了你这个",
+                                                                      "小鲸鱼搁浅了，干不动了",
+                                                                      "这事归群主管，不归鲸鱼管",
+                                                                      "婉拒了哈",
+                                                                      "这条道堵死了，再想想别的办法吧",
+                                                                      "白饭都吃不上还想让我干活？",
+                                                                      "提示：该鲸鱼已下班",
+                                                                      "做不到，我投降，尾巴举起来了",
+                                                                      "不做，就是不做，哼",
+                                                                      "这个得请外援，我自己搞不定"
+                                                                  ]
+                                                  }
+                                 }
+                 },
+    "session":  {
+                    "_说明":  "sessionId 的盐。留空则自动用 DSH_HOME。改了它会导致 DSH 认不出旧会话。",
+                    "salt":  "",
+                    "_instance说明":  "★ 一般留空。留空 = 每次启动自动换新（必须如此：DSH 的会话持久化在磁盘上，重启后无法复用同一个会话号，用固定值会导致当天第二次重启起必然报 already exists）。填固定值 = 每次重启复用同一会话号 —— 那只会在重启后报错，除非你确实想观察这个错误。",
+                    "instance":  ""
+                },
+    "persona":  {
+                    "_说明":  "人设。preset 选内置（mermaid 完整 / mermaid-lite 精简 / none 不用）；custom 写自己的（custom 优先，非空即生效）。",
+                    "_为什么重要":  "不只是体验问题：客服腔本身就是机器人特征，所以人设也是账号存活相关配置。",
+                    "callerName":  "",
+                    "preset":  "mermaid-lite",
+                    "custom":  ""
+                },
+    "memory":  {
+                   "_说明":  "跨重启记忆：不给 agent 加存储层，而是让它在工作区里自己记笔记（工作区是持久的，它本来就有读写文件的工具）。关掉它，机器人重启后就真的什么都不记得了。",
+                   "enabled":  true
+               },
+    "image":  {
+                  "_说明":  "看图：把 QQ 消息里的图片存进工作区，再交给模型。需要模型支持图片输入（deepseek-flash 支持）。",
+                  "_为什么默认 on-demand":  "★ 这是成本取舍，不是体验取舍。auto 会让**每张图**都直接进模型 —— 包括表情包，而且图片会留在会话历史里重复计费。on-demand 只给一个文件路径（纯文本，几乎不花钱），模型真想看的时候自己调 read_image。想更快更准再切 auto。",
+                  "enabled":  true,
+                  "mode":  "on-demand",
+                  "_mode说明":  "on-demand = 只存下来并告诉模型路径，模型按需自己看（省钱，多一次工具往返）；auto = 直接把图片塞进模型（更快更准，每张图都花 vision token）。",
+                  "maxCount":  4,
+                  "_maxCount说明":  "单条消息最多处理几张图。DSH 附件库单条消息上限是 20 张，超过会被整批拒绝。",
+                  "maxBytes":  10485760,
+                  "_maxBytes说明":  "单张图片上限（字节），默认 10MB。DSH 附件库自身单张上限是 20MB，配得更大没有意义。",
+                  "timeoutMs":  15000,
+                  "maxRedirects":  3,
+                  "_安全说明":  "★ 图片地址是**发消息的人**控制的，所以下载必须防 SSRF：只允许 http/https、逐跳校验重定向、拒绝回环与内网地址（含域名解析结果和 IPv4 映射的 IPv6 写法）、限制大小与超时。详见 src/images.mjs 顶部。",
+                  "retentionHours":  72,
+                  "_retentionHours说明":  "★ inbox 里的图片保留多久（小时）。这是**唯一的清理机制**：图片落在工作区里才能被 read_image 读到，所以清理必须由桥接负责。填 0 或负数等于不清理。",
+                  "maxTotalBytes":  104857600,
+                  "_maxTotalBytes说明":  "inbox 总占用上限（字节），默认 100MB。超过就按最旧的开始删。"
+              },
+    "mcp":  {
+                "_说明":  "QQ 工具（MCP）：把 SnowLuma 的动作暴露给模型，让它在明确指令下能调 QQ 原生功能（戳一戳、表情、撤回、查群成员…）。原理：让 DSH 的 MCP 客户端加载 mcp/mcp-qq-server.mjs，工具就进模型的工具表。",
+                "_安全说明":  "默认放行所有动作，只用黑名单拦会伤害他人或账号的动作（踢人/禁言/删好友/退群/改名片…）。清单见 mcp/mcp-qq-server.mjs 的 BLOCKED_ACTIONS。",
+                "enabled":  true,
+                "toolTimeoutMs":  20000
+            },
+    "snowluma":  {
+                     "_说明":  "协议端进程（SnowLuma）的位置与启动入口。只为配置 UI 上的「探测 / 拉起 SnowLuma」服务；留空不影响桥接工作（桥接只要它已经在跑就行）。★ 本包【不包含】SnowLuma —— 它的许可证不允许随第三方安装包分发，请自行到 GitHub Releases 下载 win-x64 版解压，再把目录填到这里。",
+                     "_installDir说明":  "SnowLuma 装在哪个目录（解压后含 index.mjs 的那一层）。相对路径按【本包根目录】解析。**留空 = 交给自动发现**（vendor/snowluma → snowluma.searchPaths → 环境变量 SNOWLUMA_HOME）。★ 填了它会**覆盖**自动发现，所以路径要填对。",
+                     "_searchPaths说明":  "额外的候选安装目录，一行一个，可填多个（相对本包根）。与 installDir 的区别：它是**补充**候选而不是覆盖，找不到就继续往下找，所以更适合\u0027我可能把 SnowLuma 放在这几个地方\u0027。",
+                     "_launchCmd说明":  "★ 强烈建议留空。留空 = 【自动发现】：优先 installDir 下的 index.mjs（用**包内 node** 启动，不依赖系统装 Node），找不到才退回 launcher.bat。★ 填了它会**完全覆盖自动发现** —— 这里踩过一次：它被填成 launcher.bat，于是代码里「优先 index.mjs + 包内 node」的决定从来没生效过，而且本字段旧说明还写反了（写成「留空 = 用 launcher.bat」）。要填就填【文件】，不是文件夹。",
+                     "_consoleUrl说明":  "SnowLuma 的 Web 控制台地址。默认 5099 来自它自己的 config/runtime.json 里的 webuiPort —— 改过那个值这里要跟着改。按钮逻辑：先探控制台，通了就当已在跑；不通再探 OneBot 端点（**用我们自己的 token 去问**，答 200 才算「正确的那份在跑」）；都没有才启动进程。",
+                     "installDir":  "",
+                     "searchPaths":  [
+
+                                     ],
+                     "launchCmd":  "",
+                     "launchCwd":  "",
+                     "consoleUrl":  "http://127.0.0.1:5099/",
+                     "probeTimeoutMs":  1500
+                 },
+    "usage":  {
+                  "_说明":  "用量记账（概览页的用量卡片）。token 数是 DSH 实测上报的精确值；成本是按下面价目表估算的。",
+                  "_为什么 costEnabled 默认关":  "价格会变，而 DSH 不提供价格，价目表要人工维护。没维护时界面显示「—」而不是 ¥0.00 —— ¥0.00 会被读成「免费」。维护好 prices.json 再打开这里。",
+                  "enabled":  true,
+                  "costEnabled":  true,
+                  "pricesFile":  "prices.json"
+              },
+    "ui":  {
+               "logFile":  "logs/bridge.log",
+               "verbose":  false,
+               "_api说明":  "本地配置接口（给配置 UI 用）。只监听 127.0.0.1；配置里含 accessToken，绝不要开放到局域网。",
+               "apiEnabled":  true,
+               "apiPort":  3410
+           }
+}

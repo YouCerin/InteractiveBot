@@ -1,0 +1,59 @@
+{
+  "_说明": "临时配置：仅供 verify-live.mjs 做真实端到端测试使用，不影响 config.json。",
+
+  "dsh": {
+    "cliPath": "",
+    "workspace": ".tmp-live-workspace",
+    "provider": "deepseek-official",
+    "model": "deepseek-flash",
+    "reasoningEffort": "",
+    "permissionMode": "workspace-write"
+  },
+
+  "onebot": {
+    "wsUrl": "ws://127.0.0.1:3001",
+    "httpUrl": "http://127.0.0.1:3000",
+    "wsToken": "rh8i8FeVLpfrpPtCmbj0XP1WEZksbD0DtaN8sjr9knU",
+    "httpToken": "GrIArcpJg2v-TyjijcKehkLcTOe6THTZgsGaqmGsoVU",
+    "selfId": "200000001"
+  },
+
+  "access": {
+    "_说明": "测试用管理员＝本机唯一的真人好友（该号在 QQagent_DeepSeek 配置里被标注为「管理员」）",
+    "adminUsers": ["100000001"]
+  },
+
+  "trigger": {
+    "private": true,
+    "mention": true,
+    "keyword": true,
+    "groupEnabled": false,
+    "keywords": ["小鲸鱼"]
+  },
+
+  "send": {
+    "minGapMs": 0,
+    "maxGapMs": 0,
+    "maxPerMinute": 8,
+    "maxPerHour": 500,
+    "dedupeWindowMs": 0,
+    "maxCharsPerMessage": 4000
+  },
+
+  "turn": {
+    "timeoutMs": 240000
+  },
+
+  "session": {
+    "salt": "live-test"
+  },
+
+  "persona": {
+    "callerName": "管理员"
+  },
+
+  "ui": {
+    "logFile": "logs/live-test.log",
+    "verbose": true
+  }
+}

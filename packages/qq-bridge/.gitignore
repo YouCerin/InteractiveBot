@@ -1,0 +1,42 @@
+# 桥接运行期产物 —— 不应提交，也不应被打包进分发包。
+#
+# 为什么工作区也要忽略：它是 agent 的权限沙箱根，里面会堆积 agent 读写的
+# 临时文件、下载内容、它自己创建的东西。这些东西属于"运行痕迹"，
+# 分享这个包给别人时不应该带出去。
+
+logs/
+workspace-qq/
+
+# 测试产生的临时目录
+.tmp-verify/
+.tmp-verify-onebot/
+.tmp-verify-doctor/
+.tmp-live-workspace/
+.tmp-live-outside/
+.tmp-probe-dsh/
+
+# 包内自带的依赖与运行时由 setup.mjs 生成，不入库
+# （想连依赖一起分发，直接打包整个目录即可）
+#
+# ★ vendor/ 里有 85.7 MB 的 node.exe 与纯 JS 依赖 —— 它是**构建产物**，
+#   一条 `node setup.mjs` 就能重新生成。把二进制放进 git 历史会让仓库永久变大
+#   （而且删掉也小不回来，历史里那份还在）。
+vendor/
+node_modules/
+
+# MCP 服务器配置：**含 SnowLuma 的 httpToken 明文**，这是机器专属的运行期产物
+cache/
+
+# ── 真实配置：**刻意不进库** ──
+# config.json 里含 SnowLuma 的 accessToken 与模型 API key 明文，而 git 历史里的
+# 密钥即使之后删掉也仍可被检出（永久泄露）。仓库里给的是模板 config.example.json，
+# 首次使用时 `copy config.example.json config.json` 即可（src/index.mjs 会给出这句提示）。
+config.json
+config.local.json
+config.json.bak
+config.json.bak-*
+
+# 旧架构遗留：前端构建产物（`cd config-ui && npm run build` 可重新生成）由
+# config-ui/.gitignore 负责；这里只挡根目录下零散的临时文件
+*.tmp
+.tmp-*

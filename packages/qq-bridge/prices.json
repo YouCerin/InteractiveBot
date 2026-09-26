@@ -1,0 +1,36 @@
+{
+  "_说明": "价目表。单价单位：元 / 百万 tokens。这是【估算】用的，不是官方账单。",
+  "_为什么要单独一个文件": "价格会变、需要随时改，而改它【不应该重启机器人】。放进 config.json 就会触发「改配置要重启」。",
+  "_怎么用": "填好下面的数字，然后在 config.json 里把 usage.costEnabled 打开，概览页就会出现成本卡片。",
+  "_来源": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+  "_更新日期": "2026-09-25",
+  "_核对提醒": "数字会变。拿它对账会失望，拿它看趋势才有用。请定期回官方页面核对。",
+
+  "routes": {
+    "deepseek-official/deepseek-flash": {
+      "_说明": "空闲时段价格是高峰时段的一半。",
+      "cacheHitPerM": { "offPeak": 0.02, "peak": 0.04 },
+      "cacheMissPerM": { "offPeak": 1, "peak": 2 },
+      "outputPerM": { "offPeak": 4, "peak": 8 }
+    },
+    "deepseek-official/deepseek-v4-pro": {
+      "_说明": "当前配置没用这个模型；留着是为了将来切换时不用现查。",
+      "cacheHitPerM": { "offPeak": 0.15, "peak": 0.30 },
+      "cacheMissPerM": { "offPeak": 4.5, "peak": 9.0 },
+      "outputPerM": { "offPeak": 13.5, "peak": 27.0 }
+    }
+  },
+
+  "peak": {
+    "_说明": "高峰时段 = days 里列出的星期几 且 落在 windows 之一内（按 timezone 当地时间）。窗口外、以及周末，都按空闲价。",
+    "_官方原话": "北京时间周一至周五（不含中国法定节假日）9:00-12:00、14:00-18:00 为高峰时段。",
+    "timezone": "Asia/Shanghai",
+    "windows": [
+      { "start": "09:00", "end": "12:00" },
+      { "start": "14:00", "end": "18:00" }
+    ],
+    "days": [1, 2, 3, 4, 5],
+    "_holidays 说明": "法定节假日【无法靠日期算出来】，所以这张表要人工维护。留空时节假日会被当成高峰计价 —— 也就是偏保守（可能偏高）。界面必须如实说明这一点，不要假装精确。",
+    "holidays": []
+  }
+}

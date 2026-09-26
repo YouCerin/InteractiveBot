@@ -1,0 +1,370 @@
+{
+  "$schema": "qq-bridge/project-manifest@1",
+  "_关于本文件": [
+    "这是给 agent（以及人）看的**包契约**：读它就能知道这个包是什么、怎么跑、什么绝对不能改。",
+    "它由代码维护者手工同步。改动包的行为（命令、配置键、不变量、故障特征）时，必须同步改这里。",
+    "它不是运行时配置 —— 运行配置在 config.json。"
+  ],
+
+  "package": {
+    "name": "qq-bridge",
+    "version": "0.1.0",
+    "purpose": "把 QQ 私聊消息转给一个拥有完整能力的 DSH agent，再把回答发回 QQ。",
+    "relationship": "取代 packages/dsh-qq-bot（旧架构：DSH 进程内插件 + 一次性 llm.stream 调用，没有工具循环、沙箱、权限概念）。旧包仅作参考。",
+    "runtime": {
+      "node": ">=22",
+      "vendoredNode": "vendor/node/node.exe（由 setup.mjs 复制，整个包可搬走）",
+      "externalRuntime": "DSH 本体不复制，按候选顺序查找（见 invariants.portability）"
+    }
+  },
+
+  "architecture": {
+    "flow": "QQ → SnowLuma(OneBot v11) → qq-bridge → stdio JSON-RPC → dsh --profile sdk → 模型",
+    "whyThisShape": "真正干活的是 DSH 的 agent 循环（工具/沙箱/会话）。桥接只做四件事：收消息、判断该不该回、转给 DSH、把回答发回去。不重复实现 DSH 已有的能力。",
+    "processes": [
+      { "who": "SnowLuma", "role": "QQ 协议端（第三方）", "ports": "3000=HTTP 发消息 / 3001=WebSocket 收事件" },
+      { "who": "qq-bridge", "role": "本项目，Node 进程", "note": "主动连 SnowLuma 的 WS；通过管道与 dsh 子进程通信" },
+      { "who": "dsh --profile sdk", "role": "DSH 官方 SDK 运行时，由桥接拉起为子进程", "protocol": "JSONL JSON-RPC over stdio" }
+    ]
+  },
+
+  "entrypoints": {
+    "launch": {
+      "file": "start.bat",
+      "also": "node src/index.mjs",
+      "shortcut": "启动机器人.lnk",
+      "note": "★ start.bat 现在会先拉起 SnowLuma（--snowluma）再起桥接。开关：--no-snowluma 跳过、--open-console 只开 SnowLuma 网页端、--no-browser 跳过开浏览器。⚠️ .bat 在 Windows 里**无法带自定义图标**（不是 PE 文件，没有图标资源槽），所以带图标的入口是快捷方式 启动机器人.lnk → 指向 start.bat，图标取 assets/icon.ico"
+    },
+    "check": { "file": "src/index.mjs", "args": "--check", "note": "只校验配置，不连接任何服务" },
+    "doctor": { "file": "src/index.mjs", "args": "--doctor", "note": "真去连一次协议端，报出实际结果；不发消息、不调模型" },
+    "main": { "file": "src/index.mjs", "note": "装配 + 启动；顺序：配置自检 → 建工作区 → 起 DSH → 连 QQ" }
+  },
+
+  "commands": [
+    { "cmd": "node setup.mjs", "purpose": "把 Node 运行时与 ws 依赖复制进 vendor/", "network": false, "costs": "none", "idempotent": true },
+    { "cmd": "node src/index.mjs --check", "purpose": "配置自检", "network": false, "costs": "none" },
+    { "cmd": "node src/index.mjs --doctor", "purpose": "体检（含真实连接探测）", "network": "local-only", "costs": "none" },
+    { "cmd": "node mocks/verify-api.mjs", "purpose": "配置 HTTP 接口（脱敏、空值语义、回环限制、各接口行为）", "network": "local-only", "costs": "none", "assertions": 77 },
+    { "cmd": "node mocks/verify-apitest.mjs", "purpose": "★ 新增接口的**集成测试**：注入真实依赖（价目表/账本/记忆仓库）走完整 handler。存在的理由：verify-api.mjs 不注入依赖，验的是 notImplemented 兜底分支 —— 接口实现落地后那些断言照样通过，即**假绿**。本文件补上那个洞，且是唯一会真的写盘的接口测试（全程在 .tmp-apitest/ 内，不碰 logs/ 与 workspace-qq/）。", "network": "local-only", "costs": "none", "assertions": 46 },
+    { "cmd": "node mocks/verify-config.mjs", "purpose": "配置解析与校验（默认值是否安全、键名是否真的生效、危险配置是否被拦）", "network": false, "costs": "none", "assertions": 39 },
+    { "cmd": "node mocks/verify-images.mjs", "purpose": "★ 看图（QQ 图片 → 工作区 → 模型）。重点是 **SSRF 防护**（内网/回环/云元数据/IPv4映射IPv6/data: 一律拒；**逐跳**校验重定向，并断言内网那一跳「一个请求都没发出去」）与「**群聊没被唤醒时一次网络请求都不发**」这条防 DoS 回归。另含：大小上限（content-length 超限时**不读 body**）、按字节嗅探格式（伪装成 jpg 的 HTML 要被拒）、inbox 内容寻址去重与两种清理、rkey 过期 → 调 get_image 换新地址重试、配置默认值必须省钱、非法 mode 不被静默改写。", "network": false, "costs": "none", "assertions": 145 },
+    { "cmd": "node mocks/verify-units.mjs", "purpose": "纯逻辑单元测试（文本处理 / 唤醒判定 / 会话标识 / 防自环 / 人味层）", "network": false, "costs": "none", "assertions": 114 },
+    { "cmd": "node mocks/verify-rpc.mjs", "purpose": "JSON-RPC 协议层测试（对模拟 DSH）", "network": false, "costs": "none", "assertions": 19 },
+    { "cmd": "node mocks/verify-onebot.mjs", "purpose": "全链路测试（QQ 事件 → 回复发出）", "network": "local-only", "costs": "none", "assertions": 23 },
+    { "cmd": "node mocks/verify-mcp.mjs", "purpose": "QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）", "network": false, "costs": "none", "assertions": 30 },
+    { "cmd": "node mocks/verify-mcp-profile.mjs", "purpose": "把 QQ 工具挂进 DSH 的 profile 补丁能否生成合法配置", "network": false, "costs": "none", "assertions": 23 },
+    { "cmd": "node mocks/verify-local.mjs", "purpose": "路径解析（Node / DSH 命令行 / DSH_HOME 三者不能互相认错）", "network": false, "costs": "none", "assertions": 13 },
+    { "cmd": "node mocks/verify-real-dsh.mjs", "purpose": "真实 dsh 能否被启动（不发 prompt）", "network": false, "costs": "none", "assertions": 7 },
+    { "cmd": "node mocks/verify-doctor.mjs", "purpose": "体检工具自身的准确性", "network": "local-only", "costs": "none", "assertions": 30 },
+    {
+      "cmd": "node mocks/verify-live.mjs",
+      "purpose": "真实端到端：真 dsh + 真模型 + 沙箱越界验证",
+      "network": "models-api + local",
+      "costs": "★ 会产生一次模型调用（约几厘钱）",
+      "requires": "打开 QQ 无关；但需要 DSH 与模型凭据可用"
+    },
+    { "cmd": "node mocks/verify-live.mjs --clean", "purpose": "清理测试临时目录", "costs": "none" },
+    { "cmd": "npm test", "purpose": "跑全部离线测试（不含 verify-live）", "costs": "none" }
+  ],
+
+  "directories": {
+    "src/": "桥接实现",
+    "mocks/": "测试替身与验证脚本（不需要真 QQ，不花钱）",
+    "vendor/": "包内自带：node 运行时 + ws 依赖（由 setup.mjs 生成，不入库）",
+    "logs/": "运行日志（不入库）",
+    "workspace-qq/": "★ agent 的工作区 = 权限沙箱的根（不入库）"
+  },
+
+  "files": {
+    "src/index.mjs": "装配与启动顺序。改启动流程看这里。",
+    "src/local.mjs": "★ 唯一的路径解析处。可搬迁性全靠它（绝不用 process.cwd()）。",
+    "src/config.mjs": "配置解析（normalizeConfig）与校验（validateConfig）。抽出来是为了能被测试 —— 原先埋在 index.mjs 里、只在启动时跑一次，从未被测过；而配置键名写错会静默回落默认值。",
+    "src/api.mjs": "★ 本地配置 HTTP 接口（给配置 UI 用）。只监听回环；读配置删 token 而非置空；写配置空值=保持原样。核心逻辑与网络分离，可单测。",
+    "src/bridge.mjs": "★ 核心：一条 QQ 消息 → 一句回答。唤醒判定、准入、串行锁、发送都在这里。",
+    "src/sdk-rpc.mjs": "与 dsh 子进程的 JSONL JSON-RPC 客户端。",
+    "src/session-bridge.mjs": "回合收集器（turn/end 之前收拢事件）+ 会话路由器（丢弃未知 sessionId 的事件）。",
+    "src/session-id.mjs": "★ QQ 会话键 → sessionId。顶部记录了\"重启后不能复用 id\"的实测硬限制。",
+    "src/onebot.mjs": "OneBot v11 客户端（WS 收事件 / HTTP 发消息）+ 发送队列（节流+去重）。",
+    "src/trigger.mjs": "唤醒判定矩阵 + 关键词体检（防止静默变成\"全响应\"）。",
+    "src/text.mjs": "消息段渲染、Markdown 降级、长文本分片。",
+    "src/humanize.mjs": "★ 人味层（账号存活相关）：拟人延迟、静默时段、分条发送。纯计算，可注入时钟与随机源。",
+    "src/memory.mjs": "★ 跨重启记忆：不给 agent 加存储层，而是给它\"在工作区里记笔记\"的约定（工作区持久，它本来就有文件工具）。",
+    "src/images.mjs": "★ 看图：QQ 图片 → 工作区 inbox/ → 模型。★ 存在的理由是一条取证链：模型本来就支持图片输入（dsh-llm-deepseek 里 deepseek-flash 的 inputModalities 含 image）、SDK 的 session/prompt 本来就收 {type:image,data,mimeType}（dsh-sdk-jsonrpc-server 的 durablePromptContent）、附件库本来就挂着（dsh-base 有 attachment-local）、read_image 工具本来就在（dsh-tool-fs 在 ctx.inject(['attachments']) 里注册）—— 唯一缺的是 text.mjs 把 data.url 原地丢掉了。★ 两种模式：on-demand（默认，只给路径，省钱）/ auto（直接塞图片块）。★ **本项目唯一一处外部输入能指挥进程发网络请求的地方**，所以 SSRF 防护是重点：只允许 http/https、**逐跳**校验重定向（只在第一跳查等于没查）、拒绝回环/私有/CGNAT/组播与 IPv4 映射进 IPv6 的写法、域名先解析再校验（挡 nip.io 这类「看着像域名」的）、大小上限+超时+重定向次数。已知边界：解析与 fetch 是两次解析，理论上存在 DNS rebinding 窗口，如实标注未彻底堵住。★ 文件名用内容哈希（QQ 里同一个表情包会反复出现）。★ 删除必须用 unlinkSync（Windows 上 rmSync 删单文件会静默失败，已在 memory-files.mjs 踩过）。",
+    "src/persona.mjs": "★ 人设提示词（也是账号存活相关：客服腔本身就是机器人特征）。两个预设 + 自定义；含\"提到不存在的工具\"体检。",
+    "src/speed.mjs": "★ 回应速度三档预设（快速约1秒 / 均衡约8秒 / 谨慎约20秒）。每档显式给参数并带风险文案；含反推识别与自洽性体检。",
+    "src/mcp-profile.mjs": "★ 把 QQ 工具 MCP 服务器挂进 sdk profile（运行时生成 patch + MCP 配置）。解决\"模型在子进程里、看不到桥接的 OneBot 连接\"这个架构缺口。",
+    "src/prices.mjs": "★ 价目表 + 峰谷时段判定 + 成本估算。DSH 不提供人民币价格，所以价格必须自己维护（这个事实决定了整个模块的设计）。判定用 Intl 按 peak.timezone 取墙上时间，**不能用 getHours()**。",
+    "src/usage.mjs": "★ 用量记账（追加写 JSONL）+ 按天/按会话聚合。核心是三个口径：totalTokens 不可求和、inputTokens 是【未缓存】输入、reasoning 是 output 的一部分。缺字段保持 null 而不是补 0。",
+    "src/memory-files.mjs": "★ 记忆文件的读写（UI 唯一能改磁盘文件的入口）。三条底线：只允许工作区内相对路径、只允许 .md、拒绝软链接。写操作带 sha256 冲突检测（409）。⚠️ 删除必须用 unlinkSync：实测 rmSync 删单个文件会静默失败（返回正常但文件还在）。",
+    "src/snowluma.mjs": "★ 探测/拉起 SnowLuma + token 解析（以它自己的配置为准）。它能被拉起是因为它在桥接**外面**（桥接自己不行，见 api.mjs 里为什么没有 /api/start）。⚠️ Windows 上 spawn .bat 必须 shell:true，且要 detached+stdio:ignore，否则关掉桥接会连带杀掉它。★ 发现入口时优先 index.mjs 而不是 launcher.bat：后者的 `pause` 会开一个控制台窗口，而现在输出是在界面里看的。",
+    "src/snowluma-log.mjs": "★ 读 SnowLuma 的终端输出给界面用。**读它的日志文件而不是抓 stdout** —— 实测日志文件是 UTF-8（中文正常），而 stdout 是终端编码（重定向会变 GBK 乱码）；要给人看的内容变乱码等于没显示。支持增量轮询（offset），并在文件轮转时如实标记 `rotated`（否则界面会以为「没有新日志」而悄悄少一段）。",
+    "src/roster.mjs": "★ 名单与权限分级（三级）：管理员 / 用户（只读）/ 陌生人。私聊白名单与**群白名单分开**（群不再以用户权限作为回复条件）；管理员权限在群里依然生效。★ 非管理员的禁写是**提示词层**限制，不是 OS 硬墙 —— 取证：SDK 只暴露 initialize/session/prompt/shutdown，其实现里搜 sandbox|permissionMode|approval 零匹配，所以桥接无法按会话切沙箱模式。真正的硬墙需要另起一个 read-only 的 DSH 进程（代价已记录，未做）。",
+    "src/credentials.mjs": "★ 从 `$DSH_HOME/.credentials.yaml` 的 `refs.DEEPSEEK_API_KEY` 读出 key，**注入 DSH 子进程的环境变量**。存在的理由是一次真实故障：桥接起的 DSH 子进程拿不到 key（环境变量没有、SDK 那条路径也不读凭据文件），于是每次模型调用立刻以 MISSING_CREDENTIAL 失败，**表现只是「机器人不输出内容」**（没有异常、没有报错）。★ 只解析 refs 那一个路径（文件里还有 OAuth secret），密钥只进子进程环境、**从不写日志或接口**。",
+    "mocks/verify-credentials.mjs": "凭据读取测试（含「绝不误取 OAuth secret」「环境变量优先」「失败提示可执行」「密钥不进 source/warning」）",
+    "mocks/verify-images.mjs": "★ 看图测试，重点是 **SSRF**：内网/回环/云元数据/IPv4映射IPv6/data:协议 一律拒；**逐跳**校验重定向（断言内网那一跳「一个请求都没发出去」）；大小上限（且 content-length 超限时**不读 body**）；格式按字节嗅探（伪装成 jpg 的 HTML 要被拒）；inbox 内容寻址去重与两种清理；rkey 过期 → 调 get_image 换新地址重试；配置默认值必须省钱、非法 mode 不被静默改写。★ 还有一条**回归守卫**：群聊没被唤醒时**一次网络请求都不许发**（「不唤醒 = 零成本」同时是防 DoS 的前提）",
+    "src/interim.mjs": "★ 「先应一声」四类话术（thinking/searching/tooling/blocked），默认素材取自用户给的 deal.txt。★ 去重是「带冷却的随机」：候选里先剔除冷却期内的，再随机；冷却判定用**与**（时间到了 **且** 中间说过足够多别的）——用或会让冷却时间形同虚设（被单测抓到过）。随机必须覆盖整个池子，否则话术少时会连续抽到同一句（也被单测抓到过）。",
+    "mcp/mcp-qq-server.mjs": "★ QQ 工具 MCP 服务器（手写 stdio JSON-RPC，零依赖）。默认放行所有 OneBot 动作，黑名单拦截会伤害他人/账号的动作。",
+    "mocks/verify-local.mjs": "路径解析测试（重点是 resolveDshHome：绝不能把 DSH 安装目录当成 DSH_HOME）",
+    "mocks/verify-mcp-profile.mjs": "profile 补丁生成测试（重点：不能留下\"空列表 + 真实列表\"这种会让 DSH 起不来的非法 YAML）",
+    "CONFIG-UI.md": "★ 给 UI 生成用的自包含规格（字段清单/分组/校验/提示文案/后端接口建议）。目标是让 UI 生成者不需要读代码。",
+    "src/vendor.mjs": "从 vendor/ 加载依赖，绕开标准 node_modules。",
+    "src/doctor.mjs": "体检：包内依赖 / DSH / 配置自洽 / 真实连接探测。",
+    "config.json": "全部运行配置。",
+    "assets/icon.ico": "入口图标（蓝色小鲸鱼，7 个尺寸帧：16/24/32/48/64/128/256，全部 PNG 编码）。被 `启动机器人.lnk` 引用。★ 为什么放包里而不是引用外部路径：快捷方式的图标路径是**绝对路径**，若指向 AppData 里的临时副本，那个副本被清掉后图标就会退化成白纸。",
+    "启动机器人.lnk": "★ 带图标的启动入口（指向 start.bat）。Windows 的 .bat **本身不能带自定义图标**，所以这是唯一能显示图标的做法。用 WScript.Shell COM 创建；图标存的是绝对路径，**包整体搬走后需要重建这个快捷方式**（或手动改图标）。",
+    "prices.json": "★ 价目表（元/百万 tokens）+ 峰谷时段规则。**故意独立于 config.json**：价格会变，而改它不该触发「改配置要重启」。DSH 本身不提供人民币价格，所以成本只能按这份文件估算。",
+    "PROJECT.json": "本文件：包契约。",
+    "AGENT.md": "给 agent 的操作说明（五分钟上手 + 陷阱清单）。"
+  },
+
+  "config": {
+    "file": "config.json",
+    "note": "相对路径一律相对**包根**解析，所以包搬走配置跟着走。",
+    "_hiddenKeys": ["humanize.delay"],
+    "_hiddenKeys_说明": "这些键存在于配置里但**刻意不暴露给 UI**：humanize.delay 是测试专用开关（关掉可跳过拟人延迟，否则测试一条回复要等 8 秒会超时）。UI 不要渲染它 —— 用户关掉它没有任何好处，只会让测试失效。",
+    "keys": [
+      { "key": "dsh.cliPath", "type": "string", "default": "自动查找", "note": "留空则按 invariants.portability 的候选顺序找" },
+      { "key": "dsh.searchPaths", "type": "string[]", "default": "[]", "note": "**额外的** DSH 安装根候选（相对包根解析），按顺序在 vendor/dsh、环境变量之后参与查找。存在的意义：DSH 装在非标准位置时不用改代码，也不用把路径写进 cliPath（那个会覆盖自动发现）" },
+      { "key": "dsh.workspace", "type": "string", "default": "workspace-qq", "constraints": "不能是盘符根、不能是用户主目录", "note": "★ 它是权限沙箱的根" },
+      { "key": "dsh.provider", "type": "string", "default": "deepseek-official" },
+      { "key": "dsh.model", "type": "string", "default": "deepseek-flash" },
+      { "key": "dsh.reasoningEffort", "type": "string", "default": "" },
+      { "key": "dsh.apiKey", "type": "secret", "default": "", "note": "★ 模型 API key。留空则回退到环境变量 DEEPSEEK_API_KEY、再回退到 $DSH_HOME/.credentials.yaml（DSH 桌面版「模型」页填的那份）。三处用的是同一把账号级 key。**API 返回时被删除**，只回 hasApiKey 布尔；界面传 null 表示显式清除（空串仍是「保持原样」）" },
+      { "key": "dsh.permissionMode", "type": "enum", "values": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "note": "★ 默认值不得改成 danger-full-access" },
+      { "key": "onebot.wsUrl", "type": "string", "default": "ws://127.0.0.1:3001", "note": "收事件" },
+      { "key": "onebot.httpUrl", "type": "string", "default": "http://127.0.0.1:3000", "note": "发消息" },
+      { "key": "onebot.wsToken", "type": "string", "note": "★ 与 httpToken 是两个不同的 token（SnowLuma 特性）" },
+      { "key": "onebot.httpToken", "type": "string" },
+      { "key": "onebot.selfId", "type": "string", "note": "留空则从 get_login_info 学习" },
+      { "key": "access.adminUsers", "type": "string[]", "default": "[]", "note": "★ 空 = 谁都不能用（fail-closed，刻意如此）。管理员=满权限，可以命令机器人做有实际修改的动作" },
+      { "key": "access.dmAllowlist", "type": "string[]", "default": "[]", "note": "★ 私聊白名单（普通用户：能聊天、**不能**触发修改类动作）。应在机器人的**好友列表**里选。空 = **只有管理员能私聊**（fail-closed，刻意不退回「谁都能私聊」）" },
+      { "key": "access.groupAllowlist", "type": "string[]", "default": "[]", "note": "★ 群白名单。应在机器人的**群列表**里选。空 = 所有群都不回。群聊**不再以用户权限作为回复条件**，而是由这张表决定；群里的权限仍由 adminUsers 决定" },
+      { "key": "trigger.private", "type": "boolean", "default": true },
+      { "key": "trigger.mention", "type": "boolean", "default": true },
+      { "key": "trigger.keyword", "type": "boolean", "default": true },
+      { "key": "trigger.groupEnabled", "type": "boolean", "default": false, "note": "★ 群聊总开关，**fail-closed（缺省关）**。开启后群聊**只有两种唤醒方式：被 @ 或命中关键词**，其余一律不回且零成本（连关键词都不扫）。群聊涉及账号风控风险 —— 上一个 QQ 号就是因此被处置的" },
+      { "key": "trigger.keywords", "type": "string[]", "note": "包含匹配；单字或群聊高频词会被 lintKeywords 警告" },
+      { "key": "send.minGapMs", "type": "number", "default": 1000, "note": "拟人间隔下限" },
+      { "key": "send.maxGapMs", "type": "number", "default": 3000 },
+      { "key": "send.maxPerMinute", "type": "number", "default": 8 },
+      { "key": "send.maxPerHour", "type": "number", "default": 500 },
+      { "key": "send.dedupeWindowMs", "type": "number", "default": 8000, "note": "同内容去重窗口" },
+      { "key": "send.maxCharsPerMessage", "type": "number", "default": 1500, "note": "超出按自然边界分片" },
+      { "key": "turn.timeoutMs", "type": "number", "default": 600000, "note": "单轮超时；超时会结算并告知用户，不会挂死" },
+      { "key": "humanize.enabled", "type": "boolean", "default": true, "note": "★ 人味层总开关。这是账号存活相关配置，不是体验优化" },
+      { "key": "humanize.reactMinMs", "type": "number", "default": 1500, "note": "基础反应时间下限（看到消息到开始打字）" },
+      { "key": "humanize.reactMaxMs", "type": "number", "default": 5000 },
+      { "key": "humanize.speed", "type": "enum", "values": ["fast", "balanced", "careful"], "default": "balanced", "note": "★ 回应速度档位：fast≈1秒(≈秒回，风险最高) / balanced≈8秒(推荐) / careful≈20秒(风险最低)。档位展开成下面五个参数，显式写的字段会覆盖档位" },
+      { "key": "humanize.charsPerSecond", "type": "number", "default": 5, "note": "打字速度（字数折算）" },
+      { "key": "humanize.typingMaxMs", "type": "number", "default": 3000, "note": "★ 打字时间的**单独**上限。只靠 maxDelayMs 不够：5 字/秒下 200 字要打 40 秒" },
+      { "key": "humanize.maxDelayMs", "type": "number", "default": 9000, "note": "总延迟上限（均衡档）" },
+      { "key": "humanize.chunkChars", "type": "number", "default": 300, "note": "超过该长度就分条发送（真人不会把 800 字糊在一条里）" },
+      { "key": "humanize.quietHours.enabled", "type": "boolean", "default": true, "note": "静默时段" },
+      { "key": "humanize.quietHours.start", "type": "string", "default": "02:00" },
+      { "key": "humanize.quietHours.end", "type": "string", "default": "07:00", "note": "支持跨午夜区间（如 23:00–07:00）" },
+      { "key": "humanize.quietDelayMinMs", "type": "number", "default": 45000, "note": "静默时段【不拒答，只大幅延迟】——拒答会让人以为机器人坏了" },
+      { "key": "humanize.quietDelayMaxMs", "type": "number", "default": 150000 },
+      { "key": "humanize.interim", "type": "object", "note": "长任务\"先应一声\"这一组（含下面五项）" },
+      { "key": "humanize.interim.enabled", "type": "boolean", "default": true, "note": "★ 长任务期间先应一声（实测有一轮 40 秒、20 次工具调用期间完全静默，使用者会以为机器人坏了）" },
+      { "key": "humanize.interim.afterMs", "type": "number", "default": 8000, "note": "回合超过这个时长就先发一条" },
+      { "key": "humanize.interim.messages.thinking", "type": "string[]", "note": "「在思考」时的话术（回合超时且**没调工具**）" },
+      { "key": "humanize.interim.messages.searching", "type": "string[]", "note": "「联网搜索」时的话术。★ 只有这一类才可以说「在搜」。旧键名 `web` 仍能读入（归一化时做别名）" },
+      { "key": "humanize.interim.messages.tooling", "type": "string[]", "note": "「调用其它工具」时的话术（读文件/跑命令/QQ 工具）。**不要说「搜」** —— 那是不诚实的。旧键名 `working` 仍能读入" },
+      { "key": "humanize.interim.messages.blocked", "type": "string[]", "note": "「权限受阻」时的话术（有审批被拒/越界）" },
+      { "key": "session.salt", "type": "string", "note": "留空用 DSH_HOME" },
+      { "key": "session.instance", "type": "string", "note": "★ 一般留空。留空 = 每次启动自动换新（必须如此，否则重启必撞 already exists，详见 invariants.sessionLifecycle）。填固定值 = 复用同一会话号，只用于观察错误" },
+      { "key": "persona.callerName", "type": "string", "note": "仅用于提示词里标注是谁在说话" },
+      { "key": "persona.preset", "type": "enum", "values": ["mermaid", "mermaid-lite", "none"], "default": "mermaid-lite", "note": "★ mermaid-lite=精简版（388 字，当前用），mermaid=完整版（761 字），none=不用人设" },
+      { "key": "persona.custom", "type": "string", "default": "", "note": "自己写的人设，非空即优先于 preset" },
+      { "key": "memory.enabled", "type": "boolean", "default": true, "note": "★ 跨重启记忆：让 agent 在工作区里自己记笔记。关掉则重启后真的什么都不记得" },
+      { "key": "image.enabled", "type": "boolean", "default": true, "note": "看图总开关。关掉则图片只显示成 [图片]，且**一次网络请求都不会发**" },
+      { "key": "image.mode", "type": "enum", "values": ["on-demand", "auto"], "default": "on-demand", "note": "★ on-demand=只把图存进工作区并把路径写进提示词，模型自己按需调 read_image（省钱；QQ 里表情包很多，自动注入等于每个表情包都花 vision token 且会进历史重复计费）；auto=直接把图片塞进模型（更快更准，每张图都计 vision token）。★ 非法值不会被改写掉（否则校验看不到、用户以为生效了），行为上只有精确等于 auto 才自动注入" },
+      { "key": "image.maxCount", "type": "number", "default": 4, "note": "单条消息最多处理几张图。DSH 附件库单条消息上限 20 张，超过会被整批拒绝" },
+      { "key": "image.maxBytes", "type": "number", "default": 10485760, "note": "单张图片字节上限（默认 10MB）。DSH 附件库单张上限 20MB，配更大没有意义" },
+      { "key": "image.timeoutMs", "type": "number", "default": 15000, "note": "单张图片的下载超时" },
+      { "key": "image.maxRedirects", "type": "number", "default": 3, "note": "最多跟随几次重定向。★ 每一跳都会重新校验目标地址（只在第一跳查等于没查）" },
+      { "key": "image.retentionHours", "type": "number", "default": 72, "note": "★ inbox 里图片的保留小时数。这是**唯一**的清理机制：图片必须落在工作区内才能被 read_image 读到，所以清理只能由桥接负责。填 0/负数等于不清理" },
+      { "key": "image.maxTotalBytes", "type": "number", "default": 104857600, "note": "inbox 总占用上限（默认 100MB），超过就按最旧的开始删" },
+      { "key": "mcp.enabled", "type": "boolean", "default": true, "note": "★ QQ 工具（MCP）：把 SnowLuma 动作暴露给模型（戳一戳/表情/撤回/查成员…）。关掉则模型只能用文字回复" },
+      { "key": "mcp.toolTimeoutMs", "type": "number", "default": 20000, "note": "单个 QQ 动作的超时" },
+      { "key": "snowluma.installDir", "type": "string", "default": "", "note": "★ SnowLuma 装在哪个目录，相对路径按 PKG_ROOT 解析。**留空 = 交给自动发现**（vendor/snowluma → snowluma.searchPaths → 环境变量 SNOWLUMA_HOME）。填了会**覆盖**自动发现，所以要么留空要么填对。★ 本包不分发 SnowLuma（其许可证 §5.4 禁止并入第三方安装包）" },
+      { "key": "snowluma.searchPaths", "type": "string[]", "default": "[]", "note": "**额外的**候选安装目录（相对包根），一行一个。与 installDir 的区别：它是补充候选而非覆盖，找不到就继续往下找。★ 代码里**不再有**写死的参考项目路径（`D:\\QQagent_DeepSeek\\snowluma`）—— 那条兜底会启动错的那一份、导致全部 401。需要额外位置就写在这里" },
+      { "key": "snowluma.launchCmd", "type": "string", "default": "", "note": "留空 = 自动用 installDir 下的 launcher.bat（推荐路径）。要填就填文件不是文件夹" },
+      { "key": "snowluma.launchCwd", "type": "string", "default": "", "note": "启动时的工作目录；留空则用 launchCmd 所在目录" },
+      { "key": "snowluma.consoleUrl", "type": "string", "default": "http://127.0.0.1:5099/", "note": "★ SnowLuma 的 Web 控制台地址。默认 5099 取证自它自己的 config/runtime.json 里的 webuiPort（那是它的用户设置，所以做成可配、不写死）。「拉起」按钮两步合一：先探这个地址，通了 = 已经在跑（不重复启动）；不通才用 launchCmd 真的启动进程" },
+      { "key": "snowluma.probeTimeoutMs", "type": "number", "default": 1500, "note": "探测 SnowLuma 是否在线的超时" },
+      { "key": "usage.enabled", "type": "boolean", "default": true, "note": "用量记账（概览页的用量卡片）。token 数是 DSH 实测，不是估算" },
+      { "key": "usage.costEnabled", "type": "boolean", "default": false, "note": "★ 默认关：DSH 不提供价格，价目表（prices.json）要人工维护。没维护时显示「—」而不是 ¥0.00" },
+      { "key": "usage.pricesFile", "type": "string", "default": "prices.json", "note": "价目表路径。★ 改它不需要重启桥接（就是不放进 config.json 的原因）" },
+      { "key": "ui.logFile", "type": "string", "default": "logs/bridge.log" },
+      { "key": "ui.verbose", "type": "boolean", "default": false },
+      { "key": "ui.apiEnabled", "type": "boolean", "default": true, "note": "是否提供本地配置接口（给配置 UI 用）。关掉不影响机器人本体" },
+      { "key": "ui.apiPort", "type": "number", "default": 3410, "note": "配置接口端口；只监听 127.0.0.1" }
+    ]
+  },
+
+  "invariants": {
+    "_说明": "这些是实测得出的约束，破坏它们会导致静默失效或直接崩，改代码前必须理解。",
+
+    "permissions": {
+      "rule": "权限 = 两道独立防线：谁能触发（access.adminUsers）+ 能碰什么（DSH_PERMISSION_MODE=workspace-write 沙箱）。",
+      "evidence": "实测：模型试图写工作区外文件，DSH 返回 `sandbox: file access denied under workspace-write mode`，模型如实报告被拒。",
+      "note": "workspace-write 自带 ask 审批策略；sdk profile 里无人能应答审批，所以越界操作落成 unavailable（自动拒绝）且不卡死。这是刻意利用的行为，不要\"修\"它。"
+    },
+
+    "sessionLifecycle": {
+      "rule": "同一个进程内可复用 sessionId；**进程重启后必须换新 id**。因此 `session.instance` 留空时默认取「本进程启动时刻」，而不是某个固定值。",
+      "evidence": "① 第二次运行报 `session \"qq-xxx\" already exists`。根因见 dsh-sdk-jsonrpc-server/lib/index.js:203-231 —— getOrCreateSession 只查内存 map，重启后必然走 agents.create，而磁盘上已有同名会话时会抛错；SDK 未暴露 resume。② **实测复发**：默认值一度用「当天日期」，结果 2026-09-25 当天多次重启时反复撞名（日志里 session qq-579284c0cf47 already exists）。",
+      "consequence": "重启后 DSH 侧不记得之前的对话。这是已知取舍，不是 bug。跨重启的长期记忆由工作区里的 MEMORY.md 负责（agent 自己读回来），不依赖会话历史。",
+      "antiPattern": "⚠️ 绝不要把 instance 默认值改成「当天日期」「固定字符串」这类**跨重启不变**的值 —— 那会导致「当天第一次启动正常、第二次起全部失败」，而且错误信息对使用者没有指向性。"
+    },
+
+    "portability": {
+      "rule": "所有路径从**文件自身位置**往上推（src/local.mjs），绝不用 process.cwd()，绝不写死盘符。",
+      "why": "双击启动时 Windows 给的\"起始位置\"常不是包目录；用 cwd 会解析到不存在的目录，而且**不报错**，只表现为\"什么都加载不到\"。",
+      "dshLookupOrder": ["vendor/dsh/", "环境变量 DSH_DESKTOP_APP", "DSH 桌面版默认安装位置"],
+      "note": "DSH 本体刻意不复制（约 275 MB / 15000 文件）。"
+    },
+
+    "dependencies": {
+      "rule": "运行期依赖不走 npm，由 setup.mjs 复制到 vendor/node_modules，经 src/vendor.mjs 用 createRequire 加载。",
+      "why": "包内有什么一眼可见；不受 npm 缓存/软链/清理策略影响；整个包可整体搬走。",
+      "onlyDependency": "ws（纯 JS，无原生模块）"
+    },
+
+    "triggerSemantics": {
+      "rule": "被 @ / 私聊 / 命中关键词 → **必须回答**；其余不回答（零 token 消耗）。没有\"触发后选择沉默\"这条路径。",
+      "why": "用户明确要求不潜水。这消掉了与模型博弈的哨兵机制。",
+      "consequence": "命中关键词必然产生一次模型调用，所以关键词表要克制。"
+    },
+
+    "behavioralRisk": {
+      "rule": "回复必须经过拟人延迟（humanize 模块），不得退回\"收到即回复\"。",
+      "evidence": "真实日志实测：收到消息到回复发出只隔 1 秒（782ms / 2896ms）。秒回 + 7×24 在线是行为风控最典型的特征向量，上一个 QQ 号被处置的最可能原因即此。",
+      "design": "延迟 = 随机反应时间(1.5~5s) + 打字时间(字数 ÷ 5字每秒 × 0.75~1.25 抖动，**单独封顶 8 秒**)，总延迟封顶 13 秒；静默时段(默认 02:00–07:00)改为 45~150s 长延迟。实测：200 字回复总延迟约 11.3 秒（未封顶前是约 43 秒）。",
+      "tradeoff": "静默时段**不拒答、只延迟** —— 拒答会让使用者以为机器人坏了。宁可慢，也不要坏。",
+      "note": "错误提示类消息（#safeSend）刻意不加延迟：那是\"出问题了\"的信号，尽快到达比像人重要。"
+    },
+
+    "secretHygiene": {
+      "rule": "config.json 含 SnowLuma 的 accessToken 明文与模型 API key（dsh.apiKey）明文。分享这个包之前必须清空这两者，并在 SnowLuma 里把 token 作废重发。"
+    },
+
+    "uiDocSync": {
+      "rule": "★ **任何会影响 UI 的改动，都必须同步更新 `CONFIG-UI.md`**（用户明确要求，且对后续所有改动生效）。",
+      "whatCounts": [
+        "新增/删除/重命名配置项（UI 要渲染表单）",
+        "新增/修改 HTTP 接口，或改变响应结构（UI 要取数据）",
+        "改变界面需要反映的行为（例如连发去重、先应一声、权限墙的表现）",
+        "改变默认值、取值范围、或校验规则（UI 要显示提示与错误）"
+      ],
+      "whatDoesNotCount": [
+        "纯内部重构（不改变配置面、接口、或可观察行为）",
+        "只改注释或日志文本（除非该日志被 UI 展示）"
+      ],
+      "enforcement": "`mocks/verify-manifest.mjs` 会核对 PROJECT.json 声明的配置键是否真实存在；CONFIG-UI.md 与代码的一致性目前靠人工，但这份 invariants 就是提醒。",
+      "why": "UI 是照着 CONFIG-UI.md 生成的（由 KIMI 完成）。文档落后于代码 = UI 会做出错误的东西，而且排查时两边各说各话。"
+    }
+  },
+
+  "knownFailureSignatures": [
+    { "symptom": "HTTP 426 Upgrade Required", "cause": "httpUrl 填成了 WebSocket 端口", "fix": "SnowLuma 默认 3000=HTTP、3001=WS" },
+    { "symptom": "连上但从不回复", "cause": "历史 bug：漏了把 session.event 接到会话路由器上；或 DSH 子进程已退出", "fix": "看 logs/bridge.log；桥接现在会在子进程退出时明确告警" },
+    { "symptom": "谁发都不回", "cause": "access.adminUsers 为空（fail-closed）", "fix": "填你自己的 QQ 号" },
+    { "symptom": "缺少依赖「ws」", "cause": "没跑 setup.mjs", "fix": "node setup.mjs" },
+    { "symptom": "session \"...\" already exists", "cause": "session.instance 机制失效", "fix": "把 session.instance 改成任意新值后重启" },
+    { "symptom": "Cannot convert argument to a ByteString", "cause": "token 里混进了非 ASCII 字符（复制粘贴带了中文标点）", "fix": "doctor 现在会直接指出第几个字符有问题" },
+    { "symptom": "WS 握手报成功但其实连不上", "cause": "SnowLuma 拒绝未授权的方式是\"先升级再用 close(4401) 踢掉\"", "fix": "doctor 用 400ms 观察窗识别这种情况" },
+    { "symptom": "留下 .tmp-* 目录", "cause": "Windows 上 dsh 退出后文件句柄未立即释放", "fix": "无害；node mocks/verify-live.mjs --clean，或下次运行自动清掉" },
+    { "symptom": "包根下冒出名为 [object Object] 的目录（里面有 profiles/ sessions/ storages/）", "cause": "有人把 process.env.DSH_HOME 赋成了 resolveDshHome() 返回的**对象**而不是 .home —— 环境变量只收字符串，对象被隐式 String() 成 \"[object Object]\"，DSH 子进程就把它当 home，在 cwd（= 包根）下现建了一整套，还按 profile 装了整套依赖", "fix": "删掉该目录；确认 index.mjs 写的是 `process.env.DSH_HOME = resolved.home`。verify-manifest.mjs 现在有一条断言盯着这个写法与这个目录，所以再犯会直接报错。★ 为什么危险：不报错、机器人照常回话，只是凭据文件与 profiles 全找不到 —— 下一步就是「不输出内容」" },
+    { "symptom": "start.bat 启动了 SnowLuma，但不是你以为的那个入口（用了系统 node、还带 console 窗口）", "cause": "config.json 里 snowluma.launchCmd 非空 → **完全覆盖**自动发现（`const useAuto = !launchCmd`）。自动发现本来是优先 index.mjs + 包内 node", "fix": "把 snowluma.launchCmd 留空即可。verify-manifest.mjs 有断言盯着「两处 startSnowluma 调用都传 detect」，CONFIG-UI.md §2.7 也写清了「填了会跳过自动发现」" },
+    { "symptom": "★★★ 机器人不在线：桥接在跑、SnowLuma 也在跑，但 OneBot 一律 401（日志 `rejected unauthorized WebSocket upgrade` / `HTTP 401`）", "cause": "**跑起来的是另一份 SnowLuma 安装**（`D:\\QQagent_DeepSeek\\snowluma`，另一套 token）。两个缺陷叠加：① `startSnowluma` 的默认 `locateSnowluma` 写成 `() => findSnowluma()`，**把 `{ installDir }` 丢掉了** → `snowluma.installDir` 形同虚设，`findSnowluma()` 一路走到候选表最后的 D: 兜底；② 设了 `launchCmd` 时 `cwd` 取的是 `locate.cwd`（发现到的安装目录）而不是**入口自己所在目录**，于是 `launcher.bat` 里的 `node ./index.mjs`（相对路径）在错的目录里解析、真的跑了那份代码", "fix": "默认实现改成 `({ installDir } = {}) => findSnowluma({ installDir })`；并且**显式给了 launchCmd 时 cwd 就用入口所在目录**。两条都有回归测试。★ 为什么极难查：父进程命令行里那个 `launcher.bat` 路径**看起来完全正确**（它确实是项目里那份），要把 cwd 和「批处理里的相对路径相对谁」连起来才想得到 —— 判别方法是看哪一份的 `data\\<uin>\\*.db-shm` 在被写" },
+    { "symptom": "★★★ SnowLuma 在跑、QQ 也登录着，但 3000/3001 端口就是不监听（桥接报 Unable to connect / 401）", "cause": "**SnowLuma 没钩住 QQ**。它靠把原生模块注入正在运行的 QQ 客户端、再用命名管道通信；**只有钩上才会启动 OneBot 服务**。两个前提缺一个都不行：① SnowLuma 自己的 `config/runtime.json` 里 `hookAutoLoad` 必须为 `true`（默认为 **false**，此时永远不会自动注入）；② **必须先起 SnowLuma 再启动 QQ** —— 注入挂在 `pipeWatcher.on(\"process-discovered\")`（管道发现事件）上，不是定时扫进程，所以 QQ 已经在跑时等不到事件", "fix": "① 把 SnowLuma 的 `hookAutoLoad` 改成 true（或设环境变量 `SNOWLUMA_HOOK_AUTOLOAD=1`）后重启 SnowLuma；② 保证启动顺序是 SnowLuma → QQ；顺序反了就**重启一次 QQ**。★ 判别：SnowLuma 日志里有 `hook auto-load enabled: every discovered QQ process will be injected`（开关生效）与 `[Hook] login detected: PID=… UIN=…` + `[Hook] pipe connected`（真的钩上了）；三行缺任何一行都不行。★ 界面上的「协议端」页签必须把「5099 在、3000 不在」显示成 **「SnowLuma 在跑但没钩住 QQ」**，而不是「SnowLuma 没在跑」—— 两者排查方向完全不同" }
+  ],
+
+  "verificationStatus": {
+    "_说明": "如实标注，不要把它当成\"全都验证过了\"。",
+    "verified": [
+      "离线 855 项测试（manifest 33 / api 77 / apitest 102 / config 42 / units 272 / local 13 / credentials 18 / images 145 / mcp 30 / mcp-profile 23 / rpc 20 / onebot 43 / real-dsh 7 / doctor 30）",
+      "★ 真实 QQ 端到端（2026-09-25 实测）：管理员的真实私聊消息 → 桥接 → DSH → 模型 → QQ 回复，全程无人工干预",
+      "★ 真实环境下的工具使用：要求它创建 smoke-test.txt，它调用 2 次工具并正确写入内容 'hello from qq'",
+      "真实端到端（假协议端）连续 3 轮：真模型读到工作区文件、越界被沙箱拒绝、如实报告",
+      "体检对真实 SnowLuma 全通（HTTP 200 已登录 + WS 握手成功）",
+      "防自环：机器人自己发的消息会被忽略（单测 13 例 + 全链路 2 例覆盖类型不一致、sender.user_id 等边界）",
+      "★ 「无法输出内容」的根因已修并**真机复验**（2026-09-26 02:52）：桥接起的 DSH 子进程原本拿不到模型凭据（.credentials.yaml 是桌面端在读，SDK 那条路径不读它），于是每次模型调用都在 160ms 内以 MISSING_CREDENTIAL 失败 —— 症状**只有**「回合结束但无文本」，没有异常也没有报错，所以极难定位。修法是只读 refs.DEEPSEEK_API_KEY 并注入子进程环境。复验证据：真机私聊「你好」→ 2290ms 真实往返 → 回复 10 字「在呢 这么晚还没睡啊」（不再是兜底文案）",
+      "★ 思考过程进会话镜像（**只给界面看，绝不发到 QQ**）：同一轮 GET /api/conversations 里先出现 role=thinking 的完整推理（它自己判断出「这轮不需要读记忆」），随后才是 role=bot 的正文 —— 修复前这一轮连 assistant/message 都没有，界面上自然也无从显示",
+      "记忆隔离：全局/按人/按群三层路径的分配有单测覆盖（群聊**拿不到**全局路径；文件名用明文 QQ 号便于在界面上辨认）",
+      "★ 看图（离线 145 项，mocks/verify-images.mjs）：**根因取证**是「能力一直都有、只是桥接把 data.url 丢掉了」—— 模型侧 deepseek-flash 的 inputModalities 含 image、SDK 侧 session/prompt 收 {type:image,data,mimeType}、附件库侧 dsh-base 挂着 attachment-local、工具侧 dsh-tool-fs 注册了 read_image。★ **SSRF 防护有断言**：内网/回环/云元数据(169.254.169.254)/CGNAT/IPv4映射IPv6/data:协议一律拒；**逐跳**校验重定向，并断言「内网那一跳一个请求都没发出去」；域名先解析再校验（挡 nip.io 这类写法）；content-length 超限时**不读 body**；流式超限中途止损；伪装成 jpg 的 HTML 被拒（按字节嗅探，不信 Content-Type）。★ **防 DoS 回归**：群聊没被唤醒时一次网络请求都不发。★ rkey 过期 → 调 get_image 换新地址重试成功（这是最常见的失败路径，不是异常）。★ 配置默认值必须省钱（on-demand），且非法 mode **不被静默改写**（改写了校验就看不到，用户会以为设置生效了）",
+      "★ 看图走的是 DSH **原生**那套，没有自造协议：auto 模式产出的 contentBlocks 形状与 dsh-sdk-jsonrpc-server 的 durablePromptContent 完全一致（{type:image, data:<规范 base64>, mimeType}），并断言 base64 能还原成**一模一样的字节**、且是规范形式（DSH 会用 admitEncodedImages 校验这一点）",
+      "★★ **跨重启记忆的迁移已真实发生并被观察到**（2026-09-26）：`workspace-qq/memory/` 目录本来不存在，现在出现了 `private-100000001.md`，内容正是从全局 MEMORY.md 搬过去的「属于这个人」的条目（戳一戳约定、store/ 堆放处、贪吃蛇任务）；同时全局 `MEMORY.md` 从 340 B 缩到 170 B，只剩下**索引**（指向 private 文件）与真正的跨人条目。也就是说「提示词里那段一次性迁移指引」确实被执行了 —— 这同时证明模型真的在按约定**自己维护记忆文件**",
+      "★ 记忆要能纠错（真实案例）：模型自己在 private 文件里写了一条「QQ 这条链路看不到图…他发图我得直说看不到」—— 那条在本次改动后**变成了错的**。它已被删除，并据此确认一件事：**记忆是模型自己写的，所以功能变化后旧记忆可能变成谎话**，而纠错入口就是记忆页签（直接改文件）。这也说明「记忆越短越好」不只是省钱，还降低出错率",
+      "★★ 「start.bat 会不会唤起错的 SnowLuma」已按**进程证据**查清（2026-09-26）：3000/3001/5099 的持有进程 PID 3724，命令行 `node ./index.mjs`，其父进程是 `cmd /d /s /c \"…\\project_InteractBot\\snowluma\\launcher.bat\"` —— **目录是对的**（项目里那份），且排除自身进程树后**没有任何** node/cmd 在跑 `D:\\QQagent_DeepSeek\\snowluma`；token 对照也一致（项目那份的 http/ws accessToken 与 config.json 完全相同，D: 那份两个都不同）。★ 但**入口不是代码刻意选的那个**：config.json 的 `snowluma.launchCmd` 非空 → `const useAuto = !launchCmd` 让自动发现被完全跳过，于是走 launcher.bat、用**系统 node**（命令行 `node ./index.mjs` 而非 `…\\vendor\\node\\node.exe`），而且该字段旧说明还写反了。已修：launchCmd 留空 + 说明改正 + 同步 CONFIG-UI.md",
+      "★★ 「拉起 SnowLuma」两条路的防重复启动已对齐：`startSnowluma` 的第②步（端点上应答的是不是**正确的那份**）**只**依赖调用方传 `detect`，不传就 `typeof detect !== 'function'` 静默跳过。实测 `start.bat` 走的 `--snowluma` 分支**漏传了** detect（界面按钮那条路传了）—— 于是 start.bat 只剩控制台探测这一道防线，一旦控制台端口改过（consoleUrl 默认 5099）就会重复 spawn 出第二个实例。已修：抽出唯一实现 `makeLaunchDetect`，两条路共用；新增断言（manifest 查「每处 startSnowluma 调用都传 detect」「index.mjs 不再直接调 detectSnowluma」；apitest 查行为：connected/up-not-logged-in 都不重复启动、auth-failed 必须继续启动，并**显式记录「漏传 detect 时确实会启动」**这个代价）",
+      "★ `up-not-logged-in` 也必须短路（新增行为）：以前只有 `connected` 会短路，这个状态会掉到下面去 spawn —— 那会开出第二个实例。一个进程「没登录」和「没在跑」是两件事，提示语现在明说「不要再启动一个，去控制台扫码」",
+      "★★★ 「机器人不在线」已定位到根因并修复（2026-09-26，症状＝桥接在跑、SnowLuma 也在跑，但 OneBot 一律 401）。**根因是两个缺陷叠加**：① `startSnowluma` 的默认 `locateSnowluma` 写成 `() => findSnowluma()`，**把 `{ installDir }` 丢掉了** → `snowluma.installDir` 形同虚设，`findSnowluma()` 一路走到候选表最后的 `D:\\QQagent_DeepSeek\\snowluma` 兜底；② 设了 `launchCmd` 时 `cwd` 取 `locate.cwd` 而不是**入口自己所在的目录**，于是 `launcher.bat` 里的 `node ./index.mjs`（相对路径）在错的目录里解析 —— 真的跑了 D: 那份代码、用 D: 的 token。★ 取证链：`findSnowluma({installDir})` → 项目那份 / `findSnowluma()` → **D: 那份**（实跑对照）；D: 的 `data\\200000001\\*.db-shm` 在 10:40:25 被写而项目那份冻结在 03:48；D: 的日志逐条记录 `[OneBot.WS-Server] rejected unauthorized WebSocket upgrade`，时间与桥接的重连节奏（:14/:16/:20/:28/:44…）逐条对上。★ 修法与回归测试：默认实现改为转发 `installDir`；显式 `launchCmd` 时 cwd 用入口所在目录。新增 6 条断言，并且**做了反向证明** —— 把修复回退后测试确实变红，报出的正是 `cmd=D:\\QQagent_DeepSeek\\snowluma\\index.mjs`、`cwd=D:\\QQagent_DeepSeek\\snowluma`、`来源=常见外部位置（参考项目）`",
+      "★ 教训（为什么这个 bug 极难查）：父进程命令行里那个 `launcher.bat` 路径**看起来完全正确**（它确实是项目里那份），所以「入口对不对」这个检查会通过。真正的判据是 **cwd**，以及「批处理里的相对路径相对谁」。所以排查这类问题的正确方法是看**哪一份安装的 `data\\<uin>\\*.db-shm` 在被写**，而不是看命令行里的路径"
+    ],
+    "notVerified": [
+      "群聊回复（已实现并配置放行，但**真机仍未跑过**：需要一条真实群消息；目前跑通的只有管理员私聊）",
+      "跨重启长期记忆：**迁移这一步已观察到**（见上一节 verified），但「重启之后靠笔记把记忆接上」仍**没有**在真实对话里验证过 —— 那一轮尚未发生（需要重启一次桥接再聊一句才能确认）",
+      "长时间运行的稳定性（连续运行数小时/数天未测试）",
+      "看图**真机未跑过**：离线 145 项全绿，但「真实 QQ 图片 → SnowLuma 的 data.url → 下载 → 模型真的看见」这条端到端还没有一条真实图片验证过。最可能出问题的是两处：① SnowLuma 事件里 data.url 的实际形态（rkey 有效期、是否需要额外请求头）② auto 模式下真实 JPEG/大图经过 DSH 附件库时是否被接受",
+      "看图当前默认 on-demand，所以「模型确实会去调 read_image」这一步只是在提示词层面成立，**没有在真实对话里观察到它真的读了图**",
+      "清空 `snowluma.launchCmd` 之后的启动路径**还没真机跑过**：下一次 start.bat 应该会走自动发现（`installDir` 下的 `index.mjs` + 包内 `vendor\\node\\node.exe`、不出窗口）。验证方法是看新起的 node 进程命令行里是不是包内 node 的完整路径，而不是裸 `node`",
+      "「不重复启动」的第②步在**真实端口争用场景**下没验过：离线测试用的是注入的假 detect / 假控制台，真实的「换过 WebUI 端口 + 错实例占着 3000」组合没有复现过"
+    ]
+  },
+
+  "roadmap": {
+    "done": [
+      "P0 协议端就位",
+      "P1 桥接骨架连通 dsh --profile sdk",
+      "P2 工作区沙箱 + 管理员白名单",
+      "★ 真实 QQ 链路端到端验证（含工具使用）",
+      "★ P3 人味层：拟人延迟（反应时间 + 按字数折算的打字时间）、静默时段、分条发送",
+      "★ P4 跨重启记忆：让 agent 在工作区里自己记笔记（复用它的文件工具，零新增存储层）",
+      "★ P3 完成：人设提示词（两个预设 mermaid / mermaid-lite + 自定义；含\"提到不存在的工具\"体检）",
+      "★ 成本控制：人设切精简版（−373 字/轮）；记忆指令改为\"只在需要时读一次\"，不再暗示每轮都读",
+      "★ CONFIG-UI.md：给 UI 生成用的自包含规格（字段/分组/校验/提示文案/后端接口）",
+      "★ 回应速度三档：快速≈1秒 / 均衡≈8秒（默认）/ 谨慎≈20秒，每档带风险文案（越快风控风险越高）",
+      "★ 配置 HTTP 接口已实现：/api/status、/api/config（读写）、/api/check、/api/doctor、/api/conversations、/api/stop、/api/restart；只监听回环、读配置删 token、写配置空值=保持原样",
+      "★ 为已完成的 config-ui 实现的后端（全部落地，并在**真实运行环境**逐条验证过）：GET /api/snowluma/detect（真实探测，不返回缓存值）、POST /api/snowluma/start（见下方三步重构）、GET /api/usage（真实记账聚合）、GET /api/usage/prices（价目表 + 峰谷规则 + now 判定）、GET /api/memory/tree、GET/POST/**DELETE** /api/memory/file。★ DELETE 是 UI 已在用而文档此前漏列的，已补进 CONFIG-UI.md 表格",
+      "★★ 实测：本机存在**两个不同的 SnowLuma 安装** —— 工作区 `<workspace>/snowluma/`（index.mjs 7447748 字节）与参考项目 `D:\\QQagent_DeepSeek\\snowluma`（7165599 字节）。**实际在跑的是工作区那份**（取证：PID 31580 的父进程是 `cmd /c \"…\\project_InteractBot\\snowluma\\launcher.bat\"`，启动时间 23:56:34 与工作区 config 时间戳吻合）。早期把启动入口硬指到工作区外那份是错的 —— 会启动错实例、甚至同端口撞车。所以加 `snowluma.installDir`（默认 `../../snowluma`，按 PKG_ROOT 解析）并做**就近发现**（见 src/local.mjs 的 findSnowluma）",
+      "★★ 「拉起 SnowLuma」按钮已重构为**三步**：① 探控制台（snowluma.consoleUrl，默认 5099）→ 通了就是已在跑；② 再探 OneBot 端点 → 通了也是已在跑（控制台可能关了或端口改过）；③ 都不通才用 installDir 下的 launcher.bat 真的启动。①② 都不能省：控制台只在已启动时存在，而只探控制台会在\"控制台关了但服务在跑\"时误判成需要启动、开出第二个实例。spawn 时 `.bat` 必须 `shell:true`、`.mjs` 必须显式给 node（用包内 vendor/node，SnowLuma 要求 ^22.13.0 || >=23.4.0，实测包内 v24.9.0 满足）",
+      "★★★ 真实事故（2026-09-26 凌晨，症状＝界面显示「令牌被拒」+ 机器人完全不说话）：某个**错误的** SnowLuma 实例（工作区外 `D:\\QQagent_DeepSeek\\snowluma`）占着 3000/3001/5099，而它用的是**另一套 token**，于是桥接收到 401、`/api/snowluma/detect` 判成 `auth-failed`（`httpStatus:401`，`httpReachable:true`）。取证：`Get-NetTCPConnection` 显示 3000/3001/5099 的持有进程其父进程是 `cmd /c \"D:\\QQagent_DeepSeek\\snowluma\\launcher.bat\"`，而工作区那份的 token 与桥接配置**完全一致**（对照后 ws/http 两个 token 都 match=True）—— 也就是「token 没错，是跑的那个实例不对」。★ 这个错实例是本项目**自己的集成测试**早先擅自 spawn 出来的（当时测试没注入 locateSnowluma，自动发现找了 D: 那份），detached 让它活了下来",
+      "★★★ 由上一条暴露出的**启动逻辑缺陷（已修）**：「拉起」按钮第 ② 步原本写的是「OneBot 端点可达 → 判定已在跑」，用的是 `httpReachable`。但**错实例占着 3000 时 `httpReachable` 也是 true** —— 于是判定\"已在跑\"、**永远不去启动正确的那份**，界面卡在「令牌被拒」再无出路。正确判据是**桥接自己连上了没有**（`status=connected`）：`httpReachable` 只说\"端口有东西在应答\"，**不等于\"我们在跟对的那个说话\"**。现在 `auth-failed` 会**继续往下走**去启动正确实例，并在日志里说明原因。已加回归测试",
+      "★★ 测试自身的两个坑（都在 verify-apitest.mjs 里修掉了，都是同一族问题：**异步资源的释放是竞态**）：① 测试会 spawn 假 SnowLuma 子进程，而 `spawn` 是异步的 —— 主进程走到清理时那个 .mjs 还被占着，Windows 下 `rmSync` 抛 **EPERM**；这个未捕获异常在退出路径上把进程炸成 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`，于是**60 项全过的测试被判成失败**。现在：先等子进程退出 + 清理失败只警告不抛。② 测试**绝不能走自动发现**去启动真实程序 —— 已注入受控的假 `locateSnowluma`",
+      "★★ 顶部时段指示灯（高峰/低谷）由**界面按浏览器时间**算（规则来自 /api/usage/prices 的 peak 段；实现是 §2.1.1 里给出的 computePeriod，用 Intl 按 peak.timezone 取墙上时间，**不能直接 getHours()**，窗口左闭右开）；而**账目里的时段仍由桥接判定** —— 刻意分开，因为账本不该依赖「当时有没有网页打开」。接口里的 now 字段保留用于对照排查，不是指示灯的数据源",
+      "★★★ **token 的来源已改为「SnowLuma 自己的 config/onebot_<uin>.json 优先」**（src/snowluma.mjs 的 resolveOnebotTokens / readSnowlumaTokens），config.json 里那份只作回退。为什么：真实事故——脚本把 token 改对了，之后**通过网页保存了一次配置**，那次保存把旧 token 当作**非空值**提交（mergeConfigPatch 的行为没错：非空就是\"用户要改\"），于是被合法写回旧值、**修复被静默推翻**，症状是「令牌被拒」+ 机器人完全不说话。病根是 **token 存在两处必然漂移**，而那份数据本来就是 SnowLuma 的。detect 现在额外返回 `tokenSource` 与 `tokenDiffersFromConfig` 供排查",
+      "★★ **界面按钮的行为已改变**：`POST /api/snowluma/start` 现在是**打开 SnowLuma 网页端**（系统默认浏览器打开 snowluma.consoleUrl），**不再启动进程**。启动进程移到 `start.bat`（调用 `index.mjs --snowluma`，复用 local.mjs 的 findSnowluma，**判断逻辑只有一份**）。理由：按钮在浏览器里，「打开一个本机网页」是它能确定做到的事；「启动进程」会开出第二个实例（端口冲突、抢登录态），而那是启动时该做一次的事。返回 `reachable` 让界面能区分「浏览器打开了」与「SnowLuma 其实没在跑」（控制台只在它运行时才存在）",
+      "★★ **SnowLuma 的输出改在界面里看**（`GET /api/snowluma/log`），不再依赖那个弹出来的控制台窗口。实现上是**读它自己的日志文件**，不是抓 stdout —— 实测对比同一条消息：日志文件里是 `私聊 [无忘远霞(100000001)]: 确认一下群聊开关打开了吗`（UTF-8 正确），而接管 stdout 重定向后变成 `绉佽亰 [鏃犲繕杩滈湠...]`（GBK 乱码）。**要给人看的内容变乱码等于没显示**，所以日志文件是唯一保真的来源。顺带：它已按天轮转，不必自己管文件增长。接口支持 offset 增量轮询，并在轮转时标记 `rotated`（界面必须据此清空面板，否则新旧日志拼在一起像时间倒流）",
+      "★ 发现 SnowLuma 入口时**优先 `index.mjs` 而不是 `launcher.bat`**：后者的最后一行是 `pause`，天生会开一个控制台窗口 —— 而输出既然改到界面里看，那个窗口就是多余且碍事的。用 `index.mjs` 时由包内 node 启动，`stdio:'ignore'` + `windowsHide:true`，**完全不出窗口**。",
+      "★ 记忆系统的真相：**没有数据库、没有向量检索、桥接也不代存** —— 只有一段每轮注入的提示词（src/memory.mjs）告诉模型「你的记忆是哪个文件、不要每轮都读、不要每轮都写」，然后**由模型用自己的文件工具读写**。实测模型确实这么做了（workspace-qq/MEMORY.md 里它自己记下了管理员昵称与一条约定）",
+      "★★ **权限分三级**（src/roster.mjs）：`adminUsers` 管理员（满权限）/ `dmAllowlist` 私聊白名单（普通用户，只读）/ 陌生人（不回）。**群白名单 `groupAllowlist` 与私聊白名单分开** —— 群聊不再以「用户权限」作为回复条件，而是由群白名单决定可用性，发言人权限仍由 adminUsers 决定。三张名单**空时语义各不相同**且都是 fail-closed：管理员空=谁都不能用；私聊白名单空=**只有管理员能私聊**（刻意不退回「谁都能私聊」）；群白名单空=所有群都不回。★ 非管理员的禁写是**提示词层**限制（提示词逐项列出被禁的动作类别 + 允许的只读能力），**不是 OS 硬墙**；硬墙需要另起 read-only 的 DSH 进程，代价已评估但未做（见 src/roster.mjs 顶部取证）",
+      "★★ 「先应一声」已重构为**四类**（src/interim.mjs）：thinking / searching / tooling / **blocked**（权限受阻）。素材来自用户给的 deal.txt，**全部可编辑**。去重是「带冷却的随机」——候选里先剔除冷却期内的再随机，冷却判定用**与**（时间到了**且**中间说过足够多别的）。★ 两个被单测抓到的实现错误：① 冷却判定写成**或**，导致冷却时间形同虚设；② 随机只在「可用子集」里选，话术少时会连续抽到同一句（`A|B` 得到 `B A A A`）—— 现在随机覆盖整个池子并硬性保证「绝不连续重复」。`blocked` 依赖 `TurnCollector` 新增的 `deniedApprovals`（只看 toolCalls 分辨不出「在跑」与「被审批挡住」）",
+      "★★★ 代码审查发现并修掉一个真实漏洞：文件层面禁了写，但 **QQ 层面没禁** —— MCP 的黑名单拦的是「会伤害他人或账号」的动作（踢人/禁言/改群名…），而 `qq_poke` / `qq_send_sticker` / `qq_recall` / **`qq_api`（万能口）** 都是正常功能、不在黑名单里。于是「只读」用户能让机器人**给任意 QQ 号发消息、戳任意人** —— 等于「不能用它的硬盘，却能用它的账号」。现在 `MODIFY_QQ_TOOLS` 把这类有社交后果的 QQ 动作也列为修改类（`qq_api` 必须一起禁，否则前几条全白拦），并保留只读类 QQ 查询（`qq_group_members` / `qq_message_detail` / `qq_group_history`）给普通用户用",
+      "★★★ **「机器人完全不输出内容」的真正根因（已修，且有端到端实证）**：桥接起的 DSH 子进程**拿不到 API key**（环境变量里没有、SDK 那条路径也不去读凭据文件），于是每一次模型调用**立刻**以 `MISSING_CREDENTIAL` 失败。症状极隐蔽：**不抛异常、不报错**，回合照常结束，只是没有任何 `assistant/message` —— 日志写「回合结束但无文本输出」，事件序列里**只有 `assistant/attempt` 没有 `assistant/message`**，且「思考+工具」只有 160ms（一次真实模型调用不可能这么快）。★ 是探针把 DSH 的**原始错误**打出来才定案的：`llm-deepseek: no API key for provider route \"deepseek-official\"`。★ 修法：新增 `src/credentials.mjs`，从 `$DSH_HOME/.credentials.yaml` 的 `refs.DEEPSEEK_API_KEY` 读出并**注入子进程环境**（环境变量优先，与 dsh 自己的优先级一致）；只解析那一个路径（同文件里还有 OAuth secret），密钥只进子进程环境、从不写日志或接口。★ 实例：`DSH_HOME` 若**本来没设**，桥接即使解析出 home 也传不下去，所以现在会把它**显式写回 `process.env.DSH_HOME`**。★ 启动时新增凭据自检并写进**日志文件**（第一版放得太早、只进了控制台，而桥接是无窗口运行的 —— 「写了日志但没人看得见」和「没写日志」一样糟）。修复后探针实测拿到 `assistant/message` 且文本为「你好」",
+      "★★★ 「先应一声」配了话术却不生效的真正根因（已修）：`normalizeConfig` 里只认旧键 `web` / `working`，于是归一化结果里**永远没有** `searching` / `tooling`，而挑选器要的正是新键 → 每次都退回默认。使用者配的话术一句没用上且无任何提示。现在四个类别都归一化出来，新旧键名都能读入（旧名做别名）。★ 触发条件也值得知道：**回合必须超过 `humanize.interim.afterMs`（默认 8 秒）**才发；缓存命中率高时回合常在 2 秒内完成，所以看不到它是正常的。日志里搜「先发一条」可确认是否触发过（实测触发过 4 次）",
+      "★★★ **修了一个真实丢消息的缺陷**：`shutdown` 原先**第一件事就是 `onebot.close()`**，而回复可能还在拟人延迟里排队 —— 实测有一条回复因「静默时段」被延迟 **116 秒**，使用者在它发出前重启桥接，通道当场断开，那条**已经生成好**的回复永远丢了（日志表现：`拟人延迟 116 秒后再发` 紧接 `=== 桥接退出（收到 1 条私聊，回复 0 条）===`）。现在：① 延迟可被收尾打断（`#sleepUnlessClosing`）；② `Bridge.close()` 会**跳过剩余延迟立刻把在途回复发出去**并等它们结束（最多 8 秒）；③ `shutdown` 改成**先 `await bridge.close()` 再 `onebot.close()`**。宁可拟人节奏打折，也不要丢整条回复",
+      "★ **对话栏可以显示思考过程**了：`listConversations()` 的 `messages[].role` 新增 **`thinking`**（机器人的 reasoning）。它**只进镜像、不发到 QQ**（有断言盯着这一点）。UI 规格见 CONFIG-UI.md §2.9：默认折叠、淡化处理、可能很长、**一轮可能没有**（没有就整块不显示）",
+      "★ **记忆的两层范围**（三层名单落地后的实际语义）：`MEMORY.md`=全局（**只有私聊会话可见**，跨人共享）；`memory/private-<QQ号>.md`=某个人的私聊记忆（**跨该人的所有私聊**，但**不跨群**）；`memory/group-<群号>.md`=**某个群专属**，群里要求记住的东西只写在这里，别的群与私聊都看不到。★ 一次性迁移问题：`memory/` 目录在重构前不存在，所以**旧记忆全在全局 MEMORY.md 里**（实测：管理员昵称、一条约定、store/ 与贪吃蛇任务都在）。新会话只看自己那份 → 会以为没记忆。所以提示词里加了指引：个人文件不存在时，先把全局里属于本人的条目搬过去再新建",
+
+
+      "★ `GET /api/roster` 已实现：拉真实好友/群列表，并把配置里的号码与真实名单**对照**，标出 `unknownAdmins` / `unknownDmUsers` / `unknownGroups`（号码打错是这类配置最常见的错误，且症状静默）。★ 两个刻意的设计：① 走缓存（好友/群不会秒变，而每次都要连协议端几百毫秒），`?refresh=1` 强制重拉；② **协议端连不上时不整体失败**，仍返回 200 但 `friends`/`groups` 为空且 `warnings` 说明原因，并有 `friendsKnown`/`groupsKnown` 标志 —— 因为界面若把「列表为空」直接显示成「你没有好友」会误导，而实际只是 SnowLuma 没在跑。同理，名单没拿到时**不做「号码找不到」的比对**（否则会报出一个自相矛盾的结果：既说找不到、又给空列表）",
+      "★ 死代码清理（审查时发现）：`bridge.mjs` 里的 `pickInterimText` 与 `DEFAULT_INTERIM` 已被 `src/interim.mjs` 取代但还留着（会误导后来者以为有两个实现）；`#isAllowed` 在名单逻辑重构进 `roster.mjs` 后已无调用者；`TIER` 导入未使用。都已删除。★ 连带修正两处**测试的脆弱写法**：① 契约测试原先是**文本扫描** `bridge.mjs` 里 `#isAllowed` 的方法体来验 fail-closed —— 方法搬走后它就失效了；现在改成**行为断言**（直接造 roster 看它怎么判），不再受措辞/文件位置影响，并补了「名单填上就放行」的对照（否则一个恒返回 false 的实现也能通过）。② 「先应一声」的分类断言原先靠**关键词猜内容**（漏了「翻翻」、又漏了「核实」两次），现在只断言「取自对应那一组」，分类正确性交给 `classifyInterim`",
+      "★ 群聊实测踩到的配置陷阱：`send.maxPerMinute`（默认 8）会被**单条长回复**用光 —— 一条 1870 字的回复按 chunkChars=300 会切成 8 条，正好占满这一分钟的额度，于是紧接着的第二轮**全部被静默丢弃**（日志只有「跳过发送：每分钟上限已达」）。测试里因此把配额放大并让两轮内容不同；生产环境若开群聊，这个值值得复核。",
+      "★ 记忆页签**只展示契约内的文件**（MEMORY.md 与 memory/）：实测模型还在工作区里自建了 `store/`（它自己的杂物间，README 写着「放以后要用的东西」），那**不是记忆**、模型也不会读回来 —— 列了却没用比不列更糟，所以排除。⚠️ **记忆目前是全局一份、不分人、不分群**：注入的路径对所有会话完全相同，所以 A 的偏好会被用到 B 身上。当前白名单只有一人，故未暴露（但群聊开关已被打开，需留意）；一旦多管理员就会变成真问题",
+      "★ 记忆接口的三条底线（memory-files.mjs，都有测试）：只允许工作区内相对路径（`..`/绝对路径/UNC/隐藏文件一律拒绝，且**解析之后**再确认一次仍落在工作区内）、只允许 .md、拒绝软链接（否则可借它读工作区外）。写操作带 sha256 冲突检测 → 409 并带回 currentContent（模型随时可能在写记忆，「编辑期间被改过」是常态而非意外）",
+      "★★ 实测缺陷（Node v24.9.0 / Windows）：`rmSync(path)` 删**单个文件**会**静默失败** —— 不抛错、返回正常，但 `existsSync` 仍是 true；同一环境下 `unlinkSync` 正常。所以记忆删除必须用 unlinkSync，并在调用后**复核文件真的没了**（否则接口会回 `{deleted:true}` 而文件还在，是谎报）。这条是被「删除后必须读不到」的断言抓出来的",
+      "★ 用量口径取证（2026-09-25，真实 SDK 桥接会话 qq-eff12cd760f2，一轮 15 步）：inputTokens + cacheReadTokens + cacheWriteTokens + outputTokens === totalTokens **每步都成立**（所以 inputTokens 是【未缓存】输入）。该轮实测 input=25,049 / cacheRead=223,744 / output=3,625 / 命中率 89.9% / 空闲价 ¥0.0440；★ 缓存命中占 token 量 89% 但只占费用 10% —— 这就是为什么界面必须把「未缓存输入」和「缓存命中」分开显示。★ totalTokens 是每步的上下文**快照**、不可求和（并非因为数值更大：本条实测两者恰好都等于 252,418，但单位不同，遇到 compaction 会立刻分道扬镳）",
+      "⚠️ DSH **不提供人民币价目表**：dsh-token-meter 里的 pricing 是视觉 token 折算，dsh-llm-deepseek 里没有单价。所以成本必须由本项目按 prices.json 估算，且只能叫「估算」",
+      "★ 长任务\"先应一声\"：回合超过 8 秒就先发一条（按实际工具调用选措辞，不谎称动作）。实测有一轮 40.8 秒 / 20 次工具调用期间完全静默"
+    ],
+    "todo": [
+      "P5 插件/技能两型扩展系统（当前所有功能都在核心里，没有扩展点）",
+      "可选：/api/start 与 /api/stop（UI 直接启停机器人；目前需用 start.bat）",
+      "可选：群聊支持（第一版刻意关闭，涉及账号风控）"
+    ],
+    "immediateBlocker": "无技术阻塞。机器人已可用：触发即必答、人味延迟、跨重启记忆、人设语气"
+  }
+}

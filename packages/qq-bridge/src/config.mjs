@@ -1,0 +1,430 @@
+/**
+ * 配置解析与校验。
+ *
+ * ── 为什么单独抽一个模块 ───────────────────────────────────────────────
+ * 这两个函数原先埋在 `index.mjs` 里，只在启动时跑一次，**因此从没被测试过**。
+ * 这类代码最典型的故障是：**改了一个配置键名，程序静默回落到默认值** ——
+ * 不报错、不崩，只是你设的值不生效。比如把 `humanize.charsPerSecond`
+ * 写成 `humanize.charsPerSec`，人味层就会用默认值，而你完全不知道。
+ *
+ * 抽出来之后它可以被单元测试直接覆盖（见 mocks/verify-config.mjs），
+ * 也能被 `mocks/verify-manifest.mjs` 用来核对"文档声明的配置键是否真的存在"。
+ *
+ * ── 一条设计原则 ───────────────────────────────────────────────────────
+ * **所有默认值都必须"安全"，不能"方便"。**
+ * 例如 permissionMode 默认 workspace-write（而不是全权）、
+ * adminUsers 默认为空（= 谁都不能用）、humanize 默认开启。
+ */
+
+import { DIRS, resolveInPackage, findDshCli } from './local.mjs'
+import { lintKeywords } from './trigger.mjs'
+import { lintPersona } from './persona.mjs'
+import { buildSpeedPreset, DEFAULT_SPEED_PRESET, lintHumanize, detectSpeedPreset, SPEED_PRESETS } from './speed.mjs'
+
+/**
+ * 把一个"路径列表"配置项解析成绝对路径数组。
+ *
+ * 配置里写的是**相对包根**的路径（和 `dsh.workspace`、`ui.logFile` 一致），
+ * 解析规则也必须一致 —— 否则同一个包里会出现两套相对路径语义。
+ *
+ * 为什么要允许列表而不是单个值：这些位置是**候选**（`dsh.searchPaths` /
+ * `snowluma.searchPaths`），找不到就继续往下找。写成单个值时，一条写错就彻底失效；
+ * 写成列表则能"补充"而不是"覆盖"。空白项直接丢掉，免得 `resolve('')` 变成包根。
+ *
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+function normalizePathList(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((p) => typeof p === 'string' && p.trim() !== '')
+    .map((p) => resolveInPackage(p))
+}
+
+/**
+ * 补齐默认值并解析路径。
+ *
+ * 为什么路径要在这里解析：`config.json` 里写的是相对包根的路径，
+ * 必须转成绝对路径才能用；而这一步同时保证了"包搬走路径跟着走"。
+ */
+export function normalizeConfig(c) {
+  const src = c ?? {}
+
+  // DSH 的额外安装位置候选要在 `findDshCli()` 之前算好 —— 它直接吃这张表。
+  // 这样"DSH 装在非标准位置"就是一个**配置**问题，而不是"去改 src/local.mjs"。
+  const dshSearchPaths = normalizePathList(src.dsh?.searchPaths)
+
+  return {
+    dsh: {
+      // 路径策略：包内 vendor/dsh → 环境变量 DSH_DESKTOP_APP → 配置的 searchPaths
+      // → DSH 默认安装位置。这样既能在本机直接跑，也能整体搬走，且**代码里
+      // 不含任何机器专属的绝对路径**。见 src/local.mjs。
+      cliPath: src.dsh?.cliPath ? resolveInPackage(src.dsh.cliPath) : findDshCli({ searchPaths: dshSearchPaths }),
+      // 额外的安装根候选（相对包根解析）。用途见上面 dshSearchPaths。
+      searchPaths: dshSearchPaths,
+      // 工作区＝权限沙箱的根。相对路径按 PKG_ROOT 解析，所以包搬走它也跟着走。
+      //
+      // ⚠️ 这里刻意区分两种"空"：
+      //   · 字段**没写**（undefined）→ 用默认工作区（合理的便利）
+      //   · 字段**显式写成空串**  → 保留空串，交给 validateConfig 报致命错误
+      // 如果这里把空串也当成"没配"而填默认值，那么"工作区不能为空"这条
+      // 校验就**永远不会触发** —— 用户写错了却得到一个静默的默认值。
+      // 这个坑是被 mocks/verify-config.mjs 抓出来的。
+      workspace:
+        src.dsh?.workspace === undefined
+          ? DIRS.defaultWorkspace
+          : src.dsh.workspace === ''
+            ? ''
+            : resolveInPackage(src.dsh.workspace),
+      provider: src.dsh?.provider || 'deepseek-official',
+      model: src.dsh?.model || 'deepseek-flash',
+      reasoningEffort: src.dsh?.reasoningEffort || undefined,
+      // 模型 API key。**可以留空** —— 留空时 `resolveModelCredentials` 会依次去读
+      // 环境变量 DEEPSEEK_API_KEY 与 $DSH_HOME/.credentials.yaml（DSH 桌面版填在
+      // 「模型」页里的那份）。三者的优先级见 src/credentials.mjs。
+      //
+      // 用 `|| ''` 而不是让它保持 undefined：这个键必须在归一化结果里**存在**，
+      // 否则「脱敏 → 前端表单 → 回存」这条链上它会凭空消失（mocks/verify-manifest.mjs
+      // 也会因为"清单登记了代码里没有的键"而报错）。
+      apiKey: src.dsh?.apiKey || '',
+      // 默认 workspace-write：这是"权限只限工作区"的载体。
+      // 绝不要把默认值写成 danger-full-access。
+      permissionMode: src.dsh?.permissionMode || 'workspace-write',
+    },
+    onebot: {
+      wsUrl: src.onebot?.wsUrl || 'ws://127.0.0.1:3001',
+      httpUrl: src.onebot?.httpUrl || 'http://127.0.0.1:3000',
+      wsToken: src.onebot?.wsToken || '',
+      // 与 wsToken 是两个不同的 token（SnowLuma 特性）；没单独配则退回 wsToken
+      httpToken: src.onebot?.httpToken || src.onebot?.wsToken || '',
+      selfId: src.onebot?.selfId ? String(src.onebot.selfId) : null,
+    },
+    access: {
+      adminUsers: Array.isArray(src.access?.adminUsers) ? src.access.adminUsers.map(String) : [],
+      // 私聊白名单（应在机器人的**好友列表**里选）。
+      // ★ 空时的语义：**只有管理员能私聊**（fail-closed）。
+      //   刻意不退回"谁都能私聊" —— 那会让刚加好友的陌生人直接能驱动
+      //   一个对文件有权限的 agent。
+      dmAllowlist: Array.isArray(src.access?.dmAllowlist) ? src.access.dmAllowlist.map(String) : [],
+      // 群白名单（应在机器人的**群列表**里选）。空 = 所有群都不回。
+      groupAllowlist: Array.isArray(src.access?.groupAllowlist)
+        ? src.access.groupAllowlist.map(String)
+        : [],
+    },
+    trigger: {
+      private: src.trigger?.private !== false,
+      mention: src.trigger?.mention !== false,
+      keyword: src.trigger?.keyword !== false,
+      groupEnabled: src.trigger?.groupEnabled === true,
+      keywords: Array.isArray(src.trigger?.keywords) ? src.trigger.keywords : [],
+    },
+    // 节流：默认值刻意保守（宁可慢，也不要像机器人）
+    send: {
+      minGapMs: src.send?.minGapMs ?? 1000,
+      maxGapMs: src.send?.maxGapMs ?? 3000,
+      maxPerMinute: src.send?.maxPerMinute ?? 8,
+      maxPerHour: src.send?.maxPerHour ?? 500,
+      dedupeWindowMs: src.send?.dedupeWindowMs ?? 8000,
+      maxCharsPerMessage: src.send?.maxCharsPerMessage ?? 1500,
+    },
+    turn: { timeoutMs: src.turn?.timeoutMs ?? 10 * 60_000 },
+    // 人味层：默认**开启**。这不是体验优化，是账号存活相关配置 ——
+    // 秒回 + 7×24 在线是行为风控最典型的特征。
+    //
+    // 参数来源有两层（后者覆盖前者）：
+    //   ① `humanize.speed` 档位（快速/均衡/谨慎）→ 展开成五个毫秒参数
+    //   ② `humanize` 里显式写的字段 → 覆盖档位
+    // 这样"选个档位"和"手工微调"可以共存：选了档位之后再改某一个字段，
+    // 只有那个字段被覆盖，其余仍来自档位。
+    humanize: (() => {
+      const src_h = src.humanize ?? {}
+      let base
+      try {
+        // 档位未指定时用默认档位；指定了但不存在则抛错（下面 catch 里降级）
+        base = buildSpeedPreset(src_h.speed || DEFAULT_SPEED_PRESET)
+      } catch {
+        base = buildSpeedPreset(DEFAULT_SPEED_PRESET)
+      }
+      return {
+        speed: src_h.speed || DEFAULT_SPEED_PRESET,
+        enabled: src_h.enabled !== false,
+        delay: src_h.delay !== false,
+        reactMinMs: src_h.reactMinMs ?? base.reactMinMs,
+        reactMaxMs: src_h.reactMaxMs ?? base.reactMaxMs,
+        charsPerSecond: src_h.charsPerSecond ?? base.charsPerSecond,
+        // 打字时间的**单独**上限。只靠 maxDelayMs 不够：5 字/秒下 200 字要打 40 秒。
+        typingMaxMs: src_h.typingMaxMs ?? base.typingMaxMs,
+        // 总延迟上限 = 反应时间 + 打字时间（留一点余量）
+        maxDelayMs: src_h.maxDelayMs ?? base.maxDelayMs,
+        chunkChars: src_h.chunkChars ?? 300,
+        quietHours: {
+          enabled: src_h.quietHours?.enabled === true,
+          start: src_h.quietHours?.start ?? '02:00',
+          end: src_h.quietHours?.end ?? '07:00',
+        },
+        quietDelayMinMs: src_h.quietDelayMinMs ?? 45_000,
+        quietDelayMaxMs: src_h.quietDelayMaxMs ?? 150_000,
+        // 长任务期间"先应一声"（避免使用者对着静默以为机器人坏了）
+        //
+        // ⚠️ 这一段曾经是"配了话术却不生效"的**真正根因**（比键名不匹配更深一层）：
+        //    归一化时只认旧键 `web` / `working`，于是归一化结果里**永远没有**
+        //    `searching` / `tooling`，而挑选器要的正是新键 → 每次都退回默认。
+        //    使用者配了五组话术，一句都没用上，且没有任何提示。
+        //
+        // 现在四个类别**都归一化出来**，并且新旧键名都能读入（旧名做别名）。
+        interim: (() => {
+          const m = src_h.interim?.messages ?? {}
+          const arr = (x) => (Array.isArray(x) ? x : undefined)
+          return {
+            enabled: src_h.interim?.enabled !== false,
+            afterMs: src_h.interim?.afterMs ?? 8000,
+            messages: {
+              thinking: arr(m.thinking),
+              // 新名优先，旧名兜底（旧名 `web` / `working` 是重构前的写法）
+              searching: arr(m.searching) ?? arr(m.web),
+              tooling: arr(m.tooling) ?? arr(m.working),
+              blocked: arr(m.blocked),
+            },
+          }
+        })(),
+      }
+    })(),
+    session: {
+      salt: src.session?.salt || undefined,
+      // instance 参与 sessionId 哈希。**留空 = 每次进程启动自动换新**。
+      // 为什么不能用"当天日期"之类的固定值：DSH 的会话是持久化到磁盘的，
+      // 重启后无法复用同一个 sessionId（SDK 没有 resume），
+      // 用固定值会导致当天第二次重启起必然报 "already exists"。
+      // 详见 session-id.mjs 顶部那段真实故障记录。
+      instance: src.session?.instance || undefined,
+    },
+    persona: {
+      callerName: src.persona?.callerName || '',
+      // 人设：preset 选内置，custom 完全自己写（custom 优先）。
+      preset: src.persona?.preset || undefined,
+      custom: src.persona?.custom || '',
+    },
+    // 跨重启记忆：不给 agent 加存储层，而是给它一个"记笔记"的约定
+    // （工作区是持久的，它本来就有读写文件的工具）。详见 src/memory.mjs。
+    memory: { enabled: src.memory?.enabled !== false },
+    // 看图：QQ 图片 → 工作区落盘 → 模型（详见 src/images.mjs）。
+    //
+    // ★ 默认 `on-demand` 而**不是** `auto`，这是刻意的成本取舍：
+    //   QQ 里大量是表情包，`auto` 等于每张表情包都花 vision token，
+    //   而且图片会留在会话历史里、后续每轮重复计费。
+    //   `on-demand` 只给一个路径（纯文本，留在历史里几乎不花钱），
+    //   模型**自己想看的时候**才调 read_image。
+    //   默认值要选"省钱的那一档"，想更快更准再自己切 —— 反过来
+    //   （默认烧钱、想省再关）是错的。
+    image: {
+      enabled: src.image?.enabled !== false,
+      // ★ 这里**保留原样**而不是把非法值改写成 'on-demand'。
+      //
+      //   原因和 `humanize.speed` 完全一样：一旦在归一化阶段把错值改写掉，
+      //   后面 validateConfig 就**再也看不到它**，"你写错了"这条警告也就
+      //   永远不会出现 —— 用户会以为设置生效了，其实一直是默认值。
+      //   行为上的安全由消费方保证：`mode === 'auto'` 才走自动注入，
+      //   其余任何值（含拼错的）都按 on-demand（省钱、保守）处理。
+      mode: src.image?.mode || 'on-demand',
+      // 单条消息最多处理几张。DSH 附件库单条消息上限是 20 张，
+      // 这里默认 4：够用，且不会因为有人连发 20 张就把一轮拖死。
+      maxCount: src.image?.maxCount ?? 4,
+      maxBytes: src.image?.maxBytes ?? 10 * 1024 * 1024,
+      timeoutMs: src.image?.timeoutMs ?? 15_000,
+      maxRedirects: src.image?.maxRedirects ?? 3,
+      retentionHours: src.image?.retentionHours ?? 72,
+      maxTotalBytes: src.image?.maxTotalBytes ?? 100 * 1024 * 1024,
+    },
+    // QQ 工具（MCP）：把 SnowLuma 的动作暴露给模型，让它在明确指令下能调
+    // QQ 原生功能（戳一戳、表情、撤回、查群成员…）。详见 mcp/mcp-qq-server.mjs。
+    mcp: {
+      enabled: src.mcp?.enabled !== false,
+      toolTimeoutMs: src.mcp?.toolTimeoutMs ?? 20_000,
+    },
+    // 协议端进程（SnowLuma）：让界面能"探测它在不在线 / 把它拉起来"。
+    // 桥接本身**不需要**这些值就能工作 —— 它只影响界面上的那张进程卡。
+    // 所以留空是完全正常的（默认就是留空）。
+    snowluma: {
+      // SnowLuma 装在哪。相对路径按 **PKG_ROOT** 解析（不是 cwd），所以包搬走它跟着走。
+      // 留空则完全交给 findSnowluma 的候选表（vendor/snowluma → SNOWLUMA_HOME 环境变量）。
+      //
+      // ★ 发布包把这里留空，用户自己解压 SnowLuma 后用界面/配置指过来；
+      //   开发机上填 `../../snowluma` 是为了指向工作区里那份（实测本机有两个安装）。
+      installDir: src.snowluma?.installDir ? resolveInPackage(src.snowluma.installDir) : '',
+      // 额外的安装目录候选，可填多个。存在的意义：不想把路径写进 installDir（它会**覆盖**
+      // 自动发现）时，用这张表"补充"候选，找不到就继续往下找，不会因为一条写错而彻底失效。
+      searchPaths: normalizePathList(src.snowluma?.searchPaths),
+      launchCmd: src.snowluma?.launchCmd || '',
+      launchCwd: src.snowluma?.launchCwd || '',
+      // 控制台地址。默认 5099 来自 SnowLuma **自己的** config/runtime.json
+      // 的 `webuiPort` —— 那是它的用户设置，所以这里做成可配而不是写死。
+      consoleUrl: src.snowluma?.consoleUrl || 'http://127.0.0.1:5099/',
+      probeTimeoutMs: src.snowluma?.probeTimeoutMs ?? 1500,
+    },
+    // 用量记账（概览页的用量卡片）。默认**记账但不显示钱**：
+    // token 数是量出来的，可靠；钱要靠人工维护的价目表，不可靠。
+    usage: {
+      enabled: src.usage?.enabled !== false,
+      costEnabled: src.usage?.costEnabled === true,
+      pricesFile: src.usage?.pricesFile || 'prices.json',
+    },
+    ui: {
+      logFile: src.ui?.logFile || 'logs/bridge.log',
+      verbose: src.ui?.verbose === true,
+      // 本地配置接口：默认开启，只监听回环。
+      apiEnabled: src.ui?.apiEnabled !== false,
+      apiPort: src.ui?.apiPort ?? 3410,
+    },
+  }
+}
+
+/**
+ * 配置自检。返回致命问题列表（非空则拒绝启动）。
+ * 设计原则：**配置错误必须挡在启动阶段**，不能等第一条消息来了才暴露。
+ */
+export function validateConfig(config) {
+  const fatal = []
+  const warn = []
+
+  // 工作区：不能是盘符根，也不能是用户主目录（那等于把整个磁盘交出去）。
+  // 相对路径是允许的 —— 它相对包根解析，正好让包搬走时工作区跟着走。
+  const ws = config.dsh.workspace
+  if (!ws) {
+    fatal.push('dsh.workspace 不能为空')
+  } else if (/^[a-zA-Z]:\\?$/.test(ws) || ws === '/' || ws === '\\') {
+    fatal.push(`dsh.workspace 不能是盘符根（${ws}）—— 那等于把整个磁盘交给 agent`)
+  } else if (/^[a-zA-Z]:\\Users\\[^\\]+\\?$/i.test(ws)) {
+    fatal.push(`dsh.workspace 不能是用户主目录（${ws}）—— 权限会大到无法控制`)
+  }
+
+  // 管理员：空 = 谁都不能用。这是刻意的 fail-closed，但要明确告知。
+  if (config.access.adminUsers.length === 0) {
+    warn.push(
+      'access.adminUsers 为空：**没有人可以使用这个机器人**（fail-closed 设计）。' +
+        '请在 config.json 里填入你自己的 QQ 号。',
+    )
+  }
+  for (const id of config.access.adminUsers) {
+    if (!/^\d{5,12}$/.test(id)) warn.push(`access.adminUsers 里的「${id}」不像 QQ 号，请检查`)
+  }
+
+  // 权限模式：danger-full-access 与"只限工作区"的决定矛盾，明确警告
+  if (config.dsh.permissionMode === 'danger-full-access') {
+    warn.push(
+      'dsh.permissionMode = danger-full-access：agent 将能读写整个磁盘且免审批，' +
+        '这与你"权限只限工作区"的决定相反。',
+    )
+  }
+
+  // 关键词：会静默变成"全响应"的写法要抓出来
+  warn.push(...lintKeywords(config.trigger.keywords).map((x) => `关键词告警：${x.message}`))
+
+  // 人设：预设名写错、或提到不存在的工具，都要抓出来。
+  // "提到不存在的工具"这条来自真实教训：源项目的人设里要求模型使用三个
+  // 从未注册过的工具，结果是幻觉调用 + 浪费回合。
+  warn.push(...lintPersona({ preset: config.persona?.preset, custom: config.persona?.custom }).map((x) => `人设告警：${x}`))
+
+  // 群聊
+  if (config.trigger.groupEnabled) {
+    warn.push(
+      'trigger.groupEnabled = true：**群聊已开启**。群聊只有在【被 @】或【命中关键词】时才回，' +
+        '不会自动搭话。注意账号风控风险 —— 上一个 QQ 号就是因此被处置的。',
+    )
+    // 关键词是"包含匹配"，在群里直接决定成本与打扰程度，必须再提醒一次
+    if (!Array.isArray(config.trigger.keywords) || config.trigger.keywords.length === 0) {
+      warn.push('群聊开着但关键词表为空：那就只能靠 @ 唤醒了（这本身没问题，只是确认你知道）')
+    }
+  }
+
+  // ── 看图 ────────────────────────────────────────────────────────────────
+  //
+  // 这里的告警都围绕一件事：**图片是有成本的**（vision token + 磁盘），
+  // 所以任何"会让它悄悄变贵"的写法都要说出来。
+  const img = config.image ?? {}
+  if (img.enabled !== false) {
+    if (img.mode !== 'auto' && img.mode !== 'on-demand') {
+      warn.push(
+        `image.mode「${img.mode}」不是有效值（可选 on-demand / auto），已按 on-demand 处理。`,
+      )
+    }
+    // 20 是 DSH 附件库的单条消息图片数上限；超过它的部分会被**整批拒绝**，
+    // 表现是"图片莫名全都没进去"，所以提前把矛盾点出来。
+    if (!Number.isInteger(img.maxCount) || img.maxCount < 1) {
+      warn.push(`image.maxCount「${img.maxCount}」不是正整数，图片会全部取不到，请修正。`)
+    } else if (img.maxCount > 20) {
+      warn.push(
+        `image.maxCount = ${img.maxCount}：DSH 附件库单条消息上限是 20 张，` +
+          `超过的部分会被整批拒绝。建议 ≤ 20。`,
+      )
+    }
+    // DSH 附件库单张上限默认 20MB（dsh-attachment-local 的 maxImageBytes）。
+    // 配得比它还大没有意义 —— 我们下载完也会被它拒。
+    if (!Number.isFinite(img.maxBytes) || img.maxBytes < 1) {
+      warn.push(`image.maxBytes「${img.maxBytes}」不是正数，图片会全部取不到，请修正。`)
+    } else if (img.maxBytes > 20 * 1024 * 1024) {
+      warn.push(
+        `image.maxBytes = ${img.maxBytes} 字节超过 DSH 附件库的单张上限（20MB），` +
+          `超出的图片下载下来也会被拒绝，白费带宽。`,
+      )
+    }
+    if (img.mode === 'auto') {
+      warn.push(
+        'image.mode = auto：**每张图片都会直接送进模型**（更快更准），' +
+          '代价是每张图都计 vision token，且图片会留在会话历史里重复计费。' +
+          'QQ 里表情包很多时成本会明显上升；想省就改回 on-demand。',
+      )
+    }
+    if (!Number.isFinite(img.retentionHours) || img.retentionHours <= 0) {
+      warn.push(
+        `image.retentionHours「${img.retentionHours}」不是正数：inbox 里的图片不会被清理。` +
+          `发图会持续占磁盘（这是唯一的清理机制，关掉它请自己负责）。`,
+      )
+    }
+  }
+
+  // OneBot 地址：ws 与 http 不能填成同一个端口
+  try {
+    const wsPort = new URL(config.onebot.wsUrl).port
+    const httpPort = new URL(config.onebot.httpUrl).port
+    if (wsPort === httpPort) {
+      fatal.push(
+        `onebot.wsUrl 与 onebot.httpUrl 指向了同一个端口（${wsPort}）。` +
+          `SnowLuma 默认 3001=WebSocket、3000=HTTP，请检查。`,
+      )
+    }
+  } catch {
+    fatal.push('onebot.wsUrl / onebot.httpUrl 不是合法的 URL')
+  }
+
+  if (!config.onebot.wsToken && !config.onebot.httpToken) {
+    warn.push('没有配置任何 accessToken。如果 SnowLuma 那边设了 token，连接会被拒绝。')
+  }
+
+  // 人味层被关掉要明确警告 —— 它是账号存活相关配置，不是体验开关
+  if (config.humanize?.enabled === false) {
+    warn.push(
+      'humanize.enabled = false：机器人会秒回。**秒回 + 7×24 在线是行为风控最典型的特征**，' +
+        '上一个 QQ 号被处置的最可能原因即此。除非你在做本地测试，否则建议保持开启。',
+    )
+  } else {
+    // 档位自洽性（参数互相打架的写法要抓出来）
+    warn.push(...lintHumanize(config.humanize).map((x) => `回应速度告警：${x}`))
+
+    // ★ "快速"档位风险最高，必须明确警告 —— 它约等于秒回
+    if (config.humanize?.speed === 'fast') {
+      warn.push(
+        `回应速度档位是「${SPEED_PRESETS.fast.label}」：${SPEED_PRESETS.fast.riskText}`,
+      )
+    }
+  }
+
+  // 档位名写错要报出来（否则会静默落回默认档，用户以为设置生效了）
+  if (config.humanize?.speed && !Object.prototype.hasOwnProperty.call(SPEED_PRESETS, config.humanize.speed)) {
+    warn.push(
+      `humanize.speed「${config.humanize.speed}」不是有效档位，已按「${DEFAULT_SPEED_PRESET}」处理。` +
+        `可选：${Object.keys(SPEED_PRESETS).join(' / ')}`,
+    )
+  }
+
+  return { fatal, warn }
+}
