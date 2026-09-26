@@ -255,6 +255,9 @@ export function createApiHandler(deps) {
     priceBook,
     usageLedger,
     memoryStore,
+    // 记忆快照的写入/删除（**只有控制台这条路需要它**，理由见下面记忆文件那两个路由）
+    saveMemorySnapshot,
+    dropMemorySnapshot,
     // 工作区绝对根路径（取图用 —— 对话里的图片只从 workspace/inbox 出）
     workspaceRoot,
   } = deps
@@ -473,6 +476,25 @@ export function createApiHandler(deps) {
       if (method === 'POST' && path === '/api/memory/file') {
         if (!memoryStore) return notImplemented('保存记忆文件')
         const r = memoryStore.write(body?.path, body?.content, body?.expectedSha256)
+        // ★★ 写成功之后**必须刷新快照** —— 否则使用者在这里改的记忆，
+        //    下一次读记忆时会被"篡改检测"当成绕过桥接的改动**原样回滚**。
+        //
+        // 为什么会这样：`verifyAndRestoreMemory` 的判据是"文件内容 == 桥接写下的快照"。
+        // 控制台这条路走的是 `memoryStore.write`（直接写盘），它不动快照，
+        // 于是文件与快照不一致 → 被判成篡改 → 回滚。表现是
+        // 「我在界面上删掉了一条，过一会儿它自己又回来了」——
+        // 而且**不会报错**，只会让使用者以为界面坏了。
+        //
+        // 为什么现在把这条路也算"合法写入"：篡改检测要防的是**模型绕过桥接**，
+        // 而控制台是桥接自己提供给主人的界面。主人改自己的记忆被回滚，那是缺陷不是安全。
+        // （这一段取证的边界仍然成立：**模型**用 write 工具改记忆照样会被回滚。）
+        if (r.ok) {
+          try {
+            saveMemorySnapshot?.(body?.path)
+          } catch {
+            /* 快照失败不影响保存本身；下次读记忆时会以当时内容重建快照 */
+          }
+        }
         // ★ 409 是这套接口最重要的分支：模型随时可能在写记忆，
         //   "你编辑期间它写了一次"是常态而非意外。要把当前内容一起带回去，
         //   使用者才有依据判断"谁对"。
@@ -494,6 +516,16 @@ export function createApiHandler(deps) {
       if (method === 'DELETE' && path === '/api/memory/file') {
         if (!memoryStore) return notImplemented('删除记忆文件')
         const r = memoryStore.remove(queryParam(req, 'path'))
+        // 删完**连快照一起删**：留着它只会让下一次读记忆把刚删掉的文件「复活」
+        // （判据是"文件内容 == 快照"，文件没了、快照还在，行为就取决于实现细节 ——
+        //  现在是"没有文件就跳过"，但那是**碰巧**安全，不该依赖它）。
+        if (r.ok) {
+          try {
+            dropMemorySnapshot?.(queryParam(req, 'path'))
+          } catch {
+            /* 同上：不影响删除本身 */
+          }
+        }
         return r.ok ? ok(r.data) : fail(r.status ?? 400, r.error)
       }
 

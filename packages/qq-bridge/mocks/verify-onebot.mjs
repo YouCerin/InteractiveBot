@@ -128,17 +128,22 @@ async function main() {
     trigger: { private: true, mention: true, keyword: true, groupEnabled: true, keywords: ['小鲸鱼'] },
     // ⚠️ 这两个值**刻意放大**，原因是一次真实踩坑，写下来免得被"优化"回去：
     //
-    //   mock 的回复会把**整个提示词回显**出来，所以一条回复约 1870 字，
-    //   被 chunkChars=300 切成 **8 条**。而 maxPerMinute 若也是 8，
-    //   则**第一轮自己就把这一分钟的额度用完了** —— 第二轮 8 条全被限频丢弃，
-    //   测试报"第二轮没回复"，而真实原因跟多轮上下文毫无关系。
+    //   mock 的回复会把**整个提示词回显**出来，所以一条回复的字节数正比于
+    //   提示词长度。被 chunkChars=300 切分后：
+    //     提示词 ~1870 字 → 8 条；提示词 ~2800 字（加了身份核实的权威段之后）→ 10 条。
+    //   一次完整跑有 6~7 轮回复 ≈ 60~70 次发送 —— 于是 maxPerMinute=60 **刚好差一点**，
+    //   最后两轮的回复整批被限频丢掉，测试报"没回复"，而真实原因跟多轮上下文毫无关系。
+    //
+    //   ★ 教训：这个数字是**提示词长度的函数**。提示词一变长就要跟着调，
+    //     否则会得到"改了提示词 → 全链路测试红了"这种指向完全错误结论的假失败。
+    //     所以留足余量（不是刚好够）。
     //
     //   同理 dedupeWindowMs=8000：两轮都回显提示词里的固定段落，内容高度重复，
     //   会被去重拦掉。而真实对话里两轮的回复本来就不同。
     //
     // 限频与去重是**账号存活的关键防线**，不能为了测试把它们关掉；
     // 放大配额 + 让两轮内容不同，才是既测到真实行为又不误伤的写法。
-    send: { minGapMs: 0, maxGapMs: 0, maxPerMinute: 60, maxPerHour: 500, dedupeWindowMs: 0, maxCharsPerMessage: 1500 },
+    send: { minGapMs: 0, maxGapMs: 0, maxPerMinute: 200, maxPerHour: 2000, dedupeWindowMs: 0, maxCharsPerMessage: 1500 },
     turn: { timeoutMs: 20_000 },
     // ★ 测试必须关掉拟人延迟。
     // 人味层默认是开的（它防的是账号风控），但测试要的是"快"：
@@ -362,9 +367,13 @@ async function main() {
       nonAdminOrigin !== '' && !nonAdminOrigin.includes('管理员'),
       nonAdminOrigin || '（没找到来源标注）',
     )
+    // ⚠️ 这里**不能**断言"号码紧跟着（普通用户，只读）" —— 来源标注里现在还带
+    //   协议端核实到的昵称与群内角色（「甲甲」（群管理…）），中间必然夹着东西。
+    //   第一版就是这么写死的，加了身份标注之后它立刻变成假失败。
+    //   所以改成**从后面**取权限标签：它必须在来源标注的末尾附近。
     check(
       '★ 非管理员被如实标成"普通用户，只读"',
-      nonAdminOrigin.includes(`${NON_ADMIN}（普通用户，只读）`),
+      /（普通用户，只读）\s*[\d\-: ]*\]$/.test(nonAdminOrigin),
       nonAdminOrigin,
     )
 
@@ -373,11 +382,79 @@ async function main() {
       groupMessage({ groupId: GROUP, userId: ADMIN, text: '小鲸鱼再看下', messageId: 108 }),
     )
     const adminText = (asAdmin ?? []).map((s) => s.text).join('\n')
+    const adminOrigin = adminText.match(/\[来自 QQ 群[^\]]*\]/)?.[0] ?? ''
     check(
       '★ 管理员仍被标成"管理员"（改这一处不能把真管理员也说成普通用户）',
-      adminText.includes(`${ADMIN}（管理员）`),
-      adminText.match(/\[来自 QQ 群[^\]]*\]/)?.[0] ?? '',
+      /（管理员）\s*[\d\-: ]*\]$/.test(adminOrigin),
+      adminOrigin,
     )
+  }
+
+  console.log('\n── 用例 5e：发言人身份（协议端核实 + 同步到对话预览）─────')
+  {
+    // ★ 这一节为"能否在会话中验证对话者身份"这条需求加。
+    //   两件事必须同时成立、且互不串味：
+    //     ① 身份**真的从协议端查了**（昵称、群内角色），并同步进会话镜像；
+    //     ② 身份**绝不参与权限判定** —— mock 里 NON_ADMIN 的群内角色是
+    //        `admin`（群管理），若拿它发权限，他就会变成"管理员"。
+    const b = makeBridge({ rpc, onebot, attach: false, config })
+    await b.bridge.handleEvent(
+      groupMessage({ groupId: GROUP, userId: NON_ADMIN, text: '@我了吗小鲸鱼', mentionsSelf: true, messageId: 109 }),
+    )
+    const conv = b.bridge.listConversations().find((c) => c.chatKey === `group:${GROUP}`)
+    const sender = conv?.senders?.[NON_ADMIN]
+    const lastUser = [...(conv?.messages ?? [])].reverse().find((m) => m.role === 'user')
+
+    check('★ 群成员身份是从协议端查到的（昵称来自 get_group_member_info）',
+      sender?.name === '甲甲', JSON.stringify(sender))
+    check('★ 群内角色被如实记下（mock 里这个普通用户是群管理）',
+      sender?.roleLabel === '群管理', JSON.stringify(sender))
+    check('★ 身份已核实标记为 true（界面据此决定是否显示"未核实"）',
+      sender?.verified === true)
+    check('★ 每条消息自己带发言人（群聊里一个会话有多个说话人，不能只记在会话上）',
+      lastUser?.senderId === NON_ADMIN && lastUser?.senderName === '甲甲',
+      JSON.stringify(lastUser))
+    check('★ 会话上按人索引发言人身份',
+      conv?.senders && Object.keys(conv.senders).includes(NON_ADMIN))
+    // ★ 会话名（左边那列要显示的东西）：群名来自 get_group_list。
+    //   加这一条的起因是用户反馈"聊天框左边也应显示当前聊天的群/人" ——
+    //   那里原来只有一个裸群号，认不出是哪个群，而群名桥接**早就拿到过**。
+    check('★★ 会话带上了协议端核实到的群名（左边那列要显示它，不能只有裸群号）',
+      conv?.name === '测试群' && conv?.nameVerified === true,
+      JSON.stringify({ name: conv?.name, verified: conv?.nameVerified }))
+
+    // 权限与身份必须分开：查到"群管理"**不能**变成管理员
+    const { buildPermissionInstructions } = await import('../src/roster.mjs')
+    const userBlock = buildPermissionInstructions('user', 'group')
+    check('★ 群内角色没有污染权限判定（普通用户的权限段仍是"普通用户（只读）"）',
+      userBlock.includes('【你的权限：普通用户（只读）】') && !userBlock.includes('【你的权限：管理员】'))
+    check('★ ★ 非管理员的权限段里必须明确禁止复述记忆原文',
+      userBlock.includes('不要说记忆里的内容') && userBlock.includes('不要') && userBlock.includes('记忆原文'))
+    check('★ 提示词里不再出现"ask_user_question 可以用"这种自相矛盾',
+      !userBlock.includes('ask_user_question'),
+      userBlock.match(/可以用这些只读能力[^\n]*/)?.[0] ?? '')
+    check('★ 管理员段不提这条禁令（对主人不需要设这条限制）',
+      !buildPermissionInstructions('admin', 'private').includes('不要说记忆里的内容'))
+  }
+
+  console.log('\n── 用例 5f：协议端查不到身份时，必须"说不出来"而不是编 ───')
+  {
+    // 查身份是附加信息，**绝不允许**因为查不到就影响回话或编造名字。
+    mockServer.state.memberFail = '模拟：协议端查不到成员'
+    const b = makeBridge({ rpc, onebot, attach: false, config })
+    const before = mockServer.sent.length
+    await b.bridge.handleEvent(
+      groupMessage({ groupId: GROUP, userId: NON_ADMIN, text: '小鲸鱼在吗', messageId: 110 }),
+    )
+    const conv = b.bridge.listConversations().find((c) => c.chatKey === `group:${GROUP}`)
+    const lastUser = [...(conv?.messages ?? [])].reverse().find((m) => m.role === 'user')
+    check('★ 身份查不到时**不影响回话**（消息照常处理）', mockServer.sent.length >= before)
+    check('★ 查不到就不写名字（不拿号码当昵称、不编）',
+      lastUser?.senderName === undefined && conv?.senders?.[NON_ADMIN]?.verified === false,
+      JSON.stringify({ msg: lastUser?.senderName, s: conv?.senders?.[NON_ADMIN] }))
+    check('★ 号码仍然如实保留（"不知道名字"不等于"不知道是谁"）',
+      lastUser?.senderId === NON_ADMIN)
+    mockServer.state.memberFail = null
   }
 
   console.log('\n── 用例 5c：群聊命中关键词 → 必须回 ─────────────────────')

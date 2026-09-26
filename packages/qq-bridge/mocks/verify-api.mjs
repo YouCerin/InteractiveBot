@@ -439,5 +439,60 @@ section('SnowLuma 进程接口（占位：501 而不是 404）')
     String(memTree.body?.error))
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+section('★ 控制台改记忆后必须刷新快照基准（否则下次读记忆会把它回滚掉）')
+// ══════════════════════════════════════════════════════════════════════════
+{
+  // 这条盯的是一个**静默**缺陷：`verifyAndRestoreMemory` 的判据是
+  // "文件内容 == 桥接写下的快照"，不一致就回滚。控制台保存/删除记忆走的是
+  // `memoryStore.write/remove`（直接写盘、不动快照），于是：
+  //   · 在界面上改一条 → 下一次读记忆 → 被当篡改 → **原样回滚**
+  //   · 在界面上删一条 → 快照还在 → 那条记忆有机会"复活"
+  // 两种情况的表现都是「过一会儿它自己又回来了」，而且**不报错**。
+  //
+  // 修法：这两个路由在成功之后注入式地调用快照钩子。这里用桩记录调用，
+  // 所以断言的是"**真的调了**"，而不是"文件看起来对"。
+  const calls = []
+  const store = {
+    write: (p) => ({ ok: true, data: { saved: true, path: p } }),
+    remove: (p) => ({ ok: true, data: { deleted: true, path: p } }),
+    tree: () => ({ ok: true, data: { files: [] } }),
+    read: () => ({ ok: true, data: {} }),
+  }
+  const { handler } = makeHandler({
+    memoryStore: store,
+    saveMemorySnapshot: (rel) => calls.push(['save', rel]),
+    dropMemorySnapshot: (rel) => calls.push(['drop', rel]),
+  })
+
+  const w = await handler({
+    method: 'POST', path: '/api/memory/file',
+    body: { path: 'MEMORY.md', content: '# x' },
+  })
+  check('POST 保存成功', w.status === 200 && w.body?.data?.saved === true, JSON.stringify(w.body))
+  check('★★ 保存成功后**刷新了快照**（不刷新 = 界面上的改动下次读记忆会被回滚）',
+    calls.some(([k, rel]) => k === 'save' && rel === 'MEMORY.md'), JSON.stringify(calls))
+
+  calls.length = 0
+  const d = await handler({ method: 'DELETE', path: '/api/memory/file?path=memory%2Fgroup-1.md' })
+  check('DELETE 成功', d.status === 200, JSON.stringify(d.body))
+  check('★★ 删除成功后**一并删掉快照**（不删 = 已删的记忆会复活）',
+    calls.some(([k]) => k === 'drop'), JSON.stringify(calls))
+
+  // 失败时**不该**动快照：改都没改成功，刷基准会把真实的篡改洗白
+  calls.length = 0
+  const bad = makeHandler({
+    memoryStore: { ...store, write: () => ({ ok: false, status: 409, error: '冲突', conflict: true }) },
+    saveMemorySnapshot: (rel) => calls.push(['save', rel]),
+  }).handler
+  const conflict = await bad({
+    method: 'POST', path: '/api/memory/file',
+    body: { path: 'MEMORY.md', content: '# x' },
+  })
+  check('冲突时返回 409', conflict.status === 409, `实际 ${conflict.status}`)
+  check('★★ 写入**失败**时不动快照（否则会把真实篡改洗白）',
+    calls.length === 0, JSON.stringify(calls))
+}
+
 console.log(`\n${failures === 0 ? '🎉 配置接口测试全部通过' : `⚠️ ${failures} 项失败`}\n`)
 process.exit(failures === 0 ? 0 : 1)

@@ -156,6 +156,7 @@ export function readMemoryForPrompt({ workspace, kind, peerId }) {
   const blocks = []
   const usedFiles = []
   const counts = {}
+  const detail = []
   for (const [label, rel] of wanted) {
     const abs = join(root, rel)
     const entries = readEntryLines(abs)
@@ -166,16 +167,17 @@ export function readMemoryForPrompt({ workspace, kind, peerId }) {
     if (entries.length === 0) continue
     const shown = entries.slice(0, INJECT_ENTRIES)
     const more = entries.length - shown.length
-    blocks.push(
-      `〔${label}〕` +
-        shown.join(' ') +
-        (more > 0 ? ` （另有 ${more} 条未展开）` : ''),
-    )
+    const text = shown.join(' ') + (more > 0 ? ` （另有 ${more} 条未展开）` : '')
+    blocks.push(`〔${label}〕${text}`)
+    // ★ 结构化副本（给"记忆体检"用）。为什么不在调用方解析那段文本：
+    //   解析文本是二次实现，迟早与这里的格式分叉 —— 而分叉的表现是
+    //   "体检说注入了、实际没注入"这种最难查的假信息。
+    detail.push({ label, rel, entries: entries.length, shown: shown.length, more, text })
     usedFiles.push(rel)
     counts[rel] = entries.length
   }
 
-  return { text: blocks.join('\n'), files: usedFiles, counts }
+  return { text: blocks.join('\n'), files: usedFiles, counts, blocks: detail }
 }
 
 /**
@@ -431,9 +433,14 @@ export function takeReceipt({ workspace, kind, peerId }) {
  * 读记忆之前比对：内容不一致 = 有人（模型或人）绕过桥接改了它 →
  * **回滚到快照**并记日志。这样"记忆只能由桥接落盘"就成了事实。
  *
- * ⚠️ 取舍：使用者**在控制台界面里**手动改记忆也会被判成篡改并回滚。
- *    这是有意的（那条路也属于"绕过桥接"），但必须在文档里写清楚，
- *    否则会变成"我改了它怎么又变回去了"的困惑。
+ * ⚠️ 取舍（**这条后来改过，别照旧注释理解**）：原先"使用者**在控制台界面里**
+ *    手动改记忆"也会被判成篡改并回滚。那个行为是**缺陷不是安全** ——
+ *    控制台是桥接自己提供给主人的界面，主人改自己的记忆被回滚，只会表现成
+ *    「我删了一条，过一会儿它自己又回来了」而且不报错。
+ *    现在 `/api/memory/file` 的保存/删除在成功后**同步刷新快照基准**，
+ *    所以控制台编辑是生效的。**真正的边界没有放松**：
+ *    模型用它手里的 `write` / `edit` 工具直接改 `memory/*.md`（绕过桥接）
+ *    仍然会被检测并回滚。
  *
  * @returns {{tampered: string[], restored: string[]}}
  */
@@ -492,6 +499,19 @@ export function verifyAndRestoreMemory({ workspace, log = () => {} }) {
     )
   }
   return { tampered, restored }
+}
+
+/** 删掉一个记忆文件的快照（文件被删掉时一起删，免得它"复活"已删的记忆）。 */
+export function dropSnapshot({ workspace, rel }) {
+  const root = String(workspace ?? '')
+  try {
+    const safe = String(rel).replace(/[\\/]/g, '__')
+    const p = join(root, FILE.snapshotsDir, safe)
+    if (existsSync(p)) unlinkSync(p)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 给一个记忆文件留快照（桥接每次写入后调用）。 */

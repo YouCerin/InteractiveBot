@@ -21,6 +21,7 @@ import { spawn } from 'node:child_process'
 import { mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DIRS, findDshCliWithSource, findNodeBinary, readSearchPathsFromConfig } from '../src/local.mjs'
+import { canSpawn } from './harness.mjs'
 
 const PROBE_WS = join(DIRS.vendor, '..', '.tmp-probe-dsh')
 
@@ -28,6 +29,21 @@ let failures = 0
 function check(name, ok, detail = '') {
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
   if (!ok) failures += 1
+}
+
+/**
+ * 本环境起不了子进程时**跳过，而不是失败**。
+ *
+ * ⚠️ 这个探针曾经是唯一一个"环境不允许就报红"的套件 —— 它的红与代码无关
+ * （受限沙箱里 `spawn` 的管道 stdio 会 EPERM），而**训练人忽略红色**是危险的。
+ * 规则和别的套件一致：**跑不了就说跑不了，并且明确说这不是"通过"**。
+ */
+function skipBecauseNoSpawn(reason) {
+  console.log(`\n⏭️  跳过 verify-real-dsh：本环境不允许启动带管道的子进程（EPERM）。`)
+  console.log(`   原因：${reason}`)
+  console.log('   这**不是"通过"**，也不代表桥接有问题 —— 请在正常 Windows 会话里重跑：')
+  console.log('     node mocks/verify-real-dsh.mjs\n')
+  process.exit(0)
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -52,6 +68,9 @@ if (!cliPath) {
 }
 
 console.log('\n── 2. 尝试启动（不花模型费用）──')
+// 先探一次环境：不允许起子进程就直接跳过，不要把"环境限制"报成失败。
+if (!(await canSpawn())) skipBecauseNoSpawn('探针 spawn 一个空进程即被拒绝')
+
 let child
 const stderrLines = []
 try {
@@ -62,10 +81,8 @@ try {
     windowsHide: true,
   })
 } catch (error) {
-  check('子进程 spawn 成功', false, `${error.code ?? ''} ${error.message}`)
-  console.log('\n⚠️ 这个环境不允许创建带管道的子进程（常见于受限沙箱）。')
-  console.log('   这不代表桥接有问题 —— 在正常的 Windows 会话里不会有这个限制。\n')
-  process.exit(1)
+  // 同步抛出（某些平台上 EPERM 是同步的）：同样按"跑不了"处理。
+  skipBecauseNoSpawn(`${error.code ?? ''} ${error.message}`)
 }
 
 child.stderr.setEncoding('utf8')

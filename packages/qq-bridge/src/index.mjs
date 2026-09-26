@@ -37,6 +37,7 @@ import { writeMcpConfig, ensureSdkProfilePatch } from './mcp-profile.mjs'
 import { createPriceBook } from './prices.mjs'
 import { createUsageLedger } from './usage.mjs'
 import { createMemoryStore } from './memory-files.mjs'
+import { saveSnapshot, dropSnapshot } from './memory-store.mjs'
 import { createRoster } from './roster.mjs'
 import { resolveModelCredentials } from './credentials.mjs'
 // ★ 不再直接 import `detectSnowluma` —— 所有探测都经 `makeLaunchDetect` 这一个工厂，
@@ -221,6 +222,58 @@ async function main() {
 
   // 两个只做进程管理的入口，做完就退出（不启动机器人）
   const listProcesses = process.argv.includes('--processes')
+
+  // ── 记忆体检（只读，可以在机器人正在跑的时候执行）────────────────────
+  //
+  // ★ 为什么要有这个入口（"它说记住了"和"它真的记住了"是两件事）：
+  //   离线测试证明的是**机制**通不通；而"这台机器此刻到底记着什么、
+  //   下一轮会注入什么"是运行时状态，测试答不了 —— 那恰恰是使用者最想确认的。
+  //   它**绝不写盘、绝不消费回执**，所以不会干扰正在跑的桥接。
+  //
+  // 用法：
+  //   node src/index.mjs --memory
+  //   node src/index.mjs --memory --inject private:100000001 --inject group:700000001
+  if (process.argv.includes('--memory')) {
+    ;(async () => {
+      const { inspectMemory, formatMemoryReport } = await import('./memory-inspect.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位记忆目录')
+        process.exit(2)
+      }
+      // 要预览注入的会话：显式给就用显式的；否则默认列配置里的白名单。
+      const injectArgs = []
+      for (let i = 0; i < process.argv.length; i += 1) {
+        if (process.argv[i] === '--inject' && process.argv[i + 1]) injectArgs.push(process.argv[i + 1])
+      }
+      const targets =
+        injectArgs.length > 0
+          ? injectArgs
+          : [
+              ...(config.access?.adminUsers ?? []).map((id) => `private:${id}`),
+              ...(config.access?.dmAllowlist ?? []).map((id) => `private:${id}`),
+              ...(config.access?.groupAllowlist ?? []).map((id) => `group:${id}`),
+            ]
+      const conversations = [...new Set(targets)].map((key) => {
+        const [kind, peerId] = String(key).split(':')
+        return { kind, peerId }
+      })
+      const report = inspectMemory({ workspace, conversations })
+      if (process.argv.includes('--json')) {
+        console.log(JSON.stringify(report, null, 2))
+      } else {
+        console.log('')
+        console.log(formatMemoryReport(report))
+        console.log('')
+      }
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 记忆体检失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
   const killArgIdx = process.argv.findIndex((a) => a === '--kill')
   if (listProcesses) {
     const entries = guard.list()
@@ -595,6 +648,15 @@ async function main() {
       priceBook,
       usageLedger,
       memoryStore,
+      // ★ 控制台保存/删除记忆后**必须刷新快照基准**，否则下一次读记忆会
+      //   把它当"绕过桥接的改动"回滚 —— 表现是「界面上删掉的条目自己又回来了」，
+      //   而且不报错。取证与边界写在 api.mjs 的 `/api/memory/file` 两个路由上：
+      //   篡改检测要防的是**模型绕过桥接**（它手里有 write 工具），
+      //   控制台是桥接给主人的界面 —— 主人改自己的记忆被回滚是缺陷，不是安全。
+      saveMemorySnapshot: (rel) =>
+        rel ? saveSnapshot({ workspace: config.dsh.workspace, rel }) : false,
+      dropMemorySnapshot: (rel) =>
+        rel ? dropSnapshot({ workspace: config.dsh.workspace, rel }) : false,
       // 取图路由用：对话里的图片只从 workspace/inbox 出。
       // config.dsh.workspace 在归一化阶段已是绝对路径（resolveInPackage）。
       workspaceRoot: config.dsh.workspace,

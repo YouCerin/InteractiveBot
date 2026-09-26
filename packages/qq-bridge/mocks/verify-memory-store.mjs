@@ -34,6 +34,7 @@ import {
   verifyAndRestoreMemory,
   writeReceipt,
 } from '../src/memory-store.mjs'
+import { inspectMemory, formatMemoryReport } from '../src/memory-inspect.mjs'
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -344,6 +345,40 @@ function main() {
     // 没有篡改时不该误报
     const clean = verifyAndRestoreMemory({ workspace: WORK })
     check('没有改动时零误报', clean.tampered.length === 0, JSON.stringify(clean.tampered))
+  }
+
+  // ── 记忆体检工具（src/memory-inspect.mjs）──────────────────────────────
+  //
+  // ★ 为什么它也要有测试：它是使用者用来回答"它到底记了什么"的**唯一工具**，
+  //   而工具说错话比没有工具更糟 —— 比如"体检说注入了、实际没注入"。
+  //   所以这里盯的是它有没有**如实**反映状态。
+  {
+    const insp = inspectMemory({
+      workspace: WORK,
+      conversations: [{ kind: 'group', peerId: '777777' }],
+    })
+    check('★ 体检列出了记忆文件', insp.files.some((f) => f.rel === 'memory/group-777777.md'),
+      JSON.stringify(insp.files.map((f) => f.rel)))
+    check('★ 体检算出了注入内容（非空）',
+      (insp.injections[0]?.text ?? '').length > 0)
+    check('★★ 注入内容是**结构化**给出来的（不是解析文本得来的，避免二次实现分叉）',
+      Array.isArray(insp.injections[0]?.blocks) && insp.injections[0].blocks.length > 0,
+      JSON.stringify(insp.injections[0]?.blocks?.[0] ?? null).slice(0, 80))
+    for (const b of insp.injections[0].blocks) {
+      check(`  分档「${b.label}」条目数 > 0 且带 rel`, b.entries > 0 && Boolean(b.rel))
+    }
+    const report = formatMemoryReport(insp)
+    check('★ 报告里明确标注"只读"（它可以在机器人跑着的时候执行）',
+      report.includes('只读'))
+    check('★★ 报告如实说明它**不能**回答什么（不越界承诺）',
+      report.includes('不能') && report.includes('模型行为'))
+    // 小心措辞：不能在"全部条目都注入了"时说"已截断"
+    check('★ 没有把"全都注入了"说成"已截断"',
+      !/已截断注入[^\n]*共 1 条|已截断注入/.test(report) || report.includes('另有'),
+      (report.match(/〔[^〕]+〕[^\n]*/) ?? [''])[0])
+    const json = JSON.stringify(insp)
+    check('★ 体检结果可序列化（--json 用）', json.length > 50)
+    check('★ 体检不消费回执（只读的硬性要求）', takeReceipt({ workspace: WORK, kind: 'group', peerId: '777777' }) === null)
   }
 
   console.log('')

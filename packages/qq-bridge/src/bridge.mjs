@@ -112,6 +112,23 @@ export class Bridge extends EventTarget {
    */
   #conversations = new Map()
 
+  /**
+   * 发言人身份缓存：`<kind>:<peerId>:<userId>` → `{ name, role, roleLabel, at }`。
+   *
+   * 为什么要缓存：群聊里同一个群可能每分钟来好几条消息，而"这个人是谁"
+   * 在几十秒内不会变。每条消息都去协议端查一次 = 白花一次 HTTP 往返，
+   * 还会让 SnowLuma 侧凭空多出一串查询（属于不必要的风控噪声）。
+   *
+   * TTL 取得短（5 分钟）是有意的：群名片、群内角色**是会变的**，
+   * 缓存太久会把"他已经被撤了管理"这种事瞒着不报。
+   */
+  #senderCache = new Map()
+
+  /** 身份缓存有效期：5 分钟。 */
+  static SENDER_CACHE_MS = 5 * 60 * 1000
+  /** 身份缓存条数上限 —— 防止长时间运行下无界增长。 */
+  static SENDER_CACHE_MAX = 200
+
   /** 正在收尾中（收尾期间要跳过剩余拟人延迟，尽快把在途回复发出去）。 */
   #closing = false
   /** 所有正在睡的 `#sleepUnlessClosing`，收尾时叫醒它们。 */
@@ -329,10 +346,29 @@ export class Bridge extends EventTarget {
 
     const rendered = renderSegments(payload.message, { selfId: this.onebot.selfId })
 
+    // ③-前 身份核实（**从协议端取真实昵称/群内角色**）
+    //
+    // ★ 为什么放在"记镜像"之前：镜像要带上"这句话是谁说的"，界面上才能
+    //   显示昵称而不是一串 QQ 号（会话预览的同步就靠这一条）。
+    //
+    // ★ 它**不影响**下面的准入判定：权限永远只由 roster 按配置的
+    //   `adminUsers` 决定。群内角色（群主/群管理）只用于显示与留痕 ——
+    //   理由写在 `#verifyIdentity` 的注释里（拿它发权限 = 把工作区写权限
+    //   交给任何一个群的群主）。
+    //
+    // ★ 私聊也查：你要的"私聊中验证对方 QQ 号"是代码层已经成立的
+    //   （见下方 verdict），这里额外把**昵称**查出来用于显示与留痕。
+    const identity = await this.#verifyIdentity({ kind, peerId, userId: senderId })
+
     // 记进内存镜像（给同步界面看"各个聊天在发生什么"）。
     // 放在最前面：使用者发了什么，界面上应立刻能看到 —— 即使后面判定不回复。
     const mirrorKey = `${kind}:${peerId}`
-    this.#mirror(mirrorKey, 'user', rendered.text, { kind, peerId })
+    this.#mirror(mirrorKey, 'user', rendered.text, {
+      kind,
+      peerId,
+      senderId,
+      identity,
+    })
 
     // ② 唤醒判定
     const decision = decideTrigger({
@@ -362,6 +398,27 @@ export class Bridge extends EventTarget {
     //   · 准入校验回答"这个人/这个群有资格吗，以什么权限"
     // 分开的好处：日志里能一眼看出"是被无视了还是被拒了"。
     const verdict = this.roster.decide({ kind, peerId, senderId })
+
+    // ── 身份审计：这一轮到底按"谁"、按什么级别处理 ────────────────────────
+    //
+    // 为什么必须留痕：权限这件事**出错是静默的** —— 判错了不会有任何报错，
+    // 只会表现为"某个不该有权限的人拿到了权限"。所以每次判定都写一行，
+    // 把**两个来源分开写清楚**：
+    //   · 身份核实（协议端）：只说明"这个人是谁"
+    //   · 权限判定（配置）：才是"他能做什么"的依据
+    // 两者不一致时（例如群管理但不是你的管理员）这一行里一眼能看出来。
+    {
+      const idText = identity.ok
+        ? `${identity.name || identity.userId}${identity.roleLabel ? `（${identity.roleLabel}）` : ''}`
+        : `${senderId || '?'}（身份未核实：${identity.reason ?? '未知原因'}）`
+      this.log(
+        `[bridge] 身份核实 ${kind}:${peerId} 发言人 ${idText}` +
+          `${identity.source ? ` 来源=${identity.source}` : ''}` +
+          `｜权限判定=${verdict.respond ? verdict.tier : '拒绝'}（依据=桥接管理员表/白名单，非群内角色）` +
+          `${verdict.respond ? '' : ` 原因=${verdict.reason}`}`,
+      )
+    }
+
     if (!verdict.respond) {
       this.stats.denied += 1
       this.log(`[bridge] 拒绝 ${kind}:${peerId}（来自 ${senderId}）：${verdict.reason}`)
@@ -379,6 +436,7 @@ export class Bridge extends EventTarget {
       peerId,
       senderId,
       tier: verdict.tier,
+      identity,
       rendered,
       // ★ 只把**纯数据**的图片引用传下去，**不在这里下载**。
       //   提取是零成本的（纯解析）；下载必须等 `#runTurn` 里确认要回复之后
@@ -403,6 +461,211 @@ export class Bridge extends EventTarget {
   static MAX_MIRROR_MESSAGES = 50
 
   /**
+   * 核实发言人身份 —— **从协议端（SnowLuma）取真实昵称与群内角色**。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 它是什么、它**不是**什么（这一段是这次改动的核心，别删）
+   * ══════════════════════════════════════════════════════════════════════════
+   * **是**：把"这串 QQ 号是谁"从协议端查出来，用于
+   *   ① 同步到对话预览（界面上显示昵称与身份，而不是一串数字）；
+   *   ② 写一行审计日志（这一轮按谁、按什么级别处理的）。
+   *
+   * **不是**权限依据。群内 `role`（owner/admin/member）**绝不**参与准入判定。
+   * 若拿它发权限，后果是：任何一个群的群主或群管理，只要把机器人拉进群，
+   * 就自动获得 DSH 工作区的写权限 —— 那是把整台机器的写权限交给陌生人。
+   * 权限只由 `roster.decide()` 按配置里的 `adminUsers` 决定。
+   *
+   * ── 三条硬约束 ─────────────────────────────────────────────────────────
+   *   ① **绝不抛异常**。调用方在消息路径上，查不到身份也必须能把消息回出去。
+   *   ② **绝不长时间阻塞**。协议端不在/卡住时，这里最多花几百毫秒（有显式超时）。
+   *      查身份是"给人看的附加信息"，不能让一轮回复等它。
+   *   ③ **查不到就说查不到**。`ok:false` + `reason`，不猜昵称、不拿号码当昵称。
+   *
+   * @param {{kind: string, peerId: string, userId: string}} who
+   * @returns {Promise<{ok: boolean, userId: string, name: string, role: string,
+   *          roleLabel: string, source: string, reason?: string}>}
+   */
+  async #verifyIdentity({ kind, peerId, userId }) {
+    const uid = String(userId ?? '')
+    const gid = String(peerId ?? '')
+    const base = { ok: false, userId: uid, name: '', role: '', roleLabel: '', source: '' }
+    if (!uid) return { ...base, reason: '事件里没有 user_id，无法核实身份' }
+
+    // 私聊里 peerId 就是对方 QQ 号，两者必然相同；群聊里 peerId 是群号。
+    const groupId = kind === 'group' ? gid : ''
+    // ★ 缓存键带版本号：缓存对象里现在也能带会话名，而"会话名"这个概念是后加的，
+    //   没有版本号的话，升级后残留的旧缓存会让新字段**静默为空**。
+    const cacheKey = `${kind}:${peerId}:${uid}:v2`
+
+    const cached = this.#senderCache.get(cacheKey)
+    if (cached && Date.now() - cached.at < Bridge.SENDER_CACHE_MS) return cached
+
+    // 查得到的名字从哪来：群聊走群名片（群里显示的就是这个），私聊走好友昵称。
+    // ★ 顺序有讲究：**群名片优先于昵称** —— 群里大家认得的是名片上的字。
+    let name = ''
+    let role = ''
+    let source = ''
+    let reason = ''
+
+    const onebot = this.onebot ?? {}
+
+    // ── 群聊：问协议端"这个人是谁、在群里什么角色" ─────────────────────
+    //
+    // ★ 两条路径都试，**顺序有讲究**：
+    //   ① `onebot.getGroupMemberInfo()` —— OneBotClient 上的现成封装，
+    //      它自己会把 `data` / `data.member` 各层都看一遍；
+    //   ② 退回 `onebot.call('get_group_member_info')` —— 旧调用方与测试
+    //      给的是裸的 OneBot 客户端（只有 `call`），没有那个封装。
+    //   只认一种写法的话，另一半环境里会**静默变成"查不到"** ——
+    //   而"查不到"是不报错的，只会表现成界面上一直显示号码。
+    if (kind === 'group') {
+      if (typeof onebot.getGroupMemberInfo === 'function') {
+        const info = await onebot.getGroupMemberInfo(groupId, uid, 2_000)
+        if (info?.ok) {
+          name = String(info.card || info.nickname || '')
+          role = String(info.role || '')
+          source = 'get_group_member_info'
+        } else {
+          reason = info?.reason ?? '协议端没有返回成员资料'
+        }
+      } else if (typeof onebot.call === 'function') {
+        try {
+          const res = await onebot.call(
+            'get_group_member_info',
+            { group_id: Number(groupId), user_id: Number(uid), no_cache: true },
+            2_000,
+          )
+          const m = res?.data?.member ?? res?.data ?? res ?? {}
+          name = String(m.card || m.nickname || '')
+          role = String(m.role || '')
+          if (name || role) source = 'get_group_member_info'
+          else reason = '协议端没有返回成员资料'
+        } catch (error) {
+          reason = error?.message ?? String(error)
+        }
+      } else {
+        reason = '当前协议客户端不支持 get_group_member_info'
+      }
+    }
+
+    // ── 还不知道名字时，才去好友列表里找 ────────────────────────────────
+    //
+    // ⚠️ 只在**私聊**走这条路。群里的人不一定是你好友，而且群名片
+    //   （上面那个接口）本来就是群里该显示的名字 —— 拿好友昵称去顶替
+    //   群名片，会显示成"群里根本没人在用的那个名字"。
+    if (!name && kind === 'private' && typeof this.roster?.listFriends === 'function') {
+      // ⚠️ 走 roster 的**缓存版**好友列表，不是每次直连协议端。
+      //   理由：`get_friend_list` 是全量接口（可能几百人），为了一条消息
+      //   拉一遍全量名单，代价和收益完全不成比例；而且配置界面本来就会
+      //   拉一次，缓存命中时这里是零成本。
+      try {
+        const friends = await this.roster.listFriends(
+          (action, params, timeoutMs) => this.onebot.call(action, params, timeoutMs),
+          { timeoutMs: 2_000 },
+        )
+        const hit = friends.find((f) => String(f?.userId ?? '') === uid)
+        if (hit?.nickname) {
+          name = hit.nickname
+          source = source ? `${source}+get_friend_list` : 'get_friend_list'
+        } else if (!reason) {
+          reason = '好友列表里没有这个人'
+        }
+      } catch (error) {
+        if (!reason) reason = error?.message ?? String(error)
+      }
+    } else if (!name && kind === 'private' && typeof onebot.getFriendList === 'function') {
+      // 兜底：测试或旧调用方给的是裸 OneBot 客户端（没有 roster）。
+      try {
+        const friends = await onebot.getFriendList()
+        const hit = (Array.isArray(friends) ? friends : []).find(
+          (f) => String(f?.user_id ?? '') === uid,
+        )
+        if (hit) {
+          name = String(hit.nickname ?? hit.remark ?? '')
+          source = source ? `${source}+get_friend_list` : 'get_friend_list'
+        } else if (!reason) {
+          reason = '好友列表里没有这个人'
+        }
+      } catch (error) {
+        if (!reason) reason = error?.message ?? String(error)
+      }
+    }
+    // 群里到头来什么都没查到 —— reason 必须**有话说**。
+    // 否则界面上显示"未核实"却不给原因，排查时只能靠猜。
+    if (kind === 'group' && !name && !role && !reason) {
+      reason = '协议端没有返回这个群成员的资料'
+    }
+
+    // ── 会话名：私聊显示"这个人叫什么"，群聊显示"这个群叫什么" ─────────────
+    //
+    // ★ 这一块**必须放在最后**（发言人昵称都解析完之后）。
+    //   第一版顺手写在群成员查询后面，于是私聊那条路径上 `name` 还是空的
+    //   ——因为私聊的昵称来自**下面**那个好友列表查询。表现是"私聊会话名一直为空"，
+    //   而且不报错。顺序错了不会报错，只会静默为空，所以这里显式说明。
+    //
+    // ★ 为什么要单独查群名：左边那列会话列表原来只有一个裸号码
+    //   （`700000001`），使用者认不出是哪个群。而**群名桥接早就拿到过**
+    //   （`get_group_list` 的 `group_name`，配置界面选群时用的就是它），
+    //   只是从来没往会话这边传。这是"已经有的信息没有接通"，不是新增查询。
+    // ⚠️ 查不到就**留空**，界面显示号码 —— 不编名字（和发言人昵称同一条规矩）。
+    let chatName = ''
+    let chatNameSource = ''
+    try {
+      if (kind === 'group' && typeof this.roster?.groupNameOf === 'function') {
+        const n = await this.roster.groupNameOf(
+          (action, params, timeoutMs) => this.onebot.call(action, params, timeoutMs),
+          gid,
+        )
+        if (n) {
+          chatName = n
+          chatNameSource = 'get_group_list'
+        }
+      } else if (kind === 'private') {
+        // 私聊：优先用**主人的自称**（人设里的 callerName），因为那是他要看到的名字；
+        // 其次是刚核实到的昵称。
+        if (this.config.persona?.callerName && this.roster?.tierOfPrivate?.(uid) === 'admin') {
+          chatName = String(this.config.persona.callerName)
+          chatNameSource = 'persona.callerName'
+        } else if (name) {
+          chatName = name
+          chatNameSource = source
+        }
+      }
+    } catch (error) {
+      if (!reason) reason = error?.message ?? String(error)
+    }
+
+    const result = {
+      ok: Boolean(name || role),
+      userId: uid,
+      name,
+      role,
+      // 角色的中文标签。**未知一律留空**，不写"群成员"这种猜出来的话 ——
+      // 界面宁可只显示昵称，也不要显示一个可能是错的结论。
+      roleLabel:
+        role === 'owner' ? '群主' : role === 'admin' ? '群管理' : role === 'member' ? '群成员' : '',
+      // 会话名（私聊=这个人叫什么，群聊=这个群叫什么）+ 它是从哪来的。
+      // 与发言人昵称**分开两个字段**：一个是"谁在说话"，一个是"这是哪个会话"。
+      chatName,
+      chatNameSource,
+      source,
+      reason: reason || undefined,
+    }
+
+    // 只在**查到东西**时写缓存。查不到不缓存 —— 否则协议端刚起来那一下的失败
+    // 会被记住 5 分钟，表现成"明明是好的却一直显示号码"。
+    if (result.ok) {
+      if (this.#senderCache.size >= Bridge.SENDER_CACHE_MAX) {
+        // 简单淘汰：Map 保持插入顺序，删掉最早的一条即可。
+        const oldest = this.#senderCache.keys().next().value
+        this.#senderCache.delete(oldest)
+      }
+      this.#senderCache.set(cacheKey, { ...result, at: Date.now() })
+    }
+    return result
+  }
+
+  /**
    * 往内存镜像里追加一条消息。
    *
    * ⚠️ **任何情况下都不允许抛出**。理由：镜像只是给 UI 看的辅助数据，
@@ -412,7 +675,8 @@ export class Bridge extends EventTarget {
    * @param {string} chatKey
    * @param {'user'|'bot'|'notice'} role
    * @param {string} text
-   * @param {{ kind?: string, peerId?: string, createIfMissing?: boolean }} [who]
+   * @param {{ kind?: string, peerId?: string, createIfMissing?: boolean,
+   *           senderId?: string, identity?: object }} [who]
    */
   #mirror(chatKey, role, text, who = {}) {
     try {
@@ -431,7 +695,40 @@ export class Bridge extends EventTarget {
         }
         this.#conversations.set(chatKey, conv)
       }
-      conv.messages.push({ role, text: String(text ?? ''), at: Date.now() })
+
+      // ── 发言人身份（同步到对话预览）──────────────────────────────────
+      // 群聊里一个会话有多个发言人，所以身份要**按人**记在会话上，
+      // 并且**每条消息自己带上**当时核实的身份 —— 否则界面上会出现
+      // "用最后一个人的名字去标前面所有人的话"这种明显错误。
+      const entry = { role, text: String(text ?? ''), at: Date.now() }
+      if (who.senderId) {
+        entry.senderId = String(who.senderId)
+        const id = who.identity ?? null
+        if (id?.ok) {
+          if (id.name) entry.senderName = id.name
+          if (id.roleLabel) entry.senderRole = id.roleLabel
+        }
+        if (!conv.senders) conv.senders = {}
+        // 谁说的这句话：界面按人显示。身份核实失败时只留号码，**不编名字**。
+        conv.senders[entry.senderId] = {
+          name: id?.ok && id.name ? id.name : '',
+          roleLabel: id?.ok ? id.roleLabel ?? '' : '',
+          verified: Boolean(id?.ok),
+          at: Date.now(),
+        }
+      }
+
+      // ── 会话名（左边那列要显示的东西）────────────────────────────────
+      // `name` = 私聊对方叫什么 / 群聊这个群叫什么；`nameVerified` 说明它是
+      // **协议端核实过的**还是我们不知道 —— 界面据此决定"显示名字"还是"只显示号码"。
+      // ⚠️ 绝不编名字：不知道就 `nameVerified: false`，界面显示号码。
+      if (who.identity) {
+        const id = who.identity
+        if (id.chatName) conv.name = id.chatName
+        if (id.chatName || id.ok) conv.nameVerified = Boolean(id.chatName)
+      }
+
+      conv.messages.push(entry)
       // 只留最近 N 条：这是镜像不是归档，无上限会变成内存泄漏
       if (conv.messages.length > Bridge.MAX_MIRROR_MESSAGES) {
         conv.messages.splice(0, conv.messages.length - Bridge.MAX_MIRROR_MESSAGES)
@@ -507,7 +804,14 @@ export class Bridge extends EventTarget {
         status: conv.status,
         updatedAt: conv.updatedAt,
         messageCount: conv.messages.length,
+        // ★ 会话名（"这个群/这个人叫什么"）。UI 的会话列表用它做标题；
+        //   查不到时它是空串、`nameVerified` 为 false —— 界面显示号码，**不编名字**。
+        name: conv.name ?? '',
+        nameVerified: Boolean(conv.nameVerified),
         messages: conv.messages.map((m) => ({ ...m })),
+        // ★ 发言人身份（协议端核实过的）一并给界面。
+        //   深拷贝同样必要：界面序列化时桥接可能正在往里写。
+        senders: conv.senders ? Object.fromEntries(Object.entries(conv.senders).map(([k, v]) => [k, { ...v }])) : {},
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt)
   }
@@ -531,7 +835,7 @@ export class Bridge extends EventTarget {
     }
   }
 
-  async #runTurn({ kind, peerId, senderId, tier, rendered, reason, imageRefs = [] }) {
+  async #runTurn({ kind, peerId, senderId, tier, rendered, reason, identity = null, imageRefs = [] }) {
     const chatKey = `${kind}:${peerId}`
     // instance 用**构造时固定的那个**（this.sessionInstance），不是每次新生成。
     // 用 `??` 而不是 `||` 是为了兼容测试里直接构造 Bridge 时没设它的情形。
@@ -648,6 +952,7 @@ export class Bridge extends EventTarget {
               peerId,
               senderId,
               tier,
+              identity,
               images: imagePlan,
             }),
           },
@@ -737,35 +1042,52 @@ export class Bridge extends EventTarget {
 
       let answer = markdownToPlain(result.text)
 
-      // ── 记忆标记：剥离 + 落盘（★ 这一步是"写入权归桥接"的落点）────────
+      // ── 记忆标记：**总是剥离** + （开关打开时才）落盘 ─────────────────────
       //
       // 模型在回复里写的 `<<<MEMORY …>>>` 行：
       //   ① 从发给 QQ 的正文里**剥掉**（绝不能把标记发给对方）；
       //   ② 交桥接按发起人身份与来源校验后落盘；
       //   ③ 结果写成"回执"，下一轮作为提示词的一部分告诉模型到底记上没有。
+      //
+      // ★★ ① 与 ②③ 的开关**不是同一个**（这里踩过一个真坑）：
+      //   原来整段都在 `if (memory.enabled !== false)` 里面，于是把记忆关掉之后，
+      //   标记不但不落盘、**也不剥离** —— 对方会在 QQ 里看到一整行
+      //   `<<<MEMORY fact …>>>`。这是"关掉记忆"这个操作**制造出**的泄露：
+      //   模型并不知道开关状态，它照旧会提议；而标记是**我们的内部协议**，
+      //   它绝不该出现在聊天里。
+      //   所以：剥离**无条件**执行；只有"落盘 + 回执"受开关约束。
+      //
       // 注意顺序：先剥离再判断"回复是否为空" —— 否则一条"只说了要记东西"
       // 的回复会被判成空，然后发出兜底话术，看起来像机器人抽风。
-      if (this.config.memory?.enabled !== false && this.config.dsh?.workspace) {
-        const parsed = parseMemoryMarkers(answer)
-        answer = parsed.clean
-        if (parsed.items.length > 0) {
-          const outcome = applyMemoryItems({
-            workspace: this.config.dsh.workspace,
-            kind,
-            peerId,
-            senderId,
-            tier,
-            items: parsed.items,
-            log: this.log,
-          })
-          writeReceipt({
-            workspace: this.config.dsh.workspace,
-            kind,
-            peerId,
-            applied: outcome.applied,
-            ignored: outcome.ignored,
-          })
-        }
+      const parsed = parseMemoryMarkers(answer)
+      answer = parsed.clean
+      if (
+        parsed.items.length > 0 &&
+        this.config.memory?.enabled !== false &&
+        this.config.dsh?.workspace
+      ) {
+        const outcome = applyMemoryItems({
+          workspace: this.config.dsh.workspace,
+          kind,
+          peerId,
+          senderId,
+          tier,
+          items: parsed.items,
+          log: this.log,
+        })
+        writeReceipt({
+          workspace: this.config.dsh.workspace,
+          kind,
+          peerId,
+          applied: outcome.applied,
+          ignored: outcome.ignored,
+        })
+      } else if (parsed.items.length > 0) {
+        // 开关关着（或没工作区）：剥掉标记，但**不写**、也不留回执 ——
+        // 没有记忆这回事，就不该有回执。日志里说明一句，免得排查时以为丢了。
+        this.log(
+          `[bridge] 记忆开关关闭，已剥离 ${parsed.items.length} 条提议（不落盘、不回执）`,
+        )
       }
 
       // ★ 把思考过程记进镜像（**只给界面看，不发到 QQ**）。
@@ -800,7 +1122,7 @@ export class Bridge extends EventTarget {
     })
   }
 
-  async #buildPrompt(rendered, reason, { kind, peerId, senderId, tier, images = [] } = {}) {
+  async #buildPrompt(rendered, reason, { kind, peerId, senderId, tier, identity = null, images = [] } = {}) {
     const now = new Date()
     const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
       now.getDate(),
@@ -825,16 +1147,38 @@ export class Bridge extends EventTarget {
     //
     // 所以：管理员才标"管理员"，普通用户标"普通用户"。措辞与
     // buildPermissionInstructions 保持一致（那里用的是「普通用户（只读）」）。
+    //
+    // ★★ 补上"这个人是谁"：昵称与群内角色由 `#verifyIdentity` **从协议端核实**。
+    //    为什么角色后面还要再写一句"与权限无关"：模型看到"群主""群管理"这种词，
+    //    很容易自己推出"那他有权限" —— 而那正是权限判定的旁路。
+    //    所以这里把两件事**写在同一行里**明确切开：
+    //      他是谁（协议端核实，可能是群管理） ≠ 他能做什么（配置决定）。
+    //    查不到昵称就只写号码，**不编名字**。
     const isAdminTier = tier === 'admin'
+    // 群名片/昵称：**核实到了才写**，没核实到就只留号码。
+    const namePart =
+      identity?.ok && identity.name ? `「${identity.name}」` : ''
+    // ★ 群内角色后面必须紧跟一句"与权限无关"：
+    //   模型看到"群主""群管理"这种词很容易自己推出"那他有权限" ——
+    //   而那正是权限判定的旁路。把它和权限段的关系**写在同一行里**切开。
+    const rolePart =
+      identity?.ok && identity.roleLabel
+        ? `（${identity.roleLabel}，身份来自协议端核实；**与权限无关**，能不能动手只看下面的权限段）`
+        : ''
     const who = isAdminTier
       ? this.config.persona?.callerName && reason === REASON.PRIVATE
         ? `（${this.config.persona.callerName}，管理员）`
         : '（管理员）'
       : '（普通用户，只读）'
+    // ── 会话名（这个群/这个人叫什么）──────────────────────────────────────
+    // ★ 为什么也要给模型：它原来只知道群号。群里说话时它若想提"咱们群"，
+    //   只能报一串数字 —— 那不像人说的话。群名是协议端给的事实，可以直说。
+    // ⚠️ 查不到就**只写群号**，不编名字（与发言人昵称同一条规矩）。
+    const chatPart = identity?.chatName ? `「${identity.chatName}」` : ''
     const origin =
       kind === 'group'
-        ? `[来自 QQ 群 ${peerId}，发言人 ${senderId ?? '?'}${who}  ${stamp}]`
-        : `[来自 QQ 私聊 ${who}  ${stamp}]`
+        ? `[来自 QQ 群 ${peerId}${chatPart}，发言人 ${senderId ?? '?'}${namePart}${rolePart}${who}  ${stamp}]`
+        : `[来自 QQ 私聊 ${senderId ?? '?'}${namePart}${who}  ${stamp}]`
 
     const lines = [PLATFORM_RULES]
 

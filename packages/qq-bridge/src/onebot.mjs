@@ -216,6 +216,59 @@ export class OneBotClient extends EventTarget {
   }
 
   /**
+   * 查**某个群成员**的真实资料（昵称、群名片、群内角色）。
+   *
+   * ── 为什么要真的去协议端查一次 ────────────────────────────────────────
+   * 事件里 SnowLuma 只推 `user_id`，昵称和群内角色都**推不过来**。
+   * 于是界面上只能显示一串 QQ 号，而"这个人是谁"没法核实。
+   *
+   * ── ⚠️ 它**不参与权限判定**（重要）────────────────────────────────────
+   * `role` 是**群里的**角色（owner/admin/member），不是"主人的管理员"。
+   * 拿它发权限就等于：任何一个群的群主/群管理，只要把机器人拉进群，
+   * 就自动获得 DSH 工作区的写权限。所以这里拿到的 role **只用于显示与留痕**，
+   * 准入判定仍由 roster 按配置里的 `adminUsers` 决定（见 bridge.mjs 的调用处）。
+   *
+   * @param {string|number} groupId
+   * @param {string|number} userId
+   * @param {number} [timeoutMs] 显式超时 —— 这是"给人看的附加信息"，
+   *        绝不允许它把一轮回复拖慢（默认 2 秒，见 CALL_TIMEOUT_MS）。
+   * @returns {Promise<{ok: boolean, userId: string, nickname: string, card: string,
+   *          role: string, level: string, reason?: string}>}
+   *          **任何失败都走 `ok:false`，不抛异常** —— 调用方在消息路径上。
+   */
+  async getGroupMemberInfo(groupId, userId, timeoutMs = null) {
+    const gid = String(groupId ?? '')
+    const uid = String(userId ?? '')
+    const miss = { ok: false, userId: uid, nickname: '', card: '', role: '', level: '' }
+    if (!gid || !uid) return { ...miss, reason: '缺少群号或 QQ 号' }
+
+    try {
+      const res = await this.call(
+        'get_group_member_info',
+        { group_id: Number(gid), user_id: Number(uid), no_cache: true },
+        timeoutMs ?? 2_000,
+      )
+      // 各家协议端把资料放在不同层：直接在顶层，或包在 `data` / `data.member` 里。
+      // 三处都看一遍 —— 只认一种写法会在换协议端时静默变成"查不到"。
+      const m = res?.data?.member ?? res?.data ?? res ?? {}
+      const nickname = String(m.nickname ?? m.nick ?? '')
+      const card = String(m.card ?? '')
+      const role = String(m.role ?? '')
+      return {
+        ok: Boolean(nickname || card || role),
+        userId: String(m.user_id ?? uid),
+        nickname,
+        card,
+        role,
+        level: String(m.level ?? ''),
+        reason: nickname || card || role ? undefined : '协议端没有返回可用的成员资料',
+      }
+    } catch (error) {
+      return { ...miss, reason: error?.message ?? String(error) }
+    }
+  }
+
+  /**
    * 发送消息。
    * @param {'private'|'group'} kind
    * @param {string|number} peerId

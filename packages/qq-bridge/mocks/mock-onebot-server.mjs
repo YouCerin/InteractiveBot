@@ -45,6 +45,12 @@ export function startMockOneBot({ httpPort = 3100, wsPort = 3101, wsToken = 'ws-
   const calls = []
   /** 已连接的 WebSocket 客户端。 */
   const sockets = new Set()
+  /**
+   * 可变的测试开关（给用例现场改）。
+   *   · `memberFail`：非空时 `get_group_member_info` 一律失败 ——
+   *     用来验证"身份核实失败**不影响回话**，且不编名字"。
+   */
+  const state = { memberFail: null, groupListFails: false }
 
   const http = createServer((req, res) => {
     const chunks = []
@@ -83,7 +89,35 @@ export function startMockOneBot({ httpPort = 3100, wsPort = 3101, wsToken = 'ws-
         case 'get_friend_list':
           return ok([{ user_id: 100000001, nickname: '管理员' }])
         case 'get_group_list':
+          // 测试钩子：`server.state.groupListFails = true` 时模拟"拿不到群名"，
+          // 用来验证会话名**留空**（界面显示号码）而不是编一个名字出来。
+          if (state.groupListFails) {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ status: 'failed', retcode: 1404, wording: '模拟：拉群列表失败' }))
+            return
+          }
           return ok([{ group_id: 700000002, group_name: '测试群' }])
+        // 群成员资料（身份核实用）。**刻意让一个普通群成员在群里是"群管理"**
+        // —— 用来验证"群内角色不参与权限判定"：他仍该被标成普通用户（只读）。
+        case 'get_group_member_info': {
+          // 测试钩子：`server.memberFail = '超时'` 时模拟协议端查不到人。
+          if (state.memberFail) {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(
+              JSON.stringify({ status: 'failed', retcode: 1404, wording: String(state.memberFail) }),
+            )
+            return
+          }
+          const uid = String(params.user_id ?? '')
+          const table = {
+            '100000001': { nickname: '管理员', card: '群主大人', role: 'owner' },
+            '100000002': { nickname: '路人甲', card: '甲甲', role: 'admin' },
+            '1999999999': { nickname: '陌生人', card: '', role: 'member' },
+          }
+          const hit = table[uid]
+          if (!hit) return ok({ user_id: Number(uid) || 0, nickname: '', card: '', role: '' })
+          return ok({ user_id: Number(uid), ...hit, level: '1' })
+        }
         case 'send_private_msg':
         case 'send_group_msg': {
           const segments = params.message ?? []
@@ -143,6 +177,8 @@ export function startMockOneBot({ httpPort = 3100, wsPort = 3101, wsToken = 'ws-
         wsPort: httpPort,
         sent,
         calls,
+        /** 可变测试开关（见文件头的 `state` 说明）。 */
+        state,
         /** 推一个事件给所有已连接客户端。 */
         push(event) {
           const payload = JSON.stringify(event)

@@ -99,9 +99,73 @@ function ThinkingBlock({ text, at }: { text: string; at: number }) {
   )
 }
 
-/** 会话显示名：接口只给 peerId（CONFIG-UI.md §2.8 ③），拿不到昵称就显示号码。 */
+/**
+ * 会话显示名：**优先用协议端核实到的名字**（群聊=群名，私聊=对方昵称），
+ * 没有才退回号码。
+ *
+ * 为什么号码也要显示：名字可以重复、可以随时改，**号码才是身份**。
+ * 所以私聊显示「昵称（号码）」，群聊显示「群名（群号）」。
+ *
+ * ⚠️ 核实不到时**只显示号码** —— 不猜、不拿 `用户<号码>` 之类拼出来的东西顶替。
+ * 那会让使用者以为核实成功了。
+ */
 function peerName(c: Conversation): string {
+  const id = c.peerId || c.chatKey
+  // `nameVerified !== true` 时 name 可能是空串或不可信，一律只用号码
+  if (c.nameVerified === true && c.name) return `${c.name}（${id}）`
+  return id
+}
+
+/** 列表里的短标题：名字最长，优先显示名字；只有号码时不显示"（号码）"括号。 */
+function peerShort(c: Conversation): string {
+  if (c.nameVerified === true && c.name) return c.name
   return c.peerId || c.chatKey
+}
+
+/**
+ * 消息上的发言人标签（群聊里必须有，否则根本看不出是谁在说话）。
+ *
+ * 两种状态**必须视觉可分**：
+ *   · 已核实（协议端给了昵称）→ 正常显示「昵称 · 群管理」
+ *   · 未核实 → 只显示号码 + 一个"未核实"小标，**绝不显示编出来的名字**
+ */
+function SenderLabel({
+  msg,
+  sender,
+  showName,
+}: {
+  msg: NonNullable<Conversation['messages'][number]>
+  sender?: { name: string; roleLabel: string; verified: boolean }
+  showName: boolean
+}) {
+  // 同一个人连着说了几句时，只在第一条上写名字 —— 否则每行都挂一遍很吵
+  if (!showName && !msg.senderRole) return null
+  const name = msg.senderName || sender?.name || ''
+  const role = msg.senderRole || sender?.roleLabel || ''
+  return (
+    <div className="mb-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+      {showName && name && <span className="font-medium">{name}</span>}
+      <span className="font-mono">{msg.senderId}</span>
+      {role && (
+        <span
+          className={cn(
+            'rounded px-1 py-px',
+            role === '群主' || role === '群管理'
+              ? 'bg-amber-500/15 text-amber-700'
+              : 'bg-muted-foreground/15',
+          )}
+          title="这是 QQ 群内的角色，只用于显示与留痕；能不能动手由配置里的管理员名单决定"
+        >
+          {role}
+        </span>
+      )}
+      {!sender?.verified && !msg.senderName && (
+        <span className="rounded bg-muted-foreground/15 px-1 py-px" title="没能从协议端取到昵称">
+          未核实昵称
+        </span>
+      )}
+    </div>
+  )
 }
 
 export function ConversationsTab({
@@ -165,6 +229,16 @@ export function ConversationsTab({
           <li>
             机器人说「没权限做」是普通消息不是错误（权限边界是刻意设计），所以这里不会把它标红。
           </li>
+          <li>
+            发言人身份（昵称、群内角色）是桥接**从协议端现查**的，查不到就只显示号码和一个
+            「未核实昵称」小标——<strong className="text-foreground">不会编名字</strong>。
+            群内角色只用于显示与留痕：<strong className="text-foreground">能不能动手，只由配置里的管理员名单决定</strong>。
+          </li>
+          <li>
+            左侧列表的标题是<strong className="text-foreground">群名 / 对方昵称</strong>（同样来自协议端，
+            下面小字是群号或 QQ 号）。核实不到名字时只显示号码，并标「未核实名称」——
+            号码才是身份，名字只是注释。
+          </li>
         </ul>
       </details>
       {unreachable && <InlineNote level="warn">会话数据暂时拉取不到（接口未响应）。</InlineNote>}
@@ -196,13 +270,23 @@ export function ConversationsTab({
                 ) : (
                   <User className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 )}
-                <span className="truncate font-mono text-sm font-medium">{peerName(c)}</span>
+                {/* 标题用**名字**（群名/昵称），号码放到下面一行小字 ——
+                    两者都要，因为名字会重、号码才是身份。核实不到名字时
+                    这里就只有号码，不做任何补全。 */}
+                <span className="truncate text-sm font-medium" title={peerName(c)}>
+                  {peerShort(c)}
+                </span>
                 <span className="ml-auto shrink-0 text-xs text-muted-foreground">
                   {fmtTime(c.updatedAt)}
                 </span>
               </div>
-              <div className="pl-5 text-xs">
+              <div className="flex items-center gap-1.5 pl-5 text-xs">
                 <StatusText status={c.status} />
+                {c.nameVerified === true && c.name && (
+                  <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground/70">
+                    {c.peerId}
+                  </span>
+                )}
               </div>
             </button>
           ))}
@@ -213,10 +297,22 @@ export function ConversationsTab({
           {active ? (
             <>
               <div className="border-b px-4 py-2 text-sm">
-                <span className="font-mono font-medium">{peerName(active)}</span>
+                <span className="font-medium">{peerShort(active)}</span>
+                <span className="ml-2 font-mono text-xs text-muted-foreground">{active.peerId}</span>
                 <span className="ml-2 text-xs text-muted-foreground">
                   {active.kind === 'group' ? '群聊' : '私聊'} · {active.messageCount} 条
+                  {active.kind === 'group' && Object.keys(active.senders ?? {}).length > 0
+                    ? ` · ${Object.keys(active.senders ?? {}).length} 位发言人`
+                    : ''}
                 </span>
+                {active.nameVerified !== true && (
+                  <span
+                    className="ml-2 rounded bg-muted-foreground/15 px-1 py-px text-[10px] text-muted-foreground"
+                    title="没能从协议端取到名字（不影响机器人回话）"
+                  >
+                    未核实名称
+                  </span>
+                )}
               </div>
               <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
                 {active.messages.map((m, i) => {
@@ -236,9 +332,19 @@ export function ConversationsTab({
                   if (m.role === 'user') {
                     // 对方发的：左侧气泡；text 里的 [图片] 原样保留（忠实还原），
                     // 取到的图片显示在气泡下方（§2.9）
+                    //
+                    // ★ 发言人身份（§2.8 ④）：群聊里一个会话有多个人说话，
+                    //   不标名字根本看不出谁是谁。同一人连续发言时只标第一条。
+                    const prev = active.messages[i - 1]
+                    const showName = !prev || prev.role !== 'user' || prev.senderId !== m.senderId
                     return (
                       <div key={i} className="flex justify-start">
                         <div className="max-w-[75%]">
+                          <SenderLabel
+                            msg={m}
+                            sender={m.senderId ? active.senders?.[m.senderId] : undefined}
+                            showName={showName}
+                          />
                           <div className="rounded-2xl rounded-tl-sm bg-muted px-3 py-2 text-sm whitespace-pre-wrap">
                             {m.text}
                           </div>

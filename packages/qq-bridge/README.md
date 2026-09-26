@@ -9,6 +9,10 @@
 > - **你是 AI agent，或想五分钟上手** → 读 **[AGENT.md](AGENT.md)**（操作说明 + 绝对不能改的六件事）
 > - **你需要机器可读的包契约**（命令 / 配置键 / 不变量 / 故障特征） → 读 **[PROJECT.json](PROJECT.json)**
 > - **你要打发布包（zip）** → 读 **[RELEASE.md](RELEASE.md)**（前置条件 / 要清空的密钥 / 验收清单）
+> - **你要改权限或身份核实** → 先读仓库根目录的 **`docs/identity-verification.md`**
+>   （身份是核实出来的、权限是配置定的，两者**永不互相推导**；那里写清了为什么）
+> - **你要确认"它到底记没记住"** → 读 **`docs/memory-verification.md`**，
+>   并跑 `node src/index.mjs --memory`（只读，随时可跑）
 > - **你要理解"为什么这么设计"** → 就是本文件（往下读）
 >
 > 三份文档由 `mocks/verify-manifest.mjs` 自动核对一致性 —— 代码改了但文档没同步时，
@@ -45,13 +49,21 @@ node src/index.mjs --check
 # ③ 填 config.json 里的 access.adminUsers（你自己的 QQ 号，必填！）
 
 # ④ 跑测试（不需要 QQ、不花模型费用）
-node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（19 项）
-node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制（50 项）
-node mocks/verify-config.mjs     # 配置解析与校验（39 项）
-node mocks/verify-units.mjs      # 纯逻辑：文本/唤醒/会话/防自环/人味层/人设/记忆（152 项）
-node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（19 项）
-node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（26 项）
-node mocks/verify-real-dsh.mjs   # 真实 dsh 能否被启动（7 项，零费用）
+npm test                         # 全部离线套件（实测：所有套件退出码 0）
+
+# 想单独跑某几套（下面括号里是**离线环境**下的断言条数；条目声明见 PROJECT.json）
+node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（33 项）
+node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制（89 项）
+node mocks/verify-config.mjs     # 配置解析与校验（42 项）
+node mocks/verify-units.mjs      # 纯逻辑：文本/唤醒/会话/防自环/人味层/人设/记忆
+node mocks/verify-images.mjs     # 看图：SSRF 防护 + 防 DoS（145 项）
+node mocks/verify-identity.mjs   # ★ 身份核实：谁在说话、会话名、"身份不得变成权限"、权限判据自解释（57 项）
+node mocks/verify-memory-store.mjs # 记忆存储层：分档、内容过滤、篡改回滚（78 项）
+node mocks/verify-memory-roundtrip.mjs # ★ 记忆全链路：提议→落盘→剥离→回执→下轮注入（25 项）
+node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）
+node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 需要能起子进程）
+node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
+node mocks/verify-real-dsh.mjs   # 真实 dsh 能否被启动（零费用；★ 需要能起子进程）
 node mocks/verify-doctor.mjs     # 体检工具自身的准确性（30 项）
 node mocks/verify-live.mjs       # ★ 真实端到端（会调用模型，有少量费用）
 node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
@@ -59,14 +71,26 @@ node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
 # ⑤ 体检（真正检查连接是否可用，强烈建议先跑）
 start.bat --doctor
 
+# ⑤-b 记忆体检（只读；机器人正在跑的时候也能执行）
+#   ★「它说记住了」和「它真的记住了」是两件事 —— 这条命令回答后者。
+#   详见仓库根目录 docs/memory-verification.md
+node src/index.mjs --memory           # 记了什么 + 下一轮按会话会注入什么
+node src/index.mjs --memory --full    # 注入内容整段打印
+node src/index.mjs --memory --json    # 给脚本/界面用
+
 # ⑥ 启动
 start.bat                        # 双击；或 node src/index.mjs
-# 也可以双击带图标的快捷方式：启动机器人.lnk
+# 也可以双击带图标的快捷方式：QQbot.lnk
 #   （.bat 本身在 Windows 里不能带自定义图标，所以带图标的入口是快捷方式）
 # start.bat 现在会先拉起 SnowLuma，再起桥接。跳过 SnowLuma：start.bat --no-snowluma
 ```
 
-当前状态：**离线十二套共 608 项全部通过**；真实 QQ 端到端实测通过（含 QQ 原生工具调用）。
+当前状态：**离线 19 套全部退出码 0**；真实 QQ 端到端实测通过（含 QQ 原生工具调用）。
+
+> ⚠️ 标了「★ 需要能起子进程」的几套，在受限沙箱里会 **EPERM**。
+> 那种情况下它们会**明确打印「跳过」并说明这不是通过**（跑不了就说跑不了），
+> 而不是伪装成绿色 —— 请在正常 Windows 会话里重跑以得到完整结论。
+> 上面那套 `verify-identity`（身份核实）**全桩、不需要 spawn**，所以在任何环境都是真跑。
 启动后还会同时提供**本地配置接口** `http://127.0.0.1:3410`（给配置 UI 用，规格见 `CONFIG-UI.md`）。
 
 ---
