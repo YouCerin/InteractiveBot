@@ -88,7 +88,7 @@ const DEMO_TREE: MemoryTree = {
     },
   ],
   totalBytes: 684,
-  note: '记忆由机器人自己在聊天过程中维护。没有 memory/ 目录是正常的（按需创建）。',
+  note: '记忆由桥接按模型的提议落盘（模型提议、桥接校验后写入）。没有 memory/ 目录是正常的（按需创建）。',
 }
 
 const DEMO_CONTENT = '# 记忆索引\n\n- 管理员私聊：QQ 100000001（昵称"无忘远霞"）\n- 约定：戳一戳这类指令执行完不用再回一句"已收到"，直接做完就行\n'
@@ -773,6 +773,14 @@ export function MemoryTab({
                       <span>保存后立即生效，不需要重启。</span>
                       <span className="tabular-nums">{[...content].length} 字 · Ctrl+S 保存</span>
                     </div>
+                    {memoryEnabled && (
+                      <InlineNote level="warn">
+                        记忆功能现在是<strong>开着</strong>的：桥接管着写入权，
+                        你在这里保存的内容<strong>可能在下一轮被回滚</strong>成桥接那版。
+                        想手工改，先关掉上面的「启用记忆」再改；
+                        或者直接在私聊里跟机器人说「这条记错了」，让桥接落成新条目。
+                      </InlineNote>
+                    )}
                   </div>
                 ) : (
                   <div className="flex h-full min-h-32 items-center justify-center rounded-md border border-dashed px-4 text-center text-xs text-muted-foreground">
@@ -786,28 +794,38 @@ export function MemoryTab({
         </CardContent>
       </Card>
 
-      {/* 必须解释清楚的三件事 */}
+      {/* 必须解释清楚的四件事（§2.5；第 3 条是"桥接托管记忆"改造后新增的必须告知项） */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">关于记忆，三件事</CardTitle>
+          <CardTitle className="text-base">关于记忆，四件事</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm leading-relaxed text-muted-foreground">
           <p>
             <strong className="text-foreground">1. 记忆存在哪：</strong>
-            不是数据库，是机器人自己在聊天过程中创建和维护的普通文件——
+            不是数据库，是普通文件——
             <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs">&lt;工作区&gt;/MEMORY.md</code>
-            （索引）和
+            （指令档，跨群）和
             <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs">&lt;工作区&gt;/memory/</code>
-            （细节，按需创建）。重启不丢。
+            （按人/按群的细节，按需创建）。现在<strong className="text-foreground">由桥接按模型的提议落盘</strong>
+            ，不再由模型直接写。重启不丢。
           </p>
           <p>
             <strong className="text-foreground">2. 换工作区 = 换记忆：</strong>
             旧记忆留在旧目录里，不会跟过来。
           </p>
           <p>
-            <strong className="text-foreground">3. 改这里 = 直接改机器人的长期记忆：</strong>
-            这是修正它记错东西的<strong className="text-foreground">唯一</strong>入口——
-            这个页签不只是「看看」，它是纠错入口。
+            <strong className="text-foreground">3. 手动改会被回滚：</strong>
+            桥接每次写入都留快照（
+            <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs">memory/.snapshots/</code>
+            ），读记忆前比对；不一致——无论是模型绕过协议改的、还是
+            <strong className="text-foreground">你在这个界面里改的</strong>——都会恢复成桥接那一版。
+            想手工编辑，<strong className="text-foreground">先关掉上面的「启用记忆」再改</strong>。
+          </p>
+          <p>
+            <strong className="text-foreground">4. 改这里等于直接改机器人的长期记忆：</strong>
+            它是修正错误记忆的入口；但因为第 3 条，<strong className="text-foreground">推荐做法是
+            管理员在私聊里用自然语言纠正</strong>（「别记那个了」「这条记错了」）——
+            桥接会落成新条目，而不是手工覆盖文件。
           </p>
         </CardContent>
       </Card>

@@ -133,7 +133,7 @@
       { "key": "dsh.provider", "type": "string", "default": "deepseek-official" },
       { "key": "dsh.model", "type": "string", "default": "deepseek-flash" },
       { "key": "dsh.reasoningEffort", "type": "string", "default": "" },
-      { "key": "dsh.apiKey", "type": "secret", "default": "", "note": "★ 模型 API key。留空则回退到环境变量 DEEPSEEK_API_KEY、再回退到 $DSH_HOME/.credentials.yaml（DSH 桌面版「模型」页填的那份）。三处用的是同一把账号级 key。**API 返回时被删除**，只回 hasApiKey 布尔；界面传 null 表示显式清除（空串仍是「保持原样」）" },
+      { "key": "dsh.apiKey", "type": "secret", "default": "", "optional": true, "note": "★ 模型 API key。**可选**：留空则回退到环境变量 DEEPSEEK_API_KEY、再回退到 $DSH_HOME/.credentials.yaml（DSH 桌面版「模型」页填的那份）。三处用的是同一把账号级 key。**API 返回时被删除**，只回 hasApiKey 布尔；界面传 null 表示显式清除（空串仍是「保持原样」）。★ 标 optional 的理由：桥接侧 `normalizeConfig` 对缺字段会回退成空串（有测试），所以 config.json 里不写它也能正常跑 —— 它是「可选键」而不是「必须存在的键」；`verify-manifest` 的取值核对会自动跳过 optional 键" },
       { "key": "dsh.permissionMode", "type": "enum", "values": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "note": "★ 默认值不得改成 danger-full-access" },
       { "key": "onebot.wsUrl", "type": "string", "default": "ws://127.0.0.1:3001", "note": "收事件" },
       { "key": "onebot.httpUrl", "type": "string", "default": "http://127.0.0.1:3000", "note": "发消息" },

@@ -229,7 +229,7 @@ export function createMemoryStore({ workspace, enabled = true, log = () => {} } 
       entries,
       totalBytes: sumBytes(entries),
       warnings,
-      note: '记忆由机器人自己在聊天过程中维护。没有 memory/ 目录是正常的（按需创建）。',
+      note: '记忆由桥接按模型的提议落盘（模型提议、桥接校验后写入）。没有 memory/ 目录是正常的（按需创建）。',
     }
   }
 

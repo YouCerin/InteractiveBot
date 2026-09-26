@@ -98,6 +98,7 @@ section('清单列出的配置键真的在 config.json 里')
 // ══════════════════════════════════════════════════════════════════════════
 {
   const missing = []
+  const skippedOptional = []
   for (const spec of manifest.config.keys) {
     const parts = spec.key.split('.')
     let cur = config
@@ -109,10 +110,20 @@ section('清单列出的配置键真的在 config.json 里')
       }
       cur = cur[part]
     }
-    if (!found) missing.push(spec.key)
+    if (!found) {
+      // ★ 标了 `optional: true` 的键**允许不在 config.json 里**。
+      //   理由：这类键在代码侧有明确的缺省回退（例如 dsh.apiKey → 空串 →
+      //   再回退环境变量与凭据文件），写不写都能跑。把"可选"当成"必须存在"，
+      //   会把一次正常的精简配置误报成契约损坏 —— 而假红同样会训练人忽略红色。
+      if (spec.optional === true) skippedOptional.push(spec.key)
+      else missing.push(spec.key)
+    }
   }
-  check(`${manifest.config.keys.length} 个配置键都能在 config.json 找到`, missing.length === 0,
-    missing.join(', '))
+  check(
+    `${manifest.config.keys.length} 个配置键都能在 config.json 找到（可选键 ${skippedOptional.length} 个不强制）`,
+    missing.length === 0,
+    missing.length ? `缺：${missing.join(', ')}` : '',
+  )
 }
 
 // ══════════════════════════════════════════════════════════════════════════

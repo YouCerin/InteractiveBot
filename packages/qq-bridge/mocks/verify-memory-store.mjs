@@ -220,6 +220,37 @@ function main() {
       !/一律无效/.test(bare), bare.slice(0, 120))
   }
 
+  section('⑦c 不许把记忆原文背出来（用户明确要求）')
+  {
+    // 理由不是"保密"这么笼统：记忆里混着别人的话、群内私事、以及管理员
+    // 私下交代的约定（指令档还跨群生效）。整段复述等于把 A 处内容搬到 B 处 ——
+    // 正是这个项目一直在防的"串人/串群"。
+    for (const kind of ['private', 'group']) {
+      const instr = buildMemoryInstructionsV2({ kind, recall: { text: '（有内容）' }, receipt: null })
+      check(`[${kind}] ★ 明确"不要把记忆里的文字原样念出来"`,
+        /不要把记忆里的文字原样念出来/.test(instr), instr.slice(0, 100))
+      check(`[${kind}] ★ 给出被问时的正确做法（用自己的话说个大概）`,
+        /用自己的话说个大概/.test(instr) && /不要逐条复述/.test(instr))
+      check(`[${kind}] 说清理由（混着别人的话和私事）`, /混着别人的话和私事/.test(instr))
+    }
+  }
+
+  section('⑦d 通用知识两种会话都注入（否则"私聊能答、群里答不上"）')
+  {
+    // facts-global.md 放的是"关于机器人自己"的事实（会话怎么拼、能调哪些工具…），
+    // 不含任何人的私事。只对私聊开放的话，同一个人换成群里问，答案就会不一样。
+    const g = join(WORK, 'memory', 'facts-global.md')
+    mkdirSync(join(WORK, 'memory'), { recursive: true })
+    writeFileSync(g, '# 记忆\n\n- 这是一条通用知识\n', 'utf8')
+
+    const priv = readMemoryForPrompt({ workspace: WORK, kind: 'private', peerId: '111' })
+    const grp = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: '222' })
+    check('★ 私聊注入通用知识', priv.text.includes('这是一条通用知识'), priv.files.join(','))
+    check('★ 群聊同样注入通用知识', grp.text.includes('这是一条通用知识'), grp.files.join(','))
+    check('注入标签说清它是"关于我自己"而不是某人的记忆',
+      grp.text.includes('关于我自己'), grp.text.slice(0, 60))
+  }
+
   section('⑧ 上限行为：整条拒，不截断')
   {
     const many = Array.from({ length: 70 }, (_, i) => i)
