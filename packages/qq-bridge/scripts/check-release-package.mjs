@@ -40,6 +40,7 @@ const MUST_EXIST = [
   '先读我-首次使用.txt',
   '检查配置.bat',
   '体检.bat',
+  '创建带图标的快捷方式.bat',
   'start.bat',
   'config.json',
   'config.example.json',
