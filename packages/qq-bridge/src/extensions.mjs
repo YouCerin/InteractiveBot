@@ -354,6 +354,13 @@ export function discoverSkills({ skillsDir } = {}) {
     return { skills: out, dir, exists: false }
   }
 
+  // ★ 同一个 `id` 只能有**一个**目录。
+  //   两个目录用同一个 id 时，工具裸名会撞车（`<id>__<tool>`），模型在 tools/list 里会看到
+  //   两条一模一样的名字，而派发只会命中先出现的那条 —— 表现为"看起来装上了、实际调的是另一个版本"。
+  //   这类"静默取第一个"正是本项目最忌讳的，所以：**撞车的两个都标红、都不装载**（fail-closed），
+  //   并指名道姓说清是哪几个目录 —— 装/卸/升级/回滚时最容易留下两份（旁边放了个备份目录）。
+  const idOwner = new Map()
+
   for (const e of entries) {
     if (!e.isDirectory()) continue
     if (e.name.startsWith('.')) continue // .upstream-original 之类的留档目录不是技能
@@ -373,9 +380,14 @@ export function discoverSkills({ skillsDir } = {}) {
       ? { ok: false, errors: [parseError], warnings: [] }
       : validateSkillManifest(manifest, { dir: skillDir })
 
+    // ★ 同 id 撞车：先把归属记下来，循环结束后**统一把撞车的两个都标红**（见下面的 after-loop）。
+    const skillId = String(manifest?.id ?? e.name)
+    if (!idOwner.has(skillId)) idOwner.set(skillId, [])
+    idOwner.get(skillId).push(e.name)
+
     out.push({
       // id 优先取清单里的（坏清单也尽量给个能显示的 id）
-      id: String(manifest?.id ?? e.name),
+      id: skillId,
       dirName: e.name,
       dir: skillDir,
       manifestPath,
@@ -404,6 +416,24 @@ export function discoverSkills({ skillsDir } = {}) {
       runtimeTools: [],
       loadError: '',
     })
+  }
+
+  // ★ 同 id 撞车 → **双方都标红**（fail-closed）：不猜哪个是对的，直接不装载并说清。
+  //   为什么不做"先到先得"：readdir 的顺序取决于文件系统（NTFS 上近似按名字），
+  //   一个叫 `copy-of-x` 的备份目录可能排在真正那份前面 —— 于是"静默跑的是备份"。
+  for (const [id, dirNames] of idOwner) {
+    if (dirNames.length < 2) continue
+    const who = dirNames.join(' / ')
+    for (const s of out) {
+      if (s.id !== id) continue
+      s.ok = false
+      s.errors = [
+        ...s.errors,
+        `id 重复：「${id}」在 ${who} 里出现了 ${dirNames.length} 次 —— 同一个技能只能有一个目录，` +
+          '**两个都不会装载**（否则工具名 `<id>__<工具>` 会撞车，模型看到两条一样的名字、' +
+          '实际只会调其中一条，而那条不一定是你要的）。请删掉或改掉多余的那份。',
+      ]
+    }
   }
 
   out.sort((a, b) => a.id.localeCompare(b.id))

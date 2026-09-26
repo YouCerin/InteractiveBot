@@ -190,6 +190,45 @@ section('② 发现：坏技能带着原因出现，但不影响别的技能')
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   section ②-b 同一个 id 只允许一个目录（装/卸/升级/回滚时最容易踩）
+   ══════════════════════════════════════════════════════════════════════════ */
+section('②-b ★★ 同 id 撞车：两个都标红、都不装载（fail-closed，不猜哪个对）')
+{
+  // 为什么单独用一个目录：这一节要**故意**造两份同 id 的技能，
+  // 放进共享的 SKILLS_DIR 会污染后面几节的"发现结果"计数。
+  const DUP_DIR = join(ROOT, 'skills-dup')
+  for (const [dirName, extra] of [
+    ['pixiv-lookup', { version: '1.0.0' }],
+    ['pixiv-lookup-backup', { version: '0.9.0' }], // ← 回滚时留下的备份目录，id 没改
+  ]) {
+    mkdirSync(join(DUP_DIR, dirName), { recursive: true })
+    writeFileSync(
+      join(DUP_DIR, dirName, 'skill.json'),
+      JSON.stringify({ id: 'pixiv-lookup', name: `查图 ${extra.version}`, apiVersion: 1, entry: 'index.js', ...extra }),
+      'utf8',
+    )
+    writeFileSync(join(DUP_DIR, dirName, 'index.js'), 'export function setup(api) {}\n', 'utf8')
+  }
+  const dup = discoverSkills({ skillsDir: DUP_DIR })
+  check('两份都被发现（不是静默丢掉一份）', dup.skills.length === 2, dup.skills.map((s) => s.dirName).join(','))
+  check('★★ 两份**都** ok=false —— 不猜"哪个才是真的"', dup.skills.every((s) => s.ok === false), JSON.stringify(dup.skills.map((s) => s.ok)))
+  check('★ 原因里指名道姓列出所有撞车的目录',
+    dup.skills.every((s) => /id 重复/.test(s.errors.join('；')) && /pixiv-lookup-backup/.test(s.errors.join('；')) && /pixiv-lookup/.test(s.errors.join('；'))),
+    dup.skills[0].errors.join('；'))
+  check('★ 并且说清了危险在哪（工具名撞车）与怎么办',
+    dup.skills.every((s) => /工具名/.test(s.errors.join('；')) && /删掉或改掉/.test(s.errors.join('；'))))
+  check('不同 id 时不受影响（对照组）', (() => {
+    const solo = join(ROOT, 'skills-solo')
+    for (const n of ['a-skill', 'b-skill']) {
+      mkdirSync(join(solo, n), { recursive: true })
+      writeFileSync(join(solo, n, 'skill.json'), JSON.stringify({ id: n, name: n, version: '1.0.0', apiVersion: 1, entry: 'index.js' }), 'utf8')
+      writeFileSync(join(solo, n, 'index.js'), 'export function setup() {}\n', 'utf8')
+    }
+    return discoverSkills({ skillsDir: solo }).skills.every((s) => s.ok === true)
+  })())
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    section ③ 设置合并：默认值 ← 用户值，并按清单收敛类型
    ══════════════════════════════════════════════════════════════════════════ */
 section('③ 设置合并与类型收敛（这一节的错全是静默的）')

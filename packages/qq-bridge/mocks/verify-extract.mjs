@@ -335,8 +335,14 @@ try {
 
     const picked = pickRecipes(listRecipes({ workspace: WS }), '帮我查一下这个牌子靠不靠谱')
     check('★ 用真实用户说法能匹配上', picked.length === 1, String(picked.length))
-    check('★ 刚抽到的配方置信度是初始 0.5（不会立刻被当经验）',
-      Math.abs(picked[0]?.confidence - 0.5) < 1e-9, String(picked[0]?.confidence))
+    // ⚠️ 这里原来写的是 `Math.abs(x - 0.5) < 1e-9` —— 那是个**会随机变红**的断言：
+    //    置信度是 `base × 0.5 ^ (ageDays / 60)`（半衰期 60 天），而 `upsertRecipe` 与 `pickRecipes`
+    //    之间隔着几次文件 IO，年龄不是 0 ⇒ 值必然略低于 0.5。实测在整套测试串跑（机器忙）时
+    //    漂到 0.4999999989303284（差 1.07e-9）就把整条链判红了。
+    //    现在断言的是**意图**：① 不会被"越用越信"抬到 base 之上；② 只允许那点时间衰减
+    //    （1e-3 ≈ 半衰期公式下跑两小时才会掉的量级；而"算不算经验"的闸门是 0.15，离得很远）。
+    check('★ 刚抽到的配方置信度在初始 0.5 附近（不会立刻被当经验）',
+      picked[0]?.confidence <= 0.5 && picked[0]?.confidence >= 0.5 - 1e-3, String(picked[0]?.confidence))
 
     // 同名再抽一次 → 合并取并集，不该产生第二条
     const again = await extractRecipe({ cliPath: 'x', task: {}, ops: [], runner: async () => ({ ok: true, text: FIXTURE }) })

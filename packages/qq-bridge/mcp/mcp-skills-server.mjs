@@ -46,8 +46,8 @@ import {
   loadSkill,
   isSkillEnabled,
   mergeSkillSettings,
+  skillToolFullName,
   skillToolLocalName,
-  SKILLS_SERVER_NAME,
 } from '../src/extensions.mjs'
 
 const PROTOCOL_VERSION = '2024-11-05'
@@ -208,8 +208,12 @@ async function runSkillTool(toolName, args) {
     peerKey: kind && peerId ? `${kind}:${peerId}` : '',
     config: live ?? config,
     settings: mergeSkillSettings(skill.manifest, (live ?? config)?.skills?.[skill.id]).settings,
-    // 让技能自己也能算"模型看到的工具名"（例如在报错里写清楚该调哪个）
-    toolName: (id) => `${SKILLS_SERVER_NAME}::${skillToolLocalName(skill.id, id)}`,
+    // 让技能自己也能算「**模型实际看到的工具全名**」（例如在报错里写清该调哪个）。
+    // ⚠️ 必须与 `setup(api)` 里的 `api.toolName()` 是**同一个口径**（`mcp__skills__<id>__<tool>`）：
+    //    第一版这里给的是本服务器内部的注册键（`<服务器名>::<裸名>`），
+    //    而那个名字**模型根本调不到** —— 技能若把它写进给模型看的话，模型会去调一个不存在的工具，
+    //    而且失败得很安静（它只会说"查不到"）。所以命名规则只有一处实现（src/extensions.mjs）。
+    toolName: (id) => skillToolFullName(skill.id, id),
   }
 
   try {

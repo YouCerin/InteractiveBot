@@ -394,17 +394,17 @@
     },
     {
       "cmd": "node mocks/verify-extensions.mjs",
-      "purpose": "扩展系统（0.2.2）：清单校验（id/entry/apiVersion/越界路径/明文密钥）、设置合并与密文语义、工具命名（`mcp__skills__<id>__<tool>`）、提示词片段开关、开关语义（hot/cold 如实）、发图守卫。",
+      "purpose": "扩展系统（0.2.2）：清单校验（id/entry/apiVersion/越界路径/明文密钥）、发现（坏技能带原因出现但不影响别人；★ 同 id 撞车 → 两个都标红且都不装载）、设置合并与密文语义、工具命名（`mcp__skills__<id>__<tool>`）、提示词片段开关、开关语义（hot/cold 如实）、发图守卫。",
       "network": false,
       "costs": "none",
-      "assertions": 140
+      "assertions": 145
     },
     {
       "cmd": "node mocks/verify-mcp-skills.mjs",
-      "purpose": "技能工具 MCP 服务器（0.2.2）：进程内派发（含「改 config.json 不用重启就生效」）+ 真的拉子进程走 stdio（沙箱里这一段**明确跳过**，跳过不算通过）。",
+      "purpose": "技能工具 MCP 服务器（0.2.2）：进程内派发（含「改 config.json 不用重启就生效」与「`ctx.toolName(id)` 必须与 `api.toolName()` 同口径 = 模型实际看到的全名」）+ 真的拉子进程走 stdio（沙箱里这一段**明确跳过**，跳过不算通过）。",
       "network": false,
       "costs": "none",
-      "assertions": 26
+      "assertions": 28
     },
     {
       "cmd": "node mocks/verify-contacts.mjs",
@@ -498,8 +498,8 @@
     "src/interim.mjs": "★ 「先应一声」四类话术（thinking/searching/tooling/blocked），默认素材取自用户给的 deal.txt。★ 去重是「带冷却的随机」：候选里先剔除冷却期内的，再随机；冷却判定用**与**（时间到了 **且** 中间说过足够多别的）——用或会让冷却时间形同虚设（被单测抓到过）。随机必须覆盖整个池子，否则话术少时会连续抽到同一句（也被单测抓到过）。",
     "mcp/mcp-qq-server.mjs": "★ QQ 工具 MCP 服务器（手写 stdio JSON-RPC，零依赖）。默认放行所有 OneBot 动作，黑名单拦截会伤害他人/账号的动作。",
     "mcp/mcp-skills-server.mjs": "★★ **技能工具 MCP 服务器**（0.2.2，stdio、零依赖）：把 `skills/` 里的第三方技能注册成模型能调的工具（serverName `skills` ⇒ 模型看到 `mcp__skills__<id>__<tool>`）。与 QQ 工具**分成两个服务器**的理由：隔离（技能是第三方代码，崩了不该带走 QQ 动作）、权限（技能工具不需要 QQ token，那份配置里就没有 token）、零成本（没装技能时桥接**根本不写**这一段 profile）。★★ 「随时开关」在这里落地：工具表按**已安装**注册（所以开关不需要重启），每次 `tools/call` **现读 config.json** 的开关，关掉就当场拒绝并给模型一句可转述的中文；提示词侧由桥接按同一开关每轮决定。边界如实写在文件头与 `docs/插件设计规范.md` 里：**装卸技能要重启**。★ `session: required` 的技能由宿主把 kind/peerId 加进入参（MCP 的 `tools/call` 上没有会话标识，而多会话是并发的 —— 猜会话会指向别人的会话）。",
-    "mocks/verify-extensions.mjs": "★★ 扩展系统测试（0.2.2，140 项）。五组：① **清单校验**（id/entry/apiVersion 的错必须拦、`..` 与绝对路径必须拦、设置项没界面/界面字段没默认值/明文密钥必须**告警**）；② **设置合并与密文语义**（默认值←用户值、类型收敛、`maxResults:\"10\"` 不许变 NaN、空串=保持原值、`null`=清除）；③ **命名**（技能工具全名 `mcp__skills__…`、宿主工具 `mcp__qq__qq_send_image`，两半拼装规则只有一处）；④ **提示词片段**（关掉的技能一个字都不出现、按 priority 稳定排序、某个技能抛错只跳过它）；⑤ **开关语义**（技能即时生效并同时落盘、插件按 hot/cold 如实回 restartRequired、名单类没有开关、清单坏的技能开不了）。另含 `qq_send_image` 的守卫（内网地址默认拒、开关打开才放行）与 API 路由参数校验。",
-    "mocks/verify-mcp-skills.mjs": "★★ **技能工具 MCP 服务器**的测试（0.2.2，26 项 + 沙箱跳过段）。两段式：① **进程内**驱动派发（工具枚举与命名、`session: required` 的 schema 注入、权限/如实/来源三类描述、关掉的技能当场拒绝、**改 config.json 不用重启就生效**（「随时开关」的核心保证，实测同一个进程里 true→false 立刻变）、会话参数不进业务参数、缺会话 fail-closed、技能抛错被翻译成中文、`available()` 不可用如实转述、配置坏掉/BOM 都 fail-closed）；② **真的拉子进程走 stdio**（握手 serverInfo 版本与 package.json 一致、tools/list 的 schema、tools/call 执行、未知工具 isError、未知方法 -32601、stdout 只跑协议帧）。受限沙箱里 ② 会 EPERM —— 用 `sectionIf` 明确跳过并由 `printSkipSummary` 声明「这不算完整通过」（与 verify-mcp.mjs 同一套纪律）。",
+    "mocks/verify-extensions.mjs": "★★ 扩展系统测试（0.2.2，145 项）。五组：① **清单校验**（id/entry/apiVersion 的错必须拦、`..` 与绝对路径必须拦、设置项没界面/界面字段没默认值/明文密钥必须**告警**）；② **发现**（坏技能带原因出现但不影响别人、`.开头` 的留档目录跳过；★ **同 id 撞车 → 两个都标红且都不装载** —— fail-closed，不猜哪个对：readdir 的顺序取决于文件系统，一个备份目录可能排在正式目录前面，静默跑备份是最坏的结果）；③ **设置合并与密文语义**（默认值←用户值、类型收敛、`maxResults:\"10\"` 不许变 NaN、空串=保持原值、`null`=清除）；④ **命名**（技能工具全名 `mcp__skills__…`、宿主工具 `mcp__qq__qq_send_image`，两半拼装规则只有一处）；⑤ **提示词片段与开关语义**（关掉的技能一个字都不出现、按 priority 稳定排序、某个技能抛错只跳过它；技能即时生效并同时落盘、插件按 hot/cold 如实回 restartRequired、名单类没有开关、清单坏的技能开不了）。另含 `qq_send_image` 的守卫（内网地址默认拒、开关打开才放行）与 API 路由参数校验。",
+    "mocks/verify-mcp-skills.mjs": "★★ **技能工具 MCP 服务器**的测试（0.2.2，28 项 + 沙箱跳过段）。两段式：① **进程内**驱动派发（工具枚举与命名、`session: required` 的 schema 注入、权限/如实/来源三类描述、关掉的技能当场拒绝、**改 config.json 不用重启就生效**（「随时开关」的核心保证，实测同一个进程里 true→false 立刻变）、会话参数不进业务参数、★ **`ctx.toolName(id)` 与 `api.toolName()` 同口径**（第一版给的是服务器内部注册键 —— 模型调不到它，技能照着写给模型就会「按提示调工具却总是查不到」）、缺会话 fail-closed、技能抛错被翻译成中文、`available()` 不可用如实转述、配置坏掉/BOM 都 fail-closed）；② **真的拉子进程走 stdio**（握手 serverInfo 版本与 package.json 一致、tools/list 的 schema、tools/call 执行、未知工具 isError、未知方法 -32601、stdout 只跑协议帧）。受限沙箱里 ② 会 EPERM —— 用 `sectionIf` 明确跳过并由 `printSkipSummary` 声明「这不算完整通过」（与 verify-mcp.mjs 同一套纪律）。",
     "mocks/verify-contacts.mjs": "★★ 联系人昵称测试（0.2.2，43 项）：① **解析**（`=`/`:` 两种分隔、可疑值/号码超长/形状不对/重复号码都进 `bad` 而**不静默丢**）；② **把关只有一处实现**（`normalizeNickname` 与底层 `cleanNickname` 同一个判据，不是抄一份）；③ 读写（文件不存在=空表、越界路径被拒、超 200 条被拒、渲染幂等）；④ **注入**（没有昵称时一个字都不产生、说清「不用每句都带」与「跟权限无关」、**不打印号码**）；⑤ ★★ **篡改回滚**：模拟「模型绕过桥接直接改文件」，跑 `verifyAndRestoreMemory` 后文件被还原、日志留证据、偷加的号码查不到；⑥ 接口（GET/POST、空昵称=删除、400/422/501 三种错误语义）。",
     "mocks/verify-personas.mjs": "★★ 人设库测试（0.2.2，97 项）：① **默认那两套是文件、与预设同源、只在空目录时落**（含「删掉之后启动不许复活它」与「读操作也不许复活它」）；② **命名校验拦在写盘之前**（路径分隔符 / Windows 保留字符 / 以点开头结尾 / 24 字上限 / 保留名 `none`）；③ 增删改查（重名拒绝、空正文拒绝、超 4000 字拒绝、复制新建、改名冲突、渲染带结尾换行、`hasNameBlock`、`blocked`）；④ ★★ **当前生效的是哪一套**（文件 / `none` / 老 `custom` / 老 `preset` / 两项都空 → 出厂默认；★ `active` 指向读不到的文件时**不静默退回内置**）；⑤ ★★ **写动作的配置跟随与重启语义**（保存/改名/删除**正在用的**那套 → 配置跟着改 + `restartRequired:true`；动别的 → `false`；切换不存在的名字 → 拒绝）；⑥ 接口（GET/POST、`activate` 真的写进配置且留 `.bak`、400 vs 422、没注入依赖 501、★ 旧接口 `/api/persona` 与 `/api/persona/names` 回 **410 + 新路径**而不是 404）；⑦ ★★ **接线断言**（直接读 `src/index.mjs`/`src/api.mjs` 源码：依赖真的注入了、启动真的落默认两套、路由真的挂上、配置落盘纪律只有一处、`--personas` 这个只读入口在 `--memory` 之前 —— 纯函数测过 ≠ 接线做过）。",
     "mocks/probe-extensions.mjs": "★ 扩展探针（不是测试）：打开某个技能后，把**提示词里到底多出什么字**打出来看。为什么需要它：技能对模型的影响几乎全在提示词与工具表上，而那是「看一眼就知道对不对、不看就只能猜」的东西。",
@@ -1194,6 +1194,16 @@
       "symptom": "★ 人设栏显示「正在用某一套」，但机器人说话的调子不对（或完全没有人设）",
       "cause": "① `persona.active` 指向的那一套**读不到**（被删了/改名了）→ 桥接按「不用人设」跑并大声报错（**刻意不静默退回内置**，否则你会以为「我的人设在用」）；② 那一套命中了反注入扫描 → 启动时被**整文件拒载**，注入的是一段 `[BLOCKED]` 占位文本（人设栏会用 `activeBlocked` 标红）；③ 配置里还是老写法（`active` 为空 → 走 `persona.custom`/`persona.preset`），而人设栏里那几套**一套都没在用**（界面会显示 `legacy` 引导）",
       "fix": "`node src/index.mjs --personas` 一眼看全：装了哪几套、当前用哪一套、哪一套没有名字块、`active` 指的哪一套读不到。⚠️ 人设是**构造期缓存**的：切换/改了正在用的那一套之后**必须重启**（接口会如实回 `restartRequired`）"
+    },
+    {
+      "symptom": "★ 装了一个技能，但模型调到的像是**另一个版本**（或 tools/list 里出现两条同名工具）",
+      "cause": "`skills/` 下有**两个目录用了同一个 `id`**（装/卸/升级/回滚时最容易留下：正式目录旁边放了个备份目录，或复制了一份 `pixiv-lookup.bak` 却忘了改 id）。工具裸名是 `<id>__<工具>`，同 id 就会撞车",
+      "fix": "把多余的备份目录**删掉或改 id**（推荐放到 `skills/.bak-<id>/` —— 点开头的目录扫描会跳过）。★ 0.2.2 起这种情况**两个都不装载**并标红（fail-closed）：以前是「先到先得」，而 readdir 顺序取决于文件系统，可能出现「静默跑的是备份那份」。`node src/index.mjs --extensions` 会直接说出是哪几个目录撞了"
+    },
+    {
+      "symptom": "★ 技能按自己的提示词去调工具，模型却总说「查不到 / 没有这个功能」",
+      "cause": "提示词里**写死了工具名**（常见于从别的宿主搬来的技能：上游是 `pixiv-lookup__search`，本宿主是 `mcp__skills__pixiv-lookup__search`），或者用了 `ctx.toolName(id)` 的旧实现（0.2.2 修过：它曾返回 MCP 服务器的**内部注册键**，那个名字模型调不到）",
+      "fix": "提示词里一律用 `api.toolName(id)`（`setup()` 里）或 `ctx.toolName(id)`（`execute()` 里）取真名；两者现已同口径。逐处改法见 `docs/0.2.2-pixiv-skill-migration.md`，规范见 `docs/插件设计规范.md` §3.3 / §12.3"
     },
     {
       "symptom": "改过的人设 / 配置「保存了但没生效」",

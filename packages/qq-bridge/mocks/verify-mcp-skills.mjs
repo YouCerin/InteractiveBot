@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { canSpawn, sectionIf, printSkipSummary } from './harness.mjs'
-import { skillToolLocalName, SKILL_API_VERSION } from '../src/extensions.mjs'
+import { skillToolLocalName, skillToolFullName, SKILL_API_VERSION, SKILLS_SERVER_NAME } from '../src/extensions.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG_ROOT = join(HERE, '..')
@@ -80,7 +80,9 @@ writeFileSync(
     parameters: { type: 'object', properties: { text: { type: 'string' } } },
     async execute(ctx, args) {
       // 把宿主给的上下文回显出来，测试据此断言"会话参数没被塞进业务参数"
-      return { content: 'pong:' + JSON.stringify({ kind: ctx.kind, chatId: ctx.chatId, args }) }
+      // ★ 顺带回显 ctx.toolName('ping')：它必须与 setup 里 api.toolName() **同一个口径**
+      //   （模型实际看到的全名），否则技能把它写进给模型看的话，模型会去调一个不存在的工具。
+      return { content: 'pong:' + JSON.stringify({ kind: ctx.kind, chatId: ctx.chatId, args, toolName: ctx.toolName && ctx.toolName('ping') }) }
     },
   })
   api.registerTool({
@@ -172,6 +174,13 @@ section('⑤ ★★ 改了 config.json **不用重启**就生效（"随时开关
   check('★ 会话信息给到了技能（ctx.kind / ctx.chatId）', ok.text.includes('"kind":"private"') && ok.text.includes('"chatId":"42"'))
   check('★ 会话参数**不进业务参数**（技能只拿到自己声明的 text）',
     ok.text.includes('"args":{"text":"hi"}'), ok.text)
+  // ★ ctx.toolName 必须与 setup 里 api.toolName() 同口径：模型真正能调的那个全名。
+  //   第一版给的是服务器内部的注册键（`<server>::<裸名>`）—— 模型调不到它，而技能会照着写给模型，
+  //   于是表现为"按提示调工具却总是查不到"（静默失败）。
+  check('★★ ctx.toolName(id) = **模型实际看到的工具全名**（mcp__skills__<id>__<tool>）',
+    ok.text.includes(`"toolName":"${skillToolFullName(SKILL_ID, 'ping')}"`), ok.text)
+  check('★ 而且不是服务器内部的注册键（那个名字模型调不到）',
+    !ok.text.includes(`"toolName":"${SKILLS_SERVER_NAME}::`), ok.text)
 
   writeConfig({ [SKILL_ID]: { enabled: false } })
   const off = await mod.runSkillTool(skillToolLocalName(SKILL_ID, 'ping'), { kind: 'private', peerId: '42' })
