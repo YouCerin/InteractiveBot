@@ -453,20 +453,35 @@ QQ 消息 A ──┐
 
 **拟用 schema**（`op` 部分）：
 
+> ⚠️ **0.2.3 落地时更正了一处**：第一版这里写的是 `kind: 'wake'`，但 oplog 的**实际约定是
+> `type`** —— `session-bridge.mjs` 的 `TurnCollector` 全用 `type`（assistant / tool/call /
+> tool/result / approval / approval/decided / turn/end），而读取侧（`index.mjs` 的 `--ops`）
+> 也是按 `r.type` 分支渲染的。照 `kind` 写下去的后果是**写进去了、读出来是 `undefined`**：
+> `--ops` 会打出一行 `t?s?   undefined`，而且**没有任何东西会报错**。
+> **∴ 字段名以读取方为准，现在是 `type: 'wake'`**（`mocks/verify-wake.mjs` 有一条断言钉着
+> "`type` 必须存在且 `kind` 必须是 undefined"）。这条更正本身就是本项目反复踩到的那类缺陷：
+> **两边的约定不一致，而不一致是静默的**。
+
 ```js
 {
-  kind: 'wake',              // 与既有 op 的 kind 词汇表对齐
-  policy: 'judge',
+  type: 'wake',              // ← 以读取方（--ops）的约定为准（原稿写的是 kind）
+  policy: 'semantic',
   verdict: 'answer' | 'silent',
   shadow: true,               // ← 影子模式标志：这一条没有改变行为
   fallback: false,            // 是否走了"判定失败→放行"兜底
+  judged: true,               // 是否真的问了模型（false = 超预算 / 被取消 / 没配 cliPath）
   ms: 1830,                   // 判定耗时
-  model: 'deepseek-flash',
   reason: '群友之间闲聊，未指向我',   // 判定器给的一句话理由
   excerpt: '<当前消息前 80 字>',      // ← 唯一会被 privacy.mjs 自动筛的字段
-  ctx: { recent: 10, attentive: false, aliases: 3 }   // 只放数字/布尔，不放原文
 }
 ```
+
+> ⚠️ **还有一件 0.2.3 没做完的事（影子模式的兑现路径）**：这一节只规定了**记录**的形状，
+> 而 §10.5 规定的**报表**没做。后果是：结论确实写进了
+> `runtime/oplog/<会话>-<天>.jsonl`，但**没有任何"汇总给你看"的入口** ——
+> 要看只能 `node src/index.mjs --ops --inject <会话>` 逐会话翻，而那个渲染是**为回合设计的**
+> （按 `{turn}/{step}` 对齐），wake 行的这两个字段不存在，会打成 `t?s?`。
+> 也就是说：**影子模式目前只兑现了一半**（记录有、报表没有）。
 
 三条纪律：
 1. **绝不把上下文原文写进 op**（放数字与布尔就够；原文只在 `excerpt`，且靠 `screenForStore` 兜隐私）。

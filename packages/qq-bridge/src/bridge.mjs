@@ -1411,7 +1411,14 @@ export class Bridge extends EventTarget {
         workspace: this.config.dsh?.workspace,
         chatKey,
         op: {
-          kind: 'wake',
+          // ★★ 0.2.3 更正：字段名是 **`type`**，不是 `kind`。
+          //   oplog 的既有约定全用 `type`（`session-bridge.mjs` 的 TurnCollector：
+          //   assistant / tool/call / tool/result / approval / approval/decided / turn/end），
+          //   而读取侧（`index.mjs` 的 `--ops`）也是按 `r.type` 分支渲染的。
+          //   我第一版照设计文档 §10.4 写成了 `kind` —— 后果是**写进去了、读出来是
+          //   `undefined`**：`--ops` 会打出一行 `t?s?   undefined`。这正是本项目最忌讳的
+          //   那类静默不一致（"记录有了，但读的人看不见"），所以字段名以读取方为准。
+          type: 'wake',
           policy: 'semantic',
           verdict: r.verdict,
           shadow,

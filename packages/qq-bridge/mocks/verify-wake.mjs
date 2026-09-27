@@ -371,8 +371,16 @@ section('④ 桥接接线：什么时候**不该**问判定器')
     const rel = join(WS, 'runtime', 'oplog')
     const files = existsSync(rel) ? readdirSync(rel) : []
     const text = files.map((f) => readFileSync(join(rel, f), 'utf8')).join('')
-    const row = text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } }).find((o) => o?.kind === 'wake')
+    const rows = text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } })
+    const row = rows.find((o) => o?.type === 'wake' || o?.kind === 'wake')
     check('★★ 影子结论写进了 oplog（回答"本会拦掉哪些"）', Boolean(row), text.slice(0, 160))
+    // ★★ 字段名必须是 `type` —— oplog 的既有约定（TurnCollector）与读取侧（`--ops`
+    //    按 `r.type` 分支）都用它。写成 `kind` 的后果是**写进去、读出来是 undefined**：
+    //    `--ops` 会打出一行 `t?s?   undefined`，而没有任何东西会报错。
+    //    这条断言就是钉住这个"两边约定必须一致"。
+    check('★★ 字段名是 `type`（与 oplog 约定和 `--ops` 的读取方一致，不能是 kind）',
+      row?.type === 'wake' && row?.kind === undefined, `type=${row?.type} kind=${row?.kind}`)
+    check('  且它是读取方能识别的形状（不是 `undefined`）', typeof row?.type === 'string' && row.type.length > 0)
     check('oplog 行带 shadow:true，不会被误读成"已生效"', row?.shadow === true && row?.verdict === 'silent', JSON.stringify(row ?? {}))
     check('oplog 行只放结论与数字，原文只进 excerpt（唯一被隐私筛的字段）', row?.excerpt === '小鲸鱼 今天天气不错' && row?.reason === '群友闲聊')
   }
