@@ -22,30 +22,28 @@
  * "现在是对话态吗""退出过几次"。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 模型通路：**复用已有那条，不新造第二条**
+ * 模型通路：**默认直连 HTTP**，`headless` 留作逃生舱
  * ══════════════════════════════════════════════════════════════════════════
- * 本项目**没有直连模型 API 的代码**（`dsh.apiKey` 只用于注入 DSH 子进程的
- * 环境变量，全程通过 `session/prompt` 说话 —— 见 `src/extract.mjs` 顶部）。
- * 唯一取证过的"额外一次调用"通路是**起一个一次性 `dsh --profile headless` 进程**
- * （`runHeadless`，实测 2.8~4.4 秒返回，本机 `headless` profile 确实存在）。
- * 判定器直接复用它。**不新写 HTTP 客户端**的理由不是省事：新写一条意味着
- * key 读取、超时、重试、失败兜底、计费口径各长一套，而其中每一样都出过错。
+ * 本项目原本**没有直连模型 API 的代码**，所以判定器一开始复用了唯一取证过的
+ * "额外一次调用"通路：起一个一次性 `dsh --profile headless` 进程（2.8~4.4 秒）。
+ * 那条路能跑，但**慢且贵**（起 node 进程 + 完整初始化 harness）。
  *
- * ── ⚠️ 必须如实说明的成本（不要把估算当结论）──────────────────────────────
- * 设计文档 §10.1 说过"判定比一整轮 agent 便宜一个数量级" —— 那个估算的前提是
- * **直连一个小模型**。**那个前提在本项目不成立**：一次判定要起一个 node 进程
- * 并把 harness 完整初始化一遍。它**可能比一轮简单对话还贵**。
- * 所以：
- *   · `wake.policy` 默认 `'rule'` —— 一次判定都不跑（零成本、零新进程）；
- *   · 语义模式下 `wake.judge.shadow` **默认 true** —— 先只记账、不改行为；
- *   · 另有 `wake.judge.maxPerHour` 硬上限兜住最坏情况（超了就一律放过）。
+ * 0.2.3 加了 `src/model-direct.mjs`（一次 `/chat/completions`），判定器默认走它：
+ * 约 1 秒、一次小 completion。端点/模型/key 的口径都**按 DSH 自己的适配器逐条核对过**，
+ * key **复用** `credentials.mjs` 那套三处来源（不为判定器新开一个 key 字段）。
+ *
+ * ★ `wake.judge.transport = 'headless'` **保留**，而且不是摆设：
+ *   · 需要走代理才能访问模型端点的网络（直连那条**没有做代理发现**，见 model-direct.mjs）；
+ *   · 用的是直连说不了的 provider（非 Chat Completions 形状）。
+ *   有它在，"直连不通"就还有一个明确的去处，而不是只能关掉整个功能。
  *
  * ══════════════════════════════════════════════════════════════════════════
  * 六条纪律（前四条是安全线，`mocks/verify-wake.mjs` 逐条钉住）
  * ══════════════════════════════════════════════════════════════════════════
  *   ① **同步兜底**：抛错 / 超时 / 超预算 / 解析失败 ⇒ 一律 `answer`（放过）。
  *      违反后果：判定器一坏，机器人就变哑巴，而且**没有任何报错**。
- *   ② **接受 AbortSignal**：新消息到来时旧判定必须能让路（真的 kill 子进程）。
+ *   ② **接受 AbortSignal**：新消息到来时旧判定必须能让路（子进程会真的被 kill，
+ *      HTTP 请求会真的被中止）。
  *   ③ **无副作用**：只出结论，绝不自己发送任何东西。
  *   ④ **状态可随时丢弃**：除了"本小时调用了几次"这个计数器之外没有状态；
  *      计数器清零也只是让预算重新变宽，不影响正确性。
@@ -55,6 +53,7 @@
  */
 
 import { runHeadless, parseLooseJson } from './extract.mjs'
+import { chatOnce, DIRECT_DEFAULTS } from './model-direct.mjs'
 
 /** 判定结论。只有两个取值 —— "放过"和"沉默"。 */
 export const VERDICT = {
@@ -213,27 +212,65 @@ export function parseJudgeVerdict(raw) {
  *   除此之外没有任何状态 —— 可以随时丢掉重建（纪律④）。
  *
  * @param {object} opts
- * @param {string} opts.cliPath           dsh 的 lib/bin.js（与抽取同源）
- * @param {string} opts.cwd               工作区（子进程的 cwd）
+ * @param {'http'|'headless'} [opts.transport] 默认 `'http'`（快、便宜）；`'headless'` 是逃生舱
+ * @param {string} [opts.baseUrl]       直连端点（默认与 DSH 适配器一致：https://api.deepseek.com）
+ * @param {string} [opts.apiKey]        直连用的 key（由 `resolveDirectTarget()` 解析好后传进来）
+ * @param {string} [opts.model]         直连用的模型 id
+ * @param {number} [opts.maxTokens]     直连的 max_tokens
+ * @param {number} [opts.temperature]   直连的温度
+ * @param {string} [opts.cliPath]       transport='headless' 时用：dsh 的 lib/bin.js
+ * @param {string} [opts.cwd]           transport='headless' 时用：工作区（子进程的 cwd）
  * @param {number} [opts.timeoutMs]
  * @param {number} [opts.maxPerHour]
- * @param {Function} [opts.runner]        可注入的 runner（测试用桩；默认 `runHeadless`）
+ * @param {Function} [opts.runner]
+ *   可注入的**整体调用函数**（测试用桩）。契约：
+ *   `async ({prompt, signal, timeoutMs}) => {ok, text?, why?, ms?, usage?}`。
+ *   ★ 0.2.3 起它收的是**归一化后的形状**（原来收的是 `runHeadless` 的参数），
+ *     这样 HTTP 与 headless 两条通路对判定器是同一个东西，测试也不用关心走的哪条。
  * @param {Function} [opts.log]
- * @param {Function} [opts.now]           时间源（测试用；默认 Date.now）
- * @param {string} [opts.label]           报错文案
+ * @param {Function} [opts.now]         时间源（测试用；默认 Date.now）
+ * @param {string} [opts.label]         报错文案
  */
 export function createWakeJudge({
+  transport = 'http',
+  baseUrl = DIRECT_DEFAULTS.baseUrl,
+  apiKey = '',
+  model = '',
+  maxTokens = DIRECT_DEFAULTS.maxTokens,
+  temperature = DIRECT_DEFAULTS.temperature,
   cliPath,
   cwd,
   timeoutMs = JUDGE_DEFAULTS.timeoutMs,
   maxPerHour = JUDGE_DEFAULTS.maxPerHour,
-  runner = runHeadless,
+  runner = null,
   log = () => {},
   now = () => Date.now(),
   label = '唤醒判定',
 } = {}) {
   /** 最近一小时内的判定时间戳（滑动窗口；只留最近 maxPerHour 条）。 */
   let stamps = []
+
+  /**
+   * 真正去问模型那一步。
+   *
+   * 两条通路的差别**只在这一个函数里** —— 判定逻辑（提示词、解析、兜底、预算）
+   * 完全共用，否则"直连"就会悄悄变成第二套判定行为。
+   */
+  const callModel =
+    runner ??
+    (transport === 'headless'
+      ? ({ prompt, signal, timeoutMs: t }) => runHeadless({ cliPath, prompt, cwd, timeoutMs: t, label, signal })
+      : ({ prompt, signal, timeoutMs: t }) =>
+          chatOnce({ baseUrl, apiKey, model, prompt, timeoutMs: t, maxTokens, temperature, signal, label }))
+
+  /** 这个通路此刻能不能用（建不起来就别浪费一次判定）。 */
+  function transportReady() {
+    // ★ 注入了整体调用函数（测试桩 / 上层接管）⇒ 那条通路由调用方负责。
+    //   不这样写的话，桩测试还得先假装配好 key 或 cliPath，测的就不是判定逻辑了。
+    if (runner) return true
+    if (transport === 'headless') return Boolean(cliPath && cwd)
+    return Boolean(apiKey && model)
+  }
 
   /** 这次判定花掉一个额度了吗 —— 先看再记账，超了就不记账也不调用。 */
   function takeBudget() {
@@ -250,8 +287,8 @@ export function createWakeJudge({
    * @param {object} input 见 `buildJudgePrompt`
    * @param {{signal?: AbortSignal}} [opts]
    * @returns {Promise<{verdict: string, reason: string, judged: boolean,
-   *                    fallback: boolean, why?: string, ms: number}>}
-   *   · `judged:false` = **压根没问模型**（没配 cliPath / 超预算 / 已取消）⇒ 一律放过；
+   *                    fallback: boolean, why?: string, ms: number, usage?: object}>}
+   *   · `judged:false` = **压根没问模型**（通路没配好 / 超预算 / 已取消）⇒ 一律放过；
    *   · `fallback:true` = 问了但结论不可用 ⇒ 放过。
    */
   async function judge(input, { signal } = {}) {
@@ -267,7 +304,13 @@ export function createWakeJudge({
     })
 
     // 纪律①：任何一条"不能判"的理由都通向放过。顺序是先便宜后昂贵。
-    if (!cliPath) return answer('没有配置 dsh.cliPath')
+    if (!transportReady()) {
+      return answer(
+        transport === 'headless'
+          ? `headless 通路没配好（需要 dsh.cliPath 与 dsh.workspace）`
+          : `直连通路没配好（需要 API key 与模型名）`,
+      )
+    }
     if (signal?.aborted) return answer('判定开始前已被取消')
     if (!takeBudget()) {
       log(`[wake] 本小时判定次数已达上限（${maxPerHour}），这一条按规则结论放过`)
@@ -277,10 +320,10 @@ export function createWakeJudge({
     const prompt = buildJudgePrompt(input)
     let r
     try {
-      r = await runner({ cliPath, prompt, cwd, timeoutMs, label, signal })
+      r = await callModel({ prompt, signal, timeoutMs })
     } catch (error) {
-      // runner 自己的实现抛了（桩、或 spawn 层意外）—— 照样不能影响聊天
-      return answer(`判定进程异常：${error?.message ?? error}`, { fallback: true })
+      // 调用层自己抛了（桩、或 fetch/spawn 意外）—— 照样不能影响聊天
+      return answer(`判定调用异常：${error?.message ?? error}`, { fallback: true })
     }
     if (!r?.ok) {
       // ★ 原文片段必须进日志（`extract.mjs` 那条血的教训：只记 why 的话，
@@ -301,6 +344,9 @@ export function createWakeJudge({
       judged: true,
       fallback: false,
       ms: now() - t0,
+      // token 用量只透出去供记日志 —— **不进 `usage` 账本**（那是按回合的，
+      // 详见 bridge.mjs 里的说明）。如实带出来，免得以后有人以为它被记过账。
+      usage: r.usage ?? null,
     }
   }
 
@@ -308,7 +354,7 @@ export function createWakeJudge({
   function budget() {
     const t = now()
     stamps = stamps.filter((s) => t - s < 3_600_000)
-    return { used: stamps.length, maxPerHour, timeoutMs }
+    return { used: stamps.length, maxPerHour, timeoutMs, transport, model: model || null, baseUrl: baseUrl || null }
   }
 
   return { judge, budget }

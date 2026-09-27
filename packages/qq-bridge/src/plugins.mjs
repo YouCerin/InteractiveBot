@@ -148,7 +148,7 @@ export const BUILTIN_PLUGINS = [
     why:
       '闸门每条消息现读 this.config.wake.policy（bridge.mjs 的 handleEvent）——' +
       '判定器本身懒建、只建一次（预算计数器要跨消息累积），所以 policy 与 judge.shadow 即时生效；' +
-      'judge.timeoutMs / judge.maxPerHour 只在首次装配时读一次，改这两个要重启',
+      'judge.transport / model / baseUrl / timeoutMs / maxPerHour 只在首次装配时读一次，改这几个要重启',
     what:
       '决定"这条消息要不要回"用哪一套判据。**这两者回答的是同一个问题**，' +
       '所以它们是**二选一**（同一个键），不是两个开关 —— 两个都开会让两套判据打架，' +
@@ -157,7 +157,7 @@ export const BUILTIN_PLUGINS = [
       '这一格**没有"关"**：它不是开关，是二选一。选「规则唤醒」= 今天的行为' +
       '（私聊/@/关键词 → 必答，一次额外调用都不产生）；' +
       '选「语义唤醒」= 规则先唤醒、再由判定器否决（可以沉默），' +
-      '代价是每条候选消息要起一个一次性 DSH 进程做判定，且**默认只记账不改行为**（影子模式）。',
+      '代价是每条候选消息多一次模型调用（默认直连，约 1 秒），失败/超时/超预算一律放过。',
     uiTab: 'extensions:wake-policy',
     choice: {
       options: [
@@ -171,7 +171,8 @@ export const BUILTIN_PLUGINS = [
           label: '语义唤醒（可沉默）',
           desc:
             '规则先唤醒，再由判定器决定说不说 —— 它可以否决（让机器人沉默）。' +
-            '★ 默认是**影子模式**：判定照跑、结论只写进 oplog，行为不变。',
+            '★ 判定**默认真的生效**（被判沉默的消息不会得到回复，且没有任何提示）；' +
+            '想先观察就打开展开区里的「影子模式」。',
           experimental: true,
         },
       ],

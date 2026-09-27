@@ -515,8 +515,12 @@ function PluginCard({
   const choiceValue = String(getPath(cfg, p.enabledPath) ?? p.value ?? '')
   // uiTab 以 extensions: 开头 = 详细设置展开区就在本卡（qq-tools / wake-policy）
   const expandHere = typeof p.uiTab === 'string' && p.uiTab.startsWith('extensions:')
-  const shadowOn = getBool(cfg, 'wake.judge.shadow', true)
+  // ★ 默认值必须与后端 normalizeConfig 一致：0.2.3 起 wake.judge.shadow 默认 **false**
+  //   （判定真的生效）。这里写成 true 的话，配置里没这个键时界面会显示"影子模式已开"，
+  //   而实际行为正好相反 —— 那是最伤信任的一种不一致。
+  const shadowOn = getBool(cfg, 'wake.judge.shadow', false)
   const mcpProfile = String(getPath(cfg, 'mcp.profile') ?? 'full')
+  const transport = String(getPath(cfg, 'wake.judge.transport') ?? 'http')
 
   return (
     <Card>
@@ -695,24 +699,115 @@ function PluginCard({
             </div>
 
             <p className="mt-3 text-xs text-muted-foreground">
-              策略是默认放行、黑名单拦截（踢人/禁言/改群名片/退群等会被直接拒绝）；拦截清单在代码里
-              （mcp/mcp-qq-server.mjs 的 BLOCKED_ACTIONS），改它需要改代码而不是点界面。
+              策略是<strong>两层</strong>：<strong>具名工具用黑名单</strong>（动作写死在代码里，
+              所以拦得住：踢人/禁言/改群名片/退群等会被直接拒绝），
+              <strong>而上面那个「万能口 qq_api」用只读白名单</strong>（它的动作由模型自选，
+              黑名单天然只拦得住"想得到的"—— 实测漏过读凭据与外发文件两个高危动作）。
+              两处清单都在代码里（mcp/mcp-qq-server.mjs 的 BLOCKED_ACTIONS 与 ALLOWED_API_ACTIONS），
+              改它需要改代码而不是点界面。
               工具调用发生在「思考」阶段，「对话」页签里看不到过程——界面上什么都没发生是正常的。
             </p>
           </div>
         )}
 
         {/* 唤醒策略的判定器设置（0.2.3）。★ 生效边界：shadow 即时（每轮现读）；
-            timeoutMs / maxPerHour 在判定器首次用到时装配一次 —— 改这两个要重启，
-            别因为卡片头上写着「即时生效」就把它们也当即时的。 */}
+            transport / model / baseUrl / timeoutMs / maxPerHour 在判定器首次用到时装配一次
+            —— 改这几个要重启，别因为卡片头上写着「即时生效」就把它们也当即时的。 */}
         {isWakePolicy && open && (
           <div className="rounded-md border p-3">
             <FieldRow
+              label="判定通路"
+              hint={
+                <>
+                  <strong>直连</strong>：一次 HTTP 调用（约 1 秒、一次小 completion），用下面那个模型。
+                  <strong>一次性 DSH 进程</strong>：约 3~5 秒、更贵，但 DSH 自己处理网络 ——
+                  <strong>需要走代理才能访问模型端点时选它</strong>（直连那条不做代理发现）。
+                </>
+              }
+            >
+              <div className="flex flex-col gap-2 sm:flex-row">
+                {[
+                  { v: 'http', label: '直连（默认）', desc: '一次 /chat/completions，约 1 秒。' },
+                  { v: 'headless', label: '一次性 DSH 进程', desc: '约 3~5 秒；要走代理时用它。' },
+                ].map((o) => (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => patch('wake.judge.transport', o.v)}
+                    className={cn(
+                      'flex-1 rounded-md border p-2.5 text-left transition-colors',
+                      transport === o.v ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
+                    )}
+                  >
+                    <div className="text-sm font-medium">
+                      {o.label}
+                      {transport === o.v && <Badge className="ml-1.5 bg-primary hover:bg-primary">当前</Badge>}
+                    </div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">{o.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </FieldRow>
+            <p className="-mt-1 mb-2 text-xs text-amber-700">★ 改它要重启（判定器首次被用到时装配一次）。</p>
+
+            {transport === 'http' && (
+              <>
+                <FieldRow
+                  label="判定模型"
+                  hint={
+                    <>
+                      留空 = 用主对话那个（<code>dsh.model</code>）。判定只要一个小 JSON，
+                      <strong>换成更便宜的小模型是省钱的主要手段</strong>。
+                    </>
+                  }
+                >
+                  <Input
+                    value={String(getPath(cfg, 'wake.judge.model') ?? '')}
+                    placeholder="留空 = 用 dsh.model"
+                    onChange={(e) => patch('wake.judge.model', e.target.value)}
+                  />
+                </FieldRow>
+                <FieldRow
+                  label="判定端点"
+                  hint={
+                    <>
+                      默认 <code>https://api.deepseek.com</code>（<strong>注意没有 /v1</strong>）。
+                      ★ 只允许 <code>https</code>，或回环地址的 <code>http</code> ——
+                      API key 是放在请求头里的，明文发出去等于裸奔。
+                    </>
+                  }
+                >
+                  <Input
+                    value={String(getPath(cfg, 'wake.judge.baseUrl') ?? '')}
+                    placeholder="https://api.deepseek.com"
+                    onChange={(e) => patch('wake.judge.baseUrl', e.target.value)}
+                  />
+                </FieldRow>
+                <p className="-mt-1 mb-2 text-xs text-muted-foreground">
+                  key 复用「模型」页那一把（<code>dsh.apiKey</code> / 环境变量 / DSH 凭据文件），这里不用再填。
+                  ★ 改上面两项也要重启。
+                </p>
+              </>
+            )}
+
+            <FieldRow
               label="判定器 · 影子模式"
-              hint="开 = 只记账不改行为（结论写进 runtime/oplog/）；关 = 判定真的生效。这一项即时生效（每轮现读）。"
+              hint={
+                <>
+                  <strong>关（默认）</strong>= 判定真的生效：被判「沉默」的消息不会得到回复。
+                  <strong>开</strong> = 只记账不改行为（结论写进 runtime/oplog/），用来先观察它想拦什么。
+                  这一项即时生效（每轮现读）。
+                </>
+              }
             >
               <Switch checked={shadowOn} onCheckedChange={(v) => patch('wake.judge.shadow', v)} />
             </FieldRow>
+            {!shadowOn && (
+              <InlineNote level="warn">
+                判定<strong>已经生效</strong>：被判「沉默」的消息<strong>不会</strong>得到回复，
+                而且没有任何提示。先用影子模式（打开上面这个开关）跑一段再决定，会更稳妥。
+              </InlineNote>
+            )}
             <FieldRow
               label="判定超时"
               hint="必须小于「先应一声」的等待（humanize.interim.afterMs，默认 8000）：判定比它还慢，用户会先看到「我在想」、然后什么都没有。超时一律按放过处理。"
@@ -729,7 +824,7 @@ function PluginCard({
             </p>
             <FieldRow
               label="每小时判定上限"
-              hint="每条候选消息要起一个一次性 DSH 进程做判定（约 3~5 秒），这是唯一挡住最坏情况的上限；超了一律放过（退回规则唤醒）。"
+              hint="每条候选消息要花一次模型调用做判定，这是唯一挡住最坏情况的上限；超了一律放过（退回规则唤醒）。"
             >
               <NumInput
                 value={getNum(cfg, 'wake.judge.maxPerHour', 60)}

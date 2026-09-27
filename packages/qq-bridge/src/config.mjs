@@ -237,13 +237,34 @@ export function normalizeConfig(c) {
     wake: {
       policy: typeof src.wake?.policy === 'string' && src.wake.policy.trim() ? src.wake.policy.trim() : 'rule',
       judge: {
-        // ★★ 默认 **true**：语义模式**先只记账、不改行为**。
-        //   理由是这块功能的失败方向很糟 —— 判错成"沉默"时，**没有人会收到
-        //   任何提示**，只是那个人永远等不到回复。所以先用影子模式跑一段，
-        //   拿 oplog 里的"本会拦掉 N 条"清单看它到底想拦什么，再决定要不要真开。
-        //   ⚠️ 代价是"选了 semantic 却发现行为没变" —— 所以卡片文案必须
-        //   明说当前处于影子模式（已写进 CONFIG-UI.md §2.10 的 choice 一节）。
-        shadow: src.wake?.judge?.shadow !== false,
+        // ── 通路（0.2.3 起默认直连 HTTP）──────────────────────────────────
+        //
+        // `http`：一次 `/chat/completions`，约 1 秒、一次小 completion（`src/model-direct.mjs`）。
+        // `headless`：起一个一次性 `dsh --profile headless` 进程（2.8~4.4 秒）。
+        //   ★ 它不是摆设，是**逃生舱**：直连那条**没有做代理发现**（Node 的 fetch 不认
+        //     HTTP_PROXY），而且非 Chat Completions 形状的 provider 也说不了。
+        //     有它在，"直连不通"就还有一个明确的去处，而不是只能关掉整个功能。
+        transport:
+          typeof src.wake?.judge?.transport === 'string' && src.wake.judge.transport.trim()
+            ? src.wake.judge.transport.trim()
+            : 'http',
+        // 直连端点。默认与 DSH 的 `dsh-llm-deepseek` 一致（**注意没有 `/v1`**）。
+        // ⚠️ 只有 https、或回环地址的 http 会被放行 —— 理由见 model-direct.mjs 的文件头
+        //    （Authorization 头在明文 HTTP 上等于把 key 裸奔）。
+        baseUrl:
+          typeof src.wake?.judge?.baseUrl === 'string' && src.wake.judge.baseUrl.trim()
+            ? src.wake.judge.baseUrl.trim()
+            : 'https://api.deepseek.com',
+        // 判定用哪个模型。**留空 = 用 `dsh.model`**（默认 deepseek-flash）。
+        // ★ 为什么留空也能跑：DSH 模型表里的 id 就是直接发给接口的 id（按源码核对过），
+        //   所以"不配也对"；而"换成更便宜的小模型"应当是一次**显式**选择。
+        model: typeof src.wake?.judge?.model === 'string' ? src.wake.judge.model.trim() : '',
+        // ★★ 默认改为 **false**（0.2.3 用户决定）：语义判定**真的生效**。
+        //   原来是 true（只记账、不改行为）——那时的理由是"换个便宜的通路之前，
+        //   判定又慢又贵，而且判错成沉默是静默失败"。现在有了直连（约 1 秒、一次小调用），
+        //   且**失败/超时/超预算一律放过**，所以默认生效是合理的。
+        //   ★ 想先观察的人把它设回 true 即可（那时结论只写 oplog、行为不变）。
+        shadow: src.wake?.judge?.shadow === true,
         timeoutMs: src.wake?.judge?.timeoutMs ?? 6000,
         maxPerHour: src.wake?.judge?.maxPerHour ?? 60,
       },
@@ -511,6 +532,14 @@ export function validateConfig(config) {
   // 它是本轮唯一"用户选了之后成本会上升"的开关，所以宁可多说一句。
   {
     const policy = config.wake?.policy
+    // 通路名写错属于**配置错误**，与开不开语义模式无关 ⇒ 一律报出来（不静默回落）。
+    // 现在任何非 'headless' 的值都会被当成 http，写错一个字就会静默走另一条通路。
+    const transport = config.wake?.judge?.transport
+    if (transport !== undefined && transport !== 'http' && transport !== 'headless') {
+      warn.push(
+        `wake.judge.transport「${transport}」不是有效值（可选 http / headless），已按 http（直连）处理。`,
+      )
+    }
     if (policy !== 'rule' && policy !== 'semantic') {
       warn.push(
         `wake.policy「${policy}」不是有效值（可选 rule / semantic），已按 rule（规则唤醒）处理。` +
@@ -519,21 +548,42 @@ export function validateConfig(config) {
     }
     if (policy === 'semantic') {
       const j = config.wake.judge ?? {}
+      const viaHttp = j.transport !== 'headless'
       warn.push(
         'wake.policy = semantic：**判定器会决定要不要沉默**。' +
           '它只做减法（规则说回、它才能说不回），且失败/超时/超预算一律**放过**。' +
-          '★ 代价：每条候选消息要**起一个一次性 DSH 进程**做判定（约 3~5 秒），' +
-          '上限由 wake.judge.maxPerHour 兜住。',
+          (viaHttp
+            ? `★ 通路：直连 ${j.baseUrl}（模型 ${j.model || config.dsh?.model || '?'}，约 1 秒、一次小调用）。`
+            : '★ 通路：起一个一次性 DSH 进程做判定（约 3~5 秒、比直连贵）。') +
+          `上限由 wake.judge.maxPerHour 兜住。`,
       )
-      if (j.shadow !== false) {
+      if (j.shadow === true) {
         warn.push(
-          'wake.judge.shadow = true（默认）：判定照跑、结论只写进 oplog（runtime/oplog/），' +
-            '**行为一个字都没变**。要真正生效，把 wake.judge.shadow 改成 false。',
+          'wake.judge.shadow = true：判定照跑、结论只写进 oplog（runtime/oplog/），' +
+            '**行为一个字都没变**（这是你自己选的观察模式）。要真正生效，把它改成 false。',
         )
       } else {
         warn.push(
-          'wake.judge.shadow = false：语义判定**已经生效** —— 被判为"沉默"的消息不会得到回复，' +
-            '而且**不会有任何提示**。建议先用影子模式跑一段，看 oplog 里它到底想拦什么。',
+          'wake.judge.shadow = false（**默认**）：语义判定**已经生效** —— 被判为"沉默"的消息不会得到回复，' +
+            '而且**不会有任何提示**。想先观察就把 wake.judge.shadow 设成 true（那时结论只写 oplog、行为不变）。',
+        )
+      }
+      // 通路配不全 ⇒ 判定器**每一轮都会白白放过**，而日志里只有一行"没配好"。
+      // 这种"功能开了但其实没跑"必须尽早说出来（静默失效是本项目最忌讳的）。
+      //
+      // ★ 这里**只查 headless 那一条**，因为另一条在配置层查不了、硬查会误报：
+      //   · 直连缺模型？**不可能**：`normalizeConfig` 对 `dsh.model` 有默认值
+      //     （`deepseek-flash`），所以 `wake.judge.model` 留空也总有模型可用。
+      //   · 直连缺 key？**校验层看不见**：key 可能只在 `$DSH_HOME/.credentials.yaml`
+      //     里（DSH 桌面版「模型」页填的那种，也是最常见的一种），而那份文件要
+      //     `dshHome` 才找得到 —— 在这里判就会对着一个完全正常的部署报假警告。
+      //   ∴ 直连缺 key 由**判定器自己的启动日志**报（`bridge.mjs` 的 `#ensureWakeJudge`
+      //     拿得到 `dshHome` 与 `env`，能给出真正的原因）。两处分工写在这里，免得
+      //     以后有人"顺手补一条校验"补出假红 —— 假红会训练人忽略红色。
+      if (!viaHttp && !config.dsh?.cliPath) {
+        warn.push(
+          'wake.judge.transport = headless，但 dsh.cliPath 是空的：判定器无法工作（每一轮都会按放过处理）。' +
+            '要么把 dsh.cliPath 配好，要么把通路改回 http（直连，默认）。',
         )
       }
       // ★ 与 interim（"回合还在跑，先应一声"）的顺序关系：判定比它慢的话，

@@ -1186,8 +1186,8 @@ async function main() {
       console.log('')
       if (all.length === 0) {
         console.log('   （还没有配方）')
-        console.log('   ★ 自动沉淀需要一次额外的模型调用，而本项目**没有直连模型 API 的代码**')
-        console.log('     （全程通过 DSH 的 session/prompt 说话），本机也没有 headless profile。')
+        console.log('   ★ 自动沉淀需要一次额外的模型调用 —— 本机走的是「起一个一次性 DSH 进程」那条路')
+        console.log('     （0.2.3 起也有直连通路 src/model-direct.mjs，但抽取目前没换过去）。')
         console.log('     所以自动沉淀**尚未接通** —— 现在可以先人工加：')
         console.log('       node src/index.mjs --recipes --add --json \'{"title":"...","trigger":{"keywords":["..."]},"steps":["..."]}\'')
       } else {

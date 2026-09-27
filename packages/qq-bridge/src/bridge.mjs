@@ -58,6 +58,8 @@ import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } 
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
 import { extractRecipe, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './extract.mjs'
 import { createWakeJudge, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
+import { resolveDirectTarget } from './model-direct.mjs'
+import { resolveDshHome } from './local.mjs'
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
@@ -1290,20 +1292,48 @@ export class Bridge extends EventTarget {
     if (this.#wakeJudge) return this.#wakeJudge
     const cliPath = this.config.dsh?.cliPath
     const cwd = this.config.dsh?.workspace
-    if (!cliPath || !cwd) return null
     const j = this.config.wake?.judge ?? {}
+    const transport = j.transport === 'headless' ? 'headless' : 'http'
+
+    // ── 直连通路要的三样：端点 / 模型 / key ──────────────────────────────
+    //
+    // ★ key **不新增配置字段**：`resolveDirectTarget()` 内部复用 `credentials.mjs`
+    //   那套三处来源（环境变量 → `dsh.apiKey` → `$DSH_HOME/.credentials.yaml`）。
+    //   那三处本来就用同一把账号级 key，为判定器再开一个输入框只会多一处会漂的真值。
+    // ★ `dshHome` 的取法与 `index.mjs` 建 DSH 子进程时**完全一致**（先看环境变量，
+    //   再按 cliPath 反推），否则会出现"子进程能拿到 key、判定器拿不到"这种
+    //   只在某些部署下才出现的怪事。
+    let direct = null
+    if (transport === 'http') {
+      const dshHome = process.env.DSH_HOME ?? resolveDshHome({ cliPath })?.home ?? null
+      direct = resolveDirectTarget({ config: this.config, dshHome, env: process.env })
+    }
+    // 通路配不全时**仍然建**判定器：`judge()` 会立刻按"放过"返回并留下一行日志。
+    // 为什么不在这里直接不建：那会让"配错了"表现成"判定器根本没启动"，
+    // 而配置校验层已经会把这条明确报出来（见 validateConfig 的 wake 一节）。
     try {
       this.#wakeJudge = createWakeJudge({
+        transport,
         cliPath,
         cwd,
+        baseUrl: direct?.baseUrl ?? j.baseUrl,
+        apiKey: direct?.apiKey ?? '',
+        model: direct?.model ?? '',
         timeoutMs: j.timeoutMs,
         maxPerHour: j.maxPerHour,
         log: (m) => this.log(m),
       })
       this.log(
-        `[wake] 判定器已就绪：policy=semantic · shadow=${j.shadow !== false ? '开（只记账，不改行为）' : '**关**（判定已生效）'}` +
+        `[wake] 判定器已就绪：policy=semantic · shadow=${j.shadow === true ? '开（只记账，不改行为）' : '**关**（判定已生效）'}` +
+          ` · 通路=${transport}` +
+          (transport === 'http'
+            ? `（${direct?.ok ? direct.baseUrl : '**未配好**'} · 模型 ${direct?.model ?? '?'} · key 来源 ${direct?.keySource ?? '无'}）`
+            : `（${cliPath ?? '**未配好**'}）`) +
           ` · timeout=${j.timeoutMs}ms · 上限 ${j.maxPerHour} 次/小时`,
       )
+      if (transport === 'http' && direct && !direct.ok) {
+        this.log(`[wake] ⚠️ 直连通路不可用（每一轮都会按放过处理）：${direct.why}`)
+      }
     } catch (error) {
       this.log(`❌ [wake] 判定器建不起来（这一层停用，按规则结论放过）：${error?.message ?? error}`)
       return null

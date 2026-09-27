@@ -162,34 +162,43 @@ section('③ 判定器：六条纪律里的前四条 + 预算 + 取消')
   }
   check('★ fail-open 时 judged:false（界面计数只数真的问过模型的）', (await createWakeJudge({ cliPath: 'x', cwd: 'y', runner: fallbacks[1][1] }).judge(input)).judged === false)
 
-  // 没有 cliPath：一次 runner 都不许调
+  // 没有可用通路：一次 runner 都不许调（两种通路各说各的话）
   let called = 0
-  const r2 = await createWakeJudge({ cliPath: '', cwd: 'y', runner: async () => { called += 1; return { ok: true, text: '{}' } } }).judge(input)
-  check('没配 dsh.cliPath ⇒ 放过，且**一次 runner 都不调**', r2.verdict === VERDICT.ANSWER && called === 0, `${r2.why}`)
+  const spy = async () => { called += 1; return { ok: true, text: '{}' } }
+  const rHttp = await createWakeJudge({ baseUrl: 'https://api.deepseek.com', apiKey: '', model: '', runner: null }).judge(input)
+  check('★ 直连通路没配好（没 key / 没模型）⇒ 放过，且**一次调用都不发**',
+    rHttp.verdict === VERDICT.ANSWER && called === 0, rHttp.why)
+  const rHead = await createWakeJudge({ transport: 'headless', cliPath: '', cwd: '', runner: null }).judge(input)
+  check('★ headless 通路没配好（没 cliPath）⇒ 放过，并说清缺的是什么',
+    rHead.verdict === VERDICT.ANSWER && /cliPath/.test(rHead.why ?? ''), rHead.why)
+  check('★ 两条通路的失败文案不同（不会把"key 没配"说成"cliPath 没配"）',
+    /key/.test(rHttp.why ?? '') && rHttp.why !== rHead.why, `${rHttp.why} / ${rHead.why}`)
+  check('★ 注入了整体调用函数 ⇒ 通路由调用方负责（不必先假装配好 key）',
+    (await createWakeJudge({ runner: spy }).judge(input)).verdict === VERDICT.ANSWER && called > 0)
 
   // 纪律② 取消
   let called2 = 0
   const ac = new AbortController()
   ac.abort()
-  const r3 = await createWakeJudge({ cliPath: 'x', cwd: 'y', runner: async () => { called2 += 1; return { ok: true, text: '{}' } } }).judge(input, { signal: ac.signal })
-  check('★ 已取消 ⇒ 放过，且一次 runner 都不调', r3.verdict === VERDICT.ANSWER && called2 === 0, r3.why ?? '')
+  const r3 = await createWakeJudge({ runner: async () => { called2 += 1; return { ok: true, text: '{}' } } }).judge(input, { signal: ac.signal })
+  check('★ 已取消 ⇒ 放过，且一次调用都不发', r3.verdict === VERDICT.ANSWER && called2 === 0, r3.why ?? '')
 
   // 预算：maxPerHour 是唯一挡住最坏情况的东西
   let n = 0
   const j4 = createWakeJudge({
-    cliPath: 'x', cwd: 'y', maxPerHour: 2, now: () => 1_000_000,
+    maxPerHour: 2, now: () => 1_000_000,
     runner: async () => { n += 1; return { ok: true, text: '{"answer":true}' } },
   })
   await j4.judge(input); await j4.judge(input)
   const over = await j4.judge(input)
-  check('★ 超出 maxPerHour ⇒ 不再调 runner，并放过', n === 2 && over.verdict === VERDICT.ANSWER && over.judged === false, `n=${n} ${over.why}`)
+  check('★ 超出 maxPerHour ⇒ 不再调用，并放过', n === 2 && over.verdict === VERDICT.ANSWER && over.judged === false, `n=${n} ${over.why}`)
   check('预算只放最近一小时（滑动窗口）', j4.budget().used === 2 && j4.budget().maxPerHour === 2)
   {
     // 时间源可注入 —— 这是"滑动窗口"能被离线断言的前提（不用真的等一小时）
     const nowRef = { t: 0 }
     let m = 0
     const j5 = createWakeJudge({
-      cliPath: 'x', cwd: 'y', maxPerHour: 1, now: () => nowRef.t,
+      maxPerHour: 1, now: () => nowRef.t,
       runner: async () => { m += 1; return { ok: true, text: '{"answer":true}' } },
     })
     await j5.judge(input)
@@ -199,13 +208,21 @@ section('③ 判定器：六条纪律里的前四条 + 预算 + 取消')
     check('★ 预算窗口滑过一小时后恢复（判定器状态可随时丢弃）', firstWindow === 1 && m === 2, `m=${m}`)
   }
 
-  // label 透传（0.2.3 给 runHeadless 补的参数；报错文案不能再说"抽取"）
-  let seenLabel = null
+  // 注入的整体调用函数收到的形状（0.2.3 起是归一化的：两条通路同一个契约）
+  let seen = null
+  const probeAc = new AbortController()
   await createWakeJudge({
-    cliPath: 'x', cwd: 'w', label: '唤醒判定',
-    runner: async (o) => { seenLabel = { label: o.label, cwd: o.cwd, timeoutMs: o.timeoutMs, hasPrompt: String(o.prompt).length > 0 }; return { ok: true, text: '{"answer":true}' } },
-  }).judge(input)
-  check('runner 收到 label / cwd / timeoutMs / prompt', seenLabel?.label === '唤醒判定' && seenLabel?.cwd === 'w' && seenLabel?.timeoutMs === JUDGE_DEFAULTS.timeoutMs && seenLabel?.hasPrompt === true, JSON.stringify(seenLabel))
+    runner: async (o) => { seen = { keys: Object.keys(o).sort(), timeoutMs: o.timeoutMs, hasPrompt: String(o.prompt).length > 0, hasSignal: o.signal === probeAc.signal }; return { ok: true, text: '{"answer":true}' } },
+  }).judge(input, { signal: probeAc.signal })
+  check('★ 注入函数收到的是归一化形状（prompt / signal / timeoutMs），两条通路同一个契约',
+    seen?.hasPrompt === true && seen?.hasSignal === true && seen?.timeoutMs === JUDGE_DEFAULTS.timeoutMs,
+    JSON.stringify(seen))
+
+  // budget() 要能回答"现在走的是哪条通路、用哪个模型"（排查用）
+  const bHttp = createWakeJudge({ apiKey: 'k', model: 'deepseek-v4-flash', baseUrl: 'https://api.deepseek.com' }).budget()
+  const bHead = createWakeJudge({ transport: 'headless' }).budget()
+  check('★ budget() 报出通路与模型（排查"它到底走哪条"）',
+    bHttp.transport === 'http' && bHttp.model === 'deepseek-v4-flash' && bHead.transport === 'headless', JSON.stringify(bHttp))
 
   // runHeadless 的取消分支：**在 spawn 之前**就返回，所以这里能离线断言
   const preAborted = new AbortController()

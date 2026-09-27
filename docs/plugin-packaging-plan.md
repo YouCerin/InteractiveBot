@@ -141,8 +141,8 @@ corpus / deliveryGate / deliveryLedger / markers / sessionState / wake / profile
 | name / icon | 唤醒策略 / 📣 |
 | enabledPath | `wake.policy`（**新键**）；现有 `trigger.groupEnabled` 作为它的**前置总开关**保留 |
 | switchKind | **`choice`**（0.2.3 已就绪，见 §4.1）：`[{value:'rule', label:'规则唤醒（现状）', desc:'私聊/@/关键词 → 必答'},`<br>`{value:'semantic', label:'语义唤醒（可沉默）', desc:'判定器决定说不说', experimental:true}]` |
-| hot | ⚠️ **初稿写 cold，实测是 hot（已改正）**。取证：`bridge.mjs` 的 `handleEvent` **每条消息现读** `this.config.wake.policy`，而 `wake.policy` 是**活配置对象**上的键（`extensions-service.mjs` 的 `setPath(config, …)` 就地改）⇒ 翻这个键**立刻生效**。`wake.judge.shadow` 同样每轮现读。★ **但有一半是 cold**：`wake.judge.timeoutMs` / `maxPerHour` 在判定器**首次被用到时装配一次**（预算计数器必须跨消息累积，不能每条重建）⇒ 改这两个要重启。这条边界已写进 `CONFIG-UI.md`，不许含糊成一句"即时生效" |
-| why | 闸门每条消息现读 `this.config.wake.policy`；判定器懒建、只建一次（预算计数器要跨消息累积）。所以 policy 与 judge.shadow 即时生效，judge.timeoutMs / judge.maxPerHour 改完要重启 |
+| hot | ⚠️ **初稿写 cold，实测是 hot（已改正）**。取证：`bridge.mjs` 的 `handleEvent` **每条消息现读** `this.config.wake.policy`，而 `wake.policy` 是**活配置对象**上的键（`extensions-service.mjs` 的 `setPath(config, …)` 就地改）⇒ 翻这个键**立刻生效**。`wake.judge.shadow` 同样每轮现读。★ **但其余是 cold**：`wake.judge.transport` / `model` / `baseUrl` / `timeoutMs` / `maxPerHour` 在判定器**首次被用到时装配一次**（预算计数器必须跨消息累积，不能每条重建）⇒ 改这几个要重启。这条边界已写进 `CONFIG-UI.md`，不许含糊成一句"即时生效" |
+| why | 闸门每条消息现读 `this.config.wake.policy`；判定器懒建、只建一次（预算计数器要跨消息累积）。所以 policy 与 judge.shadow 即时生效，其余五个键改完要重启 |
 | what | 决定"这条消息要不要回"用什么判据。 |
 | offEffect | 这一格**没有"关"**：它不是开关，是**二选一**。规则模式 = 今天的行为；语义模式会**让机器人学会沉默**，且引入一次额外的模型调用。 |
 | uiTab | `extensions:wake-policy`（内部子设置：窗口、退出闸门、continuation、群噪门槛、每次调用上限） |
@@ -259,6 +259,14 @@ corpus / deliveryGate / deliveryLedger / markers / sessionState / wake / profile
 ∴ 那个"便宜一个数量级"的结论**在本项目不成立**（一次判定要起 node 进程并完整初始化 harness）。
 这不是可以含糊过去的差别，它直接决定了默认值：**`semantic` 必须显式选，且 `wake.judge.shadow`
 默认 true（只记账、不改行为）**。详见 `src/wake-judge.mjs` 顶部与 `PROJECT.json` 的 `src/wake-judge.mjs` 条目。
+
+★★ **S3+ 的更正（2026-09-27，用户决定）**：上面的结论促成了一个更好的动作 ——
+**把这个缺口补上**：新增 `src/model-direct.mjs`（一次 `/chat/completions`，按
+`dsh-llm-deepseek` 的源码逐条核对线协议），判定器默认走直连。真机实测 **1092ms**
+（headless 是 2.8~4.4 秒），于是"便宜一个数量级"**才真的成立**，同时解锁了此前卡在
+同一缺口上的回合后抽取（R4b）。同一轮里 `wake.judge.shadow` **默认改为 false**（判定真的生效），
+`headless` 保留为逃生舱（**直连不做代理发现**，需要走代理时必须用它）。
+⇒ 所以本节上面那段"决定默认值"的话，**只描述当时的取舍，不再描述现状**。
 
 ---
 
