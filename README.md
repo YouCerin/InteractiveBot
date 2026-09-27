@@ -55,7 +55,7 @@ project_InteractBot/
 ★ 为什么是"看证据"而不是"数目录层数"：0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false`
 时它**是 `false`** ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根（读不到使用者的
 `config.json`、日志写进了 `app\logs\`）。修法就是那三级判据，判据由
-`packages/qq-bridge/mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 155 项）。
+`packages/qq-bridge/mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 167 项）。
 
 ★ 关窗口 = **收进托盘**，机器人**继续在线**；真正退出要用**托盘菜单的「退出并停止机器人」**
 （会先 `POST /api/stop`）。

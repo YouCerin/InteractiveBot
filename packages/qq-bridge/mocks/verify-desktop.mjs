@@ -308,8 +308,28 @@ async function main () {
       const s = pkg.scripts ?? {}
       check(
         '★ 有 npm run desktop（从源码开窗口，改壳不必重新打包）',
-        /electron[\\/]cli\.js/.test(s.desktop ?? '') && /desktop/.test(s.desktop ?? ''),
+        /scripts[\\/]run-desktop\.mjs/.test(s.desktop ?? ''),
         s.desktop ?? '（缺）',
+      )
+      // ★★ 启动器必须**摘掉 ELECTRON_RUN_AS_NODE**再起子进程。
+      //    为什么值得一条断言：DSH 的 node 垫片会设这个变量，带着它 electron 就"当 Node 用"，
+      //    壳里的 `require('electron')` 变成路径字符串 ⇒ `app` undefined ⇒
+      //    `Cannot read properties of undefined (reading 'getAppPath')`。
+      //    这条链（Node → cli.js → electron）实测必中，而报错完全没有指向性。
+      const launcherPath = join(PKG_ROOT, 'scripts', 'run-desktop.mjs')
+      const launcher = existsSync(launcherPath) ? readFileSync(launcherPath, 'utf8') : ''
+      check('★ 启动器 scripts/run-desktop.mjs 存在', launcher.length > 0, launcherPath)
+      check(
+        '★★ 启动器会摘掉 ELECTRON_RUN_AS_NODE（否则壳拿不到 app，真事故）',
+        /delete\s+env\.ELECTRON_RUN_AS_NODE/.test(launcher) && /ELECTRON_RUN_AS_NODE/.test(launcher),
+      )
+      check(
+        '★ 启动器用**绝对** app 目录 + 直通 stdio + 转发退出码',
+        /spawn\(exe,\s*\[DESKTOP\]/.test(launcher) && /stdio:\s*'inherit'/.test(launcher) && /process\.exit\(code\)/.test(launcher),
+      )
+      check(
+        '★ 工具链缺失时给得出可执行的指引（而不是一句"失败了"）',
+        /npm install --ignore-scripts/.test(launcher) && /desktop:fetch/.test(launcher),
       )
       check(
         '★ 有 npm run desktop:pack（从源码打 exe）',

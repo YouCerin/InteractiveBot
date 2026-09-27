@@ -94,7 +94,7 @@ node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
 node mocks/verify-real-dsh.mjs   # 真实 dsh 能否被启动（零费用；★ 需要能起子进程）
 node mocks/verify-doctor.mjs     # 体检工具自身的准确性（30 项）
-node mocks/verify-desktop.mjs    # ★★ 桌面壳（0.2.5，155 项，**不启动 Electron**）：包根三级判据**照真实发布包布局**断言、产物形状、状态翻译
+node mocks/verify-desktop.mjs    # ★★ 桌面壳（0.2.5，167 项，**不启动 Electron**）：包根三级判据**照真实发布包布局**断言、产物形状、状态翻译
 node mocks/verify-live.mjs       # ★ 真实端到端（会调用模型，有少量费用）
 node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
 
@@ -300,7 +300,7 @@ start.bat                        # "浏览器那条路"；或 node src/index.mjs
 0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false` 时它**是 `false`**
 ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根：
 读不到使用者的 `config.json`（日志里 `ENOENT`）、把日志写进了 `app\logs\`。
-修法就是上面这三级判据 —— 而判据由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 **155 项**）。
+修法就是上面这三级判据 —— 而判据由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 **167 项**）。
 教训是：**只验「参数怎么用」、没验「真实布局长什么样」，等于没验。**
 
 ### 关窗口 = 收进托盘（机器人**继续在线**）
@@ -326,7 +326,7 @@ start.bat                        # "浏览器那条路"；或 node src/index.mjs
 **产物形状**（exe 在、asar 关着、PE 版本号 **0.2.5**、包里的壳代码与 `desktop/` 源码**逐字节一致**）
 以及**发布包验收**。完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
 
-**离线测试入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**155 项**，不启动 Electron）。
+**离线测试入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**167 项**，不启动 Electron）。
 
 ---
 
@@ -572,7 +572,7 @@ DSH 子进程死亡时优雅降级、体检工具的准确性（含防误报）�
 **用量记账**（真实回合的 token 与成本已落盘 `logs/usage.jsonl`）、
 **桌面壳（0.2.5）的判断逻辑与产物形状**（包根三级判据**照真实发布包布局**断言、
 端口从哪来 / 什么算启动成功 / 状态怎么翻译、exe 在 / asar 关着 / PE 版本号 0.2.5 /
-包里的壳代码与 `desktop/` 源码逐字节一致，`mocks/verify-desktop.mjs` 155 项）。
+包里的壳代码与 `desktop/` 源码逐字节一致，`mocks/verify-desktop.mjs` 167 项）。
 
 **未验证：**
 跨重启的长期记忆（P4，目前重启即失忆，靠工作区的 `MEMORY.md` 兜底）、
@@ -594,6 +594,8 @@ DSH 子进程死亡时优雅降级、体检工具的准确性（含防误报）�
 | `缺少依赖「ws」` | 没跑 `node setup.mjs` |
 | 机器人失忆 | 正常现象（见上文 §7）：重启后上下文会重置；`session.instance` 新的一天会自动换新 |
 | 报 `session "..." already exists` | `session.instance` 机制失效了。把 `config.json` 的 `session.instance` 改成任意新值后重启 |
-| 双击 `app\InteractBot.exe` 后窗口一直停在启动页 | 桌面壳自己的日志在 `logs/desktop.log`（与桥接的 `logs/bridge.log` **分开**）；启动页上也有「看日志」 |
+| 双击 `app\InteractBot.exe` 后窗口一直停在启动页 | 桌面壳自己的日志在 `logs/desktop.log`（与桥接的 `logs/bridge.log` **分开**）；启动页上也有「看日志」。0.2.5 起壳会**读桥接日志**：桥接若已写明失败原因，窗口与日志里会直接给出那一行（实测 1 秒就定，不再干等 90 秒） |
+| `npm run desktop` 报 `Electron failed to install correctly…` | 跳过官方 postinstall 后**缺 `desktop/node_modules/electron/path.txt`**（它决定二进制叫什么名字），而运行时其实好好的 ⇒ `npm run desktop:fetch`（**幂等**：只补这个文件，不会重新下载 200 MB） |
+| `npm run desktop` 报 `TypeError: Cannot read properties of undefined (reading 'getAppPath')` | 环境里有 **`ELECTRON_RUN_AS_NODE=1`**（DSH 的 `node` 垫片 `.desktop-bin\node.cmd` 会设它）⇒ electron 被"当 Node 用"，`require('electron')` 返回的是包路径字符串、没有 `app`。⇒ `npm run desktop` 现在由 `scripts/run-desktop.mjs` 启动并**摘掉**这个变量（不再走 `cli.js`）；双击 exe 不受影响 |
 | 关了窗口但机器人还在回话 | **这是设计如此**：关窗口 = 收进**托盘**，机器人继续在线；真要停它用**托盘菜单的「退出并停止机器人」** |
 | 留下 `.tmp-*` 目录 | Windows 句柄回收时机问题，无害。执行 `node mocks/verify-live.mjs --clean`，或下次运行会自动清掉 |

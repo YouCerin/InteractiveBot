@@ -57,7 +57,7 @@
     "test:release-hygiene": "node mocks/verify-release-hygiene.mjs",
     "test:legacy-assets": "node mocks/verify-legacy-assets.mjs",
     "test:desktop": "node mocks/verify-desktop.mjs",
-    "desktop": "node desktop/node_modules/electron/cli.js desktop",
+    "desktop": "node scripts/run-desktop.mjs",
     "desktop:pack": "node scripts/assemble-desktop.mjs",
     "desktop:fetch": "node scripts/fetch-electron.mjs",
     "clean:junk": "node scripts/clean-junk.mjs",

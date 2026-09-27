@@ -15,7 +15,7 @@
 //   第一版把它放在 `desktop/scripts/` 下，结果 `verify-manifest` 那条
 //   "AGENT.md 里引用的文件都存在"直接报了红 —— 那条检查是**对的**：
 //   构建脚本集中在包根一处，找起来才不用猜。
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -32,8 +32,50 @@ if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
 }
 
 const distDir = join(DESKTOP, 'node_modules', 'electron', 'dist')
+const ELECTRON_PKG = join(DESKTOP, 'node_modules', 'electron')
+
+/**
+ * 写 `node_modules/electron/path.txt` —— **`require('electron')` 靠它找可执行文件**（0.2.5 补）。
+ *
+ * ★★ 为什么必须有这一步（真事故，用户实测撞上）：
+ *   我们**刻意**用 `npm install --ignore-scripts` 跳过 electron 官方的 postinstall（理由见文件头），
+ *   但**官方 postinstall 里正包含"写这个 path.txt"这一件事**。于是"下 zip + 解压"只做了它的一半：
+ *   `dist/electron.exe` 明明在，而 `require('electron')`（`electron/index.js` 读 `path.txt`
+ *   拿二进制文件名）会抛 `Electron failed to install correctly, please delete node_modules/electron
+ *   and try installing again`。而 `npm run desktop` = `electron/cli.js`，**第一行**就是
+ *   `require('electron')` ⇒ **源码侧开窗口必然失败**。
+ *   （发布包那条路没事：electron-builder 走 `electronDist` 目录，根本不 require electron 包 ——
+ *     所以只有源码侧会撞上，这也是它一直没被发现的原因。）
+ *   ⇒ 这一步是"跳过 postinstall"必须自己补上的另一半，且**幂等**：每次跑都确保它在。
+ */
+function ensurePathTxt () {
+  const name =
+    process.platform === 'win32'
+      ? 'electron.exe'
+      : process.platform === 'darwin'
+        ? 'Electron.app/Contents/MacOS/Electron'
+        : 'electron'
+  const file = join(ELECTRON_PKG, 'path.txt')
+  try {
+    const cur = existsSync(file) ? readFileSync(file, 'utf8').trim() : ''
+    if (cur === name) return false
+    writeFileSync(file, name, 'utf8')
+    return true
+  } catch (error) {
+    console.error(
+      `❌ 写不了 ${file}：${error?.message ?? error}\n` +
+        '   （没有它，`npm run desktop` 会报 "Electron failed to install correctly"）',
+    )
+    process.exit(1)
+  }
+}
+
 if (existsSync(join(distDir, 'electron.exe'))) {
+  const fixed = ensurePathTxt()
   console.log(`✅ Electron 运行时已就位：${distDir}`)
+  if (fixed) {
+    console.log('   并把 node_modules/electron/path.txt 补上了（跳过 postinstall 时必须自己写，见本文件注释）')
+  }
   process.exit(0)
 }
 if (!existsSync(join(DESKTOP, 'node_modules', 'electron', 'package.json'))) {
@@ -69,6 +111,12 @@ if (r.status !== 0 || !existsSync(join(distDir, 'electron.exe'))) {
   process.exit(1)
 }
 const exe = join(distDir, 'electron.exe')
+ensurePathTxt()
 console.log(`✅ Electron ${version} 运行时就位：${exe}（${(statSync(exe).size / 1048576).toFixed(1)} MB）`)
+console.log(
+  existsSync(join(ELECTRON_PKG, 'path.txt'))
+    ? "   已写 node_modules/electron/path.txt（= electron.exe）—— require('electron') / cli.js 靠它"
+    : '   ⚠️ path.txt 没能确认（源码侧 `npm run desktop` 可能报 "Electron failed to install correctly"）',
+)
 const vf = join(distDir, 'version')
 if (existsSync(vf)) console.log(`   版本文件：${readFileSync(vf, 'utf8').trim()}`)

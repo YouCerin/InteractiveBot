@@ -171,19 +171,23 @@ qq-bridge/
 ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根：读不到使用者的 `config.json`
 （日志里只有 `ENOENT`）、把日志写进了 `app\logs\`。
 修法就是那三级判据；而它由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言
-（离线 **155 项**）—— 0.2.4 的 132 项断言没抓到它，因为**只验了「参数怎么用」、
+（离线 **167 项**）—— 0.2.4 的 132 项断言没抓到它，因为**只验了「参数怎么用」、
 没验「真实布局长什么样」**。所以：**改 `resolvePkgRoot` 之前先读那几条"真实布局"断言。**
 
 ★ **本版没有 .bat 启动器**（0.2.4 那批中文名 .bat 入口已按用户要求删除，
 见 `mocks/verify-legacy-assets.mjs`），所以「**没有启动器也能找到包根**」是必须成立的替代证据 ——
 `verify-desktop.mjs` 里有专门一条。
 
-⚠️ **诚实边界**：窗口 / 托盘 / 菜单 / "关窗口不下线"**只能人在真机上点一遍**
-（受限沙箱里 Electron 起不来）。已被机器验证的只有壳的**判断逻辑**、**产物形状**
-（exe 在、asar 关着、PE 版本号 **0.2.5**、包里的壳代码与 `desktop/` 源码**逐字节一致**）
-以及**发布包验收**。完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
+⚠️ **诚实边界**：窗口 / 托盘 / 菜单 / "关窗口不下线"里的**交互语义**还没验完。
+**已经实测到的**：从发布包双击 `app\InteractBot.exe`、以及源码侧 `npm run desktop`，**都起过真窗口**
+（窗口标题「QQ 机器人控制台」、`logs/desktop.log` 第一行是**正确的包根**、端口来自 `config.json`、
+桥接已被认出并直接连上）；**没验的**是托盘图标、关窗口是否真的收进托盘（机器人不下线）、
+以及「退出并停止机器人」。
+已被机器验证的还有壳的**判断逻辑**、**产物形状**（exe 在、asar 关着、PE 版本号 **0.2.5**、
+包里的壳代码与 `desktop/` 源码**逐字节一致**）以及**发布包验收**。
+完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
 
-**离线入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**155 项**，不启动 Electron）。
+**离线入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**167 项**，不启动 Electron）。
 
 ---
 
@@ -199,7 +203,7 @@ qq-bridge/
 | `mocks/verify-onebot.mjs` | ❌ | ❌ | 全链路：QQ 事件 → 回复发出 |
 | `mocks/verify-real-dsh.mjs` | ❌ | ❌ | 真实 dsh 能否被启动（不发 prompt） |
 | `mocks/verify-doctor.mjs` | ❌ | ❌ | 体检工具自身准不准 |
-| `mocks/verify-desktop.mjs` | ❌ | ❌ | ★★ **桌面壳**（0.2.5，155 项）：包根三级判据（**照真实发布包布局**断言）、端口从哪来、状态翻译、产物形状；**不启动 Electron** —— 窗口/托盘只能人在真机上点 |
+| `mocks/verify-desktop.mjs` | ❌ | ❌ | ★★ **桌面壳**（0.2.5，167 项）：包根三级判据（**照真实发布包布局**断言）、端口从哪来、状态翻译、产物形状；**不启动 Electron** —— 窗口/托盘只能人在真机上点 |
 | `mocks/verify-memory-stats.mjs` | ❌ | ❌ | ★★ 记忆**可观测性**：计数、零写入告警、体检漏报修复 |
 | `mocks/verify-privacy.mjs` | ❌ | ❌ | ★★ **隐私硬闸**：七类拦得住、真实记忆零误拦、审计不含原文 |
 | `mocks/verify-oplog.mjs` | ❌ | ❌ | ★★ **操作日志**：参数与结果都记下、超时回合也留痕 |

@@ -30,7 +30,23 @@
 
 'use strict'
 
-const { app, BrowserWindow, Menu, Tray, shell, dialog, nativeImage, ipcMain } = require('electron')
+const electronApi = require('electron')
+// ★★ 0.2.5：跑在"Electron 当 Node 用"的模式下要**说人话**，别抛一个没有指向性的 TypeError。
+//    那种模式里 `require('electron')` 返回的是 npm 包的**路径字符串**，于是解构出来的 `app`
+//    是 undefined，报错变成 `Cannot read properties of undefined (reading 'getAppPath')`
+//    —— 完全看不出"其实是环境变量 ELECTRON_RUN_AS_NODE 被继承了"。
+//    实测来源：DSH 的 node 垫片（`.desktop-bin\node.cmd`）里有 `set ELECTRON_RUN_AS_NODE=1`，
+//    任何"由它起的 Node → 再 spawn electron"的链路都会中招。
+//    ⇒ `npm run desktop` 现在由 `scripts/run-desktop.mjs` 摘掉那个变量；双击 exe 不受影响。
+if (process.type !== 'browser' || !electronApi || typeof electronApi !== 'object' || !electronApi.app) {
+  console.error(
+    '[desktop] ❌ 这个进程不是 Electron 主进程（被当成 Node 跑了）。\n' +
+      '          最常见的原因：环境里有 ELECTRON_RUN_AS_NODE=1（DSH 的 node 垫片会设它）。\n' +
+      '          ⇒ 请用 `npm run desktop`（它会为子进程摘掉这个变量），或直接双击 app\\InteractBot.exe。',
+  )
+  process.exit(1)
+}
+const { app, BrowserWindow, Menu, Tray, shell, dialog, nativeImage, ipcMain } = electronApi
 const { spawn } = require('node:child_process')
 const { existsSync, readFileSync, mkdirSync, appendFileSync } = require('node:fs')
 const { join } = require('node:path')
@@ -636,7 +652,10 @@ async function boot () {
 // ─────────────────────────────────────────────────────────────────────────────
 if (!app.requestSingleInstanceLock()) {
   // 第二个实例：把话说完就退出。**不弹窗**（双击两次不该弹一个错误窗）。
-  logLine('已经有一个 InteractBot 窗口在运行 —— 本进程退出')
+  // ⚠️ 这句文案要留出"不是已有窗口"的可能：权限/沙箱下**单实例锁本身可能建不起来**
+  //    （Chromium 报 `Lock file can not be created! Error code: 5`），而 API 同样回 false。
+  //    实测：本沙箱里就是这样，第一版这句被我读成"已经有一个窗口在运行"，查了半天。
+  logLine('单实例检查未通过 —— 本进程退出（通常=已经有一个 InteractBot 窗口在跑；也可能是锁建不起来：权限/沙箱）')
   app.quit()
 } else {
   app.on('second-instance', () => {
