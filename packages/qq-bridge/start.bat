@@ -64,8 +64,22 @@ if /i not "%~1"=="--no-snowluma" (
 )
 
 rem Open the SnowLuma web console (best effort; ignore failures silently).
+rem
+rem IMPORTANT: --wait-snowluma is passed ONLY on the branch that just started
+rem SnowLuma. Why: the browser used to be opened immediately after the spawn, so
+rem the page you got was SnowLuma MID-BOOT (not logged in / empty lists) and you
+rem had to press F5 before it showed the real state. With --wait-snowluma the
+rem launcher waits (up to 60s, polling once a second) for the moment OneBot really
+rem answers get_login_info with a user_id -- the moment the page will come up
+rem already logged in. It returns early when the token is rejected (waiting cannot
+rem help that) and prints progress, so it never looks frozen.
+rem Skip with: start.bat --no-browser
 if /i not "%~1"=="--no-browser" (
-  "%NODE%" "%~dp0src\index.mjs" --open-console >nul 2>nul
+  if /i "%~1"=="--no-snowluma" (
+    "%NODE%" "%~dp0src\index.mjs" --open-console >nul 2>nul
+  ) else (
+    "%NODE%" "%~dp0src\index.mjs" --open-console --wait-snowluma
+  )
 )
 
 rem Open the console UI in the default browser once the config API is up.

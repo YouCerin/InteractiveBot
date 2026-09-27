@@ -42,7 +42,7 @@ import { createRoster } from './roster.mjs'
 import { resolveModelCredentials } from './credentials.mjs'
 // ★ 不再直接 import `detectSnowluma` —— 所有探测都经 `makeLaunchDetect` 这一个工厂，
 //   目的就是让"两条调用路径传的判据一致"变成结构上必然成立（见该函数的注释）。
-import { startSnowluma, openSnowlumaConsole, resolveOnebotTokens, makeLaunchDetect } from './snowluma.mjs'
+import { startSnowluma, openSnowlumaConsole, resolveOnebotTokens, makeLaunchDetect, waitForSnowlumaReady } from './snowluma.mjs'
 import { createSnowlumaLogReader } from './snowluma-log.mjs'
 // ★ H13：账号发现（**只回摘要，绝不回 token**）与本地语料检索
 import { discoverOnebotConfig, listAccountNames } from './token-discovery.mjs'
@@ -1493,6 +1493,30 @@ async function main() {
   // 所以 start.bat 只负责调用，判断全在 JS 里。
 
   if (openConsoleOnly) {
+    // ★★ 打开网页端之前**先等 SnowLuma 真的就绪**（`--wait-snowluma[=<秒>]`）。
+    //
+    // 为什么必须有这一步：start.bat 的 `--snowluma` 是**立刻返回**的（spawn 完就走），
+    // 紧接着打开浏览器就会看到 SnowLuma「启动中途」的那一页（未登录 / 空列表），
+    // 使用者得手动刷新一下才对 —— 而"刷新一下就好了"这种症状会被当成偶发，长期留着。
+    // 判据不是"控制台可达"，而是 `status === 'connected'`（OneBot 在应答**且认我们的 token**）：
+    // 控制台在钩住 QQ 之前就起来了，所以 5099 能打开完全不等于登录好了。
+    const waitArg = process.argv.find((a) => a === '--wait-snowluma' || a.startsWith('--wait-snowluma='))
+    if (waitArg) {
+      const secs = Number(String(waitArg).split('=')[1])
+      const timeoutMs = (Number.isFinite(secs) && secs > 0 ? secs : 60) * 1000
+      const ready = await waitForSnowlumaReady({
+        config,
+        log: (m) => console.log(m),
+        timeoutMs,
+        // ⚠️ 这里**不能**传 `wsConnected: () => onebot.connected` / `getLogin: () => loginInfo`：
+        //    这一段在 `onebot` / `loginInfo` 声明**之前**执行（那些东西在下面的启动流程里才建），
+        //    闭包一旦被调用就会撞上 TDZ（`Cannot access 'loginInfo' before initialization`）。
+        //    对这个用途也没必要 —— `connected` 的判据是 `get_login_info` 真的回了 user_id
+        //    （OneBot 在应答**且已登录**），与桥接自己那条 WS 无关。
+        detect: makeLaunchDetect({ config, log }),
+      })
+      if (ready.ok) console.log(`✅ ${ready.hint}`)
+    }
     // 打开 SnowLuma 的网页端（浏览器）
     const r = await openSnowlumaConsole({ config, log })
     console.log(r.ok ? `✅ ${r.data.hint}` : `❌ ${r.error}`)

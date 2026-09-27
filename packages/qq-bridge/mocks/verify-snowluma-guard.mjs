@@ -179,8 +179,93 @@ async function main() {
     check('非法 PID 被拒（不写垃圾进登记）', bad.ok === false, JSON.stringify(bad))
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('⑥ ★★ 等 SnowLuma 就绪再开网页端（修"页面开太早、要手动刷新"）')
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // 真实缺陷：start.bat 的 `--snowluma` 是 spawn 完立刻返回的，紧接着打开浏览器
+  // 看到的是 SnowLuma 启动中途的页面（未登录/空列表），使用者必须手动刷新一次。
+  // 这里把时间**注入**掉（`sleep`），所以断言的是判定逻辑本身，不依赖真实等待。
+  {
+    const { waitForSnowlumaReady, SNOWLUMA_STATUS } = await import('../src/snowluma.mjs')
+
+    /** 造一个"第 N 次探测才返回某状态"的探测器，并记录被调用次数。 */
+    const detector = (states) => {
+      let i = 0
+      const fn = async () => {
+        const s = states[Math.min(i, states.length - 1)]
+        i += 1
+        return typeof s === 'string' ? { status: s } : s
+      }
+      fn.calls = () => i
+      return fn
+    }
+    // 注入的 sleep：把"等待"变成"推进"（并记录被 sleep 了几次）
+    const fakeSleep = () => {
+      const rec = { n: 0 }
+      return { sleep: async () => { rec.n += 1 }, rec }
+    }
+
+    // ① 已经在跑且已登录 → 一次探测就返回，**零等待**
+    {
+      const d = detector([SNOWLUMA_STATUS.CONNECTED])
+      const s = fakeSleep()
+      const r = await waitForSnowlumaReady({ config: cfg, detect: d, log: noopLog, sleep: s.sleep })
+      check('★ 已就绪 → 立刻返回（不白等）', r.ok === true && r.polls === 1 && s.rec.n === 0, JSON.stringify({ ok: r.ok, polls: r.polls, sleeps: s.rec.n }))
+      check('★ 如实说明"已经在跑且已登录"', /已经在跑/.test(r.hint), r.hint)
+    }
+
+    // ② 起来了但没登录 → 继续等，直到 connected
+    {
+      const d = detector([SNOWLUMA_STATUS.UP_NOT_LOGGED_IN, SNOWLUMA_STATUS.UP_NOT_LOGGED_IN, SNOWLUMA_STATUS.CONNECTED])
+      const s = fakeSleep()
+      const logs = []
+      const r = await waitForSnowlumaReady({ config: cfg, detect: d, log: (m) => logs.push(m), sleep: s.sleep })
+      check('★ 未登录时继续等，直到 connected', r.ok === true && r.status === SNOWLUMA_STATUS.CONNECTED, JSON.stringify({ status: r.status, polls: r.polls }))
+      check('★ 等了 2 次（不是一次就开）', r.polls === 3 && s.rec.n === 2, JSON.stringify({ polls: r.polls, sleeps: s.rec.n }))
+      check('★ 期间有进度提示（否则看起来像卡死）', logs.some((m) => /⏳/.test(m) && /等 QQ 登录/.test(m)), logs.join(' | ').slice(0, 140))
+      check('就绪后的说明带上了大致等待秒数', /已就绪/.test(r.hint), r.hint)
+    }
+
+    // ③ "在跑但没钩住 QQ" → 等满超时，并**说清是哪一种没就绪**（排查方向完全不同）
+    {
+      const notHooked = { status: SNOWLUMA_STATUS.OFFLINE, consoleReachable: true }
+      const d = detector([notHooked])
+      const s = fakeSleep()
+      const logs = []
+      const r = await waitForSnowlumaReady({ config: cfg, detect: d, log: (m) => logs.push(m), sleep: s.sleep, timeoutMs: 3000, pollMs: 1000 })
+      check('★ 超时后 ok=false（如实回报，不假装就绪）', r.ok === false && r.status === SNOWLUMA_STATUS.OFFLINE)
+      check('★★ 结论指明"还没钩住 QQ"（而不是含糊的"超时"）', /钩住 QQ/.test(r.hint), r.hint)
+      check('★ 并且提示了怎么办（先启动 QQ / 重启一次 QQ）', /启动 QQ|重启一次 QQ/.test(r.hint), r.hint)
+      check('超时告警进了日志（不许静默）', logs.some((m) => /还没就绪/.test(m)), logs.join(' | ').slice(0, 140))
+    }
+
+    // ④ token 被拒 → **早退**（再等一百年也不会变），把页面打开让使用者去改
+    {
+      const d = detector([SNOWLUMA_STATUS.AUTH_FAILED, SNOWLUMA_STATUS.CONNECTED])
+      const s = fakeSleep()
+      const logs = []
+      const r = await waitForSnowlumaReady({ config: cfg, detect: d, log: (m) => logs.push(m), sleep: s.sleep, timeoutMs: 60_000 })
+      check('★ token 被拒 → 不在那儿干等（只探一次）', r.ok === false && r.polls === 1 && s.rec.n === 0, JSON.stringify({ polls: r.polls, sleeps: s.rec.n }))
+      check('★ 并且说明白了该去控制台核对 token', /token/.test(r.hint) || logs.some((m) => /token/.test(m)))
+    }
+
+    // ⑤ 探测器自己抛错 → 不能把启动流程带崩，按"没就绪"继续
+    {
+      let n = 0
+      const d = async () => {
+        n += 1
+        if (n === 1) throw new Error('探测炸了')
+        return { status: SNOWLUMA_STATUS.CONNECTED }
+      }
+      const s = fakeSleep()
+      const r = await waitForSnowlumaReady({ config: cfg, detect: d, log: noopLog, sleep: s.sleep })
+      check('★ 探测抛错不致命（继续等，最终成功）', r.ok === true && r.polls === 2, JSON.stringify({ ok: r.ok, polls: r.polls }))
+    }
+  }
+
   console.log('')
-  if (failures === 0) console.log('🎉 SnowLuma 第三防线与 PID 登记测试全部通过')
+  if (failures === 0) console.log('🎉 SnowLuma 第三防线 + PID 登记 + 就绪等待测试全部通过')
   else console.log(`⚠️ ${failures} 项失败`)
   rmSync(ROOT, { recursive: true, force: true })
   process.exit(failures === 0 ? 0 : 1)

@@ -178,7 +178,7 @@ config.json.bak*          历史备份，含旧密钥
 
 **★ 图标：`.bat` 在资源管理器里永远显示默认的"白纸+齿轮"，这是 Windows 的限制**
 （它不给 `.bat` 显示自定义图标）。所以包内给了一个
-`创建带图标的快捷方式.bat`：双击它就在同目录生成 `QQ机器人.lnk`，图标指向
+`创建带图标的快捷方式.bat`：双击它就在同目录生成 `QQbot.lnk`，图标指向
 `assets\icon.ico`。
 
 为什么不直接发一个做好的 `.lnk`：**`.lnk` 里存的是绝对路径**，在作者机器上生成的
@@ -233,7 +233,7 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 InteractBot-<版本>-win-x64/
 ├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
 ├── 启动机器人.bat           ← 中文名入口（正文纯 ASCII，转调 start.bat）
-├── 创建带图标的快捷方式.bat  ← 双击生成带图标的 QQ机器人.lnk（.bat 本身无法显示图标）
+├── 创建带图标的快捷方式.bat  ← 双击生成带图标的 QQbot.lnk（.bat 本身无法显示图标）
 ├── 检查配置.bat             ← 给小白：双击 = start.bat --check
 ├── 体检.bat                 ← 给小白：双击 = start.bat --doctor（真连一次 SnowLuma）
 ├── start.bat

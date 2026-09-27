@@ -417,8 +417,105 @@ export async function openSnowlumaConsole({ config, log = () => {}, probe = prob
   }
 }
 
-/** 用系统默认程序打开一个 URL。Windows 用 `start`（必须过 cmd）。 */
-function defaultOpenBrowser(platform) {
+/**
+ * ★★ **等 SnowLuma 真的起来（并且登录上）再继续** —— `start.bat` 打开网页端之前必须过这一关。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 它修的是一个真实缺陷：「拉起来了，但页面开太早」
+ * ══════════════════════════════════════════════════════════════════════════
+ * 原来的顺序是：`--snowluma`（spawn，**立刻返回**）→ `--open-console`（立刻开浏览器）。
+ * 而 SnowLuma 要好几秒才做完这些事：起控制台（5099）→ 钩住 QQ → 开 OneBot 端口（3000/3001）
+ * → 完成登录。于是浏览器里看到的是**启动中途**的那一页：显示未登录 / 空列表，
+ * 使用者必须**手动刷新**才能看到真正的状态 —— 而"刷新一下就好了"这种症状最容易被当成
+ * "偶发"而长期留着。
+ *
+ * ★ 判据不是"控制台可达"，而是 **`status === 'connected'`**：
+ *   控制台在钩住 QQ **之前**就起来了，所以"5099 能打开"完全不代表登录好了。
+ *   `connected` 意味着：OneBot 端点在应答、而且**认我们的 token**（`detect()` 真的调了一次
+ *   `get_login_info` 并拿到了登录信息）—— 这正是"页面打开就是登录态"的那个时刻。
+ *
+ * ── 三条早退规则（都是刻意的）──────────────────────────────────────────────
+ *   · `connected`   → 成功，立刻返回（已经在跑的情况下**零等待**）；
+ *   · `auth-failed` → 也返回（token 被拒时再等一百年也不会变；该让使用者去控制台改 token）；
+ *   · 其余（offline / up-not-logged-in）→ 继续等，并**每约 5 秒报一次进度**，
+ *     免得看起来像卡死。
+ *
+ * @param {object} opts
+ * @param {object} opts.config
+ * @param {() => Promise<object>} opts.detect  与防重复启动**同一个**探测器（`makeLaunchDetect`）
+ * @param {(m: string) => void} [opts.log]
+ * @param {number} [opts.timeoutMs]  默认 60 秒（SnowLuma 冷启动 + 钩 QQ 的实测上限）
+ * @param {number} [opts.pollMs]     默认 1000ms
+ * @param {(ms: number) => Promise<void>} [opts.sleep] 测试注入用
+ * @returns {Promise<{ok: boolean, status: string, waitedMs: number, polls: number, last: object|null, hint: string}>}
+ */
+export async function waitForSnowlumaReady({
+  config,
+  detect,
+  log = () => {},
+  timeoutMs = 60_000,
+  pollMs = 1000,
+  sleep = null,
+} = {}) {
+  const wait = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)))
+  const limit = Math.max(0, Number(timeoutMs) || 0)
+  const interval = Math.max(100, Number(pollMs) || 1000)
+  const t0 = Date.now()
+  let polls = 0
+  let last = null
+  let nextReport = 0
+
+  for (;;) {
+    polls += 1
+    try {
+      last = typeof detect === 'function' ? await detect() : null
+    } catch (error) {
+      last = { status: SNOWLUMA_STATUS.OFFLINE, hint: `探测出错：${error?.message ?? error}` }
+    }
+    const status = String(last?.status ?? SNOWLUMA_STATUS.OFFLINE)
+
+    if (status === SNOWLUMA_STATUS.CONNECTED) {
+      return {
+        ok: true,
+        status,
+        waitedMs: Date.now() - t0,
+        polls,
+        last,
+        hint: polls === 1 ? 'SnowLuma 已经在跑且已登录。' : `SnowLuma 已就绪（等了约 ${Math.round((Date.now() - t0) / 1000)} 秒）。`,
+      }
+    }
+    if (status === SNOWLUMA_STATUS.AUTH_FAILED) {
+      log('⚠️  SnowLuma 在跑，但它**拒绝我们的 token**（再等也不会变）—— 这就去打开网页端，请在控制台里核对 token。')
+      return { ok: false, status, waitedMs: Date.now() - t0, polls, last, hint: last?.hint ?? 'token 被拒，请去控制台核对。' }
+    }
+
+    const elapsed = Date.now() - t0
+    if (elapsed >= limit) {
+      // 如实说清"等到什么程度、现在是什么状态"——不要含糊成"超时了"。
+      const why =
+        last?.consoleReachable === true
+          ? '控制台能打开，但 OneBot 端口还没开 ⇒ **SnowLuma 还没钩住 QQ**（要先启动 QQ，或重启一次 QQ 让它触发注入）'
+          : '控制台也还没起来 ⇒ SnowLuma 可能还在冷启动，或者根本没启动成功'
+      log(`⚠️  等了 ${Math.round(elapsed / 1000)} 秒还没就绪：${why}。仍会打开网页端，但页面里可能还是未登录状态。`)
+      return { ok: false, status, waitedMs: elapsed, polls, last, hint: why }
+    }
+
+    if (elapsed >= nextReport) {
+      const secs = Math.round(elapsed / 1000)
+      const what =
+        status === SNOWLUMA_STATUS.UP_NOT_LOGGED_IN
+          ? 'SnowLuma 起来了，等 QQ 登录'
+          : last?.consoleReachable === true
+            ? 'SnowLuma 在跑，等它钩住 QQ 并开 OneBot 端口'
+            : '等 SnowLuma 起床'
+      log(`⏳ ${what}… ${secs}s / ${Math.round(limit / 1000)}s`)
+      nextReport = elapsed + 5000
+    }
+    await wait(interval)
+  }
+}
+
+/** 用系统默认程序打开一个 URL。Windows 用 `start`（必须过 cmd）。 */function defaultOpenBrowser(platform) {
   return (url) =>
     new Promise((resolvePromise, reject) => {
       // Windows 的 `start` 是 cmd 内建命令，直接 spawn 会 ENOENT，
