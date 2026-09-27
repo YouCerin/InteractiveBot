@@ -21,31 +21,91 @@ const { join } = require('node:path')
 const DEFAULT_UI_PORT = 3410
 
 /**
- * 谁是"包根"。
+ * 谁是"包根"—— 也就是 `config.json` / `src/` / `workspace-qq` / `logs/` 所在的那一层。
  *
- * 两种运行方式下 `__dirname` 不一样：
- *   · 开发机直接 `electron desktop/`：`desktop/` 的上一级；
- *   · 打包后：app 目录 = `resources/app`，而包根是它的上两级
- *     （`<发布包>/resources/app` → `<发布包>`）。
- * 判据用**存在性**（`src/index.mjs` 与 `config.example.json` 都在才算），
- * 而不是数目录层数 —— 数层数会在打包形态变化时**静默指到错的地方**。
+ * ★★★ 这里踩过一次**真机才暴露**的坑，改法因此从"猜目录层数"换成了"看证据 + 找标记"：
+ *
+ *   第一版只在"打包形态"分支下 `resourcesPath/..`，而那个分支的判据是 `app.isPackaged`。
+ *   实测（0.2.4 发布包，2026-09-28 01:19 的 `desktop.log`）：
+ *
+ *       包根 …\InteractBot-0.2.4-win-x64\app            ← 指到了 app\，而不是发布包根
+ *       控制台端口 3410 —— 读不到 config.json（ENOENT）—— 用默认端口 3410
+ *
+ *   两个原因叠在一起：① **`asar: false` 时 `app.isPackaged` 是 `false`**
+ *   （Electron 看的是有没有 `app.asar`，而我们**故意**不打 asar）⇒ 打包分支根本没进；
+ *   ② 就算进了，`resourcesPath/..` 也**差一级**（`…\app\resources` 的上一级是 `app`，
+ *   不是发布包根）。⇒ 后果不是崩，而是**静默用了错的包根**：读不到使用者的配置、
+ *   日志写到别的目录、把 `app/` 当成了工作区与配置的所在地。
+ *
+ *   ∴ 现在的判据按**优先级**来，且每一级都尽量靠证据而不是靠数层数：
+ *     ① `INTERACTBOT_PKG_ROOT` —— 由启动器（`启动机器人.bat` / `start.bat`）显式设置。
+ *        这是**唯一**能让"一个包里有多个可能的根"变得不含糊的办法，也是启动器本来就知道的事实；
+ *     ② 从起点**逐级向上找"包根标记"**（同时有 `config.example.json` 与 `src/index.mjs`
+ *        的那一层就是包根）—— 对"发布包根 / `app/` / `app/resources/app` / 开发侧 `desktop/`"
+ *        这四种起点**都成立**，而且不依赖 `isPackaged`、也不依赖打包形态；
+ *     ③ 都找不到就返回起点 —— **绝不猜一个看起来像的路径**（猜错的后果是静默用错根，
+ *        而"没找到"至少能在日志里说出来）。
+ *
+ * ⚠️ 改这里之前先读 `mocks/verify-desktop.mjs` 里那几条"真实布局"断言：
+ *   它们是**照着发布包的真实目录形状**写的，因为这个坑正是"只测参数、没测布局"漏掉的。
  */
-function resolvePkgRoot ({ dirname, resourcesPath = null, isPackaged = false } = {}) {
-  const candidates = []
-  if (isPackaged && resourcesPath) candidates.push(join(resourcesPath, '..'))
-  candidates.push(join(dirname, '..'))
-  candidates.push(dirname)
-  for (const c of candidates) {
+function resolvePkgRoot ({ dirname, env = {}, isPackaged = false, resourcesPath = null } = {}) {
+  const { existsSync } = require('node:fs')
+  const { dirname: dirOf, join: joinOf, resolve: resolveOf } = require('node:path')
+
+  /**
+   * 包根标记：**同时**有 `config.example.json` 与 `src/index.mjs` 的那一层。
+   *
+   * 为什么用"两个都要"而不是"有一个就算"：
+   *   · 只有 `config.example.json` —— 太弱：模板可能被单独放在别处；
+   *   · 只有 `src/index.mjs` —— 太弱：桌面壳候选里 `app/resources/app` 也有 `src`? 不，
+   *     它没有 `src/`，但**别的项目**可能有，所以标记越具体越不容易指错；
+   *   · 两个都要 ⇒ 实测下**只有真正的包根**同时满足（发布包根 ✓ / `app/` ✓ /
+   *     `app/resources/app` ✗ / 开发侧 `desktop/` ✗ / 开发侧包根 ✓）。
+   */
+  const isPkgRoot = (dir) => {
     try {
-      readFileSync(join(c, 'config.example.json'))
-      readFileSync(join(c, 'src', 'index.mjs'))
-      return c
+      return existsSync(joinOf(dir, 'config.example.json')) && existsSync(joinOf(dir, 'src', 'index.mjs'))
     } catch {
-      /* 试下一个 */
+      return false
     }
   }
-  // 一个都命不中时不猜：返回开发形态那一层，让上层把"找不到"报出来
-  return candidates[0] ?? dirname
+
+  // ① 启动器显式告诉我们的（最可靠）
+  //
+  // ⚠️ 末尾的分隔符要先去掉：批处理里 `set "X=%~dp0"` 给的是 `C:\pkg\`（**带尾反斜杠**），
+  //    而 `isPkgRoot()` 拼的是 `join(dir, 'config.example.json')` —— `join` 能容忍尾斜杠，
+  //    所以**判断本身不受影响**；但把它原样返回会让日志与字符串比较多一个尾斜杠
+  //    （出现"两个看起来一样的路径却不相等"）。这里统一归一化。
+  const fromEnv = String(env.INTERACTBOT_PKG_ROOT ?? '').trim().replace(/[\\/]+$/, '')
+  if (fromEnv && isPkgRoot(fromEnv)) return resolveOf(fromEnv)
+  if (fromEnv && !isPkgRoot(fromEnv)) {
+    // ⚠️ 说了但不对 —— 不静默忽略：这正是"配置/路径写错却没人知道"的形态
+    console.warn(
+      `[desktop] ⚠️ INTERACTBOT_PKG_ROOT=${fromEnv} 看起来不是包根` +
+        '（缺 config.example.json 或 src/index.mjs）—— 改为按标记向上查找',
+    )
+  }
+
+  // ② 从起点逐级向上找标记
+  const start = dirname ?? process.cwd()
+  const roots = []
+  let cur = resolveOf(start)
+  for (let i = 0; i < 6; i += 1) {
+    roots.push(cur)
+    if (isPkgRoot(cur)) return cur
+    const up = dirOf(cur)
+    if (up === cur) break
+    cur = up
+  }
+
+  // ③ 找不到 —— 把候选说出来，返回起点（不猜）
+  console.warn(
+    `[desktop] ⚠️ 没找到包根标记（同时有 config.example.json 与 src/index.mjs 的那一层）。\n` +
+      `           找过这些：${roots.join(' → ')}\n` +
+      '           ⇒ 配置与日志会落在起点下一级；请检查包是否完整（缺 src/ 或 config.example.json）',
+  )
+  return roots[roots.length - 1] ?? start
 }
 
 /**

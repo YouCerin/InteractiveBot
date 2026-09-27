@@ -30,6 +30,7 @@ import { createServer } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Script } from 'node:vm'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
@@ -158,6 +159,122 @@ async function main () {
     })
     check('伪造资源目录时不抛错', typeof fake === 'string' && fake.length > 0, String(fake))
     eq('伪造资源目录时回落到开发层（不猜）', fake, PKG_ROOT)
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('★★ 包根解析：按**真实发布包布局**验（这一节是补一次真机事故）')
+  {
+    // ★★★ 为什么这一节要造**真实目录形状**，而不是只喂 `dirname` 字符串：
+    //   第一版就是这么漏掉一个真 bug 的 —— 那版 `resolvePkgRoot` 依赖 `app.isPackaged`
+    //   进"打包形态"分支，而实测 **`asar: false` 时 `isPackaged === false`**
+    //   （Electron 看的是有没有 `app.asar`，而我们故意不打 asar）⇒ 打包分支根本没进，
+    //   壳静默把 `app\` 当成了包根：读不到使用者的 `config.json`（日志里写着 ENOENT）、
+    //   日志写进 `app\logs\`。离线断言当时全绿，因为它只验了"参数怎么用"、
+    //   没验"真实布局长什么样"。
+    const tmp = join(PKG_ROOT, 'cache', 'desktop-pkgroot-fixture')
+    rmSync(tmp, { recursive: true, force: true })
+    const mkdir = (rel) => {
+      const p = join(tmp, rel)
+      mkdirSync(p, { recursive: true })
+      return p
+    }
+    const touch = (rel, body = 'x') => {
+      // ⚠️ 先建父目录：`writeFileSync` 不会替你建（第一版这里直接 ENOENT 崩了 ——
+      //    造 fixture 的代码自己也得对，"测试写错了"与"被测代码写错了"要分得清）。
+      mkdirSync(dirname(join(tmp, rel)), { recursive: true })
+      writeFileSync(join(tmp, rel), body, 'utf8')
+    }
+
+    // 造一个"发布包根"：标记文件都在（= 真包根）
+    mkdir('.')
+    touch('config.example.json', '{}')
+    touch(join('src', 'index.mjs'), '// bridge entry')
+    // ── 形态 A：发布包的真实形状 ──────────────────────────────────────────
+    //   <root>/                     ← 标记在这
+    //   <root>/app/resources/app/   ← 壳代码在这（Electron 的 appPath 就指这里）
+    const appResApp = mkdir(join('app', 'resources', 'app'))
+    touch(join('app', 'resources', 'app', 'main.cjs'), '// shell')
+
+    const realLayout = lib.resolvePkgRoot({ dirname: appResApp, env: {}, isPackaged: false })
+    eq('★ 发布包布局：从 app\\resources\\app 向上找到**发布包根**', realLayout, tmp)
+    check(
+      '★ 而且不是 app\\ 那一层（第一版就是错在这里）',
+      realLayout !== join(tmp, 'app'),
+      `实际 ${realLayout}`,
+    )
+    // 用找出来的根去读配置 —— 这才是"能不能读到使用者配置"的真正判据
+    check(
+      '★ 用这个根能找到 config.example.json（= 能读到使用者的配置）',
+      existsSync(join(realLayout, 'config.example.json')),
+      realLayout,
+    )
+
+    // ── 形态 B：asar:false 让 isPackaged 为假，两种取值都必须得到同一答案 ──
+    const asUnpacked = lib.resolvePkgRoot({ dirname: appResApp, env: {}, isPackaged: true })
+    eq('★ isPackaged=true 时答案不变（不许依赖它）', asUnpacked, tmp)
+
+    // ── 形态 C：启动器用环境变量显式指定（最可靠的一条路）────────────────
+    const viaEnv = lib.resolvePkgRoot({ dirname: 'C:\\不存在\\随便', env: { INTERACTBOT_PKG_ROOT: tmp }, isPackaged: false })
+    eq('★ 环境变量优先且被采纳', viaEnv, tmp)
+
+    // ── 形态 D：环境变量**写错了** → 不许静默忽略，要回落到"按标记找"──────
+    const warn = []
+    const origWarn = console.warn
+    console.warn = (m) => warn.push(String(m))
+    const badEnv = lib.resolvePkgRoot({
+      dirname: appResApp,
+      env: { INTERACTBOT_PKG_ROOT: join(tmp, 'app') }, // app/ 不是包根（缺标记）
+      isPackaged: false,
+    })
+    console.warn = origWarn
+    eq('★ 环境变量指错时回落到按标记找到的真根', badEnv, tmp)
+    check('★ 而且**喊了一声**（不静默忽略）', warn.some((w) => w.includes('看起来不是包根')), warn.join(' | ').slice(0, 160))
+
+    // ── 形态 E：开发侧（desktop/ 的上一级才是包根）────────────────────────
+    const devLayout = lib.resolvePkgRoot({ dirname: join(PKG_ROOT, 'desktop'), env: {}, isPackaged: false })
+    eq('★ 开发侧：从 desktop/ 向上找到包根', devLayout, PKG_ROOT)
+
+    // ── 形态 F：找不到标记时不猜（返回起点，并把候选喊出来）──────────────
+    //
+    // ⚠️ 这个场景**必须放到系统临时目录**去造：第一版我把它放在包内 `cache/` 下，
+    //    而"向上找"真的会走到 `packages/qq-bridge`（那里有标记）⇒ 它**不算找不到**，
+    //    断言于是假失败。造 fixture 的地方本身就是被测逻辑的一部分（"往上能找到什么"），
+    //    这一点很容易忽略。
+    const outside = join(tmpdir(), `interactbot-pkgroot-none-${Date.now()}`)
+    const nowhere = join(outside, 'app', 'resources')
+    mkdirSync(nowhere, { recursive: true })
+    const warn2 = []
+    const origWarn2 = console.warn
+    console.warn = (m) => warn2.push(String(m))
+    const fallback = lib.resolvePkgRoot({ dirname: nowhere, env: {}, isPackaged: false })
+    console.warn = origWarn2
+    // 判据（第一版写成"必须是 outside 那一层"，太紧 —— 它会沿链再往上走几层，
+    //   走到 `AppData\Local` 之类仍然**是链上真实存在的一层**，那不算错）：
+    //   ① 返回的目录**真实存在**（没编路径）；② 它是起点的**祖先**（确实是"往上找"的结果）。
+    const isAncestor = (anc, child) => {
+      const a = anc.replace(/[\\/]+$/, '').toLowerCase()
+      const c = child.toLowerCase()
+      return c === a || c.startsWith(a + '\\') || c.startsWith(a + '/')
+    }
+    check('★ 找不到标记时返回一个**真实存在**的目录（不编路径）', existsSync(fallback), fallback)
+    check('★ 而且它是起点的**祖先**（确实是往上找出来的）', isAncestor(fallback, nowhere), `${fallback} vs ${nowhere}`)
+    check(
+      '★ 并且把"找过哪些"喊出来',
+      warn2.some((w) => w.includes('没找到包根标记')),
+      warn2.join(' | ').slice(0, 200) || '（一条告警都没有）',
+    )
+    rmSync(outside, { recursive: true, force: true })
+
+    rmSync(tmp, { recursive: true, force: true })
+
+    // ── 接线：main.cjs 必须把 env 与 appPath 传进去 ──────────────────────
+    const mainSrc = readFileSync(join(DESKTOP, 'main.cjs'), 'utf8')
+    check('★★ main.cjs 调用 resolvePkgRoot 时传了 env（否则启动器说的根没人听）', /resolvePkgRoot\(\{[\s\S]{0,200}env:\s*process\.env/.test(mainSrc))
+    check('★★ 并且用 app.getAppPath() 当起点（不是 __dirname 猜）', /dirname:\s*app\.getAppPath\(\)/.test(mainSrc))
+    check('★ 起桥接时把根显式传给子进程', /INTERACTBOT_PKG_ROOT:\s*PKG_ROOT/.test(mainSrc))
+    // 启动器显式设置它 —— 否则打包形态只能靠向上找（能work，但少一层确定证据）
+    const launchBat = readFileSync(join(PKG_ROOT, '启动机器人.bat'), 'utf8')
+    check('★ 启动机器人.bat 显式设置 INTERACTBOT_PKG_ROOT', /set\s+"INTERACTBOT_PKG_ROOT=%~dp0"/.test(launchBat))
   }
 
   // ══════════════════════════════════════════════════════════════════════════

@@ -46,6 +46,15 @@ echo.
 goto :delegate
 
 :launch
+rem Tell the app where the package root is. Why this is not optional:
+rem the electron runtime lives in app\, so the app cannot tell "app\" from
+rem "the package root" by looking at its own folder -- and with asar:false
+rem Electron's app.isPackaged is FALSE, so it cannot use that either.
+rem The launcher is the one thing that KNOWS the answer (it is IN the root).
+set "INTERACTBOT_PKG_ROOT=%~dp0"
+rem %~dp0 ends with a backslash; drop it so logs and path comparisons do not show
+rem "C:\pkg\" while everything else says "C:\pkg".
+if "%INTERACTBOT_PKG_ROOT:~-1%"=="\" set "INTERACTBOT_PKG_ROOT=%INTERACTBOT_PKG_ROOT:~0,-1%"
 start "" "%~dp0app\InteractBot.exe"
 endlocal & exit /b 0
 

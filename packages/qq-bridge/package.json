@@ -68,7 +68,9 @@
     "test:live": "node mocks/verify-live.mjs",
     "test:clean": "node mocks/verify-live.mjs --clean",
     "doctor": "node src/index.mjs --doctor",
-    "test:desktop": "node mocks/verify-desktop.mjs"
+    "test:desktop": "node mocks/verify-desktop.mjs",
+    "desktop": "node desktop/node_modules/electron/cli.js .",
+    "desktop:pack": "node scripts/assemble-desktop.mjs"
   },
   "comment": {
     "dependencies": "运行期依赖不走 npm，而是由 setup.mjs 复制到 vendor/node_modules（这样整个包可以整体搬走）。下面的 dependencies 只是给手工 npm install 时作参考。 ★ 0.2.2 起多一个 undici：它**不是桥接自己要用的**，而是技能要用的（pixiv 插件的代理支持要 ProxyAgent；Node 内置 fetch 不认 dispatcher）。它是**可选**依赖 —— 不装的话用代理的技能会自己报「代理不可用」，机器人本体不受影响。"

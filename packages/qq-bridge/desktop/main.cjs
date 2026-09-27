@@ -37,9 +37,22 @@ const { join } = require('node:path')
 
 const lib = require('./lib.cjs')
 
+/**
+ * 包根：`config.json` / `src/` / `workspace-qq` / `logs/` 所在的那一层。
+ *
+ * ★ 三个输入缺一不可（`lib.cjs` 的 `resolvePkgRoot` 里逐条解释了为什么）：
+ *   · `env` —— 启动器（`启动机器人.bat` / `start.bat`）会显式设 `INTERACTBOT_PKG_ROOT`，
+ *     那是**唯一**能让"一个包里多个可能的根"不含糊的证据；
+ *   · `appPath` —— `app.getAppPath()`，打包后是 `…\app\resources\app`、开发时是 `desktop/`；
+ *   · 向上找"包根标记" —— 前两者都没有时按证据找（同时有 `config.example.json` 与 `src/index.mjs`）。
+ *
+ * ⚠️ 第一版这里传的是 `process.resourcesPath` 且依赖 `app.isPackaged` —— 实测在
+ *   `asar: false` 的发布包里 `isPackaged === false`，于是**静默指到了 `app\`**：
+ *   读不到使用者的 config.json（日志里写着 `ENOENT`）、把日志写进了 `app\logs\`。
+ */
 const PKG_ROOT = lib.resolvePkgRoot({
-  dirname: __dirname,
-  resourcesPath: process.resourcesPath,
+  dirname: app.getAppPath(),
+  env: process.env,
   isPackaged: app.isPackaged,
 })
 
@@ -76,8 +89,15 @@ function logLine (msg) {
   try {
     mkdirSync(join(PKG_ROOT, 'logs'), { recursive: true })
     appendFileSync(DESKTOP_LOG, `${line}\n`, 'utf8')
-  } catch {
-    /* 日志写不进去不该影响机器人 */
+  } catch (error) {
+    // ⚠️ 原来这里是空 catch ⇒ 日志写不进去时**完全没有痕迹**（真机上就这样过一次：
+    //   会话跑了 10 分钟，`logs/desktop.log` 却不存在，而那是排障的第一入口）。
+    //   现在至少往 stderr 喊一句 —— 桌面壳的 stderr 会被启动器/终端看到。
+    //   ★ 还不完美（GUI 直接双击时没有终端），所以"回退到用户数据目录"留作下一版的修法。
+    if (!logLine.warned) {
+      logLine.warned = true
+      console.error(`[desktop] ⚠️ 写不进日志文件 ${DESKTOP_LOG}（${error?.code ?? error?.message}）—— 本次运行的日志只在这个终端的输出里`)
+    }
   }
 }
 
@@ -190,6 +210,10 @@ function startBridge ({ silent = false } = {}) {
       cwd: PKG_ROOT,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // ★ 把包根**明确告诉**新进程（而不是让它自己从 `--background` 的 cwd 或 argv 去推）。
+      //   桥接自己算出来的根当然也对，但这一行让"这次到底用的是哪个根"变成**父进程说了算**，
+      //   排查时不必再靠猜（配合日志里那句"包根 …"）。
+      env: { ...process.env, INTERACTBOT_PKG_ROOT: PKG_ROOT },
     })
     let stdout = ''
     let stderr = ''

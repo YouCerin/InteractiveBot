@@ -54,6 +54,34 @@ start.bat
                  └─ 没有                     → 退回 start.bat（后台桥接 + 浏览器里的控制台）
 ```
 
+★ **不打 exe 也能开那个窗口 —— 源码里就能起**（改桌面壳时用这条，省掉 2 分钟打包）：
+
+```bash
+cd packages/qq-bridge
+npm run desktop        # = node desktop/node_modules/electron/cli.js .
+# 第一次若报"找不到 electron"：
+#   cd desktop && npm install --ignore-scripts && node scripts/fetch-electron.mjs
+```
+
+它跑的是 **`desktop/` 里那份源码**，行为与 exe 一致（同一个 `main.cjs`），
+而且**数据落在源码侧**（`packages/qq-bridge/{config.json,workspace-qq,logs,cache}`）——
+因为包根解析到的就是本包根。改完 `desktop/*.cjs` **直接重启这条命令**即可，
+**不需要**重新打包（`npm run desktop:pack` 只有要交付 exe 时才跑）。
+
+★★ **exe 里装的是什么、没装什么**（问过一次，记这里）：
+`app/resources/app/` 里只有壳的那几个文件（`main/preload/lib/splash + 图标`）；
+**桥接源码没被打进 exe** —— 它在发布包根的 `src/`，由壳按包根去找。
+∴ "源码里能不能起窗口"的答案是**能**，而且那份代码与 exe 里那份**逐字节相同**
+（`assemble-desktop.mjs` 每次都会比对，不一致就报错）。
+
+⚠️ **包根是怎么定的**（真实事故，改之前必读）：壳的包根 = `config.json` / `src/` /
+`workspace-qq` 所在那一层，按**三级判据**找：① 启动器设的 `INTERACTBOT_PKG_ROOT`
+（`启动机器人.bat` / `start.bat` 会设）→ ② 从 `app.getAppPath()` 逐级向上找"包根标记"
+（同时有 `config.example.json` 与 `src/index.mjs`）→ ③ 找不到就**返回链上真实存在的一层并喊一声**，绝不猜。
+第一版依赖 `app.isPackaged`，而 **`asar: false` 时它是 `false`** ⇒ 打包分支没进、
+壳把 `app\` 当成了包根（读不到使用者的 config、日志写进 `app\logs\`）。
+∴ 任何"按目录层数猜路径"的写法在这里都是错的。
+
 * **窗口关掉 ≠ 机器人下线**：窗口只是收到右下角托盘，桥接照跑。真要它下线用托盘菜单的
   「退出并停止机器人」（或界面里的「停止」）。
 * 界面**还是那一份** `config-ui/dist`（窗口加载的是桥接自己伺服的 `http://127.0.0.1:<端口>/`）——
@@ -61,9 +89,7 @@ start.bat
 * 桌面壳自己的源码在 `desktop/`（`main.cjs` / `preload.cjs` / `lib.cjs` / `splash.html`）。
   它**只做启动器的活**：起桥接一律走 `node src/index.mjs --background`（那份"已经有桥接在跑"
   的判断只在 `src/index.mjs` 里有一份），它不复刻任何启动逻辑。
-* 改桌面壳之后要重新打包：`node scripts/assemble-desktop.mjs`（≈2 分钟，产物 324 MB）。
-  第一次还要先在 `desktop/` 里装工具链、再下 Electron 运行时：
-  `cd desktop && npm install --ignore-scripts` 然后回到包根跑 `node scripts/fetch-electron.mjs`。
+* 改桌面壳之后**要交付时才**重新打包：`npm run desktop:pack`（≈2 分钟，产物 324 MB）。
 * ⚠️ **它跑不起来时先看 `logs/desktop.log`**（与 `logs/bridge.log` 分开）：
   窗口/托盘/启动页的问题全在那里，桥接自己的问题才在 bridge.log。
 
