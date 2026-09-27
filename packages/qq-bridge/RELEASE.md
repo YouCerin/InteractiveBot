@@ -1,6 +1,6 @@
 # RELEASE.md — 打发布包（zip）
 
-> 目标产物：一个 **zip**，解压后双击 `start.bat` 即可用。
+> 目标产物：一个 **zip**，解压后双击 `启动机器人.bat` 即可用。
 > 用户的外置依赖只有两样：**QQ 桌面版** 和 **DSH**（外加自己的模型 API key 与 SnowLuma）。
 >
 > 本文只讲"怎么打",不讲设计理由 —— 设计理由见 `README.md` / `AGENT.md` / `PROJECT.json`。
@@ -106,7 +106,8 @@ npm test
 **要的：**
 
 ```
-start.bat                 ★ 唯一入口（0.2.5 起中文名入口已删除，见 §4）
+启动机器人.bat            （可选，见 §4）
+start.bat
 config.json               ★ 已清空密钥的模板
 prices.json
 src/                      （全部 .mjs）
@@ -126,7 +127,7 @@ config-ui/node_modules/   约 202 MB
 logs/  cache/  workspace-qq/   运行痕迹（★ workspace-qq 里有模型读写的聊天内容）
 config.json.bak*          历史备份，含旧密钥
 .tmp-*                    测试残留
-（0.2.5：../dsh-qq-bot（废弃）/ 旧架构目录**已删除**，这条不再适用）
+../dsh-qq-bot（废弃）/     旧架构
 ```
 
 `.gitignore` 里已经排除了 `logs/`、`workspace-qq/`、`vendor/`、`node_modules/`。
@@ -171,30 +172,26 @@ config.json.bak*          历史备份，含旧密钥
 
 ---
 
-## 4. 入口（0.2.5 起只有 `start.bat`）
+## 4. 入口与快捷方式
 
-发布包给的是 **`start.bat`**（双击即用，开关见 §2 的命令表）。
+发布包给的是 `启动机器人.bat`（中文名，方便双击）+ `start.bat`（真正干活的）。
 
-★ 0.2.5：原先还有四个中文名入口（`启动机器人.bat` / `检查配置.bat` / `体检.bat` /
-`创建带图标的快捷方式.bat`）与一份 `先读我-首次使用.txt`，**都已按用户要求删除 ——
-不要加回来**。少一个入口就少一份要同步的东西，而"自检 / 体检"本来就能用
-`start.bat --check` / `start.bat --doctor`（等价于 `node src/index.mjs --check|--doctor`）做到。
-`scripts/assemble-release.mjs` 的拷贝清单与 `scripts/check-release-package.mjs` 的必需件清单
-也已同步删掉这些名字：**加回名字 = 组装时第③步直接报"包根缺少必需件"**（这是刻意的，
-它让"把删掉的文件再造一份出来"变成一件会立刻失败的事）。
+**★ 图标：`.bat` 在资源管理器里永远显示默认的"白纸+齿轮"，这是 Windows 的限制**
+（它不给 `.bat` 显示自定义图标）。所以包内给了一个
+`创建带图标的快捷方式.bat`：双击它就在同目录生成 `QQbot.lnk`，图标指向
+`assets\icon.ico`。
 
-**关于图标（为什么干脆不给快捷方式了）**：`.bat` 在资源管理器里永远显示默认的
-"白纸+齿轮"，这是 Windows 的限制（它不是 PE 文件，没有图标资源槽）。想让入口带图标
-只能用 `.lnk`，而 **`.lnk` 里存的是绝对路径**：在作者机器上生成的那份指向作者的目录，
-换台机器目标与图标一起失效（图标退化成白纸）。旧办法是随包带一个"现场生成快捷方式"的
-`.bat`，代价是多一个要长期维护的引导入口 + 一套字符码陷阱，换来的只是一个图标 ——
-0.2.5 取消。想要图标就自己右键 `start.bat` → 发送到桌面快捷方式 →
-把快捷方式属性里的图标指向 `assets\icon.ico`。
+为什么不直接发一个做好的 `.lnk`：**`.lnk` 里存的是绝对路径**，在作者机器上生成的
+那份指向作者的目录，换台机器目标与图标一起失效（图标退化成白纸）。现场生成就不会错。
 
-★ 仍然成立的那条坑：**`start.bat` 正文必须纯 ASCII** —— cmd 按系统代码页
-（中文 Windows 是 GBK）解析 `.bat`，UTF-8 中文注释会吞掉换行、把解析搞坏。
-（旧文档里还有第二条同源陷阱 —— 内嵌 PowerShell 读无 BOM 的 UTF-8 `.ps1` 会被当 GBK，
-那条随"现场生成快捷方式"脚本一起消失了。）
+生成脚本里两个坑（都真实踩过，别再犯）：
+
+1. **`.bat` 正文必须纯 ASCII**：cmd 按系统代码页（中文 Windows 是 GBK）解析 `.bat`，
+   UTF-8 文件里的中文会吞掉换行、把解析搞坏。
+2. **脚本里那段 PowerShell 也必须纯 ASCII（连注释也是）**：Windows PowerShell 5.1 会把
+   **无 BOM 的 UTF-8** `.ps1` 当 GBK 读；一条中文注释就能"吃掉"紧随其后的代码 ——
+   实际表现是报"快捷方式路径名称需以 .lnk 或 .url 结尾"。
+   所以中文文件名一律用字符码拼：`[char]0x673A + [char]0x5668 + [char]0x4EBA` = 机器人。
 
 ---
 
@@ -213,9 +210,6 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 `检查配置.bat` / `体检.bat` **只存在于发布包里、仓库里没有源** ——
 文档的"最终形状"列了它们，而拷贝清单一条都没有，说明当时是手工补进去的，
 然后没人记得。手敲清单必然漏项，而**漏项不会报错**。
-（★ 0.2.5：那几个入口已删除，清单里不再有它们；同批还修掉了 `QQ机器人.lnk` 这条
-0.2.2 改名（`QQbot.lnk`）后就一直失效的旧条目 —— 它让第③步"缺一个都不组装"
-**长期卡在"包根缺少必需件：QQ机器人.lnk"**，没有任何提示指向真正的成因。）
 
 脚本做的事（顺序不能换）：
 
@@ -233,12 +227,16 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 `package.json` / `PROJECT.json` 的 `package.version` / MCP server info /
 `RELEASE.md` 里的包名。四处里漏改一处，症状是"包名写着 0.2.0、里面报的却是 0.1.0"。
 
-**发布包的最终形状**（0.2.5 实测：120 个文件 / 解压后约 88.6 MB；这两个数由
-`check-release-package.mjs` 每次组装时实测报出，别照抄进文档当承诺）：
+**发布包的最终形状**（73 个文件 / 解压后约 87 MB / zip 约 32.6 MB）：
 
 ```
 InteractBot-<版本>-win-x64/
-├── start.bat               ← ★ 唯一点击入口（0.2.5 起中文名入口已删除，见 §4）
+├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
+├── 启动机器人.bat           ← 中文名入口（正文纯 ASCII，转调 start.bat）
+├── 创建带图标的快捷方式.bat  ← 双击生成带图标的 QQbot.lnk（.bat 本身无法显示图标）
+├── 检查配置.bat             ← 给小白：双击 = start.bat --check
+├── 体检.bat                 ← 给小白：双击 = start.bat --doctor（真连一次 SnowLuma）
+├── start.bat
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
 ├── prices.json  package.json
@@ -261,11 +259,13 @@ InteractBot-<版本>-win-x64/
 > **且只有一种**"。要举例说明"旧版本并存"时用文字描述，不要写出具体的旧版本号，
 > 否则那条断言会红（它没法区分"举例"和"漏改"）。
 
-★ 0.2.5：包内**不再有**面向非技术使用者的 `先读我-首次使用.txt`（已按用户要求删除）。
-新手现在读 `README.md`（仓库与包内都有），或直接双击 `start.bat` 按它的提示走；
-`AGENT.md` / `PROJECT.json` 仍分别面向 AI agent 与机器校验。
+★ **小白文档不是装饰**：`先读我-首次使用.txt` 是包内唯一一份写给非技术使用者的文档
+（其余 `AGENT.md` / `README.md` / `RELEASE.md` / `PROJECT.json` 分别面向 AI agent、
+开发者和机器校验）。它必须给出四个下载链接、三步配置、五个常见故障对照，
+以及"密钥非官方登录有账号风险"的提示。改动 README/配置项文案时记得同步它。
 
-★ `start.bat` 的正文必须是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，含中文会吞掉换行）。
+★ 两个 `*.bat` 引导入口的正文是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，
+含中文会吞掉换行），只转调 `start.bat` 的对应开关 —— 开关的语义只有一处实现。
 
 不带：`vendor/dsh`（用户自装）、`vendor/snowluma`（许可证不允许）、
 `config-ui/{src,node_modules}`（202 MB，属项目开发资产）、
@@ -287,7 +287,7 @@ node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desk
 Compress-Archive -Path $out -DestinationPath "$out.zip"
 ```
 
-体积参考：解压后约 **88.6 MB**（0.2.5 实测），zip 后约 **40–45 MB**（大头是已压缩过的 `node.exe`）。
+体积参考：解压后约 **87 MB**，zip 后约 **40–45 MB**（大头是已压缩过的 `node.exe`）。
 
 ★ 包必须放在**可写**位置（用户桌面、D 盘目录都行）：
 `logs/`、`cache/`、`workspace-qq/` 都要写。放在 `C:\Program Files\` 下会失败。
@@ -297,7 +297,7 @@ Compress-Archive -Path $out -DestinationPath "$out.zip"
 ## 6. 验收清单（必须在一台干净机器 / 另一个盘符上跑）
 
 1. 解压到**另一个盘符**（例如 `D:\test`）而非原路径。
-2. 双击 `start.bat` → 应能自建 `logs/`、`cache/`、`workspace-qq/`。
+2. 双击 `启动机器人.bat` → 应能自建 `logs/`、`cache/`、`workspace-qq/`。
 3. `start.bat --check` → 应显示 DSH 的解析结果与来源；**没装 DSH 时必须列出所有候选位置**，而不是一句"找不到"。
 4. 故意把 `dsh.cliPath` 填错 → 报错必须说明"这个路径是配置指定的但它不存在"。
 5. 不填 `apiKey`、机器上也没有 `%APPDATA%\dsh-desktop\harness\.credentials.yaml` → 启动日志必须明确报出凭据缺失

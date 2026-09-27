@@ -5,9 +5,9 @@
 > **📖 先读哪一份？**
 > - **你想先知道"这项目是什么、各模块怎么实现的、agent 到底有多大权限"** →
 >   读 **`docs/项目简介.md`**（一页：数据流 / 模块表 / 12 条特色 / 权限硬墙与软墙 / 文档地图）
-> - **你只是想把它跑起来、不想看代码** → 双击 **`start.bat`**（要自检就
->   `start.bat --check`，要真连一次 SnowLuma 体检就 `start.bat --doctor`）
->   ★ 0.2.5：原先那份 `先读我-首次使用.txt` 与 `检查配置.bat`、`体检.bat` 已删除
+> - **你只是想把它跑起来、不想看代码** → 读 **[先读我-首次使用.txt](先读我-首次使用.txt)**
+>   （四个依赖的下载地址 / 三步配置 / 常见故障对照 / 账号风险提示），
+>   然后双击 `检查配置.bat` 与 `体检.bat` 自检
 > - **你是 AI agent，或想五分钟上手** → 读 **[AGENT.md](AGENT.md)**（操作说明 + 绝对不能改的六件事）
 > - **你需要机器可读的包契约**（命令 / 配置键 / 不变量 / 故障特征） → 读 **[PROJECT.json](PROJECT.json)**
 > - **你要打发布包（zip）** → 读 **[RELEASE.md](RELEASE.md)**（前置条件 / 要清空的密钥 / 验收清单）
@@ -21,9 +21,8 @@
 > 测试会失败。这是刻意的：**说明书撒谎比没有说明书更糟。**
 
 > 与 `packages/dsh-qq-bot` 的关系：那个是**旧架构**（DSH 进程内插件，用一次性
-> `llm.stream` 调用，没有工具循环、没有沙箱、没有权限概念）。本目录是**新架构**。
-> ★ 0.2.5：旧目录已按用户要求**删除**（此前的说法是"保留仅作参考"）——
-> 它是**有意删掉的**，不要重建；旧方案存档在 `docs/design.md` 与 `docs/implementation-plan.md`。
+> `llm.stream` 调用，没有工具循环、没有沙箱、没有权限概念）。本目录是**新架构**，
+> 旧目录保留仅作参考。
 
 ---
 
@@ -230,8 +229,8 @@ node src/index.mjs --ui --dist <某个包的 config-ui/dist>   # 查别人给的
 
 # ⑥ 启动
 start.bat                        # 双击；或 node src/index.mjs
-# ★ 0.2.5：带图标的快捷方式入口（旧 QQbot.lnk / 创建带图标的快捷方式.bat）已删除 ——
-#   现在只有 start.bat 这一个入口（要图标就右键 start.bat 自己建快捷方式，图标用 assets\icon.ico）
+# 也可以双击带图标的快捷方式：QQbot.lnk
+#   （.bat 本身在 Windows 里不能带自定义图标，所以带图标的入口是快捷方式）
 # start.bat 现在会先拉起 SnowLuma，再起桥接。跳过 SnowLuma：start.bat --no-snowluma
 ```
 
@@ -402,7 +401,8 @@ async createSession(sessionId) {
 
 ```
 qq-bridge/
-├── start.bat              入口（★ 唯一入口；双击启动，优先用包内 Node；会先拉起 SnowLuma）
+├── 启动机器人.lnk          ★ 带图标的启动入口（指向 start.bat）
+├── start.bat              入口（双击启动，优先用包内 Node；会先拉起 SnowLuma）
 ├── setup.mjs              一次性准备（幂等）
 ├── config.json            全部配置
 ├── prices.json            ★ 价目表 + 峰谷时段规则（改它不需要重启）

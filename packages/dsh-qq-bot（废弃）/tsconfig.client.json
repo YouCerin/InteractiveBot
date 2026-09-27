@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": [],
+    "declaration": false,
+    "outDir": "lib/client",
+    "rootDir": "src/client",
+    "baseUrl": ".",
+    "paths": {
+      "@deepseek-ai/dsh-client-ui-renderer/client": [
+        "node_modules/@deepseek-ai/dsh-client-ui-renderer/lib/types/client/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-client-ui-layout/client": [
+        "node_modules/@deepseek-ai/dsh-client-ui-layout/lib/types/client/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-client-ui-sidebar/client": [
+        "node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/types/client/index.d.ts"
+      ]
+    }
+  },
+  "include": ["src/client"]
+}

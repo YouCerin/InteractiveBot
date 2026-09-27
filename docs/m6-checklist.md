@@ -1,10 +1,6 @@
 # M6 部署与联调操作清单
 
-> ★★ **0.2.5：这份清单针对的 `packages/dsh-qq-bot（废弃）` 已按用户要求删除 ——
-> 下面的步骤已经无法执行，本文件仅作历史存档**（当时的部署流程与踩坑记录）。
-> 现在的部署入口见 `packages/qq-bridge/README.md` 与 `packages/qq-bridge/RELEASE.md`。
-
-> 目标：把 `dsh-qq-bot` 装进桌面版 DSH，接上真实 QQ 协议端，跑通端到端对话。（历史目标）
+> 目标：把 `dsh-qq-bot` 装进桌面版 DSH，接上真实 QQ 协议端，跑通端到端对话。
 
 ## 环境事实（本机）
 
