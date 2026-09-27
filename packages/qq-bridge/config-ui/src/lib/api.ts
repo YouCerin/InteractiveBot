@@ -604,23 +604,36 @@ export interface SkillInfo {
   permissions?: { net?: string[]; listen?: string | string[] | boolean }
 }
 
+export interface PluginChoiceOption {
+  value: string
+  label: string
+  /** 按钮下的小字：一句话说清选它的后果 */
+  desc?: string
+  /** true = 「实验性」徽标（从外部项目借来、尚未在本项目长期验证）——必须显示，不能只做 tooltip */
+  experimental?: boolean
+}
+
 export interface PluginInfo {
   id: string
   name: string
   icon?: string
   what?: string
-  /** ★ 界面上直接显示这句原文，不要自己改写 */
+  /** ★ 界面上直接显示这句原文，不要自己改写（choice 类除外：二选一没有"关"，不显示这句） */
   offEffect: string
   enabledPath: string
-  /** boolean = 普通开关；enum = 人设（开=默认档，不是"上次那档"）；list = 名单类（不渲染 Switch） */
-  switchKind: 'boolean' | 'enum' | 'list' | string
+  /** boolean = 普通开关；enum = 人设（开=默认档，不是"上次那档"）；list = 名单类（不渲染 Switch）；
+   *  choice = 二选一（0.2.3：不渲染 Switch，渲染 N 个并列按钮，没有"关"） */
+  switchKind: 'boolean' | 'enum' | 'list' | 'choice' | string
   enabled: boolean | null
+  /** choice 的当前生效值（高亮按钮用；choice 的 enabled 恒为 null，不能靠它判断） */
   value?: unknown
+  /** choice 的候选（switchKind === 'choice' 时非空，其余为 null） */
+  options?: PluginChoiceOption[] | null
   /** true = 即时生效；false = 需要重启（why 里有取证位置，要显示出来） */
   hot: boolean
   why: string
-  /** 详细设置仍在原页签；'extensions:qq-tools' = 展开区就在本页 */
-  uiTab: string
+  /** 详细设置仍在原页签；'extensions:xxx' = 展开区就在本页；null = 只有开关（别渲染「去详细设置」） */
+  uiTab: string | null
 }
 
 export interface ExtensionsResult {

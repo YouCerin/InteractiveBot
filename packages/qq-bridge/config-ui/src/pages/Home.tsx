@@ -54,6 +54,9 @@ function pathToTab(path: string): string | null {
     case 'mcp':
     case 'skills':
     case 'security':
+    case 'wake':
+    case 'delivery':
+    case 'corpus':
       return 'extensions'
     case 'onebot':
     case 'snowluma':
@@ -222,8 +225,10 @@ export default function Home() {
       return
     }
     try {
-      await api.stop()
-      toast.info('机器人正在停止…再次启动请用 start.bat。')
+      // ★ 「停止」必须说明停掉之后要用什么再起来 —— 这句话由后端 hint 给，
+      //   前端不写死（CONFIG-UI.md §2.7.5 D）。
+      const result = await api.stop()
+      toast.info(result.hint ?? '机器人正在停止…再次启动请双击 启动机器人.bat。')
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e))
     }
@@ -333,8 +338,8 @@ export default function Home() {
         <h1 className="text-xl font-semibold">连不上机器人</h1>
         <p className="max-w-md text-center text-sm leading-relaxed text-muted-foreground">
           配置接口（http://127.0.0.1:3410）没有响应。机器人没启动时接口也不在线—— 先在机器人目录里双击
-          <code className="mx-1 rounded bg-muted px-1.5 py-0.5">start.bat</code>
-          启动它，然后回到这里刷新。
+          <code className="mx-1 rounded bg-muted px-1.5 py-0.5">启动机器人.bat</code>
+          启动它（0.2.3 起后台启动，不会留黑窗口），然后回到这里刷新。
         </p>
         <div className="flex gap-2">
           <Button onClick={() => loadAll(true)} disabled={refreshing}>

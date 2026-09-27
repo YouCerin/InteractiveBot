@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pause, Play, RefreshCw } from 'lucide-react'
+import { Eraser, Pause, Play, RefreshCw } from 'lucide-react'
 
 import { api, isNotImplemented } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -10,13 +10,15 @@ const POLL_MS = 2000
 const MAX_LINES = 400
 
 /**
- * 桥接日志（H13，规格见 CONFIG-UI.md §5.x）。
+ * 桥接日志（H13 起步，0.2.3 起成为「唯一能看到启动期信息的地方」：桥接 --background
+ * 无窗口运行，stdio ignore，logs/bridge.log 是唯一保真来源。规格见 CONFIG-UI.md §2.7.5 A / §5.x）。
  *
  * ★ **轮询，不是 SSE**：后端接口是"一次请求一次响应"（`serveApi` 直接 `res.end`），
  *   改成流式要重做那一层；而"近实时"用秒级轮询已经够，实现与排查都更简单。
  *   这条如实写在代码里，免得后来者以为"这里本该是 SSE、是不是漏了"。
  * ★ 用**游标**增量取：游标是"已经给过的行数"，超出总行数时后端会自动回到 0
- *   （日志轮转后不会永远收不到新日志）。
+ *   （日志轮转后不会永远收不到新日志）—— 收到回绕后的全量要清屏重建，否则像时间倒流。
+ * ★ 「清屏」只清界面显示，**不删日志文件**。
  * ★ 只显示，不写盘、不控制进程 —— 这是"看正在发生什么"的窗口。
  */
 export function BridgeLogCard({ demo = false }: { demo?: boolean }) {
@@ -33,7 +35,13 @@ export function BridgeLogCard({ demo = false }: { demo?: boolean }) {
       setUnsupported(false)
       setErr(null)
       if (chunk.lines.length > 0) {
-        setLines((prev) => [...prev, ...chunk.lines].slice(-MAX_LINES))
+        setLines((prev) => {
+          // 游标回绕（后端自动回到 0）说明文件被轮转/重建了：清屏重建，
+          // 否则新旧日志拼在一起，看起来像时间倒流（§2.7.5 A）。
+          const wrapped = chunk.cursor <= cursor && cursor > 0
+          const next = wrapped ? chunk.lines : [...prev, ...chunk.lines]
+          return next.slice(-MAX_LINES)
+        })
       }
       setCursor(chunk.cursor)
     } catch (e) {
@@ -74,6 +82,14 @@ export function BridgeLogCard({ demo = false }: { demo?: boolean }) {
     if (follow && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
   }, [lines, follow])
 
+  /** 用户手动往上滚时自动关掉跟随（否则没法看历史，§2.7.5 A）。 */
+  const onBoxScroll = () => {
+    const box = boxRef.current
+    if (!box || !follow) return
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24
+    if (!atBottom) setFollow(false)
+  }
+
   if (demo || unsupported) return null
 
   return (
@@ -86,6 +102,15 @@ export function BridgeLogCard({ demo = false }: { demo?: boolean }) {
               {follow ? <Pause className="mr-1 h-3.5 w-3.5" /> : <Play className="mr-1 h-3.5 w-3.5" />}
               {follow ? '暂停跟随' : '继续跟随'}
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="只清掉界面上的显示，不删日志文件"
+              onClick={() => setLines([])}
+            >
+              <Eraser className="mr-1 h-3.5 w-3.5" />
+              清屏
+            </Button>
             <Button variant="ghost" size="sm" onClick={() => void pull()}>
               <RefreshCw className="mr-1 h-3.5 w-3.5" />
               拉一次
@@ -97,12 +122,15 @@ export function BridgeLogCard({ demo = false }: { demo?: boolean }) {
         {err && <div className="mb-2 text-xs text-red-700">取日志失败：{err}</div>}
         <div
           ref={boxRef}
+          onScroll={onBoxScroll}
           className={cn(
             'h-56 overflow-auto rounded-md bg-slate-950 p-2 font-mono text-[11px] leading-relaxed text-slate-200',
           )}
         >
           {lines.length === 0 ? (
-            <div className="text-slate-500">（还没有日志）</div>
+            <div className="text-slate-500">
+              还没有桥接日志 —— 它还没运行过。（这不是错误；日志文件 logs/bridge.log 出现后这里会自动显示）
+            </div>
           ) : (
             lines.map((l, i) => (
               <div key={`${i}-${l.slice(0, 24)}`} className="whitespace-pre-wrap break-all">

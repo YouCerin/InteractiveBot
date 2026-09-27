@@ -16,7 +16,7 @@ import {
   type PluginInfo,
   type SkillInfo,
 } from '@/lib/api'
-import { getBool, getNum } from '@/lib/config'
+import { getBool, getNum, getPath } from '@/lib/config'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -507,7 +507,16 @@ function PluginCard({
   const [open, setOpen] = useState(false)
   const isList = p.switchKind === 'list'
   const isEnum = p.switchKind === 'enum'
+  const isChoice = p.switchKind === 'choice'
   const isQqTools = p.id === 'qq-tools'
+  const isWakePolicy = p.id === 'wake-policy'
+  // 二选一（choice，0.2.3）：当前值从**编辑中的 cfg** 读（按钮走的是改配置通道，
+  // 保存前以草稿为准）；cfg 还没回填该键时用后端给的 value。enabled 恒为 null，不能靠它判断。
+  const choiceValue = String(getPath(cfg, p.enabledPath) ?? p.value ?? '')
+  // uiTab 以 extensions: 开头 = 详细设置展开区就在本卡（qq-tools / wake-policy）
+  const expandHere = typeof p.uiTab === 'string' && p.uiTab.startsWith('extensions:')
+  const shadowOn = getBool(cfg, 'wake.judge.shadow', true)
+  const mcpProfile = String(getPath(cfg, 'mcp.profile') ?? 'full')
 
   return (
     <Card>
@@ -515,7 +524,8 @@ function PluginCard({
         <div className="flex items-center gap-2">
           <span className="text-lg">{p.icon ?? '🔌'}</span>
           <span className="font-medium">{p.name}</span>
-          {/* 生效方式徽标：cold 的必须把 why 显示出来（在下面） */}
+          {/* 生效方式徽标：cold 的必须把 why 显示出来（在下面）。choice 也照常标：
+              但「即时生效」只对 policy / judge.shadow 成立，展开区里那两个键另有说明。 */}
           {p.hot ? (
             <Badge variant="outline" className="border-emerald-300 text-emerald-700">
               即时生效
@@ -528,21 +538,76 @@ function PluginCard({
           <span className="ml-auto flex items-center gap-2">
             {isList ? (
               // 名单/列表类：不渲染 Switch，改成「去维护」
-              <Button variant="outline" size="sm" onClick={() => onNavigateTab(p.uiTab)}>
+              <Button variant="outline" size="sm" onClick={() => onNavigateTab(p.uiTab ?? 'protocol')}>
                 去维护
               </Button>
-            ) : (
+            ) : isChoice ? null : (
+              // choice 不渲染 Switch（按钮在下面）
               <Switch checked={p.enabled === true} onCheckedChange={onToggle} />
             )}
           </span>
         </div>
 
         {p.what && <p className="text-xs text-muted-foreground">{p.what}</p>}
-        {/* ★ 关掉会怎样：直接显示原文，不改写 */}
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          <span className="font-medium text-foreground">关掉会怎样：</span>
-          {p.offEffect.replace(/\*\*/g, '')}
-        </p>
+        {/* ★ 关掉会怎样：直接显示原文，不改写。
+            例外：choice（二选一）**没有"关"** —— 显示这句会让人以为"两个都不选"也是一种状态，
+            所以它的"选它会怎样"写在每个按钮上（CONFIG-UI.md §2.10 二选一）。 */}
+        {!isChoice && (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            <span className="font-medium text-foreground">关掉会怎样：</span>
+            {p.offEffect.replace(/\*\*/g, '')}
+          </p>
+        )}
+
+        {/* ── 二选一（choice）：N 个并列按钮，点另一个即切换（走改配置通道，不做二次确认） ── */}
+        {isChoice && (
+          <div className="flex flex-col gap-2 sm:flex-row">
+            {p.options?.map((o) => {
+              const active = o.value === choiceValue
+              return (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => patch(p.enabledPath, o.value)}
+                  className={cn(
+                    'flex-1 rounded-md border p-3 text-left transition-colors',
+                    active ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
+                  )}
+                >
+                  <div className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
+                    {o.label}
+                    {o.experimental && (
+                      <Badge
+                        variant="outline"
+                        className="border-violet-300 text-violet-700"
+                        title="从外部项目借来、尚未在本项目长期验证"
+                      >
+                        实验性
+                      </Badge>
+                    )}
+                    {active && <Badge className="bg-primary hover:bg-primary">当前</Badge>}
+                  </div>
+                  {o.desc && <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{o.desc}</div>}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
+        {/* ★★ 选中语义唤醒时必须显示当前是不是影子模式 —— 否则「判定照跑但行为不变」
+            看起来就是"点了没反应"（CONFIG-UI.md §2.10 唤醒策略）。 */}
+        {isWakePolicy && choiceValue === 'semantic' && shadowOn && (
+          <InlineNote level="info">
+            当前是<strong>影子模式</strong>：判定照跑、结论写进操作日志（runtime/oplog/），<strong>行为不变</strong>。
+            要让它真的生效，把下方「判定器 · 影子模式」关掉并保存。
+          </InlineNote>
+        )}
+        {isWakePolicy && choiceValue === 'semantic' && !shadowOn && (
+          <InlineNote level="warn">
+            判定已<strong>真正生效</strong>：被判「沉默」的消息<strong>不会</strong>得到回复（且没有任何提示）。
+          </InlineNote>
+        )}
+
         {isEnum && (
           <p className="text-xs text-muted-foreground">
             这是枚举开关：打开时用的是<strong>默认档</strong>，不是「你上次选的那档」。
@@ -555,7 +620,7 @@ function PluginCard({
         )}
 
         <div className="flex gap-2 pt-1">
-          {isQqTools ? (
+          {expandHere ? (
             <Button type="button" variant="outline" size="sm" onClick={() => setOpen(!open)}>
               {open ? <ChevronDown className="mr-1 h-3.5 w-3.5" /> : <ChevronRight className="mr-1 h-3.5 w-3.5" />}
               详细设置
@@ -563,7 +628,7 @@ function PluginCard({
           ) : (
             p.uiTab &&
             p.uiTab !== 'extensions' && (
-              <Button variant="ghost" size="sm" className="text-xs" onClick={() => onNavigateTab(p.uiTab)}>
+              <Button variant="ghost" size="sm" className="text-xs" onClick={() => p.uiTab && onNavigateTab(p.uiTab)}>
                 → 去「{TAB_LABEL[p.uiTab] ?? p.uiTab}」细调
               </Button>
             )
@@ -581,11 +646,99 @@ function PluginCard({
                 min={1000}
               />
             </FieldRow>
-            <p className="mt-2 text-xs text-muted-foreground">
+
+            {/* 0.2.3：工具档位（二选一）。默认值 full = 升级前的行为，不许顺手收紧。 */}
+            <div className="mt-3">
+              <div className="text-sm font-medium">工具档位</div>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                {[
+                  { v: 'full', label: '完整（默认）', desc: '全部 14 个工具，等于升级前的行为。' },
+                  { v: 'readonly', label: '只读', desc: '只给只读工具，发送/互动类一并藏掉。' },
+                ].map((o) => (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => patch('mcp.profile', o.v)}
+                    className={cn(
+                      'flex-1 rounded-md border p-2.5 text-left transition-colors',
+                      mcpProfile === o.v ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
+                    )}
+                  >
+                    <div className="text-sm font-medium">
+                      {o.label}
+                      {mcpProfile === o.v && (
+                        <Badge className="ml-1.5 bg-primary hover:bg-primary">当前</Badge>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">{o.desc}</div>
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1.5 text-xs text-amber-700">
+                ⚠ readonly 会把发送/互动类工具一并藏掉，<strong>包括 qq_send_image</strong>
+                （P站发图链路要用它）。改档位要重启 DSH 子进程才生效（保存后按提示重启）。
+              </p>
+            </div>
+
+            {/* 0.2.3：万能口 qq_api 的开关。默认开 = 升级前的行为。 */}
+            <div className="mt-3">
+              <FieldRow
+                label="万能口 qq_api"
+                hint="一个只读白名单的通用 OneBot 口（发送/删除/上传/读凭据一律不放行）。关掉只是少这一个口，上面的具名工具不受影响。"
+              >
+                <Switch
+                  checked={getBool(cfg, 'mcp.genericApi', true)}
+                  onCheckedChange={(v) => patch('mcp.genericApi', v)}
+                />
+              </FieldRow>
+              <p className="mt-1 text-xs text-amber-700">改这一项要重启才生效（MCP 工具表是 DSH 启动时加载的）。</p>
+            </div>
+
+            <p className="mt-3 text-xs text-muted-foreground">
               策略是默认放行、黑名单拦截（踢人/禁言/改群名片/退群等会被直接拒绝）；拦截清单在代码里
               （mcp/mcp-qq-server.mjs 的 BLOCKED_ACTIONS），改它需要改代码而不是点界面。
               工具调用发生在「思考」阶段，「对话」页签里看不到过程——界面上什么都没发生是正常的。
             </p>
+          </div>
+        )}
+
+        {/* 唤醒策略的判定器设置（0.2.3）。★ 生效边界：shadow 即时（每轮现读）；
+            timeoutMs / maxPerHour 在判定器首次用到时装配一次 —— 改这两个要重启，
+            别因为卡片头上写着「即时生效」就把它们也当即时的。 */}
+        {isWakePolicy && open && (
+          <div className="rounded-md border p-3">
+            <FieldRow
+              label="判定器 · 影子模式"
+              hint="开 = 只记账不改行为（结论写进 runtime/oplog/）；关 = 判定真的生效。这一项即时生效（每轮现读）。"
+            >
+              <Switch checked={shadowOn} onCheckedChange={(v) => patch('wake.judge.shadow', v)} />
+            </FieldRow>
+            <FieldRow
+              label="判定超时"
+              hint="必须小于「先应一声」的等待（humanize.interim.afterMs，默认 8000）：判定比它还慢，用户会先看到「我在想」、然后什么都没有。超时一律按放过处理。"
+            >
+              <NumInput
+                value={getNum(cfg, 'wake.judge.timeoutMs', 6000)}
+                onChange={(n) => patch('wake.judge.timeoutMs', n)}
+                unit="毫秒"
+                min={1000}
+              />
+            </FieldRow>
+            <p className="-mt-1 mb-2 text-xs text-amber-700">
+              ★ 改它要重启：判定器首次被用到时装配一次（预算计数器要跨消息累积，不能每条重建）。
+            </p>
+            <FieldRow
+              label="每小时判定上限"
+              hint="每条候选消息要起一个一次性 DSH 进程做判定（约 3~5 秒），这是唯一挡住最坏情况的上限；超了一律放过（退回规则唤醒）。"
+            >
+              <NumInput
+                value={getNum(cfg, 'wake.judge.maxPerHour', 60)}
+                onChange={(n) => patch('wake.judge.maxPerHour', n)}
+                unit="次"
+                min={1}
+              />
+            </FieldRow>
+            <p className="-mt-1 text-xs text-amber-700">★ 改它要重启（同上，装配一次）。</p>
           </div>
         )}
       </CardContent>
