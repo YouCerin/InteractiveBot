@@ -623,6 +623,28 @@ section('④ 桥接接线：什么时候**不该**问判定器')
     check('oplog 行只放结论与数字，原文只进 excerpt（唯一被隐私筛的字段）', row?.excerpt === '小鲸鱼 今天天气不错' && row?.reason === '群友闲聊')
   }
 
+  // ── ④-5b ★★ 判定流水**写不进去时必须留痕**（observability 不许静默失败）────
+  //
+  // `appendOp` **从不抛异常**，它靠**返回值**报错（`{ok:false, why}`）。第一版这里只包了
+  // try/catch ⇒ 等于把失败全吞了：磁盘满 / `runtime/` 被占成文件 / **当天那个文件已达
+  // 2MB 上限** 时，判定流水会**一声不响地停止写入** —— 那正好毁掉影子模式的全部价值
+  // （它存在的意义就是"留下可审的记录"，而记录断了没人知道）。
+  {
+    const j = stubJudge({ verdict: VERDICT.ANSWER })
+    const { bridge, logs, WS } = makeBridge({ wake: { policy: 'semantic' }, judge: j })
+    // 把 `runtime` 做成一个**文件**：`appendOp` 里的 `mkdirSync` 会失败 ⇒ 返回 ok:false
+    const { writeFileSync: wf, mkdirSync: mk, rmSync: rm } = await import('node:fs')
+    rm(`${WS}/runtime`, { recursive: true, force: true })
+    mk(WS, { recursive: true })
+    wf(`${WS}/runtime`, 'not a directory', 'utf8')
+    const r = await bridge.handleEvent(groupMsg('小鲸鱼 写不进去也要留痕', 7201))
+    check('★ 判定照常（观测写不进去**不影响这一条消息**）', r.handled !== false, JSON.stringify(r))
+    check('★★ 但**必须有日志**说清流水没写进去（观测不许静默失败）',
+      logs.some((l) => l.includes('判定流水没写进 oplog')), logs.filter((l) => l.includes('oplog')).join(' | ') || '（没有日志）')
+    check('  └ 日志里带上原因（不是一句笼统的"失败"）',
+      logs.some((l) => /判定流水没写进 oplog（这一条查不到了）：.+/.test(l)))
+  }
+
   // ── ④-6 判定失败一律放过（fail-open 的接线那一半）────────────────────
   {
     const j = stubJudge({ judged: false })

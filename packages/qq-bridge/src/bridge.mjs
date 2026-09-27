@@ -1467,8 +1467,15 @@ export class Bridge extends EventTarget {
     //   而那正是这块功能最容易被误判成"机器人坏了"的地方。
     // ★ `excerpt` 是 oplog **唯一会被 privacy.mjs 自动筛**的字段（oplog.mjs:83），
     //   所以原消息只放这里，别的字段只放数字与结论。
+    // ★★ 0.2.3 修一处**静默失败**：`appendOp` **从不抛异常**，它靠**返回值**报错
+    //   （`{ok:false, why}`）—— 而第一版这里只包了 try/catch，等于把失败全吞了：
+    //   磁盘满、`runtime/` 被占成文件、或**当天那个文件已达 2MB 上限**时，
+    //   判定流水会**一声不响地停止写入**。那正好毁掉影子模式的全部价值
+    //   （它的存在意义就是"留下可审的记录"，而记录断了没人知道）。
+    //   ∴ 失败必须留一行日志。这条与整份 oplog 的"绝不抛"纪律不冲突：
+    //   **不影响聊天，但要让人看得见**。
     try {
-      appendOp({
+      const opResult = appendOp({
         workspace: this.config.dsh?.workspace,
         chatKey,
         op: {
@@ -1494,9 +1501,12 @@ export class Bridge extends EventTarget {
           excerpt: String(rendered.text ?? '').slice(0, 80),
         },
       })
+      if (!opResult?.ok) {
+        this.log(`[wake] ⚠️ 判定流水没写进 oplog（这一条查不到了）：${opResult?.why ?? '未知原因'}`)
+      }
     } catch (error) {
-      // 观测手段写不进去不能影响聊天（与整份 oplog 同一条纪律）
-      this.log(`[wake] 判定流水写不进去（已忽略）：${error?.message ?? error}`)
+      // 防御：`appendOp` 承诺不抛，但它内部还有 import 级的隐私模块调用，兜一层
+      this.log(`[wake] ⚠️ 判定流水写入异常（已忽略，不影响这一条消息）：${error?.message ?? error}`)
     }
 
     // ── ⑤ 结论 ───────────────────────────────────────────────────────────
