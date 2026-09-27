@@ -128,10 +128,15 @@ export function buildJudgePrompt({
 } = {}) {
   const names = (Array.isArray(selfNames) ? selfNames : []).filter(Boolean)
   const who = senderName ? `${senderName}（${senderId || '未知号码'}）` : senderId || '未知'
-  const ctxLines = (Array.isArray(recent) ? recent : []).map((m) => {
-    const label = m?.role === 'bot' ? '机器人' : m?.senderName || '某人'
-    return `${label}：${oneLine(m?.text, excerptChars)}`
-  })
+  // ★ 称呼必须**只按 role 决定**，不许"认不出就当某人"：
+  //   调用方（`bridge.mjs` 的 `#wakeContext`）已经按白名单只放 user / bot 进来，
+  //   但这里再做一次显式判断，免得将来有人往里塞第三种 role 时被**默认当成群成员**。
+  const ctxLines = (Array.isArray(recent) ? recent : [])
+    .filter((m) => m?.role === 'bot' || m?.role === 'user')
+    .map((m) => {
+      const label = m.role === 'bot' ? '机器人' : m.senderName || '某人'
+      return `${label}：${oneLine(m?.text, excerptChars)}`
+    })
 
   return [
     '你是 QQ 聊天里的"要不要接话"判定器。你的输出只有一个 JSON 对象，不要解释、不要寒暄、不要用 markdown 代码块。',

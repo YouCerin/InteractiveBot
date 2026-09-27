@@ -1346,18 +1346,41 @@ export class Bridge extends EventTarget {
    *
    * ★ 为什么是"投影"而不是把镜像数组直接递进去：镜像的用途是**给界面看**
    *   （`listConversations` 会原样吐给 UI），它哪天因为界面需求变了形状，
-   *   判定器的输入就会跟着变 —— 那是一种很隐蔽的耦合。所以这里只取需要的子集。
+   *   判定器的输入就会跟着变 —— 那是一种很隐蔽的耦合。
    * ★ 镜像里 `role` 只有三档（user / bot / notice），且**在判定之前就已经写好**
    *   （`#mirror` 在 `decideTrigger` 之前调用），所以判定器天然看得到"刚刚发生了什么"。
    * ★ 只在内存里、重启即空，且空着也必须正确 —— 满足"状态可随时丢弃"这条纪律。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * ★★ 0.2.3 修正：**必须按 role 过滤，不能只投影字段**
+   * ══════════════════════════════════════════════════════════════════════════
+   * 镜像里其实有**四**种 role，不是三种 —— `#mirrorThinking` 往**同一个 `messages` 数组**
+   * 里推 `role: 'thinking'`（那是**模型的内部推理**，存在镜像里的唯一目的是
+   * "只给界面看"），还有 `role: 'notice'`（桥接自己发出去的提示，如"先应一声"）。
+   *
+   * 第一版只投影了字段、没有过滤 role，后果是两个都真的会发生：
+   *   ① **判定器会把模型的内部推理当成"群里某人说的话"** —— 那段推理里经常直接写着
+   *      "这轮不需要插嘴""群里在闲聊"之类的判断，喂回去等于**让它自己给自己投票**，
+   *      而且是**贴着一个错的身份**（见 ②）；
+   *   ② `buildJudgePrompt` 只认 `role === 'bot'`，其余一律标成「某人」⇒
+   *      内部推理与系统提示都会被当成**群成员的发言**。
+   *   ③ 顺带一个泄漏面：那段推理**只该给界面看**（项目里对它的原话是"绝不发到 QQ"），
+   *      而判定提示词是**发出去**的（0.2.3 起还是直连 HTTP）。
+   *
+   * ∴ 这里只放**真正在会话里发生过的一来一回**：`user` 与 `bot`。白名单，不是黑名单 ——
+   * 以后镜像再长出别的 role（比如工具结果），默认**不会**被喂给判定器。
    */
   #wakeContext(chatKey) {
     const msgs = this.#conversations.get(chatKey)?.messages ?? []
-    return msgs.slice(-WAKE_JUDGE_DEFAULTS.contextMessages).map((m) => ({
-      role: m.role,
-      text: m.text,
-      senderName: m.senderName ?? '',
-    }))
+    const ROLES = new Set(['user', 'bot'])
+    return msgs
+      .filter((m) => ROLES.has(m.role))
+      .slice(-WAKE_JUDGE_DEFAULTS.contextMessages)
+      .map((m) => ({
+        role: m.role,
+        text: m.text,
+        senderName: m.senderName ?? '',
+      }))
   }
 
   /**

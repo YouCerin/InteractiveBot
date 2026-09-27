@@ -287,7 +287,7 @@ section('④ 桥接接线：什么时候**不该**问判定器')
     sender: { user_id: MEMBER, nickname: '路人甲' },
   })
 
-  function makeBridge({ wake = {}, judge = null, replies = ['好的'], delays = [], access = {} } = {}) {
+  function makeBridge({ wake = {}, judge = null, replies = ['好的'], delays = [], access = {}, reasonings = [] } = {}) {
     const WS = freshWorkspace()
     const router = new SessionRouter({ log: () => {} })
     const logs = []
@@ -312,11 +312,26 @@ section('④ 桥接接线：什么时候**不该**问判定器')
       rpc.prompts.push(String(contentBlocks?.[0]?.text ?? ''))
       const text = replies[turn] ?? replies[replies.length - 1] ?? '好的'
       const d = Number(delays[turn] ?? 0)
+      const reasoning = String(reasonings[turn] ?? '')
       turn += 1
       // 可选：这一轮很慢 —— 用来构造"回合还在跑时又来了一条消息"（重复内容短路
       // 与"取消旧判定"这两条都只能这么做出来）
       if (d > 0) await new Promise((r) => setTimeout(r, d))
-      router.handleEvent(sessionId, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } })
+      // ★ 形状必须与实测一致：思考是 `content` 里的一个 `{type:'reasoning', text}` 块
+      //   （`session-bridge.mjs` 的 `reasoningOfAssistantMessage`）。桥接会把它写进
+      //   会话镜像的 `role:'thinking'` 条目 —— 那正是"判定器上下文必须过滤 role"那条
+      //   断言的原料。
+      router.handleEvent(sessionId, {
+        type: 'assistant/message',
+        data: {
+          message: {
+            content: [
+              ...(reasoning ? [{ type: 'reasoning', text: reasoning }] : []),
+              { type: 'text', text },
+            ],
+          },
+        },
+      })
       router.handleEvent(sessionId, { type: 'turn/end', data: { reason: 'completed' } })
       return { messageId: `m${turn}` }
     }
@@ -376,6 +391,56 @@ section('④ 桥接接线：什么时候**不该**问判定器')
     check('★ 判定器拿到了一个 AbortSignal（纪律②）', j.signals[0] instanceof AbortSignal)
     check('计数分开：判过一次 / 想沉默一次', bridge.stats.wakeJudged === 1 && bridge.stats.wakeSilenced === 1)
     check('日志里说清了结论与耗时', logs.some((l) => /\[wake\] 群 .*判定=silent/.test(l)), logs.filter((l) => l.includes('[wake]')).join(' | '))
+  }
+
+  // ── ④-4-b ★★ 判定器的上下文**必须按 role 过滤**（内部推理与系统提示不许进去）──
+  //
+  // 这一段盯的是一个**真实缺陷**（0.2.3 自查发现并修掉）：会话镜像里其实有**四**种 role ——
+  // `#mirrorThinking` 往**同一个 `messages` 数组**里推 `role: 'thinking'`（那是**模型的
+  // 内部推理**，存在镜像里的唯一目的是"只给界面看"），还有 `role: 'notice'`
+  // （桥接自己发出去的提示，如"先应一声"）。
+  // 第一版投影**只取字段、没过滤 role**，于是三件事同时发生：
+  //   · 判定器把**模型的内部推理**当成"群里某人说的话"读 —— 而那段推理里经常直接写着
+  //     "这轮不用插嘴""群里在闲聊"之类的话，喂回去等于**让它自己给自己投票**；
+  //   · 身份也是错的：`buildJudgePrompt` 只认 `role === 'bot'`，其余一律标成「某人」；
+  //   · 那段推理**只该给界面看**，而判定提示词是**发出去**的（0.2.3 起还是直连 HTTP）。
+  // 所以这里用**真 Bridge** 造出真实形状的 thinking 条目（走 `assistant/message` 里的
+  // `{type:'reasoning'}` 块 → `reasoningOfAssistantMessage` → `#mirrorThinking`），
+  // 再断言判定器**一个字都没收到**。
+  {
+    const SECRET_THINKING = '这轮是群里闲聊，我不用插嘴（内部推理，不该被任何人读到）'
+    const j = stubJudge({ verdict: VERDICT.ANSWER })
+    const { bridge } = makeBridge({
+      wake: { policy: 'semantic' },
+      judge: j,
+      replies: ['（第一轮的回复）', '（第二轮的回复）'],
+      reasonings: [SECRET_THINKING, ''],
+    })
+    // 第一轮：真跑一轮，把 thinking 写进镜像（role='thinking'）+ 机器人回复（role='bot'）
+    await bridge.handleEvent(groupMsg('小鲸鱼 第一轮', 7101))
+    const afterFirst = j.calls.length
+    // 第二轮：判定器会拿到镜像投影出来的 recent
+    await bridge.handleEvent(groupMsg('小鲸鱼 第二轮', 7102))
+    const second = j.calls[afterFirst]
+    check('第二轮确实又判了一次（不然这条断言测的是空气）', j.calls.length === afterFirst + 1, `calls=${j.calls.length}`)
+
+    const recent = second?.recent ?? []
+    check('★★ 判定器的 recent 里**只有** user / bot 两种 role（白名单，不是黑名单）',
+      recent.length > 0 && recent.every((m) => m.role === 'user' || m.role === 'bot'),
+      JSON.stringify(recent.map((m) => m.role)))
+    check('★★ 机器人自己说过的话**在**（判定"是不是在回应它"要用）',
+      recent.some((m) => m.role === 'bot' && String(m.text).includes('第一轮的回复')),
+      JSON.stringify(recent.map((m) => m.text).slice(0, 3)))
+    check('★★ 第一轮的用户消息**在**（那是"近期对话"的本体）',
+      recent.some((m) => m.role === 'user' && String(m.text).includes('第一轮')))
+
+    // ★★ 最强的一条：断言**真正发出去的那段提示词**里没有内部推理。
+    //    比"检查 recent 的 role"更硬 —— 它检查的是离开这台机器的字节。
+    const prompt = buildJudgePrompt(second)
+    check('★★★ 内部推理**一个字都没有进判定提示词**（它只该给界面看）',
+      !prompt.includes(SECRET_THINKING) && !prompt.includes('不用插嘴'), prompt.split('\n').filter((l) => l.includes('推理')).join(' | '))
+    check('  并且它没有被伪装成"某人说的话"（过滤是过滤，不是改名）',
+      !/某人：.*不用插嘴/.test(prompt))
   }
 
   // ── ④-5 影子模式：判定照跑、**行为一个字都不变** ─────────────────────
