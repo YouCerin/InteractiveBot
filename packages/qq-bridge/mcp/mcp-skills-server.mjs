@@ -52,7 +52,7 @@ import {
 
 const PROTOCOL_VERSION = '2024-11-05'
 // ⚠️ 版本号必须与 package.json 一致（mocks/verify-manifest.mjs 会核对）
-const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.2.4' }
+const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.2.3' }
 
 /** 服务端配置：`{ skillsDir, configPath, workspace? }`。 */
 let config = null

@@ -25,8 +25,7 @@
  *   node scripts/assemble-release.mjs --force             # 允许覆盖已存在的输出目录（默认拒绝）
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,72 +56,18 @@ const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 // ★ `personas` 必须在清单里（0.2.2）：它是**出厂默认那两套人设**的文件。
 //   漏了它的后果是「发布包里一套人设都没有」—— 界面人设栏空着，而且**不会报错**
 //   （启动时的 `ensureDefaultPersonas` 只在人员没动过手时补默认，用户自己建过就什么都不补）。
-const COPY_DIRS = [
-  'src',
-  'mcp',
-  // ★ `assets/` 必须在清单里：它装着 `icon.ico`，而 `创建带图标的快捷方式.bat`
-  //   生成的 .lnk 里写的是**相对路径** `assets\icon.ico,0` —— 少了它，快捷方式
-  //   能建出来但**图标是空白**，而且不报错（只会看起来"没生效"）。
-  //   （0.2.4 核对过它确实在清单里；这条注释是补上"为什么不能删"。）
-  'assets',
-  'skills',
-  'personas',
-  join('config-ui', 'dist'),
-  join('vendor', 'node'),
-  join('vendor', 'node_modules', 'ws'),
-  // ★ 0.2.4：两个"界面里已有同样按钮"的诊断入口被收进了这个子目录
-  //   （用户要求：包根别摆那么多东西）。**收起来 ≠ 删掉**：
-  //   它们不经过界面也不经过桥接的 HTTP 接口，所以恰恰在"控制台打不开 /
-  //   桥接起不来"时是唯一能拿到诊断的路。理由写在那个目录自己的 读我.txt 里。
-  //
-  // ⚠️ **`desktop/` 与 `scripts/` 刻意不进包**（0.2.4 试过一次、退回来了）：
-  //   本想让"从包里重新打一个 exe"成立，但 `desktop/node_modules`（Electron 工具链，
-  //   ~72 MB / 7 千多个文件）与 `desktop/.npm-cache`（~200 MB）**不在 git 里、
-  //   却会被 `cpSync` 照抄** ⇒ 包从 413 MB 涨到 1000 MB，而且那两份缓存本来就不该发出去。
-  //   即使过滤掉，包里也只有**没有依赖的源码** —— 使用者仍要自己 `npm install`，
-  //   所以"包内重打 exe"并没有真的变简单。
-  //   ∴ "从源码打 exe / 从源码开窗口"这两个入口**只留在仓库**（`打包桌面程序.bat` /
-  //   `打开桌面界面（源码运行）.bat` 仍在包根与仓库里，但它们依赖仓库里的 desktop/）。
-  //   发布包里给使用者的是**已经打好的 exe** + `桌面端bot启动.bat`。
-  //
-  // ★★ 目录名**必须是纯 ASCII** —— 这不是风格问题，是**会崩**：
-  //   实测（Node v24.9.0 / Windows）`cpSync(中文名目录, dst, {recursive:true})`
-  //   让**整个进程**以 Access Violation 崩掉（退出码 -1073740791 /
-  //   STATUS_STACK_BUFFER_OVERRUN），没有任何异常可捕获 —— 于是组装走到这一项就
-  //   **静默半途而废**（目录只拷了一半，日志停在上一行）。
-  //   第一版叫「备用命令（界面起不来时用）」，正好踩中。
-  //   ⚠️ 同一族的坑本仓库早有记录（`AGENT.md` 第 8 条：`rmSync` 删中文名**文件**会崩），
-  //   这里是它的兄弟：**目录**名 + `cpSync`。文件名里的中文没事（一直这么用）。
-  //   回归断言在 `mocks/verify-release-hygiene.mjs`（把这条钉住，防它被改回中文名）。
-  'backup-commands',
-]
-/** 要单文件拷贝的（相对包根）。★ `启动机器人.bat` 等入口**必须**在这里 —— 上次就是漏了它们。 */
+const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
+/** 要单文件拷贝的（相对包根）。★ `启动机器人.bat` 等三个入口**必须**在这里 —— 上次就是漏了它们。 */
 const COPY_FILES = [
   'package.json',
   'start.bat',
-  // ★ 这两个中文名入口必须在清单里 —— 上一次组装是手敲的、把它们漏了，
+  // ★ 这三个中文名入口必须在清单里 —— 上一次组装是手敲的、把它们漏了，
   //   于是它们**只存在于发布包里、仓库里没有源**（这次已把源补回项目）。
-  //   0.2.4：`桌面端bot启动.bat` 是"只开独立界面"的那个入口（用户要求），
-  //   与 `启动机器人.bat`（全能启动器：还分派 --check/--doctor… 且没有 exe 时退回浏览器）
-  //   并列存在 —— 两个都得进包。
   '启动机器人.bat',
-  '桌面端bot启动.bat',
-  // ⚠️ `打包桌面程序.bat` 与 `打开桌面界面（源码运行）.bat` **刻意不进发布包**：
-  //   它们要能工作就得连 `desktop/` 与 `scripts/`（还得带 Electron 工具链）一起发 ——
-  //   而那会把包从 413 MB 抬到 1000 MB，且使用者仍要自己 `npm install`。
-  //   ∴ 它们留在**仓库**里（改桌面壳时用），发布包给的是**已经打好的 exe**。
+  '检查配置.bat',
+  '体检.bat',
   '创建带图标的快捷方式.bat',
-  // ⚠️ `QQ机器人.lnk` **不在清单里**（0.2.4 更正）。
-  //
-  // 它曾经在这里，而包根**根本没有这个文件** ⇒ 只要跑组装就必然停在第③步
-  // （"包根缺少这些必需件：QQ机器人.lnk"）。查过才知道它的来历：只在
-  // `_release/` 的两个老包里存在（0.2.0 那份是**手敲组装**的、把开发机上现成的
-  // 快捷方式一起拷了进去），git 里从未有过源文件。
-  //
-  // 而它**本来就不该随包分发**：`.lnk` 存的是**绝对路径**，而且带的是本机图标缓存位置 ——
-  // 在别人机器上目标与图标都是坏的（`创建带图标的快捷方式.bat` 的注释里早就写着这条，
-  // 所以那个脚本是"在**使用者的机器上**生成 .lnk"）。现在由它生成两个：
-  // `QQbot.lnk`（指向 .bat 入口）与 `InteractBot.lnk`（指向 app\InteractBot.exe）。
+  'QQ机器人.lnk',
   '先读我-首次使用.txt',
   'setup.mjs',
   'prices.json',
@@ -132,58 +77,6 @@ const COPY_FILES = [
   'README.md',
   'RELEASE.md',
 ]
-
-/**
- * 桌面壳（0.2.4）：`InteractBot.exe` 那一份从 `.build-desktop/` 的**最近一次成功构建**取。
- *
- * 为什么读 `latest.json` 而不是"猜一个目录名"：`.build-desktop/` 下每次构建是一个新目录
- * （`pack-<时间戳>`，见 scripts/assemble-desktop.mjs 的说明：Windows 上旧产物常被
- * Defender/索引器占住、删不掉）。既然同时可能有好几份，**"哪一份是当前的"就必须是记下来的**，
- * 而不是按名字排序猜 —— 猜错了会把一份旧 exe 打进新包，而且没有任何东西会报错。
- *
- * ⚠️ 这一段**只做查证、把结论记下来**，一条都不打印：`log` / `bad` 在下面才声明
- * （const 的 TDZ），在这里调它们会直接 `ReferenceError: Cannot access 'bad' before initialization`
- * —— 实测踩过。所以结论存进 `desktopNotice`，由下面那段按原顺序打出来。
- */
-const DESKTOP_LATEST = join(PKG_ROOT, '.build-desktop', 'latest.json')
-let DESKTOP_UNPACKED = null
-let DESKTOP_META = null
-const desktopNotice = [] // { level: 'info'|'bad', text }
-{
-  if (existsSync(DESKTOP_LATEST)) {
-    try {
-      const meta = JSON.parse(readFileSync(DESKTOP_LATEST, 'utf8'))
-      const dir = join(PKG_ROOT, meta.unpacked ?? '')
-      if (existsSync(join(dir, 'InteractBot.exe'))) {
-        DESKTOP_UNPACKED = dir
-        DESKTOP_META = meta
-        desktopNotice.push({
-          level: 'info',
-          text: `桌面壳：用最近一次构建（${meta.builtAt ?? '?'}，Electron ${meta.electronVersion ?? '?'}）`,
-        })
-      } else {
-        desktopNotice.push({
-          level: 'bad',
-          text: `.build-desktop/latest.json 指向的目录里没有 InteractBot.exe：${dir}`,
-        })
-      }
-    } catch (error) {
-      desktopNotice.push({ level: 'bad', text: `读不出 .build-desktop/latest.json：${error?.message ?? error}` })
-    }
-  } else {
-    // ★ 不拦：没有桌面壳**也要能组出一个能用的包**（桌面壳是本机工具链打出来的，
-    //   换台机器可能没有）。但必须**说清楚** —— 否则"0.2.4 说好的独立窗口"会静默地不成立
-    //   （`启动机器人.bat` 会悄悄退回浏览器那条路）。
-    desktopNotice.push({
-      level: 'warn',
-      text:
-        '没有 .build-desktop/latest.json —— 本次**不带桌面壳**（InteractBot.exe 不会进包，' +
-        '「启动机器人.bat」会退回浏览器那条老路）',
-    })
-    desktopNotice.push({ level: 'info', text: '   要带的话：cd desktop && npm install --ignore-scripts' })
-    desktopNotice.push({ level: 'info', text: '             然后回到包根跑 node scripts/fetch-electron.mjs 与 node scripts/assemble-desktop.mjs' })
-  }
-}
 
 let failures = 0
 const log = (m) => console.log(m)
@@ -197,11 +90,6 @@ log(`组装发布包  InteractBot-${VERSION}-win-x64`)
 log(`  源  ：${PKG_ROOT}`)
 log(`  目标：${OUT}`)
 if (DRY) log('  ⚠️ --dry-run：只报告，不写盘')
-for (const n of desktopNotice) {
-  if (n.level === 'bad') bad(n.text)
-  else if (n.level === 'warn') log(`⚠️ ${n.text}`)
-  else log(n.text)
-}
 log('')
 
 // ⚠️ 子进程输出**不能用管道捕获**：受限沙箱禁止"通过管道截获另一个程序的输出"
@@ -337,38 +225,8 @@ if (existsSync(OUT)) {
   //   实测：`cpSync(srcDir, existingDir, {recursive:true})` 在这种"目录已存在
   //   且里面有同名目录"的情形下会抛 EIO（errno 5）—— 报错指向 `cp` 那个 syscall，
   //   完全看不出是"目标目录没清"造成的。删了重建最省事也最可预期。
-  //
-  // ★★★ 但"删到一半失败"会留下一个**半份发布包**，而那比"没组装"更坏：
-  //   它看起来像一份发布包（目录在、文件有几个），实际缺 Electron 运行时。
-  //   0.2.4 实测事故：Windows 上有进程/扫描器占着 `default_app.asar` ⇒ `rmSync` 抛
-  //   EPERM，而**已经删掉的那一半不会回来** —— 两个旧发布包因此变成 133/134 个文件
-  //   （正常 209），而使用者无从判断哪一份能跑。
-  //   ∴ 先删到临时名、**确认删得掉**，再真正删；删不掉就**明确报错并退出**，
-  //     绝不留下半份目录（宁可什么都不做）。
-  const tmp = `${OUT}.deleting-${Date.now()}`
-  try {
-    renameSync(OUT, tmp)
-  } catch (error) {
-    log('')
-    bad(
-      `旧输出目录不能改名（${error?.code ?? error?.message}）：${OUT}\n` +
-        '   通常是有进程/扫描器占着里面的文件（Defender、搜索索引器，或**这个包里的程序正在运行**）。\n' +
-        '   ⇒ **本次不组装**：继续下去会把旧目录删掉一半，留下一个看起来像发布包、实际不全的目录。\n' +
-        '   怎么办：① 关掉正在跑的 InteractBot / 等一会儿再试；② 或者换一个输出目录：' +
-        '`--out <新目录>`（推荐，旧目录留着不动）。',
-    )
-    process.exit(1)
-  }
-  try {
-    rmSync(tmp, { recursive: true, force: true })
-    log('   （--force：旧输出目录已清掉再重建）')
-  } catch (error) {
-    // 名字已经改掉了 ⇒ 不会污染 OUT；但临时目录留着要说清
-    bad(
-      `已把旧目录改名成 ${tmp}，但删不掉（${error?.code ?? error?.message}）—— 它是个残留，不会影响本次组装。\n` +
-        '   稍后（重启后）手工删掉它即可。',
-    )
-  }
+  rmSync(OUT, { recursive: true, force: true })
+  log('   （--force：已清掉旧的输出目录再重建）')
 }
 mkdirSync(OUT, { recursive: true })
 for (const d of COPY_DIRS) {
@@ -379,101 +237,14 @@ for (const d of COPY_DIRS) {
   //   src/extensions.mjs 的 ensureSkillNodeModules）。它**绝不能进发布包**：
   //   链的目标是开发机的绝对路径，换台机器就是死链，而且会让"发布包里夹带 node_modules"
   //   这条本来就该守住的规则失效。用户拿到包后第一次启动，桥接会自己重建它。
-  //
-  // ★★ `desktop/` 与 `scripts/` 也要**排掉 node_modules**（0.2.4 实测踩到）：
-  //   不加过滤时组装出来是 **9122 个文件 / 1002 MB** —— 因为 `desktop/node_modules`
-  //   是 Electron 工具链（~72 MB，7 千多个文件），而它是**能被 .gitignore 忽略、却会被
-  //   `cpSync` 照抄**的。发布包里那份`打包桌面程序.bat`本来就会引导使用者自己装它。
-  //   ⚠️ 判据用"相对拷贝根的这一段路径里有没有 node_modules"，不能只看 basename
-  //   （`vendor/node_modules/ws` 是**必须带**的，那是另一条清单项，不走这个 filter）。
-  const makeFilter = (d) =>
-    d === 'skills' || d === 'desktop' || d === 'scripts'
-      ? (src) => {
-          const rel = src.slice(join(PKG_ROOT, d).length)
-          // node_modules：Electron 工具链（~72 MB / 7 千多个文件），使用者现装
-          if (/[\\/]node_modules([\\/]|$)/.test(rel)) return false
-          // .npm-cache：npm 缓存 + 那次下下来的 Electron 运行时 zip（~200 MB）——
-          //   实测第一次过滤掉 node_modules 后仍有 606 MB，就是它。
-          if (/[\\/]\.npm-cache([\\/]|$)/.test(rel)) return false
-          return true
-        }
-      : undefined
-  // ⚠️ 这里必须**按目录调用一次** makeFilter(d)，拿到的是谓词本身；
-  //   第一版我写成 `...(filter ? { filter } : {})`，那会把**函数**当谓词传进去
-  //   （工厂本身也是函数，truthy）⇒ 每个条目都会被调用一次并返回一个函数（truthy）
-  //   ⇒ 一个文件都过滤不掉。这种错不会有异常，只会"过滤看起来加了、其实没生效"。
-  const dirFilter = makeFilter(d)
-  cpSync(from, to, { recursive: true, force: true, ...(dirFilter ? { filter: dirFilter } : {}) })
+  const filter =
+    d === 'skills' ? (src) => !/[\\/]node_modules([\\/]|$)/.test(src.slice(from.length)) : undefined
+  cpSync(from, to, { recursive: true, force: true, ...(filter ? { filter } : {}) })
   log(`   📁 ${d}`)
 }
 for (const f of COPY_FILES) {
   cpSync(join(PKG_ROOT, f), join(OUT, f), { force: true })
   log(`   📄 ${f}`)
-}
-
-// ── ④-b 桌面壳（0.2.4）：整目录搬进包根的 `app/` ─────────────────────────
-//
-// ★ 为什么是 `app/` 子目录、而不是把 exe 与 Chromium 的几十个 dll 平铺在包根：
-//   ① 包根现在有 16 个入口文件与 config.json，再铺 20 个 dll 会让人一眼看不出
-//      "该点哪个"；② 名字冲突不再是问题（`version` / `LICENSES.chromium.html`
-//      这类通用名不与我们的文件抢位）；③ 想删掉桌面壳时，删一个目录就干净了。
-//
-// ★★ exe 还是能从那儿找到包根：它按**存在性**往上找（`desktop/lib.cjs` 的
-//    `resolvePkgRoot`）—— `<包根>/app/resources/app` → 上两级是 `<包根>/app`（没有
-//    config.example.json）→ 再上两级就是 `<包根>`（有）⇒ 命中。这一段是**实测过**的，
-//    不是"应该能找到"（见下面 ⑤ 的验收）。
-if (DESKTOP_UNPACKED) {
-  log('')
-  log('── ④-b 桌面壳（InteractBot.exe）──')
-  const appDir = join(OUT, 'app')
-  mkdirSync(appDir, { recursive: true })
-  cpSync(DESKTOP_UNPACKED, appDir, { recursive: true, force: true })
-  const exe = join(appDir, 'InteractBot.exe')
-  if (!existsSync(exe)) {
-    bad(`拷完以后 app/InteractBot.exe 不存在 —— 桌面壳没进包`)
-  } else {
-    let n = 0
-    let bytes = 0
-    const walkApp = (d) => {
-      for (const e of readdirSync(d, { withFileTypes: true })) {
-        const full = join(d, e.name)
-        if (e.isDirectory()) walkApp(full)
-        else if (e.isFile()) {
-          n += 1
-          bytes += statSync(full).size
-        }
-      }
-    }
-    walkApp(appDir)
-    log(`   📁 app/（${n} 个文件，${(bytes / 1024 / 1024).toFixed(1)} MB）`)
-    log(`   📄 app/InteractBot.exe（${(statSync(exe).size / 1024 / 1024).toFixed(1)} MB）`)
-    // ★ 溯源：把"这份 exe 是哪份源码、哪个 Electron、什么时候打的"写进包。
-    //   与 config-ui 的 ui-build.json 同一个理由 —— 发布包里的东西必须能自证来源。
-    const desktopMeta = DESKTOP_META ?? {}
-    const appMain = join(appDir, 'resources', 'app', 'main.cjs')
-    writeFileSync(
-      join(appDir, 'PROVENANCE.txt'),
-      [
-        'InteractBot 桌面壳（控制台窗口 + 启动器）',
-        '',
-        `打包时间   ：${desktopMeta.builtAt ?? '?'}`,
-        `Electron   ：${desktopMeta.electronVersion ?? '?'}`,
-        `源文件     ：packages/qq-bridge/desktop/{main,preload,lib}.cjs + splash.html + assets/app-icon.ico`,
-        `主进程哈希 ：${existsSync(appMain) ? createHash('sha256').update(readFileSync(appMain)).digest('hex').slice(0, 16) : '（读不到）'}`,
-        '',
-        '怎么启动：双击包根目录的「启动机器人.bat」（或创建带图标的快捷方式）。',
-        '直接双击 app\\InteractBot.exe 也可以 —— 它会自己找到包根、起桥接、开窗口。',
-        '',
-        '窗口关掉只会收到右下角托盘，机器人**继续在线**；要它下线请用托盘菜单的',
-        '「退出并停止机器人」。',
-        '',
-        '这份文件由 scripts/assemble-release.mjs 生成，用来回答"这个 exe 是哪来的"。',
-        '',
-      ].join('\n'),
-      'utf8',
-    )
-    log('   📄 app/PROVENANCE.txt（这份 exe 的来源）')
-  }
 }
 
 // ★ 空白 config.json：从**模板**复制，绝不拷你的真配置

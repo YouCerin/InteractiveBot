@@ -86,27 +86,8 @@ rem Open the console UI in the default browser once the config API is up.
 rem curl itself does the waiting: retries on connection-refused for ~2 min,
 rem and only on success does the browser open. Skip with: start.bat --no-browser
 rem Note: if you changed ui.apiPort in config.json, change 3410 below too.
-rem
-rem 0.2.4: SKIPPED when app\InteractBot.exe exists. The desktop app opens the
-rem real window itself, so opening a browser too would give you two consoles
-rem for one bot -- and the point of this version is that the browser is no
-rem longer the console. (The Chinese-named launcher .bat routes a plain
-rem double-click to the app; this branch only matters for
-rem "start.bat --no-snowluma" style invocations.)
-rem
-rem WARNING: keep this FILE pure ASCII, comments included. The line above used
-rem to name that launcher in Chinese, and under cmd's GBK codepage those bytes
-rem swallowed the line break -- cmd then read the NEXT line as part of the
-rem comment, so this whole if-block got split mid-token and every run printed
-rem   'em' is not recognized as an internal or external command
-rem plus a dozen similar lines (the launcher looked like it did nothing).
-rem scripts/... and mocks/verify-text-encoding.mjs now check for this.
 if /i not "%~1"=="--no-browser" (
-  if exist "%~dp0app\InteractBot.exe" (
-    echo Desktop app found: it will open the console window itself ^(no browser^).
-  ) else (
-    start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/ && start http://127.0.0.1:3410/"
-  )
+  start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/api/status && start http://127.0.0.1:3410/"
 )
 
 rem --- QQ bridge ---------------------------------------------------------------

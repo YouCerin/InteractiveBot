@@ -47,57 +47,6 @@ start.bat
 **跑之前先看 `--doctor` 的输出。** 它会把「哪一项没配好」直接列出来；
 它全绿了再启动，可以省掉 90% 的"连不上但不知道为什么"。
 
-### ★ 0.2.4 起：入口是**桌面程序**，不是浏览器页面
-
-```
-启动机器人.bat  ─┬─ 有 app\InteractBot.exe → 起它（它自己起桥接/协议端、开真正的窗口）
-                 └─ 没有                     → 退回 start.bat（后台桥接 + 浏览器里的控制台）
-```
-
-★ **不打 exe 也能开那个窗口 —— 源码里就能起**（改桌面壳时用这条，省掉 2 分钟打包）：
-
-```bash
-npm run desktop        # = node desktop/node_modules/electron/cli.js desktop
-# 或者直接双击包根的【打开桌面界面（源码运行）.bat】
-# 第一次若报"找不到 electron"：cd desktop && npm install --ignore-scripts && node scripts/fetch-electron.mjs
-```
-
-**从源码打 exe** 也各有一个双击入口（以前是"三条命令、顺序不能错、而没有任何地方写着"）：
-
-| 双击 | 作用 |
-|---|---|
-| **`打开桌面界面（源码运行）.bat`** | 跑 `desktop/` 里那份源码开窗口（**改完 `desktop/*.cjs` 直接重启它**，不必打包） |
-| **`打包桌面程序.bat`** | 从源码打 exe（内部就是 `scripts/assemble-desktop.mjs`；工具链缺失时给你 setup 命令，不静默失败） |
-
-它跑的是 **`desktop/` 里那份源码**，行为与 exe 一致（同一个 `main.cjs`），
-而且**数据落在源码侧**（`packages/qq-bridge/{config.json,workspace-qq,logs,cache}`）——
-因为包根解析到的就是本包根。`npm run desktop:pack` 只有要交付 exe 时才跑。
-
-★★ **exe 里装的是什么、没装什么**（问过一次，记这里）：
-`app/resources/app/` 里只有壳的那几个文件（`main/preload/lib/splash + 图标`）；
-**桥接源码没被打进 exe** —— 它在发布包根的 `src/`，由壳按包根去找。
-∴ "源码里能不能起窗口"的答案是**能**，而且那份代码与 exe 里那份**逐字节相同**
-（`assemble-desktop.mjs` 每次都会比对，不一致就报错）。
-
-⚠️ **包根是怎么定的**（真实事故，改之前必读）：壳的包根 = `config.json` / `src/` /
-`workspace-qq` 所在那一层，按**三级判据**找：① 启动器设的 `INTERACTBOT_PKG_ROOT`
-（`启动机器人.bat` / `start.bat` 会设）→ ② 从 `app.getAppPath()` 逐级向上找"包根标记"
-（同时有 `config.example.json` 与 `src/index.mjs`）→ ③ 找不到就**返回链上真实存在的一层并喊一声**，绝不猜。
-第一版依赖 `app.isPackaged`，而 **`asar: false` 时它是 `false`** ⇒ 打包分支没进、
-壳把 `app\` 当成了包根（读不到使用者的 config、日志写进 `app\logs\`）。
-∴ 任何"按目录层数猜路径"的写法在这里都是错的。
-
-* **窗口关掉 ≠ 机器人下线**：窗口只是收到右下角托盘，桥接照跑。真要它下线用托盘菜单的
-  「退出并停止机器人」（或界面里的「停止」）。
-* 界面**还是那一份** `config-ui/dist`（窗口加载的是桥接自己伺服的 `http://127.0.0.1:<端口>/`）——
-  所以"改界面 → 重新 build → 两种入口都生效"，不存在第二份 UI。
-* 桌面壳自己的源码在 `desktop/`（`main.cjs` / `preload.cjs` / `lib.cjs` / `splash.html`）。
-  它**只做启动器的活**：起桥接一律走 `node src/index.mjs --background`（那份"已经有桥接在跑"
-  的判断只在 `src/index.mjs` 里有一份），它不复刻任何启动逻辑。
-* 改桌面壳之后**要交付时才**重新打包：`npm run desktop:pack`（≈2 分钟，产物 324 MB）。
-* ⚠️ **它跑不起来时先看 `logs/desktop.log`**（与 `logs/bridge.log` 分开）：
-  窗口/托盘/启动页的问题全在那里，桥接自己的问题才在 bridge.log。
-
 ---
 
 ## 3. 绝对不能改的七件事
@@ -115,10 +64,6 @@ npm run desktop        # = node desktop/node_modules/electron/cli.js desktop
 | 7 | ★ **涉及 UI 的改动，必须同步更新 `CONFIG-UI.md`** | 界面是照那份文档生成的。文档落后于代码 = UI 做出错误的东西，而且两边各说各话 |
 | 8 | ★★ **删单个文件必须用 `unlinkSync`，不要用 `rmSync`** | 实测（Node v24.9.0 / Windows）：`rmSync(path)` 删单个文件要么**静默失败**（不抛错、返回值正常、文件仍在 —— 使用者以为删了、机器人却还记得），要么直接把进程**崩掉**（退出码 `-1073740791` = `STATUS_STACK_BUFFER_OVERRUN`，我删一个**中文文件名**时崩过一次）。**删目录**用 `rmSync(..., {recursive:true})` 没问题，不受此限。★ 这条在 `memory-files` / `images` / `api` / `recipes` / `tasks` / `oplog` 六处各写过一遍注释 —— 就是因为我没先查、又踩了一次，所以提到这里 |
 | 9 | ★★★ **增强路径可以失败，但不许"安静地失败"** | 提示词里的附加段落（任务台账 / 配方 / 记忆）都包在 `try/catch` 里，本意是"算出不来只是少一段上下文，别弄挂这一轮" —— 但**空 `catch` 会吞掉硬错误**。真机事故：`#buildPrompt` 里用的 `chatKey` 其实是 `#runTurn` 的局部变量，于是 `readTask` 每轮抛 `ReferenceError` 被吃掉，**任务段在真机上从未注入过一次**，而 124 项离线断言全绿（它们只测纯函数 `renderTaskBlock`，**没测接线**）。现在统一走 `#warnInjectOnce(段落名, error)`：**每段只喊一次**（防刷屏），但一定留证据。教训有两层：① 空 `catch` 要配一句日志；② **喂给纯函数的参数从哪来，必须有测试盯着** |
-| 10 | ★★ **桌面壳（`desktop/`）的运行期依赖必须是 0** | 壳只用 Electron 的 API 与 node 内置模块。加一个 `dependencies` 会让 electron-builder 去"收集运行期依赖"（`npm list`），而**本机沙箱禁止用管道捕获子进程输出** ⇒ `⛔ EPERM` ⇒ 整个打包失败。这条不是风格问题：`scripts/assemble-desktop.mjs` 的前置检查会直接拒绝组装。详见下一节 |
-| 11 | ★★ **`.bat` / `.cmd` 一律纯 ASCII，绝不写中文注释** | cmd 用**系统代码页**（中文 Windows = GBK）解析批处理文件，而本仓库的文件是 UTF-8。一个中文字符的字节被当 GBK 读时会**吞掉行尾** ⇒ cmd 把下一行当成这一行的一部分 ⇒ 整个 `if (...)` 块从中间断开。症状**不是"报错停住"**，而是十几行 `'em' is not recognized as an internal or external command`，而**真正那条命令根本没跑**（启动器看起来"什么都没做"）。★ 这个坑本仓库踩过**三次**：`创建带图标的快捷方式.bat`、`scripts/build-tools/npm.cmd`、以及 **0.2.4 的 `start.bat`** —— 第三次的代价最大：一句中文注释让**整个启动链不可用**，而 51 套离线测试**全绿**（当时没有任何东西在检查这件事）。∴ 现在它是可执行的判据：`mocks/verify-text-encoding.mjs` 里"所有 .bat/.cmd 都是纯 ASCII"那条（报出**第一处所在的行**，不是只报字节数），并已用**负对照**验过牙。要解释就写在 `.md` / `.mjs` 里；中文**文件名**不受影响（那是 NTFS 的事，与代码页无关） |
-| 12 | ★★★ **`.bat` 的注释里绝不能出现裸 `>`（会截断文件）** | `>` 对 cmd 是**重定向**，而 `rem` 只吃掉"命令"，**不吃掉重定向**。0.2.4 实测事故：我在注释里写了 `rem   DesktopBot.lnk -> 桌面端bot启动.bat`，cmd 于是去找一个叫 `DesktopBot.lnk` 的命令、并把**目标文件截断成 0 字节** —— 一次弄空了 `桌面端bot启动.bat` **和** `启动机器人.bat`（后者是**用户的主入口**）。两个文件都变成 0 字节，而**离线测试当时没红**（没有任何断言读那两个文件的内容）。∴ ① 注释里要写箭头就写 `to`（或干脆别写）；② `mocks/verify-desktop.mjs` 现在断言这两个启动器的**内容**（不只是"存在"）；③ 同族的还有 `<` —— 一律别在 `.bat` 注释里用 |
-| 13 | ★★ **改完 `.bat` 必须真跑一次那条分支** | 上面两条的共同教训：`.bat` 的坏法**都不报错**（一个吞换行、一个截断文件），静态读一遍看不出。0.2.4 里 `创建带图标的快捷方式.bat` 的 `echo Shortcut(s) created` 就因为未转义的 `)` 在**成功路径**上打出 `created was unexpected at this time` —— 而它在仓库里躺了很久没人发现（因为它"看起来还能用"）。∴ 改了 `.bat` 就在真终端里点一遍对应分支 |
 
 **第 7 条的范围**（哪些算"涉及 UI"）：
 新增/改名配置项、新增或改变 HTTP 接口与响应结构、改变界面需要反映的行为
@@ -136,26 +81,8 @@ qq-bridge/
 ├── PROJECT.json      ← 包契约（机器可读：命令/配置/不变量/故障特征）
 ├── README.md         ← 给人看的完整说明（设计决定、排障表）
 ├── config.json       ← 全部运行配置
-├── start.bat         ← 入口（优先用包内 Node）；发布包里由桌面壳接手
+├── start.bat         ← 入口（优先用包内 Node）
 ├── setup.mjs         ← 一次性准备
-├── 打包桌面程序.bat    ← ★ 0.2.4：**从源码打 exe**（双击即可；内部调 scripts/assemble-desktop.mjs）
-├── 打开桌面界面（源码运行）.bat ← ★ 0.2.4：**不打 exe 就开窗口**（跑 desktop/ 里那份源码）
-├── backup-commands/  ← ★ 0.2.4：两个诊断入口（检查配置.bat / 体检.bat
-│                       = `start.bat --check` / `--doctor`）。界面里已有同样的按钮
-│                       （概览页「检查配置」、状态条「体检」），所以它们从包根挪到了这里 ——
-│                       但**没有删**：它们不经过界面也不经过桥接的 HTTP 接口，
-│                       恰恰在"控制台打不开"时才是唯一能用的一条路。理由在那个目录的 读我.txt。
-│                       ⚠️ 包根**只允许三个 .bat**，`check-release-package.mjs` 有断言盯着。
-│                       ⚠️ ★★ 目录名**必须是 ASCII**：实测 `cpSync(中文名目录, …, {recursive:true})`
-│                       会让进程 Access Violation **崩掉**（-1073740791），组装半途而废。
-│                       第一版叫「备用命令（界面起不来时用）」，正好踩中 —— 见 assemble-release.mjs
-├── desktop/          ← ★ 桌面壳（0.2.4）：把控制台装进真正的窗口，并当启动器
-│   ├── main.cjs            主进程：窗口 / 托盘 / 单实例 / 启停桥接
-│   ├── lib.cjs             ★ 纯逻辑（端口从哪来、状态怎么翻译、什么算启动成功）—— 可离线测
-│   ├── preload.cjs         启动页与主进程之间**唯一**的通道（四个白名单动作）
-│   ├── splash.html         启动页（窗口打开前那几秒给你看的东西）
-│   ├── electron-builder.yml 打包配置（★ `asar: false` 必须在顶层）
-│   └── assets/app-icon.ico  窗口/托盘/任务栏图标（与包根 assets/icon.ico 同一份）
 ├── src/
 │   ├── index.mjs          装配与启动顺序  ← 改启动流程看这里
 │   ├── local.mjs          ★ 路径解析（可搬迁性全靠它）
@@ -171,18 +98,11 @@ qq-bridge/
 │   ├── extensions-service.mjs ★ 扩展开关与设置（**即时生效**那条通道）
 │   ├── plugins.mjs        内置插件登记表（记忆/看图/QQ工具… 的开关 + 即时还是重启）
 │   └── doctor.mjs         体检
-├── scripts/          构建脚本（**不进发布包**）
-│   ├── assemble-desktop.mjs  ★ 打桌面壳（stage → electron-builder → 验收）
-│   ├── fetch-electron.mjs    下 Electron 运行时（走 npmmirror 镜像，不用 github）
-│   ├── patch-electron-builder.mjs ★ 给收集器打"不要管道"的补丁（本机沙箱限制）
-│   ├── build-tools/npm-stub.mjs   收集器问"有哪些依赖"时的替身（答：没有）
-│   ├── assemble-release.mjs  组装发布包（把 app/ 平铺进去）
-│   └── check-release-package.mjs 发布包验收
 ├── mcp/              手写的 MCP 服务器：mcp-qq-server.mjs（QQ 工具）+ mcp-skills-server.mjs（技能工具）
 ├── skills/           外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
 ├── mocks/            测试替身与验证脚本（不需要真 QQ，不花钱）
 ├── vendor/           包内自带：node 运行时 + ws（由 setup.mjs 生成）
-├── logs/             运行日志（`bridge.log` 桥接的、`desktop.log` 桌面壳的）
+├── logs/             运行日志
 └── workspace-qq/     ★ agent 的工作区 = 权限沙箱的根
     ├── MEMORY.md     全局记忆（agent 自己维护）
     ├── memory/       按人/按群的记忆、指令、回执、快照（**篡改检测只扫这里和根**）
@@ -195,40 +115,6 @@ qq-bridge/
 ```
 
 > ★ 改 `docs/项目简介.md` 之后**不用手抄一份**：桥接下次启动会自动重写 `store/interactbot-intro.md`。
-
-### ★★ 桌面壳为什么长这样（三条边界，改之前先读）
-
-| # | 边界 | 为什么 |
-|---|---|---|
-| 1 | 窗口加载的是**桥接伺服的地址**（`http://127.0.0.1:<端口>/`），不是本地 `dist/index.html` | 只有一条链路：`config-ui/src` → `dist` → 窗口。若改成直接 load 本地文件，就会出现"发布包里那份 dist"和"窗口用的那份"两个真相 —— 而 UI 产物**真的脱钩过一次**（包里旧 5 小时、1100 项测试全绿） |
-| 2 | 起桥接一律 `node src/index.mjs --background` | 那句"已经有一个桥接在运行"的判据（process-guard 的登记）只在 `src/index.mjs` 里有一份。桌面壳自己拼 spawn 参数 = 两份必然分叉 |
-| 3 | 端口只读 `config.json` 的 `ui.apiPort`，读不到就说出来 | 不 import 桥接的 `config.mjs`（那会把整套默认值合并与校验卷进一个"只想知道端口"的进程）。四种情形（没写/读不到/坏 JSON/越界）各自有话说，**绝不静默取默认值** —— "改过端口但界面连不上"正是这条会掩盖的事故 |
-
-**顺带三条已取的证**（都在 `mocks/verify-desktop.mjs` 里钉着）：
-
-* `/api/status` 的字段是 **顶层 `connected` + `login:{userId,nickname}`**（照 `src/index.mjs` 的
-  `getStatus()` 抄的）。第一版壳里写的是 `connection.connected` —— **那个字段不存在**，
-  于是托盘永远显示"状态未知"：不报错、不影响功能，只会一直错下去。
-* `--background` 在"已经有一个桥接在跑"时是 **exit 1**。双击 exe 时上一个桥接可能**正在启动**
-  （process-guard 登记得比端口绑定早），那一刻就是这个分支 —— 把它当"失败"会写出一句吓人且不成立的话。
-* `electron-builder.yml` 的 **`asar: false` 必须在顶层**：写进 `win:` 底下会被**静默忽略**，
-  构建照样成功、exe 照样出来，只是 app 变成 `resources/app.asar` —— 只有发布包验收能发现。
-
----
-
-## 4.5 本机沙箱的两条硬限制（打桌面壳时会撞上，都不是项目的问题）
-
-这两条是**本机 DSH 沙箱**的限制，换一台普通 Windows 机器不会遇到；但在这个环境里
-想让 `node scripts/assemble-desktop.mjs` 跑通，就必须知道它们（每条都实测过，
-诊断脚本留在 `cache/spawn-probe*.mjs`）：
-
-| # | 限制（实测） | 撞上时的表现 | 本项目的绕法 |
-|---|---|---|---|
-| 1 | **任何 `stdio: 'pipe'` 的 spawn 都被拒**（`inherit` / `ignore` / 文件描述符都行；`['ignore', fd, 'pipe']` 也**被拒**） | electron-builder 收集运行期依赖时固定会 `powershell → npm list` 并用管道读输出 ⇒ `⛔ spawn EPERM`，整个打包失败 | `scripts/patch-electron-builder.mjs` 把那一处改成"子进程直接把 stdout/stderr 写文件"（4 个 hunk，**补丁打不上就非零退出**）；`scripts/build-tools/npm-stub.mjs` + `npm.cmd` 再给它一个确定性的答复（零依赖）。**补丁后** `collector.getNodeModules()` 能跑完，收集器随即回落到它自己的**纯文件遍历**通路 |
-| 2 | **Chromium 的进程单例锁与 mojo 平台通道被拒**（要命名管道/锁文件） | 打好的 `InteractBot.exe` **在本沙箱里起不来**：`process_singleton_win.cc:457 Lock file can not be created! Error code: 5` + `platform_channel.cc:82 Check failed: 拒绝访问`，退出码 `-2147483645` | **没有绕法**，也不需要：这是"沙箱里跑不了 Electron 的 GUI"本身。★ **真机上它是好的** —— 使用者双击过，`%APPDATA%\InteractBot\` 里留下了 `index-*.js` 的 Code Cache、Network Persistent State 与 270KB 级 GPU 缓存，说明**窗口真的开了、控制台真的渲染了、真的连上了桥接**。∴ **不要**把"沙箱起不来"写成"桌面程序未验证"（第一版就这么写错了）：那是把环境限制说成产品缺陷 |
-
-> ★ 补丁是**针对依赖内部实现**的，所以 electron-builder 一升级它就会"打不上"并**明确报错**
-> 让人来看 —— 这是刻意的：猜着改一个依赖的内部实现，比构建失败危险得多。
 
 ---
 
@@ -1102,24 +988,9 @@ node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切�
 
 ## 8. 当前状态与下一步
 
-**已完成并验证**：P0 协议端就位 · P1 桥接骨架 · P2 工作区沙箱 + 三级名单 · **真实 QQ 链路端到端（含工具使用）** · P3 人味层（拟人延迟/静默时段/分条/先应一声）· P4 跨重启记忆（桥接托管写入 + 每小时蒸馏 + 更正不覆盖）· **P5 扩展系统（技能 + 插件，可随时开关）** · 0.2.2 的**人设库**与**按人昵称** · 0.2.3 的**插件化**（二选一 / 唤醒策略 / QQ 工具档位 / 投递 / 语料库）· **0.2.4 的桌面程序**（真正的窗口 + 启动器，`InteractBot.exe`）。
+**已完成并验证**：P0 协议端就位 · P1 桥接骨架 · P2 工作区沙箱 + 三级名单 · **真实 QQ 链路端到端（含工具使用）** · P3 人味层（拟人延迟/静默时段/分条/先应一声）· P4 跨重启记忆（桥接托管写入 + 每小时蒸馏 + 更正不覆盖）· **P5 扩展系统（技能 + 插件，可随时开关）** · 0.2.2 的**人设库**与**按人昵称**。
 
-**验收口径**：离线 `npm test` 全绿（**链上 51 套**；逐套数字见 `PROJECT.json` 的 `commands[].assertions`，那里同时写明**为什么本仓库不发布一个「总断言数」**；另有 3 套在受限沙箱里明确**跳过** —— 跳过不算通过）。真实运行侧的证据逐条记在 `PROJECT.json` 的 `verificationStatus`，**连同每条「未验证」的边界**（那张表比这段文字更权威）。
-
-**0.2.4 的验收边界（必须如实说）**：
-
-* ✅ 离线可验的部分：桌面壳的**判断**（132 项，`mocks/verify-desktop.mjs`）、打包产物形状
-  （发布包验收查 `app/InteractBot.exe` 与 `app/resources/app/*.cjs`）、exe 的**图标与版本号**
-  （读 PE 资源确认过：ProductName=InteractBot、FileVersion=0.2.4、图标 7 档含 256×256）。
-* ✅ **真机已由使用者验证过**（2026-09-28 01:00:07 起约 10 分钟）：证据是
-  `%APPDATA%\InteractBot\` 里落了 `index-*.js` 的 Code Cache、`Network Persistent State`
-  与 270 KB 级 GPU 缓存 ⇒ **窗口真的开了、控制台真的渲染并连上了桥接**。
-* ❌ **仍然没验的**：① ★★「**关掉窗口之后机器人还在不在线**」—— 那 10 分钟里窗口一直开着，
-  要验它必须关掉窗口再发一条 QQ 消息（这是最该补验的一条）；② **`logs/desktop.log` 在真机上
-  没有落盘**（已知真问题，见 `docs/0.2.4-release-notes.md` §6.5）；③ "桌面壳自己把桥接拉起来"
-  这条分支（那次桥接本来就在跑）；④ 托盘图标/右键菜单的观感；⑤ 自动重连。
-* ⚠️ **我在沙箱里启动不了它**（Chromium 的单例锁与 mojo 通道要命名管道/锁文件，沙箱禁止 ⇒
-  退出码 `-2147483645`）。**这是环境限制，不是产品缺陷** —— 两者不要混为一谈。
+**验收口径**：离线 `npm test` 全绿（**链上 50 套**；逐套数字见 `PROJECT.json` 的 `commands[].assertions`，那里同时写明**为什么本仓库不发布一个「总断言数」**；另有 3 套在受限沙箱里明确**跳过** —— 跳过不算通过）。真实运行侧的证据逐条记在 `PROJECT.json` 的 `verificationStatus`，**连同每条「未验证」的边界**（那张表比这段文字更权威）。
 
 **下一步（等使用者指令）**：
 - 控制台按 `CONFIG-UI.md` **重新生成**（§2.2 人设库 / §2.5 昵称 / §2.10 扩展页 + §1 的加减法）。
@@ -1128,13 +999,12 @@ node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切�
 - pixiv 技能的**真机取图/发图**（代理那一步需要 `vendor/node_modules/undici`，本机 `npm install` 失败过，见 §6.5）；
 - **群聊实测**（代码与配置都放行了，但至今没有一条真实群消息跑过）。
 
-**如实标注（没验证过的事）**：群聊未真机验证 · **桌面程序已真机验证过（窗口/渲染/连上桥接），但「关窗口不下线」与托盘观感仍未验** · **`logs/desktop.log` 在真机上没落盘（已知真问题，未修）** · 看图与 `qq_send_image` 的端到端未跑过 · 长时间运行稳定性未测 ·
+**如实标注（没验证过的事）**：群聊未真机验证 · 看图与 `qq_send_image` 的端到端未跑过 · 长时间运行稳定性未测 ·
 「随时开关」不覆盖**装卸技能**（要重启，这是设计边界不是缺陷）· 技能是第三方代码、**在宿主进程里跑**
 （进程内无法隔离，只有如实声明权限）。完整列表见 `PROJECT.json` 的 `verificationStatus.notVerified`。
 
 **当前风险（不是 bug，但要知道）**：技能在宿主进程内运行，无法沙箱化；人设/大部分配置改动**必须重启**才生效
-（唯一的例外是技能开关与设置，见 §6.5）；`InteractBot.exe` **未做代码签名**（Windows 会显示"未知发布者"，
-首次运行可能被 SmartScreen 拦一下 —— 那是预期内的，不是打包出错）。
+（唯一的例外是技能开关与设置，见 §6.5）。
 
 ---
 

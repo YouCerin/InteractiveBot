@@ -68,54 +68,10 @@ function section(t) {
 
 /** 只看文本类文件；二进制/产物/运行痕迹一律跳过（它们不是"手写的东西"）。 */
 const TEXT_EXT = /\.(md|mjs|cjs|js|json|txt|patch|ya?ml|ts|tsx|css|html|ps1)$/i
-
-/**
- * ★★★ `.bat` / `.cmd` 单独走一遍 walk（0.2.4 修的一处**致命漏洞**）。
- *
- * 为什么必须单独列：`TEXT_EXT` 里**没有 `bat`/`cmd`**（它们在"编码事故"那四条判据里
- * 不该参与乱码统计），而 `walk()` 只收 `TEXT_EXT` 命中的文件 —— 于是
- * **"所有 .bat 都是纯 ASCII"那条断言一个文件都没扫过，恒为绿**。
- *
- * 实测代价：我加了一句话里带中文的 `.bat`，那条断言照样报"✅（0 个）"。
- * 也就是说 0.2.4 里那三次 `.bat` 中文事故，**守卫一次都没有真正挡住过** ——
- * 我给 npm.cmd 写负对照时"命中"的是判据的**逻辑片段**，不是这条接线。
- * ∴ 教训（与"任务段从未注入"是同一类）：**判据写对了 ≠ 它在跑**；
- *   一条 `check()` 如果输入集合是空的，它永远绿，而且看不出是空的。
- *   这里因此把 `.bat`/`.cmd` 的输入集合**显式**列出来，并在下面断言"扫到的文件数 > 0"。
- */
-const BAT_EXT = /\.(bat|cmd)$/i
-
-function walkBat (dir, out = []) {
-  let entries
-  try {
-    entries = readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return out
-  }
-  for (const e of entries) {
-    if (e.name.startsWith('.tmp')) continue
-    const abs = join(dir, e.name)
-    if (e.isDirectory()) {
-      if (SKIP_DIR.has(e.name)) continue
-      walkBat(abs, out)
-    } else if (BAT_EXT.test(e.name)) {
-      out.push(abs)
-    }
-  }
-  return out
-}
 const SKIP_DIR = new Set([
   'node_modules', 'vendor', 'dist', 'logs', 'cache', '_release', 'snowluma',
   'workspace-qq', '.git', '.tmp-verify', '.tmp-verify-onebot', '.tmp-verify-doctor',
   '.tmp-live-workspace', '.tmp-live-outside', '.tmp-probe-dsh', 'reference',
-  // ★ 桌面壳的构建产物（0.2.4）。为什么必须跳过：它整份是 **Electron 的运行时**
-  //   （复制来的 Chromium），里面有几十 MB 的第三方文件 —— 比如
-  //   `LICENSES.chromium.html`。那是**别人写的**东西，既不是我们手写的、
-  //   也不该由我们的编码守卫来评判（实测它含 137 处 U+FFFD —— 那是 Chromium
-  //   自己在许可证文本里放的替换字符，天知道为什么，但与我们无关）。
-  //   ⚠️ 本套的判据是"我们自己的文本文件有没有被重编码写坏"，把它算进来只会
-  //   制造一条**永远红的假失败**，而假失败会让人去改守卫。
-  '.build-desktop',
 ])
 
 /**
@@ -250,115 +206,6 @@ section('① 全仓库文本文件：不许 UTF-16 / U+FFFD / 误加的 BOM / �
   if (allowed.length) console.log(`   ℹ️  豁免·**当前在用**（真被这条判据命中）：${allowed.join(', ')}`)
   if (precautionary.length) console.log(`   ℹ️  豁免·预防性（暂时没命中，但这类文件故意引用样本）：${precautionary.join(', ')}`)
   if (batBom.length) console.log(`   ℹ️  .bat 带 UTF-8 BOM（历史用法，豁免不判红）：${batBom.join(', ')}`)
-
-  // ★★ ①-b  `.bat` / `.cmd` **必须纯 ASCII**（0.2.4 新增；这条是被真事故逼出来的）
-  //
-  // 为什么单独一条、而且必须是**硬**判据：
-  //   cmd 用**系统代码页**（中文 Windows = GBK）解析批处理文件，而本仓库的文件是 UTF-8。
-  //   一个中文字符的字节被当成 GBK 读时，**行尾会被吞掉** —— cmd 于是把下一行当成
-  //   这一行的一部分，整个 if-block 从中间断开。症状不是"报错停住"，而是：
-  //       'em' is not recognized as an internal or external command
-  //       'his' is not recognized as an internal or external command
-  //   …十几行碎片，而**真正的那条命令根本没跑**（启动器看起来"什么都没做"）。
-  //
-  // 这个坑本仓库踩过三次（`创建带图标的快捷方式.bat` / `scripts/build-tools/npm.cmd` /
-  //   0.2.4 的 `start.bat`）。第三次的代价是：`start.bat` 的中文注释让 **0.2.4 的
-  //   启动链整个坏掉**（`启动机器人.bat --check` 那条分支直接不可用），而
-  //   51 套离线测试全绿 —— 因为在那之前**没有任何东西**在检查这件事，
-  //   `AGENT.md` 里那句"`.bat` 必须纯 ASCII"只是文档里的一句话。
-  //   ∴ 现在它是可执行的判据（`AGENT.md` 第 11 条）。
-  //
-  // ⚠️ 判据是"**任何**非 ASCII 字节"（不是"中文字符"）：GBK 里行尾字节 0x5C 之类的
-  //   边界情况太绕，而"批处理文件纯 ASCII"本来就没有代价（要解释就写在 .md / .mjs 里）。
-  const batNonAscii = []
-  const batFiles = walkBat(REPO_ROOT)
-  // ★★ 先断言"扫到了东西"：一条 check 的输入集合为空时它**永远绿**，而且看不出是空的 ——
-  //    这正是这条断言此前"一个文件都没扫过却一直报 ✅"的原因（见 `walkBat` 上方的注释）。
-  check(
-    `★★ 这个仓库里扫到了 ${batFiles.length} 个 .bat/.cmd（空集合会让下面两条断言变成空断言）`,
-    batFiles.length >= 5,
-    batFiles.length ? '' : '一个都没扫到 —— 判据的输入集合是空的，等于没有判据',
-  )
-  for (const abs of batFiles) {
-    const rel = relative(REPO_ROOT, abs).split('\\').join('/')
-    const buf = readFileSync(abs)
-    const bad = []
-    for (let i = 0; i < buf.length; i += 1) if (buf[i] > 127) bad.push(i)
-    if (bad.length) {
-      // 报出**第一处**所在的整行，让人一眼看到是哪句话写坏的（而不是只知道有 N 个字节）
-      const text = buf.toString('utf8')
-      const upto = buf.subarray(0, bad[0]).toString('utf8')
-      const lineNo = upto.split(/\r?\n/).length
-      const lineText = text.split(/\r?\n/)[lineNo - 1] ?? ''
-      batNonAscii.push(`${rel}(第 ${lineNo} 行，${bad.length} 个字节：${lineText.trim().slice(0, 60)})`)
-    }
-  }
-  check(
-    '★★ 所有 .bat / .cmd 都是纯 ASCII（cmd 按系统代码页解析，非 ASCII 会吞掉换行）',
-    batNonAscii.length === 0,
-    batNonAscii.length
-      ? `${batNonAscii.join('；')}\n      —— 把中文/全角符号**删掉或改写成 ASCII**（要解释就写在 .md/.mjs 里）。` +
-        '\n      症状不是"报错停住"，而是十几行 `\'em\' is not recognized...` 且真正的命令没跑。'
-      : '（0 个）',
-  )
-
-  // ★★★ ①-c  `.bat` / `.cmd` 的**注释里不许出现裸的重定向符**（0.2.4 新增，被真事故逼出来的）
-  //
-  // 为什么这条比上一条还贵：`>` 对 cmd 是**重定向**，而 `rem` 只吃掉"命令"、
-  // **不吃掉重定向**。实测事故（0.2.4）：我在注释里写了
-  //     rem   DesktopBot.lnk -> 桌面端bot启动.bat
-  // cmd 于是去找一个叫 `DesktopBot.lnk` 的命令，并把**目标文件截断成 0 字节** ——
-  // 一次弄空了 `桌面端bot启动.bat` **和** `启动机器人.bat`（后者是用户的主入口）。
-  // 两个文件都变 0 字节，**而离线测试当时没红**：没有任何断言读那两个文件的**内容**。
-  //
-  // ∴ 判据（★ 必须精确到**真形态**，否则会误报一大片，而误报会让人删掉守卫）：
-  //   致命形态只有一种：`rem` 之后**第一个词就是一个带扩展名的文件名**，紧跟重定向，
-  //   再跟**另一个文件名** —— 例如（0.2.4 真事故）
-  //       rem  DesktopBot.lnk -> 桌面端bot启动.bat
-  //   cmd 会**执行** `DesktopBot.lnk`（找不到就报错）并把 `桌面端bot启动.bat`
-  //   **截断成 0 字节**。两个条件缺一不可：
-  //     · 第一个词得是**文件名形状** —— 否则 cmd 只是"找不到命令"，不碰任何文件；
-  //     · 重定向后得有**非空白目标** —— `rem  a  ->  b`（箭头后是空格）的重定向目标为空，
-  //       cmd 不碰文件（这在旧注释里很常见，判红只会制造噪音）。
-  //   ⇒ 用"文件名形状 + 非空目标"两条约束，把真事故与噪音分开。
-  const batRedirect = []
-  const FILE_LIKE = /\.[A-Za-z0-9]{1,4}(\s|$)/ // 形如 foo.bat / a.exe / x.cmd
-  for (const abs of batFiles) {
-    const rel = relative(REPO_ROOT, abs).split('\\').join('/')
-    const text = readFileSync(abs, 'utf8')
-    text.split(/\r?\n/).forEach((line, i) => {
-      // `rem` 后面**至少一个非空白字符**（`rem` 单独一行会被 cmd 忽略，安全）
-      const m = /^\s*rem\s+(\S.*)$/i.exec(line)
-      if (!m) return
-      const body = m[1].replace(/\^[<>]/g, ' ') // 去掉已转义的 ^> ^<
-      const words = body.split(/\s+/).filter(Boolean)
-      const first = words[0] ?? ''
-      // 第一个词之后紧跟重定向符？（允许 `word>` 或 `word >`）
-      if (!/^[^\s<>]*[<>]/.test(body.replace(/^[^\s<>]*/, (w) => w))) return
-      const redir = body.indexOf('>') >= 0 ? body.indexOf('>') : body.indexOf('<')
-      const after = body.slice(redir + 1).trim()
-      const startsLikeFile = FILE_LIKE.test(first)
-      if (startsLikeFile && after.length > 0 && /^[^\s<>]/.test(after)) {
-        batRedirect.push(`${rel}(第 ${i + 1} 行：${line.trim().slice(0, 70)})`)
-      }
-    })
-  }
-  check(
-    '★★★ .bat/.cmd 注释里没有「动词 -> 目标文件」那种重定向（rem 不阻止它，实测截断成 0 字节）',
-    batRedirect.length === 0,
-    batRedirect.length
-      ? `${batRedirect.join('；')}\n      —— 注释里要写箭头就写 "to"，或用 ^> 转义。` +
-        '\n      0.2.4 真事故：一句 `rem  foo.lnk -> bar.bat` 把两个启动器都截成了 0 字节，而测试全绿。'
-      : '（0 个）',
-  )
-
-  // ★ 顺带：那两个启动器**必须有内容**（0 字节是这次事故的形态，而"存在性"断言看不出它）
-  for (const rel of ['packages/qq-bridge/启动机器人.bat', 'packages/qq-bridge/桌面端bot启动.bat']) {
-    const abs = join(REPO_ROOT, rel)
-    if (!existsSync(abs)) continue
-    const size = statSync(abs).size
-    check(`★ ${rel.replace('packages/qq-bridge/', '')} 不是空文件（>0 字节）`, size > 200, `${size} 字节`)
-  }
 
   // 豁免清单本身也要有纪律：条目必须存在、必须写理由。
   check(

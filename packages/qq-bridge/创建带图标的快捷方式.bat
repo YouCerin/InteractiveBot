@@ -38,28 +38,14 @@ rem       (Spelled as hex so this file stays ASCII even in comments.)
 rem ============================================================================
 
 chcp 65001 >nul
-rem 0.2.4: creates up to THREE shortcuts --
-rem   DesktopBot.lnk   -> the desktop-window-only launcher .bat (Chinese file name;
-rem                      the one most people want). A .bat cannot carry a custom
-rem                      icon in Explorer, which is why shortcuts are generated.
-rem   QQbot.lnk        -> the all-purpose launcher .bat
-rem   InteractBot.lnk  -> app\InteractBot.exe directly (when the desktop app exists;
-rem                      its icon is embedded in the exe by electron-builder)
-rem The Chinese file names are built from character codes so this file stays pure
-rem ASCII (cmd parses .bat with the system codepage; Chinese here would break it).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $d=$PWD.Path; $sh=New-Object -ComObject WScript.Shell; $launch=[char]0x542F+[char]0x52A8+[char]0x673A+[char]0x5668+[char]0x4EBA+'.bat'; if(-not (Test-Path -LiteralPath (Join-Path $d $launch))){$launch='start.bat'}; $desk=[char]0x684C+[char]0x9762+[char]0x7AEF+'bot'+[char]0x542F+[char]0x52A8+'.bat'; $l=$sh.CreateShortcut((Join-Path $d 'QQbot.lnk')); $l.TargetPath=(Join-Path $d $launch); $l.WorkingDirectory=$d; $l.IconLocation='assets\icon.ico,0'; $l.Description='InteractBot - QQ + DSH bridge'; $l.Save(); Write-Host ('OK -> QQbot.lnk'); if(Test-Path -LiteralPath (Join-Path $d $desk)){ $deskLnk=((($desk -replace '\.bat$','')) + '.lnk'); $l3=$sh.CreateShortcut((Join-Path $d $deskLnk)); $l3.TargetPath=(Join-Path $d $desk); $l3.WorkingDirectory=$d; $l3.IconLocation='assets\icon.ico,0'; $l3.Description='InteractBot desktop console (standalone window)'; $l3.Save(); Write-Host ('OK -> ' + $deskLnk) } else { Write-Host ('note: ' + $desk + ' not found, skipped its shortcut') }; $exe=Join-Path $d 'app\InteractBot.exe'; if(Test-Path -LiteralPath $exe){ $l2=$sh.CreateShortcut((Join-Path $d 'InteractBot.lnk')); $l2.TargetPath=$exe; $l2.WorkingDirectory=(Join-Path $d 'app'); $l2.Description='InteractBot desktop console (window + launcher)'; $l2.Save(); Write-Host ('OK -> InteractBot.lnk') } else { Write-Host 'note: app\InteractBot.exe not found, skipped InteractBot.lnk' }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $d=$PWD.Path; $lnk='QQbot.lnk'; $bat=[char]0x542F+[char]0x52A8+[char]0x673A+[char]0x5668+[char]0x4EBA+'.bat'; if(-not (Test-Path -LiteralPath (Join-Path $d $bat))){$bat='start.bat'}; $sh=New-Object -ComObject WScript.Shell; $l=$sh.CreateShortcut((Join-Path $d $lnk)); $l.TargetPath=(Join-Path $d $bat); $l.WorkingDirectory=$d; $l.IconLocation='assets\icon.ico,0'; $l.Description='InteractBot - QQ + DSH bridge'; $l.Save(); Write-Host ('OK -> ' + (Join-Path $d $lnk))"
 
 if errorlevel 1 (
   echo.
   echo [!] Failed to create the shortcut. See the message above.
 ) else (
   echo.
-  rem NOTE the caret-escaped parentheses: an unescaped ")" inside an if-block
-  rem CLOSES the block early, so the rest of the line is parsed as a command --
-  rem cmd then prints "created was unexpected at this time" on the SUCCESS path.
-  rem This file shipped like that until 0.2.4 (it only "worked" because the
-  rem error was cosmetic and the shortcuts were already written).
-  echo Shortcut^(s^) created in this folder. Right-click one, or drag it to the
+  echo Shortcut created in this folder. Right-click it, or drag it to the
   echo desktop, to keep it handy.
 )
 echo.

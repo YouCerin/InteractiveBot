@@ -37,8 +37,9 @@ const rel = (p) => relative(root, p).replace(/\\/g, '/')
 // ── ① 结构：该有的必须都在 ─────────────────────────────────────────────
 const MUST_EXIST = [
   '启动机器人.bat',
-  '桌面端bot启动.bat',
   '先读我-首次使用.txt',
+  '检查配置.bat',
+  '体检.bat',
   '创建带图标的快捷方式.bat',
   'start.bat',
   'config.json',
@@ -50,93 +51,9 @@ const MUST_EXIST = [
   'config-ui/dist/index.html',
   'vendor/node/node.exe',
   'vendor/node_modules/ws/index.js',
-  // ★ 0.2.4：两个诊断入口收进了子目录（包根只留用户真要双击的那几个）。
-  //   ⚠️ 目录名是 `backup-commands`（纯 ASCII）—— 中文目录名会让 `cpSync(..., {recursive:true})`
-  //   把进程崩掉（见 assemble-release.mjs 里那段注释）。改这个名字请先读那里。
-  'backup-commands/检查配置.bat',
-  'backup-commands/体检.bat',
-  'backup-commands/读我.txt',
 ]
 for (const f of MUST_EXIST) {
   if (!files.some((p) => rel(p) === f)) problems.push(`缺少必需文件：${f}`)
-}
-
-// ── ①-a ★ 桌面壳（0.2.4）：`app/InteractBot.exe` ─────────────────────────
-//
-// 为什么单列：桌面壳是**唯一**一个"没有它包也还能用、但用户会以为坏了"的东西 ——
-// `启动机器人.bat` 找不到 exe 时会退回旧路径（拉起浏览器）并打一句提示，
-// 于是"这一版说好的独立窗口"会**静默地不成立**。所以这里把它当硬项查。
-{
-  const exe = 'app/InteractBot.exe'
-  if (!files.some((p) => rel(p) === exe)) {
-    problems.push(
-      `缺少桌面壳：${exe}\n` +
-        '      （桌面壳不是可选项：没有它，0.2.4 的"独立窗口"这条就不成立；' +
-        '要重新打：node scripts/assemble-desktop.mjs）',
-    )
-  } else {
-    const mb = (statSync(join(root, exe.replace(/\//g, sep))).size / 1024 / 1024).toFixed(1)
-    notes.push(`桌面壳：${exe}（${mb} MB，Electron 运行时自带）`)
-    // ★ app 里的壳代码必须是**明文可读**的，而不是打进 asar。
-    //   理由：这份代码是给使用者/维护者看的（"如实、可查"），而且 app 只有 6 个小文件。
-    //   实测踩过：`asar: false` 写在 win: 下面会被 electron-builder 忽略，
-    //   构建**成功**、exe 也出来了，只是 app 变成了 resources/app.asar —— 只有验收能发现。
-    for (const f of ['app/resources/app/main.cjs', 'app/resources/app/preload.cjs', 'app/resources/app/lib.cjs', 'app/resources/app/splash.html']) {
-      if (!files.some((p) => rel(p) === f)) {
-        problems.push(
-          `桌面壳的 ${f.replace('app/resources/app/', '')} 不在（是不是被打进了 asar？）\n` +
-            '      （desktop/electron-builder.yml 的 `asar: false` 必须在**顶层**，放进 win: 里会被忽略）',
-        )
-      }
-    }
-    // 溯源文件：这份 exe 是哪份源码、哪个 Electron 打的
-    if (!files.some((p) => rel(p) === 'app/PROVENANCE.txt')) {
-      problems.push('缺少 app/PROVENANCE.txt（桌面壳的来源说明，由 assemble-release.mjs 生成）')
-    }
-    // ★ 壳的源码**只有一份**：包根不该再出现 main.cjs / preload.cjs / splash.html
-    //   （那意味着有人手工拷过一份，两份必然分叉）
-    for (const stray of ['main.cjs', 'preload.cjs', 'splash.html']) {
-      if (files.some((p) => rel(p) === stray)) {
-        problems.push(`包根出现了 ${stray} —— 桌面壳的源只该在 app/resources/app/ 里，不该平铺在包根`)
-      }
-    }
-  }
-}
-
-// ── ①-c ★ 包根只该有"用户真要双击"的那几个 .bat（0.2.4）────────────────
-//
-// 用户 0.2.4 的要求：UI 里已有同样按钮的东西别摆在包根。两个诊断入口因此收进了
-// `backup-commands/`。这条断言防的是**它们被悄悄放回包根**（比如有人
-// 手工拷一份 "方便使用"）—— 那会让"包根只有两个入口"这件事静默地不成立。
-{
-  // ★ 0.2.4：`桌面端bot启动.bat` = **只开独立界面**的那个入口（用户要求），
-  //   与全能启动器 `启动机器人.bat` 并列。它必须在包里 —— 缺了它，
-  //   "方便地打开带独立界面的后台"这件事就退回成"得先分辨哪个 bat 是干嘛的"。
-  // ★ 0.2.4 收尾的取舍说明：`打包桌面程序.bat` 与 `打开桌面界面（源码运行）.bat` 是**源码侧**
-  //   的双击入口，**刻意不进发布包**（它们要工作就得连 desktop/ 与 Electron 工具链一起发，
-  //   而那会把包从 413 MB 抬到 1000 MB，且使用者仍要自己 npm install）。
-  //   ∴ 白名单里**只列发布包里真有的**；那两个文件在仓库里，不进包。
-  //   ⚠️ 这条白名单是"双向"的：不在单子里的 .bat 不许出现，单子里的必须有 —— 把源码侧的
-  //   入口写进来会让组装每次都失败（0.2.4 实测踩过一次）。
-  const ROOT_BATS = [
-    '启动机器人.bat',
-    '桌面端bot启动.bat',
-    '创建带图标的快捷方式.bat',
-    'start.bat',
-  ]
-  const bats = files.map((p) => rel(p)).filter((r) => r.toLowerCase().endsWith('.bat') && !r.includes('/'))
-  for (const b of bats) {
-    if (!ROOT_BATS.includes(b)) {
-      problems.push(
-        `包根不该有这个 .bat：${b}\n` +
-          `      （包根只留：${ROOT_BATS.join(' / ')}；诊断类的收在「backup-commands/」里）`,
-      )
-    }
-  }
-  for (const b of ROOT_BATS) {
-    if (!bats.includes(b)) problems.push(`包根缺少入口：${b}`)
-  }
-  notes.push(`包根入口：${bats.join('、')}（其余 .bat 都在「备用命令」子目录里）`)
 }
 
 // ── ①-b ★ 界面产物的**构建溯源标记**必须在 ──────────────────────────────
@@ -195,13 +112,6 @@ const FORBIDDEN = [
   ['配置备份', /config\.json\.bak/],
   ['测试替身', /^mocks\//],
   ['测试残留', /\.tmp-/],
-  // ★ 桌面壳（0.2.4）：**只发打好的 app/**，不发它的构建源与工具链。
-  //   桌面壳的源在仓库里（desktop/），进包只会多一份会分叉的副本；
-  //   而 desktop/node_modules 是 300 MB 级的构建期依赖（Electron 工具链）。
-  ['桌面壳构建源（只发 app/）', /^desktop\//],
-  ['桌面壳构建产物（只发 app/）', /^\.build-desktop\//],
-  ['桌面壳的 npm 缓存', /\.npm-cache\//],
-  ['构建期脚本（staging 时才用）', /^scripts\//],
 ]
 for (const p of files) {
   const r = rel(p)
