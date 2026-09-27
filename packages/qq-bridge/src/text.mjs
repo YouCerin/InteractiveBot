@@ -29,7 +29,8 @@ export function asSegments(value) {
  *
  * @param {Array} segments
  * @param {{ selfId?: string|number|null }} [opts]
- * @returns {{ text: string, mentioned: boolean, images: number,
+ * @returns {{ text: string, mentioned: boolean, ats: Array<{qq:string,name:string}>,
+ *             images: number,
  *             imageRefs: Array<{url:string,file:string,fileId:string,summary:string}>,
  *             replyTo: string|null }}
  */
@@ -39,6 +40,17 @@ export function renderSegments(segments, { selfId = null } = {}) {
   let images = 0
   /** ★ 图片段的可下载线索。渲染成文本时它会被丢掉，所以要**单独带出来**。 */
   const imageRefs = []
+  /**
+   * ★ **@ 了谁**（0.2.3）。
+   *
+   * 为什么单独带出来：`text` 里它只剩一个 `@名字` 的字符串，
+   * 而"@ 的是谁"是唤醒判定器**唯一**能据以判断"这话是不是说给我听的"的线索 ——
+   * 实测过一次误判：一条 `@张三 小鲸鱼刚说的那个方案我看行` 被判成
+   * "明确@了机器人"（判定器只看见文本里有个 `@`，不知道 @ 的是别人，也不知道
+   * 机器人自己的 QQ 号）。所以这里把它结构化地带出来。
+   * `all`（@全体成员）也收进来，让调用方自己决定怎么表述。
+   */
+  const ats = []
   let replyTo = null
 
   for (const seg of segments ?? []) {
@@ -54,9 +66,12 @@ export function renderSegments(segments, { selfId = null } = {}) {
         const qq = String(data.qq ?? '')
         if (qq === 'all') {
           parts.push('@全体成员')
+          ats.push({ qq: 'all', name: '全体成员' })
         } else {
           if (selfId != null && String(selfId) === qq) mentioned = true
-          parts.push(`@${data.name ? String(data.name) : qq}`)
+          const name = data.name ? String(data.name) : ''
+          parts.push(`@${name || qq}`)
+          ats.push({ qq, name })
         }
         break
       }
@@ -116,6 +131,7 @@ export function renderSegments(segments, { selfId = null } = {}) {
   return {
     text: parts.join('').trim(),
     mentioned,
+    ats,
     images,
     imageRefs,
     replyTo,

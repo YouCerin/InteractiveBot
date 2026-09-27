@@ -1433,6 +1433,11 @@ export class Bridge extends EventTarget {
           senderName: identity?.ok ? identity.name : '',
           text: rendered.text,
           hitAt: rendered.mentioned === true,
+          // ★★ 0.2.3：把"机器人是谁"与"这条 @ 的是谁"一起给它。
+          //   不给这两样，它只能看见文本里有个 `@`，于是把 `@张三` 读成"@ 了机器人"
+          //   （真机上误判过一次，日志里留着原话）。`ats` 由 `renderSegments` 结构化带出。
+          selfId: String(this.onebot?.selfId ?? ''),
+          ats: rendered.ats ?? [],
           recent: this.#wakeContext(chatKey),
           selfNames: this.wakeKeywords ?? this.config.trigger?.keywords ?? [],
         },

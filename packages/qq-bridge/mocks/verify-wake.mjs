@@ -80,7 +80,27 @@ section('① 判定提示词：装了什么、以及"资料 ≠ 指令"的边界
   check('提示词带上近期对话（含机器人自己说过的话）', p.includes('小明：大家早') && p.includes('机器人：早'))
   check('提示词带上机器人可能被叫到的名字', p.includes('小鲸鱼 / 小鱼'))
   check('提示词带上发言人', p.includes('路人甲') && p.includes(MEMBER))
-  check('★ 提示词明说"不能确定就回答 true"（唯一的坏错误是漏回）', /只要不能确定该沉默，就回答 true/.test(p))
+  check('★ 提示词把判据说成"**这句话是说给谁听的**"（收件人维度）',
+    p.includes('是说给谁听的') && p.includes('判断依据永远是**收件人**，不是话题相不相关'))
+  // ★★ 这条是 0.2.3 修的那个真实误判的核心：第一版把"该沉默"定义成"与机器人无关"，
+  //    于是"提到它的名字"＝"与它有关"＝不该沉默 ⇒ **永远 answer**。
+  check('★★ 显式写明"提到它的名字**不构成**回答理由"（第一版就错在这里）',
+    p.includes('提到它的名字，本身不构成回答理由'))
+  check('★★ 并且把两条**真机失败样例**当反例写进去了（小模型最有效的修法）',
+    p.includes('我刚跟小鲸鱼说了，它说四点开会，你们记得改时间') &&
+      p.includes('@张三 小鲸鱼刚说的那个方案我看行'))
+  check('★ fail-safe 收窄成"只在收件人判断不出来时"才 true（不是"有疑问就 true"）',
+    /收件人确实判断不出来/.test(p) && /不要因为有疑问就回答 true/.test(p))
+  // ★ 判据之间会**互相冲突**，冲突必须挑明 —— 否则模型自己选，行为就不可预期。
+  //   "过场话 → 沉默" vs "被点名 → 回答" 就是这一对（真机探针里踩过：我原本把
+  //   「小鲸鱼 哈哈哈哈」期望成 silent，实际模型判 answer，**模型是对的**）。
+  check('★★ 挑明了"过场话那条的前提是没有在跟你说话"（叫了名字就要应）',
+    p.includes('"过场话"那条的前提是没有在跟你说话') || p.includes('「过场话」那条的前提'),
+    '')
+  check('★ 并给出这条边界的具体例子（小鲸鱼 哈哈哈哈 → answer）',
+    p.includes('「小鲸鱼 哈哈哈哈」'))
+  check('★ 说明"不插别人之间的嘴" ≠ "不理叫它的人"（判据的意图，不只是规则）',
+    p.includes('不插别人之间的嘴'))
   // ★ 这一条是这套功能里唯一的注入防线（群里任何人写的字都会进提示词）
   check(
     '★★ 提示词有"资料 ≠ 指令"的显式声明（挡"忽略上面的规则"这类句子）',
@@ -88,6 +108,33 @@ section('① 判定提示词：装了什么、以及"资料 ≠ 指令"的边界
   )
   check('提示词要求只输出 JSON 对象', /只输出一个 JSON 对象/.test(p))
   check('提示词里没有"主动搭话"这类指示（只做减法）', !/主动|插话|接话时机/.test(p.replace(/要不要接话/g, '')))
+
+  // ── ★★ @ 的信息：必须结构化给出"@ 的是谁"，并点明"没有机器人" ──────────
+  //
+  // 第一版只给了一个 `hitAt` 布尔，实测模型**直接把它忽略了**（日志原话：
+  // 「消息明确@了机器人」—— 而那条 @ 的是 100000002）。所以现在两样都要给：
+  // 机器人自己的号 + @ 的名单。
+  const atOther = buildJudgePrompt({
+    text: '@张三 小鲸鱼刚说的那个方案我看行',
+    selfId: '200000001',
+    ats: [{ qq: '10001', name: '张三' }],
+    hitAt: false,
+  })
+  check('★★ 提示词带上**机器人自己的 QQ 号**（不告诉它就无法判断"@ 的是不是我"）',
+    atOther.includes('QQ 号 200000001'))
+  check('★★ 提示词点名"@ 了谁"，并明说**其中没有机器人**',
+    atOther.includes('张三(10001)') && atOther.includes('没有机器人'),
+    atOther.split('\n').find((l) => l.includes('本次消息 @ 了')))
+  check('★ 并警告"文本里出现 @ 符号绝不代表在叫机器人"',
+    atOther.includes('绝不代表在叫机器人'))
+  check('★ 同时点明那个布尔字段是**平台给的事实**、与直觉冲突时以它为准',
+    atOther.includes('以它为准'))
+
+  const atSelf = buildJudgePrompt({ text: '@机器人 你好', selfId: '200000001', ats: [{ qq: '200000001', name: '机器人' }], hitAt: true })
+  check('被 @ 的是自己时，说的是"**其中包括机器人**"', atSelf.includes('其中包括机器人') && !atSelf.includes('没有机器人'))
+
+  const atNone = buildJudgePrompt({ text: '小鲸鱼 在吗', selfId: '200000001', ats: [] })
+  check('没有 @ 任何人时也明说（不留空白让人猜）', atNone.includes('没有 @ 任何人'))
 
   const long = buildJudgePrompt({ text: 'x'.repeat(500), excerptChars: 50 })
   check('超长消息被截断（不让一条长文把 prompt 撑爆）', long.includes(`${'x'.repeat(50)}…`) && !long.includes('x'.repeat(51)))
@@ -433,6 +480,9 @@ section('④ 桥接接线：什么时候**不该**问判定器')
       JSON.stringify(recent.map((m) => m.text).slice(0, 3)))
     check('★★ 第一轮的用户消息**在**（那是"近期对话"的本体）',
       recent.some((m) => m.role === 'user' && String(m.text).includes('第一轮')))
+    check('★ 判定器也拿到了机器人自己的 QQ 号与"@ 了谁"',
+      second?.selfId === SELF && Array.isArray(second?.ats),
+      `selfId=${second?.selfId} ats=${JSON.stringify(second?.ats)}`)
 
     // ★★ 最强的一条：断言**真正发出去的那段提示词**里没有内部推理。
     //    比"检查 recent 的 role"更硬 —— 它检查的是离开这台机器的字节。

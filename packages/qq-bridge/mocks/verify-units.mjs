@@ -124,6 +124,30 @@ section('text.mjs · 消息段渲染')
   check('空数组返回空文本', renderSegments([]).text === '')
   check('null 不崩', renderSegments(null).text === '')
   check('脏元素被跳过', renderSegments([null, undefined, 'x', { type: 'text', data: { text: 'ok' } }]).text === 'ok')
+
+  // ★★ 0.2.3：`ats` —— **@ 了谁**必须结构化带出来。
+  //   为什么单独带：`text` 里它只剩一个 `@名字`，而"@ 的是谁"是唤醒判定器判断
+  //   "这话是不是说给我听的"的**唯一**线索。真机误判过一次：一条
+  //   `@张三 小鲸鱼刚说的…` 被判成"明确@了机器人"（它只看见文本里有个 `@`，
+  //   既不知道 @ 的是谁、也不知道机器人自己的号）。
+  {
+    const rAt = renderSegments(
+      [
+        { type: 'at', data: { qq: '10001', name: '张三' } },
+        { type: 'text', data: { text: ' 小鲸鱼刚说的那个方案我看行' } },
+      ],
+      { selfId: '200000001' },
+    )
+    check('★★ ats 带出"@ 了谁"（号码 + 名字）',
+      rAt.ats.length === 1 && rAt.ats[0].qq === '10001' && rAt.ats[0].name === '张三', JSON.stringify(rAt.ats))
+    check('  @ 的不是自己时 mentioned 仍为 false（两者不是一回事）', rAt.mentioned === false)
+    check('  @全体成员也收进 ats（让调用方自己决定怎么表述）',
+      renderSegments([{ type: 'at', data: { qq: 'all' } }], { selfId: '200000001' }).ats[0]?.qq === 'all')
+    const rAtSelf = renderSegments([{ type: 'at', data: { qq: '200000001', name: '小鲸鱼' } }], { selfId: '200000001' })
+    check('  @自己时 mentioned=true 且 ats 里也有它', rAtSelf.mentioned === true && rAtSelf.ats[0]?.qq === '200000001')
+    check('  没有 @ 时 ats 是空数组（不是 undefined）',
+      Array.isArray(renderSegments([{ type: 'text', data: { text: 'hi' } }]).ats))
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
