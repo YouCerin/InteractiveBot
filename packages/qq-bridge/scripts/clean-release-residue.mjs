@@ -28,7 +28,7 @@
  *   node scripts/clean-release-residue.mjs --keep <目录名> # 指定保留哪一个（默认自动挑最完整的）
  */
 
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -183,17 +183,39 @@ if (!APPLY) {
 }
 
 // ── 真删 ─────────────────────────────────────────────────────────────────────
+//
+// ★★★ 必须先改名到"垃圾桶名字"再删（0.2.4 收尾时这里踩了同一个坑）：
+//   直接 `rmSync(目录)` 在"删到一半撞上被占用的文件"时**不会回滚** ——
+//   实测：`-b`（209 文件 / 413 MB）被削成 **135 个文件 / 102 MB**，
+//   而报错只说了一句 EPERM。也就是说"清理脚本"自己会把残留从"完整但多余"
+//   变成"半份且名字还像正常的"，比不清理更坏。
+//   ⇒ 先 `renameSync` 到一个显眼的临时名（`.residue-deleting-<时间戳>`）：
+//     · 改名成功 ⇒ 目标名已经腾出来（这正是我们要的），删不删得掉都不影响"该用哪一份"；
+//     · 改名失败 ⇒ 一个字都没动，如实报错。
+//   ⚠️ 这个失败模式在 `assemble-release.mjs` 里已经修过一次（同样的写法），
+//     这里是它的第二处实例 —— **同一个 bug 会在每个"顺手删目录"的地方重演**。
 console.log('')
 let failed = 0
 for (const d of drops) {
+  const trash = `${d.full}.residue-deleting-${Date.now()}`
   try {
-    rmSync(d.full, { recursive: true, force: true })
+    renameSync(d.full, trash)
+  } catch (error) {
+    failed += 1
+    console.log(
+      `  ❌ 连改名都不行 ${d.name}（${error?.code ?? error?.message}）—— 一个字都没动，这是安全的。\n` +
+        '     ⇒ 重启一次再跑这个脚本，或者手工删。',
+    )
+    continue
+  }
+  try {
+    rmSync(trash, { recursive: true, force: true })
     console.log(`  ✅ 已删 ${d.name}`)
   } catch (error) {
     failed += 1
     console.log(
-      `  ❌ 删不掉 ${d.name}（${error?.code ?? error?.message}）—— 有进程/扫描器占着里面的文件。\n` +
-        '     ⇒ 重启一次再跑这个脚本，或者手工删。它不是本项目的问题（electron 产物常被 Defender/索引器占住）。',
+      `  ⚠️ ${d.name} 已改名成 ${trash.split(/[\\/]/).pop()} 但删不掉（${error?.code ?? error?.message}）\n` +
+        `     ⇒ 名字已让开（不会再和"该用哪一份"混淆），重启后删掉那个 .residue-deleting-* 即可。`,
     )
   }
 }
