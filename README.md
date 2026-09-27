@@ -42,6 +42,9 @@ project_InteractBot/
 （它自己找到包根 → 用 `node src/index.mjs --background` 把桥接拉起来 → 开出控制台窗口）。
 源码侧**不必打包就能开窗口**：`npm run desktop`（跑 `desktop/` 那份壳源码，
 改完壳重启这条命令即可）；打 exe 用 `npm run desktop:pack`。
+★ 最省事的是**双击仓库根的 `desktop.bat`**：它用包内 `vendor\node\node.exe` 直接调同一个启动器
+（`scripts/run-desktop.mjs`），不需要终端、不需要 `cd`、不依赖 PATH 里的 node/npm；失败时会 `pause`，
+所以双击的窗口不会"一闪就没"。
 
 ★ 这一版**没有 .bat 启动器**：0.2.4 曾用中文名 .bat 去设环境变量 `INTERACTBOT_PKG_ROOT`，
 那一类中文名入口已按用户要求删除（见 `packages/qq-bridge/mocks/verify-legacy-assets.mjs`）。
@@ -55,7 +58,7 @@ project_InteractBot/
 ★ 为什么是"看证据"而不是"数目录层数"：0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false`
 时它**是 `false`** ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根（读不到使用者的
 `config.json`、日志写进了 `app\logs\`）。修法就是那三级判据，判据由
-`packages/qq-bridge/mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 167 项）。
+`packages/qq-bridge/mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线一百多项）。
 
 ★ 关窗口 = **收进托盘**，机器人**继续在线**；真正退出要用**托盘菜单的「退出并停止机器人」**
 （会先 `POST /api/stop`）。

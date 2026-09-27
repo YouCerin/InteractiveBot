@@ -43,6 +43,7 @@ npm test
 #   发布包：双击 app\InteractBot.exe   ★ 0.2.5 主入口：壳自己找到包根 →
 #             用 node src/index.mjs --background 把桥接拉起来 → 开出控制台窗口
 #   源码侧开窗口（不必打包）：npm run desktop
+#     ★ 最省事：**双击仓库根的 desktop.bat**（用包内 Node，不需要终端/cd/npm；失败会 pause）
 #     ⚠️ 首次要先 cd desktop && npm install --ignore-scripts，再回包根跑 npm run desktop:fetch
 #        （取 Electron 运行时，约 136 MB，走 npmmirror 镜像；github 在本机连不通）
 start.bat
@@ -90,6 +91,7 @@ qq-bridge/
 ├── desktop/          ← ★ 桌面壳源码（Electron）：main.cjs 窗口/托盘/启停桥接、lib.cjs **纯逻辑（能离线测）**、splash.html 启动页
 │                        `npm run desktop` 跑它；`npm run desktop:pack` 从它打出 `app/`
 ├── start.bat         ← "浏览器那条路"（★ 0.2.5 起**不再是唯一入口**；发现 app\InteractBot.exe 就不再打开浏览器）
+│                        ★ 源码侧开桌面窗口的最省事入口在**仓库根**：`desktop.bat`（双击；走 scripts/run-desktop.mjs）
 ├── setup.mjs         ← 一次性准备
 ├── src/
 │   ├── index.mjs          装配与启动顺序  ← 改启动流程看这里
@@ -171,7 +173,7 @@ qq-bridge/
 ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根：读不到使用者的 `config.json`
 （日志里只有 `ENOENT`）、把日志写进了 `app\logs\`。
 修法就是那三级判据；而它由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言
-（离线 **167 项**）—— 0.2.4 的 132 项断言没抓到它，因为**只验了「参数怎么用」、
+（离线 **一百多项**）—— 0.2.4 的 132 项断言没抓到它，因为**只验了「参数怎么用」、
 没验「真实布局长什么样」**。所以：**改 `resolvePkgRoot` 之前先读那几条"真实布局"断言。**
 
 ★ **本版没有 .bat 启动器**（0.2.4 那批中文名 .bat 入口已按用户要求删除，
@@ -187,7 +189,7 @@ qq-bridge/
 包里的壳代码与 `desktop/` 源码**逐字节一致**）以及**发布包验收**。
 完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
 
-**离线入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**167 项**，不启动 Electron）。
+**离线入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**一百多项**，不启动 Electron）。
 
 ---
 
@@ -203,7 +205,7 @@ qq-bridge/
 | `mocks/verify-onebot.mjs` | ❌ | ❌ | 全链路：QQ 事件 → 回复发出 |
 | `mocks/verify-real-dsh.mjs` | ❌ | ❌ | 真实 dsh 能否被启动（不发 prompt） |
 | `mocks/verify-doctor.mjs` | ❌ | ❌ | 体检工具自身准不准 |
-| `mocks/verify-desktop.mjs` | ❌ | ❌ | ★★ **桌面壳**（0.2.5，167 项）：包根三级判据（**照真实发布包布局**断言）、端口从哪来、状态翻译、产物形状；**不启动 Electron** —— 窗口/托盘只能人在真机上点 |
+| `mocks/verify-desktop.mjs` | ❌ | ❌ | ★★ **桌面壳**（0.2.5，一百多项）：包根三级判据（**照真实发布包布局**断言）、端口从哪来、状态翻译、产物形状；**不启动 Electron** —— 窗口/托盘只能人在真机上点 |
 | `mocks/verify-memory-stats.mjs` | ❌ | ❌ | ★★ 记忆**可观测性**：计数、零写入告警、体检漏报修复 |
 | `mocks/verify-privacy.mjs` | ❌ | ❌ | ★★ **隐私硬闸**：七类拦得住、真实记忆零误拦、审计不含原文 |
 | `mocks/verify-oplog.mjs` | ❌ | ❌ | ★★ **操作日志**：参数与结果都记下、超时回合也留痕 |

@@ -94,7 +94,7 @@ node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
 node mocks/verify-real-dsh.mjs   # 真实 dsh 能否被启动（零费用；★ 需要能起子进程）
 node mocks/verify-doctor.mjs     # 体检工具自身的准确性（30 项）
-node mocks/verify-desktop.mjs    # ★★ 桌面壳（0.2.5，167 项，**不启动 Electron**）：包根三级判据**照真实发布包布局**断言、产物形状、状态翻译
+node mocks/verify-desktop.mjs    # ★★ 桌面壳（0.2.5，一百多项，**不启动 Electron**）：包根三级判据**照真实发布包布局**断言、产物形状、状态翻译
 node mocks/verify-live.mjs       # ★ 真实端到端（会调用模型，有少量费用）
 node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
 
@@ -271,6 +271,7 @@ start.bat                        # "浏览器那条路"；或 node src/index.mjs
 
 | 场景 | 怎么做 |
 |---|---|
+| **最省事（源码侧双击）** | 双击**仓库根**的 **`desktop.bat`** —— 它用包内 `vendor\node\node.exe` 直接调 `scripts/run-desktop.mjs`，**不需要终端、不需要 `cd`、不依赖 PATH 里的 node/npm**；失败会 `pause`，双击的窗口不会一闪就没 |
 | **发布包里（普通使用者）** | 双击 `app\InteractBot.exe`。它自己找到包根 → 用 `node src/index.mjs --background` 把桥接拉起来 → 开出控制台窗口 |
 | **源码侧（不必打包就能开窗口）** | 首次准备：`cd desktop && npm install --ignore-scripts`，再回包根 `npm run desktop:fetch`（取 Electron 运行时，约 **136 MB**，走 npmmirror 镜像；github 在本机连不通）。之后 `npm run desktop` 就开窗口 —— 它跑的是 `desktop/` 那份壳源码，数据落**源码侧包根**；改完壳**重启这条命令即可，不必重新打包** |
 | **打 exe** | `npm run desktop:pack` → 产物在 `.build-desktop/pack-<时间戳>/win-unpacked/`，最近一次记在 `.build-desktop/latest.json`（发布组装读它，**不猜目录名**） |
@@ -300,7 +301,7 @@ start.bat                        # "浏览器那条路"；或 node src/index.mjs
 0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false` 时它**是 `false`**
 ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根：
 读不到使用者的 `config.json`（日志里 `ENOENT`）、把日志写进了 `app\logs\`。
-修法就是上面这三级判据 —— 而判据由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 **167 项**）。
+修法就是上面这三级判据 —— 而判据由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 **一百多项**）。
 教训是：**只验「参数怎么用」、没验「真实布局长什么样」，等于没验。**
 
 ### 关窗口 = 收进托盘（机器人**继续在线**）
@@ -326,7 +327,7 @@ start.bat                        # "浏览器那条路"；或 node src/index.mjs
 **产物形状**（exe 在、asar 关着、PE 版本号 **0.2.5**、包里的壳代码与 `desktop/` 源码**逐字节一致**）
 以及**发布包验收**。完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
 
-**离线测试入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**167 项**，不启动 Electron）。
+**离线测试入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**一百多项**，不启动 Electron）。
 
 ---
 
@@ -572,7 +573,7 @@ DSH 子进程死亡时优雅降级、体检工具的准确性（含防误报）�
 **用量记账**（真实回合的 token 与成本已落盘 `logs/usage.jsonl`）、
 **桌面壳（0.2.5）的判断逻辑与产物形状**（包根三级判据**照真实发布包布局**断言、
 端口从哪来 / 什么算启动成功 / 状态怎么翻译、exe 在 / asar 关着 / PE 版本号 0.2.5 /
-包里的壳代码与 `desktop/` 源码逐字节一致，`mocks/verify-desktop.mjs` 167 项）。
+包里的壳代码与 `desktop/` 源码逐字节一致，`mocks/verify-desktop.mjs` 一百多项）。
 
 **未验证：**
 跨重启的长期记忆（P4，目前重启即失忆，靠工作区的 `MEMORY.md` 兜底）、

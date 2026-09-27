@@ -331,6 +331,21 @@ async function main () {
         '★ 工具链缺失时给得出可执行的指引（而不是一句"失败了"）',
         /npm install --ignore-scripts/.test(launcher) && /desktop:fetch/.test(launcher),
       )
+
+      // ── ★ 最省事的入口：仓库根的 `desktop.bat`（双击即可）──────────────────
+      //    为什么值得断言：它是**用户真正会用的那个**，而它自己有两条 cmd 老坑
+      //    （必须纯 ASCII、注释里不许有裸 `>` —— 判据在 verify-text-encoding ④），
+      //    还必须走**同一个启动器**（走 cli.js 就会踩 ELECTRON_RUN_AS_NODE 那个坑）。
+      const rootBat = join(PKG_ROOT, '..', '..', 'desktop.bat')
+      const batText = existsSync(rootBat) ? readFileSync(rootBat, 'utf8') : ''
+      check('★ 仓库根有可双击的 desktop.bat（源码侧开窗口的最省事入口）', batText.length > 0, rootBat)
+      check(
+        '★★ 它走的是同一个启动器（不是 cli.js —— 否则又会踩 ELECTRON_RUN_AS_NODE 那个坑）',
+        /scripts\\run-desktop\.mjs/.test(batText) && !/cli\.js/.test(batText),
+      )
+      check('★ 它优先用包内 Node（不依赖 PATH 里有没有 node/npm）', /vendor\\node\\node\.exe/.test(batText))
+      check('★ 失败时会 pause（双击场景下窗口不会一闪就没）', /\bpause\b/.test(batText))
+      check('★ 它保持纯 ASCII（cmd 按 GBK 解析 .bat，中文注释会吞换行）', !/[^\x00-\x7F]/.test(batText))
       check(
         '★ 有 npm run desktop:pack（从源码打 exe）',
         /assemble-desktop\.mjs/.test(s['desktop:pack'] ?? ''),
