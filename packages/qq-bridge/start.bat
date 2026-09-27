@@ -86,8 +86,32 @@ rem Open the console UI in the default browser once the config API is up.
 rem curl itself does the waiting: retries on connection-refused for ~2 min,
 rem and only on success does the browser open. Skip with: start.bat --no-browser
 rem Note: if you changed ui.apiPort in config.json, change 3410 below too.
+rem
+rem 0.2.5: SKIPPED when app\InteractBot.exe exists. The desktop shell opens a
+rem real window AND starts the bridge itself, so opening a browser as well
+rem would give you two consoles for one bot -- and the point of this build is
+rem that the browser is no longer the console.
+rem (This branch still matters for "start.bat --no-snowluma" style runs, where
+rem the desktop app was never launched.)
+rem
+rem WARNING: keep this FILE pure ASCII, comments included. A Chinese comment
+rem here once swallowed a line break under cmd's GBK codepage, so cmd read the
+rem following line as part of the comment and this very if-block split
+rem mid-token: every run printed "'em' is not recognized as an internal or
+rem external command" and the real command never ran, so the launcher looked
+rem like it did nothing.
+rem
+rem WARNING 2: never put a bare greater-than sign in a rem line. cmd parses
+rem redirection BEFORE rem, so a line that names a file after that sign
+rem silently overwrites and truncates it -- that is how two launcher .bat
+rem files were reduced to 0 bytes in 0.2.4 while every offline test stayed
+rem green. mocks/verify-text-encoding.mjs checks both rules now.
 if /i not "%~1"=="--no-browser" (
-  start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/api/status && start http://127.0.0.1:3410/"
+  if exist "%~dp0app\InteractBot.exe" (
+    echo Desktop app found: it opens the console window itself ^(no browser^).
+  ) else (
+    start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/api/status && start http://127.0.0.1:3410/"
+  )
 )
 
 rem --- QQ bridge ---------------------------------------------------------------

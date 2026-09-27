@@ -40,6 +40,11 @@ node src/index.mjs --doctor
 npm test
 
 # ⑤ 启动
+#   发布包：双击 app\InteractBot.exe   ★ 0.2.5 主入口：壳自己找到包根 →
+#             用 node src/index.mjs --background 把桥接拉起来 → 开出控制台窗口
+#   源码侧开窗口（不必打包）：npm run desktop
+#     ⚠️ 首次要先 cd desktop && npm install --ignore-scripts，再回包根跑 npm run desktop:fetch
+#        （取 Electron 运行时，约 136 MB，走 npmmirror 镜像；github 在本机连不通）
 start.bat
 # 或：node src/index.mjs
 ```
@@ -81,7 +86,10 @@ qq-bridge/
 ├── PROJECT.json      ← 包契约（机器可读：命令/配置/不变量/故障特征）
 ├── README.md         ← 给人看的完整说明（设计决定、排障表）
 ├── config.json       ← 全部运行配置
-├── start.bat         ← 入口（优先用包内 Node）
+├── app/              ← ★ 发布包里的桌面壳（`InteractBot.exe` 在这里；含 Electron 运行时，约 324 MB）
+├── desktop/          ← ★ 桌面壳源码（Electron）：main.cjs 窗口/托盘/启停桥接、lib.cjs **纯逻辑（能离线测）**、splash.html 启动页
+│                        `npm run desktop` 跑它；`npm run desktop:pack` 从它打出 `app/`
+├── start.bat         ← "浏览器那条路"（★ 0.2.5 起**不再是唯一入口**；发现 app\InteractBot.exe 就不再打开浏览器）
 ├── setup.mjs         ← 一次性准备
 ├── src/
 │   ├── index.mjs          装配与启动顺序  ← 改启动流程看这里
@@ -98,6 +106,7 @@ qq-bridge/
 │   ├── extensions-service.mjs ★ 扩展开关与设置（**即时生效**那条通道）
 │   ├── plugins.mjs        内置插件登记表（记忆/看图/QQ工具… 的开关 + 即时还是重启）
 │   └── doctor.mjs         体检
+├── scripts/          ★ 构建脚本：assemble-desktop.mjs 打 exe / fetch-electron.mjs 取运行时 / assemble-release.mjs 组装发布包
 ├── mcp/              手写的 MCP 服务器：mcp-qq-server.mjs（QQ 工具）+ mcp-skills-server.mjs（技能工具）
 ├── skills/           外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
 ├── mocks/            测试替身与验证脚本（不需要真 QQ，不花钱）
@@ -142,6 +151,40 @@ qq-bridge/
 见 `src/session-id.mjs` 顶部。一句话：**同一场运行内上下文连续，重启后必须换新 id**。
 代价是重启后 DSH 侧不记得之前的对话 —— 这是已知取舍，跨重启记忆属 P4（桥接侧自己存摘要注入）。
 
+### 桌面壳：包根**看证据**、关窗口**不下线**（0.2.5 新增）
+
+控制台 UI 从"浏览器里的一张网页"搬进了**真正的程序窗口**（Electron 38.8.6，运行时自带、
+免安装、目标机器**不需要装 Node**），启动方式**打包成 .exe**。
+**这部分不在本文件的操作闭环里**（它不影响桥接本身），但有几条改之前必须知道的：
+
+| 事实 | 依据 / 怎么写才对 |
+|---|---|
+| 发布包主入口 = `app\InteractBot.exe`，**双击即可** | 它自己找到包根 → `node src/index.mjs --background` 起桥接 → 开窗口 |
+| 源码侧**不必打包**就能开窗口 | 首次 `cd desktop && npm install --ignore-scripts` + 回包根 `npm run desktop:fetch`（Electron 运行时约 136 MB）；之后 `npm run desktop`。改完壳**重启这条命令**即可 |
+| 打 exe | `npm run desktop:pack` → `.build-desktop/pack-<时间戳>/win-unpacked/`，最近一次记在 `.build-desktop/latest.json`（发布组装读它，**不猜目录名**） |
+| **包根怎么找** | `desktop/lib.cjs` 的 `resolvePkgRoot`，三级判据：① 环境变量 `INTERACTBOT_PKG_ROOT`（若有人显式设）→ ② 从 `app.getAppPath()`（打包后 `app\resources\app`、开发时 `desktop/`）**逐级向上找包根标记**（**同时**有 `config.example.json` 与 `src/index.mjs` 的那一层）→ ③ 找不到就返回链上**真实存在**的一层并**在日志里喊一声**，**绝不猜** |
+| **关窗口 ≠ 退出** | 关窗口 = 收进**托盘**，机器人**继续在线**；真正退出只有托盘菜单的「退出并停止机器人」（会先 `POST /api/stop`） |
+| 桌面壳与桥接的日志**分开** | 壳写 `logs/desktop.log`，桥接写 `logs/bridge.log` |
+
+★★ **为什么判据是"看证据"而不是"数目录层数"（真机事故，别再改回去）**：
+0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false` 时它**是 `false`**
+⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根：读不到使用者的 `config.json`
+（日志里只有 `ENOENT`）、把日志写进了 `app\logs\`。
+修法就是那三级判据；而它由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言
+（离线 **155 项**）—— 0.2.4 的 132 项断言没抓到它，因为**只验了「参数怎么用」、
+没验「真实布局长什么样」**。所以：**改 `resolvePkgRoot` 之前先读那几条"真实布局"断言。**
+
+★ **本版没有 .bat 启动器**（0.2.4 那批中文名 .bat 入口已按用户要求删除，
+见 `mocks/verify-legacy-assets.mjs`），所以「**没有启动器也能找到包根**」是必须成立的替代证据 ——
+`verify-desktop.mjs` 里有专门一条。
+
+⚠️ **诚实边界**：窗口 / 托盘 / 菜单 / "关窗口不下线"**只能人在真机上点一遍**
+（受限沙箱里 Electron 起不来）。已被机器验证的只有壳的**判断逻辑**、**产物形状**
+（exe 在、asar 关着、PE 版本号 **0.2.5**、包里的壳代码与 `desktop/` 源码**逐字节一致**）
+以及**发布包验收**。完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
+
+**离线入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**155 项**，不启动 Electron）。
+
 ---
 
 ## 6. 测试地图（按"要不要花钱"分）
@@ -156,6 +199,7 @@ qq-bridge/
 | `mocks/verify-onebot.mjs` | ❌ | ❌ | 全链路：QQ 事件 → 回复发出 |
 | `mocks/verify-real-dsh.mjs` | ❌ | ❌ | 真实 dsh 能否被启动（不发 prompt） |
 | `mocks/verify-doctor.mjs` | ❌ | ❌ | 体检工具自身准不准 |
+| `mocks/verify-desktop.mjs` | ❌ | ❌ | ★★ **桌面壳**（0.2.5，155 项）：包根三级判据（**照真实发布包布局**断言）、端口从哪来、状态翻译、产物形状；**不启动 Electron** —— 窗口/托盘只能人在真机上点 |
 | `mocks/verify-memory-stats.mjs` | ❌ | ❌ | ★★ 记忆**可观测性**：计数、零写入告警、体检漏报修复 |
 | `mocks/verify-privacy.mjs` | ❌ | ❌ | ★★ **隐私硬闸**：七类拦得住、真实记忆零误拦、审计不含原文 |
 | `mocks/verify-oplog.mjs` | ❌ | ❌ | ★★ **操作日志**：参数与结果都记下、超时回合也留痕 |
@@ -982,13 +1026,15 @@ node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切�
 | `HTTP 426` | `httpUrl` 填成了 WebSocket 端口（SnowLuma：3000=HTTP、3001=WS） |
 | `session "..." already exists` | `session.instance` 机制失效，改成任意新值重启 |
 | `Cannot convert argument to a ByteString` | token 里混进了中文/全角字符 |
+| 双击 `app\InteractBot.exe` 后窗口一直停在启动页 | 看 `logs/desktop.log`（桌面壳自己的日志，与 `logs/bridge.log` **分开**）；启动页上有「看日志」 |
+| 关了窗口但机器人还在回话 | **设计如此**：关窗口 = 收进**托盘**，机器人继续在线；要停它用托盘菜单的「退出并停止机器人」 |
 | 留下 `.tmp-*` 目录 | 无害；`node mocks/verify-live.mjs --clean` |
 
 ---
 
 ## 8. 当前状态与下一步
 
-**已完成并验证**：P0 协议端就位 · P1 桥接骨架 · P2 工作区沙箱 + 三级名单 · **真实 QQ 链路端到端（含工具使用）** · P3 人味层（拟人延迟/静默时段/分条/先应一声）· P4 跨重启记忆（桥接托管写入 + 每小时蒸馏 + 更正不覆盖）· **P5 扩展系统（技能 + 插件，可随时开关）** · 0.2.2 的**人设库**与**按人昵称**。
+**已完成并验证**：P0 协议端就位 · P1 桥接骨架 · P2 工作区沙箱 + 三级名单 · **真实 QQ 链路端到端（含工具使用）** · P3 人味层（拟人延迟/静默时段/分条/先应一声）· P4 跨重启记忆（桥接托管写入 + 每小时蒸馏 + 更正不覆盖）· **P5 扩展系统（技能 + 插件，可随时开关）** · 0.2.2 的**人设库**与**按人昵称** · **0.2.5 的桌面壳**（控制台进真正的程序窗口 + 打包成 `app\InteractBot.exe`；**判断逻辑与产物形状**已机器验证 —— 窗口/托盘那部分见下）。
 
 **验收口径**：离线 `npm test` 全绿（**链上 50 套**；逐套数字见 `PROJECT.json` 的 `commands[].assertions`，那里同时写明**为什么本仓库不发布一个「总断言数」**；另有 3 套在受限沙箱里明确**跳过** —— 跳过不算通过）。真实运行侧的证据逐条记在 `PROJECT.json` 的 `verificationStatus`，**连同每条「未验证」的边界**（那张表比这段文字更权威）。
 
@@ -1000,6 +1046,8 @@ node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切�
 - **群聊实测**（代码与配置都放行了，但至今没有一条真实群消息跑过）。
 
 **如实标注（没验证过的事）**：群聊未真机验证 · 看图与 `qq_send_image` 的端到端未跑过 · 长时间运行稳定性未测 ·
+**桌面壳的窗口 / 托盘 / 菜单 / "关窗口不下线"**（0.2.5：这些**只能人在真机上点一遍**，
+受限沙箱里 Electron 起不来）·
 「随时开关」不覆盖**装卸技能**（要重启，这是设计边界不是缺陷）· 技能是第三方代码、**在宿主进程里跑**
 （进程内无法隔离，只有如实声明权限）。完整列表见 `PROJECT.json` 的 `verificationStatus.notVerified`。
 

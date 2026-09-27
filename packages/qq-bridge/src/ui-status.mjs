@@ -17,10 +17,13 @@
  * 这里重算一次比对。**哈希算法只有一份**（`scripts/ui-build-stamp.cjs`），
  * 免得校验侧与构建侧各写一套、迟早分叉。
  *
- * ── 三种结果必须分开，不能混成"绿/红" ──────────────────────────────────
- *   · `fresh`    —— 标记在、哈希一致        → 这份就是当前源码构建的
- *   · `stale`    —— 标记在、哈希不一致      → **源码改过没重新构建**（要修的是构建）
- *   · `unstamped`—— 标记不在                → **无法判断**（要修的是产物，不是源码）
+ * ── 四种结果必须分开，不能混成"绿/红" ──────────────────────────────────
+ *   · `fresh`      —— 标记在、哈希一致        → 这份就是当前源码构建的
+ *   · `stale`      —— 标记在、哈希不一致      → **源码改过没重新构建**（要修的是构建）
+ *   · `unstamped`  —— 标记不在                → **无法自证来源**（要修的是产物，不是源码）
+ *   · `uncheckable`—— 缺"重算哈希的输入/实现" → **判不了**（0.2.5 补：发布包里没有
+ *                    `config-ui/src`，只有 `dist`，重算出来会是**空串的哈希** ⇒ 那时报
+ *                    `stale` 是**假红**，而假红会训练人忽略红色）
  *
  * ★ 为什么必须分开：`stale` 与 `unstamped` 的处理方式完全不同。混起来报一句
  *   "界面不同步"，使用者会去重新构建，而 `unstamped` 那种情况下重新构建**也修不好**
@@ -36,9 +39,25 @@ import { PKG_ROOT } from './local.mjs'
 
 const require = createRequire(import.meta.url)
 // ★ 与构建侧**同一个** CJS 模块（哈希逻辑只有一份）。
-const { computeUiSourceHash, readBuildStamp, UI_ROOT } = require(
-  join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs'),
-)
+//
+// ★★ 0.2.5 修：这个 require 原来是**模块顶层**的，于是 `scripts/ui-build-stamp.cjs`
+//    一旦不在包里，`src/index.mjs` 一 import 就抛 —— **整个桥接启动即死**。
+//    而发布包从来只拷 `src/`、不拷 `scripts/`（见 assemble-release 的清单）⇒ 实测：
+//    `_release/InteractBot-0.2.0` 起每一份包里的桥接都**起不来**，
+//    且 `respawnBridge` 用的是 `stdio:'ignore'`，连 `logs/bridge.log` 都不会生成 ——
+//    用户只看到"桌面窗口一直等"，没有任何线索（真机实测：90 秒超时）。
+//
+//    ⇒ 缺了它就**降级成"无法判断"（unstamped）**，并**说清缺的是哪个文件**。
+//    这是本仓库既有的纪律：**观测手段不许把主流程弄挂**
+//    （同 `memory-stats`：统计文件坏掉也不许抛）。判据本身没有变松 —— 变的是
+//    "缺助手"从"崩"变成"如实说：我判断不了，因为缺这份实现"。
+const stampModule = (() => {
+  try {
+    return require(join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs'))
+  } catch (error) {
+    return { __loadError: error?.message ?? String(error) }
+  }
+})()
 
 /** 默认的开发路径产物目录（桥接伺服的就是它）。 */
 export function defaultUiDist() {
@@ -50,7 +69,7 @@ export function defaultUiDist() {
  *
  * @param {{distDir?: string}} [opts]
  * @returns {{
- *   status: 'fresh'|'stale'|'unstamped'|'missing',
+ *   status: 'fresh'|'stale'|'unstamped'|'missing'|'uncheckable',
  *   distDir: string,
  *   stamp?: object,
  *   expectedHash: string,
@@ -59,7 +78,36 @@ export function defaultUiDist() {
  * }}
  */
 export function checkUiFreshness({ distDir = defaultUiDist() } = {}) {
-  const expectedHash = computeUiSourceHash()
+  // ★ 缺"算哈希的那份实现"时**不崩**，而是如实报"判不了"（理由见文件顶部 0.2.5 那段）
+  if (stampModule.__loadError) {
+    return {
+      status: 'uncheckable',
+      distDir,
+      expectedHash: '',
+      why:
+        `算不出源码哈希：${stampModule.__loadError}` +
+        '（校验侧与构建侧共用的那份实现在 scripts/ui-build-stamp.cjs）',
+      advice:
+        '这个包里**没有** `scripts/ui-build-stamp.cjs` —— 界面产物无法自证来源。' +
+        '发布包应当带上它（见 `scripts/assemble-release.mjs` 的拷贝清单）；' +
+        '源码树里出现这句，说明那个文件被删了或路径口径变了。',
+    }
+  }
+  // ★★ 发布包里**没有** `config-ui/src`（只发 dist）⇒ 重算哈希的输入是空的、
+  //    算出来会是"空串的哈希"（`e3b0c442…`），于是永远报 `stale` —— 那是**假红**。
+  //    这里如实分开：判不了就说判不了，并说清"这是发布包的正常形态"。
+  if (!existsSync(join(PKG_ROOT, 'config-ui', 'src'))) {
+    return {
+      status: 'uncheckable',
+      distDir,
+      expectedHash: '',
+      why: '这个包里没有 config-ui/src（发布包只发 dist），没法重算源码哈希',
+      advice:
+        '要判断"UI 与源码是否同步"请在**源码树**里跑 `node src/index.mjs --ui`（或 `setup.mjs --release`）——' +
+        '发布包本身只有成品，这一层判不了。',
+    }
+  }
+  const expectedHash = stampModule.computeUiSourceHash()
 
   if (!existsSync(join(distDir, 'index.html'))) {
     return {
@@ -71,7 +119,7 @@ export function checkUiFreshness({ distDir = defaultUiDist() } = {}) {
     }
   }
 
-  const r = readBuildStamp(distDir)
+  const r = stampModule.readBuildStamp(distDir)
   if (!r.ok) {
     return {
       status: 'unstamped',
@@ -119,6 +167,8 @@ export function uiFreshnessTitle(status) {
       return '❌ 界面产物**落后于**当前源码（源码改了没重新构建）'
     case 'unstamped':
       return '⚠️ 界面产物**无法自证来源**（没有构建标记）'
+    case 'uncheckable':
+      return '· 界面新鲜度**判不了**（缺重算哈希的输入/实现 —— 发布包属于这种）'
     case 'missing':
       return '❌ 界面产物不存在'
     default:

@@ -1,6 +1,7 @@
 # RELEASE.md — 打发布包（zip）
 
-> 目标产物：一个 **zip**，解压后双击 `start.bat` 即可用。
+> 目标产物：一个 **zip**，解压后双击 `app\InteractBot.exe` 即可用（桌面壳是本版主入口）；
+> `start.bat` 仍在，走的是浏览器那条路。
 > 用户的外置依赖只有两样：**QQ 桌面版** 和 **DSH**（外加自己的模型 API key 与 SnowLuma）。
 >
 > 本文只讲"怎么打",不讲设计理由 —— 设计理由见 `README.md` / `AGENT.md` / `PROJECT.json`。
@@ -106,7 +107,9 @@ npm test
 **要的：**
 
 ```
-start.bat                 ★ 唯一入口（0.2.5 起中文名入口已删除，见 §4）
+app/                      ★ 桌面壳：InteractBot.exe（200.5 MB）+ Electron 运行时，共约 324 MB
+scripts/ui-build-stamp.cjs  ★ **运行期就要用**（`src/ui-status.mjs` require 它），不是可选的构建脚本
+start.bat                 老那条路（浏览器）；发现 app\InteractBot.exe 时**不再**开浏览器
 config.json               ★ 已清空密钥的模板
 prices.json
 src/                      （全部 .mjs）
@@ -123,6 +126,10 @@ vendor/dsh/               DSH 本体（275MB，用户自己装）
 vendor/snowluma/          SnowLuma（许可证不允许）
 config-ui/src/            前端源码
 config-ui/node_modules/   约 202 MB
+desktop/                  桌面壳**源码**（只发 app/ 里那份成品；两边都放 = 两个真相）
+desktop/node_modules/     约 72 MB（electron + electron-builder，构建期依赖）
+desktop/.npm-cache/       约 200 MB（Electron 的 zip 与 electron-builder 的缓存）
+.build-desktop/           打包产物根（每份约 324 MB；组装脚本从它里面的 latest.json 找产物）
 logs/  cache/  workspace-qq/   运行痕迹（★ workspace-qq 里有模型读写的聊天内容）
 config.json.bak*          历史备份，含旧密钥
 .tmp-*                    测试残留
@@ -171,30 +178,30 @@ config.json.bak*          历史备份，含旧密钥
 
 ---
 
-## 4. 入口（0.2.5 起只有 `start.bat`）
+## 4. 入口（0.2.5：主入口是 `app\InteractBot.exe`）
 
-发布包给的是 **`start.bat`**（双击即用，开关见 §2 的命令表）。
+发布包里**有两个入口，但只有一个是"这一版的主入口"**：
 
-★ 0.2.5：原先还有四个中文名入口（`启动机器人.bat` / `检查配置.bat` / `体检.bat` /
-`创建带图标的快捷方式.bat`）与一份 `先读我-首次使用.txt`，**都已按用户要求删除 ——
-不要加回来**。少一个入口就少一份要同步的东西，而"自检 / 体检"本来就能用
-`start.bat --check` / `start.bat --doctor`（等价于 `node src/index.mjs --check|--doctor`）做到。
-`scripts/assemble-release.mjs` 的拷贝清单与 `scripts/check-release-package.mjs` 的必需件清单
-也已同步删掉这些名字：**加回名字 = 组装时第③步直接报"包根缺少必需件"**（这是刻意的，
-它让"把删掉的文件再造一份出来"变成一件会立刻失败的事）。
+| 入口 | 是什么 | 什么时候用 |
+|---|---|---|
+| **`app\InteractBot.exe`** | ★ **主入口**：双击就开一个真正的程序窗口（Electron 运行时自带），并把桥接拉起来 | 日常使用 —— 这就是"UI 不再依赖浏览器"那一条 |
+| `start.bat` | 老那条路：起桥接 + **在默认浏览器里**开控制台 | 包没有桌面壳时、或你要 `--check/--doctor/--foreground` 这些开关 |
 
-**关于图标（为什么干脆不给快捷方式了）**：`.bat` 在资源管理器里永远显示默认的
-"白纸+齿轮"，这是 Windows 的限制（它不是 PE 文件，没有图标资源槽）。想让入口带图标
-只能用 `.lnk`，而 **`.lnk` 里存的是绝对路径**：在作者机器上生成的那份指向作者的目录，
-换台机器目标与图标一起失效（图标退化成白纸）。旧办法是随包带一个"现场生成快捷方式"的
-`.bat`，代价是多一个要长期维护的引导入口 + 一套字符码陷阱，换来的只是一个图标 ——
-0.2.5 取消。想要图标就自己右键 `start.bat` → 发送到桌面快捷方式 →
-把快捷方式属性里的图标指向 `assets\icon.ico`。
+★ 两者**不冲突**：`start.bat` 一旦发现 `app\InteractBot.exe` 存在就**不再打开浏览器**（否则同一台机器会出现两个控制台）。
 
-★ 仍然成立的那条坑：**`start.bat` 正文必须纯 ASCII** —— cmd 按系统代码页
-（中文 Windows 是 GBK）解析 `.bat`，UTF-8 中文注释会吞掉换行、把解析搞坏。
-（旧文档里还有第二条同源陷阱 —— 内嵌 PowerShell 读无 BOM 的 UTF-8 `.ps1` 会被当 GBK，
-那条随"现场生成快捷方式"脚本一起消失了。）
+★★ 本版刻意**没有** .bat 启动器（0.2.4 有一个中文名的 `桌面端bot启动.bat` 负责设 `INTERACTBOT_PKG_ROOT`，那一类中文名入口已按用户要求删除）。**没有启动器也必须能找到包根**，靠的是壳里的三级判据：
+  ① 环境变量 `INTERACTBOT_PKG_ROOT`（若有人显式设）→ ② 从 `app\resources\app` **逐级向上找包根标记**
+  （同时有 `config.example.json` 与 `src/index.mjs` 的那一层）→ ③ 找不到就返回链上真实存在的一层并
+  **在日志里喊一声**，绝不猜。
+  ⚠️ 0.2.4 的真事故正出在这里：第一版按 `app.isPackaged` 猜层数，而 **`asar: false` 时它是 `false`**
+  ⇒ 壳**静默**把 `app\` 当成了包根（读不到使用者的 `config.json`、日志写进 `app\logs\`）。
+  所以那条判据现在由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言。
+
+**关于图标**：`.exe` 是 PE 文件，**可以**带自定义图标 —— 打包时 `signAndEditExecutable` 会把图标与
+版本号写进 PE 资源。换句话说"打包成 .exe"顺带解决了 0.2.4 那套 `.lnk` 的麻烦
+（`.bat` 不能带图标、`.lnk` 存绝对路径、换台机器图标就退化成白纸）。
+
+**窗口关掉的语义**：关窗口 = **收进托盘**，机器人继续在线；要它下线请用托盘菜单的「退出并停止机器人」。
 
 ---
 
@@ -208,6 +215,21 @@ node scripts/assemble-release.mjs --dry-run   # 先看它要做什么
 node scripts/assemble-release.mjs --zip       # 组装 + 压缩
 node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会先删干净再建）
 ```
+
+**★ 打桌面壳（0.2.5 的前置步骤）**：包里的 `app/` 是**打出来的成品**，不是源码。组装前先打一次：
+
+```bash
+cd packages/qq-bridge
+cd desktop && npm install --ignore-scripts && cd ..   # 首次：壳的构建期依赖（electron / electron-builder）
+npm run desktop:fetch                                 # 首次：取 Electron 运行时（约 136 MB，走 npmmirror 镜像）
+npm run desktop:pack                                  # 打 exe → .build-desktop/pack-<时间戳>/win-unpacked
+```
+
+组装脚本读 `.build-desktop/latest.json` 找**最近一次成功构建**（**不猜目录名** —— 0.2.4 那批
+`pack-*` 里 10 个是空壳、只有 1 个能用），把它整目录拷进包根 `app/`，并做两件自校验：
+① 包里那份壳代码与 `desktop/` 源码**逐字节比对**（防"改了壳却忘了重新打包"这种不报错的脱钩）；
+② 写 `app/PROVENANCE.txt`（打包时间 / Electron 版本 / 主进程哈希）。
+**没有产物时组装直接失败**并打印上面这几条命令 —— 桌面壳是本版主入口，静默地缺了它是最坏的结果。
 
 **★ 为什么必须有脚本**：上一次组装是手敲的，结果 `启动机器人.bat` /
 `检查配置.bat` / `体检.bat` **只存在于发布包里、仓库里没有源** ——
@@ -225,6 +247,7 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 | ② | 输出目录已存在就**拒绝**（要覆盖得显式 `--force`，且先删干净再建） | 老版本要留着对照；而且 `cpSync` 往已有目录上拷会抛难懂的 EIO |
 | ③ | 清点源文件，缺一个都不组装 | 漏项不报错，所以要在组装**之前**数一遍 |
 | ④ | 组装 + **自校验包里的 config.json 确实是空白** | 光"从模板复制"不够，复制完要再验一次结果 |
+| ④-b | 把桌面壳整目录拷进包根 `app/` + **逐字节比对**壳代码 + 写 `PROVENANCE.txt` | 桌面壳是本版主入口；而"包里那份是不是当前源码打的"必须能机器判断（0.2.4 在 UI 产物上脱钩过一次，1100 项测试全绿） |
 | ⑤ | 跑 `check-release-package.mjs`，看**退出码** | 不要挑它的输出文案判通过 |
 | ⑥ | 可选 `--zip` | 用 `tar -a`（bsdtar），比 `Compress-Archive` 快且条目名用正斜杠 |
 
@@ -233,12 +256,16 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 `package.json` / `PROJECT.json` 的 `package.version` / MCP server info /
 `RELEASE.md` 里的包名。四处里漏改一处，症状是"包名写着 0.2.0、里面报的却是 0.1.0"。
 
-**发布包的最终形状**（0.2.5 实测：120 个文件 / 解压后约 88.6 MB；这两个数由
+**发布包的最终形状**（0.2.5 实测：**202 个文件 / 解压后约 413 MB**；这两个数由
 `check-release-package.mjs` 每次组装时实测报出，别照抄进文档当承诺）：
 
 ```
 InteractBot-<版本>-win-x64/
-├── start.bat               ← ★ 唯一点击入口（0.2.5 起中文名入口已删除，见 §4）
+├── app/                    ← ★ 桌面壳：约 324 MB（Electron 运行时 + InteractBot.exe 200.5 MB）
+│   ├── InteractBot.exe     ← ★ 主入口：双击即开窗口并把桥接拉起来
+│   ├── PROVENANCE.txt      ← 这份 exe 是哪份源码、哪个 Electron、什么时候打的
+│   └── resources/app/      ← 壳代码（**明文**，不是 asar —— asar 一打上就没法机器复核里层了）
+├── start.bat               ← 老那条路（浏览器）；发现 app\InteractBot.exe 时不再开浏览器
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
 ├── prices.json  package.json
@@ -274,7 +301,7 @@ InteractBot-<版本>-win-x64/
 ### 打包后必须跑一次验收脚本
 
 ```powershell
-node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.3-win-x64"
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.5-win-x64"
 ```
 
 它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**
@@ -297,7 +324,13 @@ Compress-Archive -Path $out -DestinationPath "$out.zip"
 ## 6. 验收清单（必须在一台干净机器 / 另一个盘符上跑）
 
 1. 解压到**另一个盘符**（例如 `D:\test`）而非原路径。
-2. 双击 `start.bat` → 应能自建 `logs/`、`cache/`、`workspace-qq/`。
+2. 双击 `app\InteractBot.exe` → 应开出控制台窗口并连上桥接；`logs/desktop.log` 的第一行应该是
+   **发布包根**（不是 `app\` —— 0.2.4 正是栽在这里）；关掉窗口后机器人应仍在托盘里（不下线）。
+   `start.bat` 仍应能自建 `logs/`、`cache/`、`workspace-qq/`，且**不再**打开浏览器。
+   ⚠️ **窗口停在启动页超过 90 秒** ⇒ 去看 `logs/bridge.log`。最常见的两条：
+   ① `❌ 无法启动 DSH：没找到 DSH` —— 包里那份 `config.json` 是空白模板，需要你填
+   `dsh.cliPath`/`dsh.searchPaths`（或设 `DSH_DESKTOP_APP`）。这是**先决条件**，不是缺陷。
+   ② 端口被占（`控制台端口` 那行会写它用的是哪个）。
 3. `start.bat --check` → 应显示 DSH 的解析结果与来源；**没装 DSH 时必须列出所有候选位置**，而不是一句"找不到"。
 4. 故意把 `dsh.cliPath` 填错 → 报错必须说明"这个路径是配置指定的但它不存在"。
 5. 不填 `apiKey`、机器上也没有 `%APPDATA%\dsh-desktop\harness\.credentials.yaml` → 启动日志必须明确报出凭据缺失
