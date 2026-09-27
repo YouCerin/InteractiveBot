@@ -404,11 +404,11 @@ async function auditForRelease() {
     }
     if (existsSync(p)) warns.push(`${label} 还在：${rel(p)} —— 发布前删掉或清空`)
   }
-  for (const [label, p] of [
-    ['旧架构目录（已废弃）', join(PKG_ROOT, '..', 'dsh-qq-bot（废弃）')],
-    ['前端源码依赖（202MB，不进包）', join(PKG_ROOT, 'config-ui', 'node_modules')],
-  ]) {
-    if (existsSync(p)) warns.push(`${label} 仍在磁盘上：${rel(resolve(p))}（打包时排除即可）`)
+  // ★ 0.2.5：`packages/dsh-qq-bot（废弃）` 已按用户要求删除，盯它的那条检查随之去掉 ——
+  //   留一条**永远不会触发**的死条目比没有这条检查更坏：它看起来还在守着什么。
+  {
+    const p = join(PKG_ROOT, 'config-ui', 'node_modules')
+    if (existsSync(p)) warns.push(`前端源码依赖（202MB，不进包） 仍在磁盘上：${rel(resolve(p))}（打包时排除即可）`)
   }
 
   // ⑤ 必需件在不在

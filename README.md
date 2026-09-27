@@ -2,9 +2,11 @@
 
 把**可配置的 QQ 对话机器人**接到 DeepSeek Harness（DSH）：QQ 消息 → DSH agent → 回答发回 QQ。
 
-> **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.2）**。它**不是** DSH 插件，
+> **当前状态：`packages/qq-bridge` 是仓库里唯一的实现（0.2.2）**。它**不是** DSH 插件，
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
-> `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
+> `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，**已在 0.2.5 按用户要求
+> 删除**（旧方案存档在 `docs/design.md`、`docs/implementation-plan.md`、`docs/m6-checklist.md`）——
+> 那是**有意删掉的**，不要再把它建回来。
 
 ## 目录结构
 
@@ -15,13 +17,12 @@ project_InteractBot/
 │   ├── dsh-agent-teams/            # skill 源 + 开发文档 + git 历史
 │   └── pixiv-lookup-1.1.0/         # ★ 第三方技能**原件**（适配前的逐字副本）
 ├── packages/
-│   ├── qq-bridge/                  # ★ 在维护的那个：QQ ↔ DSH 桥接（详见它自己的 README/AGENT.md）
-│   │   ├── src/                    # 桥接主体（含扩展内核 extensions.mjs / 插件表 plugins.mjs）
-│   │   ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
-│   │   ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
-│   │   ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
-│   │   └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
-│   └── dsh-qq-bot（废弃）/
+│   └── qq-bridge/                  # ★ 唯一的实现：QQ ↔ DSH 桥接（详见它自己的 README/AGENT.md）
+│       ├── src/                    # 桥接主体（含扩展内核 extensions.mjs / 插件表 plugins.mjs）
+│       ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
+│       ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
+│       ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
+│       └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
 ├── docs/                           # 版本级文档（设计 / 验收 / 适配存档）
 │   ├── 插件设计规范.md              # ★ 扩展体系的契约（技能清单、生命周期、安全、UI、验收）
 │   ├── 0.2.2-release-notes.md       # 这一版更新了什么
@@ -83,7 +84,11 @@ copy config.example.json config.json    # 模板：密钥与本机路径都是�
 
 ## 下一步
 
-1. 实现 `dsh-qq-bot` 的 OneBot 11 WebSocket 连接与鉴权（`packages/dsh-qq-bot/src/index.ts` 内的 TODO）。
+> ⚠️ 下面这几条是**第一版「DSH 进程内插件」路线**当时的待办；那条路线已废弃，
+> 对应的包也已在 0.2.5 删除（存档：`docs/implementation-plan.md`）。保留仅为历史对照 ——
+> 现在的实现与入口见 `packages/qq-bridge/README.md`。
+
+1. ~~实现 `dsh-qq-bot` 的 OneBot 11 WebSocket 连接与鉴权（`packages/dsh-qq-bot/src/index.ts` 内的 TODO）~~ —— 该包已删除；这件事由 `packages/qq-bridge`（外部进程 + `dsh --profile sdk`）以另一条路线完成。
 2. 消息接收 → Agent 会话路由；注册 `qq_bot_send_*` 工具。
 3. `pnpm install` + `pnpm build` + `pnpm typecheck`（DSH 包 pre-release，必要时按指南软链类型）。
 4. `dsh plugin --profile web add ...` 安装、`--dump-config` 验证、真实 QQ 联调。

@@ -413,7 +413,7 @@ export function StatusBar({
               <div className="space-y-2 pt-1 text-sm leading-relaxed text-foreground/80">
                 <p>
                   机器人没在运行时，这个界面也连不上它，所以「启动」只能手动做一次： 在机器人目录里双击{' '}
-                  <code className="rounded bg-muted px-1">启动机器人.bat</code>（0.2.3 起后台启动，不会留黑窗口）。
+                  <code className="rounded bg-muted px-1">start.bat</code>（0.2.3 起后台启动，不会留黑窗口）。
                   要看实时输出、或想用 Ctrl+C 停止，用{' '}
                   <code className="rounded bg-muted px-1">start.bat --foreground</code>。
                 </p>
@@ -443,7 +443,7 @@ export function StatusBar({
                   description: (
                     <>
                       停止后本界面会断开，而且<strong className="text-red-600">无法从这里再启动</strong>
-                      ——需要到机器人目录双击 启动机器人.bat 才能重新启动（现在不会留黑窗口）。
+                      ——需要到机器人目录双击 start.bat 才能重新启动（现在不会留黑窗口）。
                     </>
                   ),
                   confirmText: '停止',

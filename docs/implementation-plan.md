@@ -1,6 +1,10 @@
 # dsh-qq-bot 实施计划（基于 M8 运行时取证）
 
-> 状态：**待用户确认**。运行时事实已由只读探针验证；入口身份（官方 Bot / 个人号）待最终拍板。
+> ★★ **0.2.5：本文件描述的包 `packages/dsh-qq-bot（废弃）` 已按用户要求删除，本文件随之归档。**
+> 现在的实现是 `packages/qq-bridge`（外部进程 + `dsh --profile sdk`）。**不要照着它重建那个包**
+> —— 删除是有意的，重建会被 `mocks/verify-legacy-assets.mjs` 判红。
+
+> 状态：**已归档（0.2.5）**。以下是当时的状态记录：运行时事实已由只读探针验证；入口身份（官方 Bot / 个人号）待最终拍板。
 > 探针证据：`probe-sdk.mjs`、`.probe-ws/marker.txt`、`marker-outside.txt`
 > 取证依据：`docs/design.md`（旧设计，已被本文件取代）、`docs/contracts.md`（M1 契约）、
 > `dsh-adapter-qq-技术分析报告.md`（同类实现源码分析）
