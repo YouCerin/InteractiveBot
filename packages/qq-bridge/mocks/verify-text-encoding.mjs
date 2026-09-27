@@ -68,6 +68,42 @@ function section(t) {
 
 /** 只看文本类文件；二进制/产物/运行痕迹一律跳过（它们不是"手写的东西"）。 */
 const TEXT_EXT = /\.(md|mjs|cjs|js|json|txt|patch|ya?ml|ts|tsx|css|html|ps1)$/i
+
+/**
+ * ★★★ `.bat` / `.cmd` 单独走一遍 walk（0.2.4 修的一处**致命漏洞**）。
+ *
+ * 为什么必须单独列：`TEXT_EXT` 里**没有 `bat`/`cmd`**（它们在"编码事故"那四条判据里
+ * 不该参与乱码统计），而 `walk()` 只收 `TEXT_EXT` 命中的文件 —— 于是
+ * **"所有 .bat 都是纯 ASCII"那条断言一个文件都没扫过，恒为绿**。
+ *
+ * 实测代价：我加了一句话里带中文的 `.bat`，那条断言照样报"✅（0 个）"。
+ * 也就是说 0.2.4 里那三次 `.bat` 中文事故，**守卫一次都没有真正挡住过** ——
+ * 我给 npm.cmd 写负对照时"命中"的是判据的**逻辑片段**，不是这条接线。
+ * ∴ 教训（与"任务段从未注入"是同一类）：**判据写对了 ≠ 它在跑**；
+ *   一条 `check()` 如果输入集合是空的，它永远绿，而且看不出是空的。
+ *   这里因此把 `.bat`/`.cmd` 的输入集合**显式**列出来，并在下面断言"扫到的文件数 > 0"。
+ */
+const BAT_EXT = /\.(bat|cmd)$/i
+
+function walkBat (dir, out = []) {
+  let entries
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const e of entries) {
+    if (e.name.startsWith('.tmp')) continue
+    const abs = join(dir, e.name)
+    if (e.isDirectory()) {
+      if (SKIP_DIR.has(e.name)) continue
+      walkBat(abs, out)
+    } else if (BAT_EXT.test(e.name)) {
+      out.push(abs)
+    }
+  }
+  return out
+}
 const SKIP_DIR = new Set([
   'node_modules', 'vendor', 'dist', 'logs', 'cache', '_release', 'snowluma',
   'workspace-qq', '.git', '.tmp-verify', '.tmp-verify-onebot', '.tmp-verify-doctor',
@@ -235,9 +271,16 @@ section('① 全仓库文本文件：不许 UTF-16 / U+FFFD / 误加的 BOM / �
   // ⚠️ 判据是"**任何**非 ASCII 字节"（不是"中文字符"）：GBK 里行尾字节 0x5C 之类的
   //   边界情况太绕，而"批处理文件纯 ASCII"本来就没有代价（要解释就写在 .md / .mjs 里）。
   const batNonAscii = []
-  for (const abs of walk(REPO_ROOT)) {
+  const batFiles = walkBat(REPO_ROOT)
+  // ★★ 先断言"扫到了东西"：一条 check 的输入集合为空时它**永远绿**，而且看不出是空的 ——
+  //    这正是这条断言此前"一个文件都没扫过却一直报 ✅"的原因（见 `walkBat` 上方的注释）。
+  check(
+    `★★ 这个仓库里扫到了 ${batFiles.length} 个 .bat/.cmd（空集合会让下面两条断言变成空断言）`,
+    batFiles.length >= 5,
+    batFiles.length ? '' : '一个都没扫到 —— 判据的输入集合是空的，等于没有判据',
+  )
+  for (const abs of batFiles) {
     const rel = relative(REPO_ROOT, abs).split('\\').join('/')
-    if (!/\.(bat|cmd)$/i.test(rel)) continue
     const buf = readFileSync(abs)
     const bad = []
     for (let i = 0; i < buf.length; i += 1) if (buf[i] > 127) bad.push(i)
@@ -268,22 +311,40 @@ section('① 全仓库文本文件：不许 UTF-16 / U+FFFD / 误加的 BOM / �
   // 一次弄空了 `桌面端bot启动.bat` **和** `启动机器人.bat`（后者是用户的主入口）。
   // 两个文件都变 0 字节，**而离线测试当时没红**：没有任何断言读那两个文件的**内容**。
   //
-  // ∴ 判据：注释行（rem / ::）里不许有**未转义**的 `>` 或 `<`。
-  //   默认拒绝，不开"看起来无害就放行"的口子 —— 真事故正是从"看起来只是注释"开始的。
+  // ∴ 判据（★ 必须精确到**真形态**，否则会误报一大片，而误报会让人删掉守卫）：
+  //   致命形态只有一种：`rem` 之后**第一个词就是一个带扩展名的文件名**，紧跟重定向，
+  //   再跟**另一个文件名** —— 例如（0.2.4 真事故）
+  //       rem  DesktopBot.lnk -> 桌面端bot启动.bat
+  //   cmd 会**执行** `DesktopBot.lnk`（找不到就报错）并把 `桌面端bot启动.bat`
+  //   **截断成 0 字节**。两个条件缺一不可：
+  //     · 第一个词得是**文件名形状** —— 否则 cmd 只是"找不到命令"，不碰任何文件；
+  //     · 重定向后得有**非空白目标** —— `rem  a  ->  b`（箭头后是空格）的重定向目标为空，
+  //       cmd 不碰文件（这在旧注释里很常见，判红只会制造噪音）。
+  //   ⇒ 用"文件名形状 + 非空目标"两条约束，把真事故与噪音分开。
   const batRedirect = []
-  for (const abs of walk(REPO_ROOT)) {
+  const FILE_LIKE = /\.[A-Za-z0-9]{1,4}(\s|$)/ // 形如 foo.bat / a.exe / x.cmd
+  for (const abs of batFiles) {
     const rel = relative(REPO_ROOT, abs).split('\\').join('/')
-    if (!/\.(bat|cmd)$/i.test(rel)) continue
     const text = readFileSync(abs, 'utf8')
     text.split(/\r?\n/).forEach((line, i) => {
-      const t = line.trim()
-      if (!/^(rem\b|::)/i.test(t)) return
-      const bare = t.replace(/\^[<>]/g, '') // 去掉已转义的 ^> ^<
-      if (/[<>]/.test(bare)) batRedirect.push(`${rel}(第 ${i + 1} 行：${t.slice(0, 60)})`)
+      // `rem` 后面**至少一个非空白字符**（`rem` 单独一行会被 cmd 忽略，安全）
+      const m = /^\s*rem\s+(\S.*)$/i.exec(line)
+      if (!m) return
+      const body = m[1].replace(/\^[<>]/g, ' ') // 去掉已转义的 ^> ^<
+      const words = body.split(/\s+/).filter(Boolean)
+      const first = words[0] ?? ''
+      // 第一个词之后紧跟重定向符？（允许 `word>` 或 `word >`）
+      if (!/^[^\s<>]*[<>]/.test(body.replace(/^[^\s<>]*/, (w) => w))) return
+      const redir = body.indexOf('>') >= 0 ? body.indexOf('>') : body.indexOf('<')
+      const after = body.slice(redir + 1).trim()
+      const startsLikeFile = FILE_LIKE.test(first)
+      if (startsLikeFile && after.length > 0 && /^[^\s<>]/.test(after)) {
+        batRedirect.push(`${rel}(第 ${i + 1} 行：${line.trim().slice(0, 70)})`)
+      }
     })
   }
   check(
-    '★★★ .bat/.cmd 注释里没有裸的 > 或 <（rem 不阻止重定向 —— 实测把文件截断成 0 字节）',
+    '★★★ .bat/.cmd 注释里没有「动词 -> 目标文件」那种重定向（rem 不阻止它，实测截断成 0 字节）',
     batRedirect.length === 0,
     batRedirect.length
       ? `${batRedirect.join('；')}\n      —— 注释里要写箭头就写 "to"，或用 ^> 转义。` +

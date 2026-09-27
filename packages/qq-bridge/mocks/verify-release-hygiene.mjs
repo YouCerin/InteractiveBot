@@ -283,6 +283,24 @@ section('⑥ ★★ 拷贝清单里的目录名必须是纯 ASCII（中文名会
     const missing = items.filter((it) => !existsSync(join(PKG_ROOT, it)))
     check('★ 清单里的目录在磁盘上都存在', missing.length === 0, missing.join('、'))
   }
+
+  // ★★ 单文件清单（COPY_FILES）同样要查：它里面**混着中文文件名的入口**
+  //   （`启动机器人.bat` / `桌面端bot启动.bat` / …）。中文**文件名**本身没问题
+  //   （`cpSync` 逐文件拷贝不会崩 —— 见上面那段注释里实测矩阵的第 3 行），
+  //   但"清单里的东西必须在磁盘上"这条对文件同样成立：漏一个，组装到第③步才报。
+  const FILE_LIST_RE = /const COPY_FILES = \[([\s\S]*?)\n\]/
+  const fm = text.match(FILE_LIST_RE)
+  check('能从发布脚本里读出 COPY_FILES 清单', fm !== null)
+  if (fm) {
+    const files = [...fm[1].matchAll(/'([^']+)'/g)].map((x) => x[1]).filter(Boolean)
+    check(`★ 清单里读到 ${files.length} 个文件项`, files.length >= 10, files.join('、'))
+    const missingFiles = files.filter((it) => !existsSync(join(PKG_ROOT, it)))
+    check('★ 清单里的文件在磁盘上都存在', missingFiles.length === 0, missingFiles.join('、'))
+    // 这几个是"用户入口"，缺了它们发布包就少了打开的路径 —— 单列出来，防手滑删掉
+    for (const must of ['启动机器人.bat', '桌面端bot启动.bat', 'start.bat']) {
+      check(`★ 入口 ${must} 在拷贝清单里`, files.includes(must))
+    }
+  }
 }
 
 console.log('')

@@ -112,7 +112,18 @@ for (const f of MUST_EXIST) {
   // ★ 0.2.4：`桌面端bot启动.bat` = **只开独立界面**的那个入口（用户要求），
   //   与全能启动器 `启动机器人.bat` 并列。它必须在包里 —— 缺了它，
   //   "方便地打开带独立界面的后台"这件事就退回成"得先分辨哪个 bat 是干嘛的"。
-  const ROOT_BATS = ['启动机器人.bat', '桌面端bot启动.bat', '创建带图标的快捷方式.bat', 'start.bat']
+  // ★ 0.2.4 收尾的取舍说明：`打包桌面程序.bat` 与 `打开桌面界面（源码运行）.bat` 是**源码侧**
+  //   的双击入口，**刻意不进发布包**（它们要工作就得连 desktop/ 与 Electron 工具链一起发，
+  //   而那会把包从 413 MB 抬到 1000 MB，且使用者仍要自己 npm install）。
+  //   ∴ 白名单里**只列发布包里真有的**；那两个文件在仓库里，不进包。
+  //   ⚠️ 这条白名单是"双向"的：不在单子里的 .bat 不许出现，单子里的必须有 —— 把源码侧的
+  //   入口写进来会让组装每次都失败（0.2.4 实测踩过一次）。
+  const ROOT_BATS = [
+    '启动机器人.bat',
+    '桌面端bot启动.bat',
+    '创建带图标的快捷方式.bat',
+    'start.bat',
+  ]
   const bats = files.map((p) => rel(p)).filter((r) => r.toLowerCase().endsWith('.bat') && !r.includes('/'))
   for (const b of bats) {
     if (!ROOT_BATS.includes(b)) {

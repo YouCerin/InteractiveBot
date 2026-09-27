@@ -75,6 +75,16 @@ const COPY_DIRS = [
   //   它们不经过界面也不经过桥接的 HTTP 接口，所以恰恰在"控制台打不开 /
   //   桥接起不来"时是唯一能拿到诊断的路。理由写在那个目录自己的 读我.txt 里。
   //
+  // ⚠️ **`desktop/` 与 `scripts/` 刻意不进包**（0.2.4 试过一次、退回来了）：
+  //   本想让"从包里重新打一个 exe"成立，但 `desktop/node_modules`（Electron 工具链，
+  //   ~72 MB / 7 千多个文件）与 `desktop/.npm-cache`（~200 MB）**不在 git 里、
+  //   却会被 `cpSync` 照抄** ⇒ 包从 413 MB 涨到 1000 MB，而且那两份缓存本来就不该发出去。
+  //   即使过滤掉，包里也只有**没有依赖的源码** —— 使用者仍要自己 `npm install`，
+  //   所以"包内重打 exe"并没有真的变简单。
+  //   ∴ "从源码打 exe / 从源码开窗口"这两个入口**只留在仓库**（`打包桌面程序.bat` /
+  //   `打开桌面界面（源码运行）.bat` 仍在包根与仓库里，但它们依赖仓库里的 desktop/）。
+  //   发布包里给使用者的是**已经打好的 exe** + `桌面端bot启动.bat`。
+  //
   // ★★ 目录名**必须是纯 ASCII** —— 这不是风格问题，是**会崩**：
   //   实测（Node v24.9.0 / Windows）`cpSync(中文名目录, dst, {recursive:true})`
   //   让**整个进程**以 Access Violation 崩掉（退出码 -1073740791 /
@@ -97,6 +107,10 @@ const COPY_FILES = [
   //   并列存在 —— 两个都得进包。
   '启动机器人.bat',
   '桌面端bot启动.bat',
+  // ⚠️ `打包桌面程序.bat` 与 `打开桌面界面（源码运行）.bat` **刻意不进发布包**：
+  //   它们要能工作就得连 `desktop/` 与 `scripts/`（还得带 Electron 工具链）一起发 ——
+  //   而那会把包从 413 MB 抬到 1000 MB，且使用者仍要自己 `npm install`。
+  //   ∴ 它们留在**仓库**里（改桌面壳时用），发布包给的是**已经打好的 exe**。
   '创建带图标的快捷方式.bat',
   // ⚠️ `QQ机器人.lnk` **不在清单里**（0.2.4 更正）。
   //
@@ -365,9 +379,31 @@ for (const d of COPY_DIRS) {
   //   src/extensions.mjs 的 ensureSkillNodeModules）。它**绝不能进发布包**：
   //   链的目标是开发机的绝对路径，换台机器就是死链，而且会让"发布包里夹带 node_modules"
   //   这条本来就该守住的规则失效。用户拿到包后第一次启动，桥接会自己重建它。
-  const filter =
-    d === 'skills' ? (src) => !/[\\/]node_modules([\\/]|$)/.test(src.slice(from.length)) : undefined
-  cpSync(from, to, { recursive: true, force: true, ...(filter ? { filter } : {}) })
+  //
+  // ★★ `desktop/` 与 `scripts/` 也要**排掉 node_modules**（0.2.4 实测踩到）：
+  //   不加过滤时组装出来是 **9122 个文件 / 1002 MB** —— 因为 `desktop/node_modules`
+  //   是 Electron 工具链（~72 MB，7 千多个文件），而它是**能被 .gitignore 忽略、却会被
+  //   `cpSync` 照抄**的。发布包里那份`打包桌面程序.bat`本来就会引导使用者自己装它。
+  //   ⚠️ 判据用"相对拷贝根的这一段路径里有没有 node_modules"，不能只看 basename
+  //   （`vendor/node_modules/ws` 是**必须带**的，那是另一条清单项，不走这个 filter）。
+  const makeFilter = (d) =>
+    d === 'skills' || d === 'desktop' || d === 'scripts'
+      ? (src) => {
+          const rel = src.slice(join(PKG_ROOT, d).length)
+          // node_modules：Electron 工具链（~72 MB / 7 千多个文件），使用者现装
+          if (/[\\/]node_modules([\\/]|$)/.test(rel)) return false
+          // .npm-cache：npm 缓存 + 那次下下来的 Electron 运行时 zip（~200 MB）——
+          //   实测第一次过滤掉 node_modules 后仍有 606 MB，就是它。
+          if (/[\\/]\.npm-cache([\\/]|$)/.test(rel)) return false
+          return true
+        }
+      : undefined
+  // ⚠️ 这里必须**按目录调用一次** makeFilter(d)，拿到的是谓词本身；
+  //   第一版我写成 `...(filter ? { filter } : {})`，那会把**函数**当谓词传进去
+  //   （工厂本身也是函数，truthy）⇒ 每个条目都会被调用一次并返回一个函数（truthy）
+  //   ⇒ 一个文件都过滤不掉。这种错不会有异常，只会"过滤看起来加了、其实没生效"。
+  const dirFilter = makeFilter(d)
+  cpSync(from, to, { recursive: true, force: true, ...(dirFilter ? { filter: dirFilter } : {}) })
   log(`   📁 ${d}`)
 }
 for (const f of COPY_FILES) {

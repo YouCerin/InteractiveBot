@@ -291,6 +291,28 @@ async function main () {
         check('★ 它不把参数转交给 start.bat（目标单一）', !/call\s+"%~dp0start\.bat"/.test(desk))
       }
     }
+
+    // ★★ 0.2.4 收尾：**源码侧的两个入口**（用户问："能否把源码打包成 exe，并提供打开独立 UI 的通道"）。
+    //    ⇒ "从源码打 exe"与"从源码开窗口"各给一个双击入口，而不是让人记住三条命令。
+    {
+      const packPath = join(PKG_ROOT, '打包桌面程序.bat')
+      check('★ 存在 打包桌面程序.bat（从源码打 exe）', existsSync(packPath))
+      if (existsSync(packPath)) {
+        const pack = readFileSync(packPath, 'utf8')
+        check('★ 它调用 assemble-desktop.mjs（打包逻辑只有一处实现）', /scripts\\assemble-desktop\.mjs/.test(pack))
+        check('★ 工具链缺失时给出一句 setup 指引（而不是静默失败）', /npm install --ignore-scripts/.test(pack) && /fetch-electron\.mjs/.test(pack))
+      }
+
+      const openPath = join(PKG_ROOT, '打开桌面界面（源码运行）.bat')
+      check('★ 存在 打开桌面界面（源码运行）.bat（不打 exe 就开窗口）', existsSync(openPath))
+      if (existsSync(openPath)) {
+        const open = readFileSync(openPath, 'utf8')
+        check('★ 它用 electron 的 cli.js 指到 desktop/（跑的是源码那份）', /desktop\\node_modules\\electron\\cli\.js/.test(open) && /"%~dp0desktop"/.test(open))
+        check('★ 工具链缺失时也给了指引', /npm install --ignore-scripts/.test(open))
+        // 与发布包入口的区别：它不该引用 app\InteractBot.exe（那是打包后才有的）
+        check('★ 它不依赖打包产物（源码形态本来就没有 app\\）', !/app\\InteractBot\.exe/.test(open))
+      }
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════

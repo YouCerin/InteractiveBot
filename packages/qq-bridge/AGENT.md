@@ -57,16 +57,21 @@ start.bat
 ★ **不打 exe 也能开那个窗口 —— 源码里就能起**（改桌面壳时用这条，省掉 2 分钟打包）：
 
 ```bash
-cd packages/qq-bridge
-npm run desktop        # = node desktop/node_modules/electron/cli.js .
-# 第一次若报"找不到 electron"：
-#   cd desktop && npm install --ignore-scripts && node scripts/fetch-electron.mjs
+npm run desktop        # = node desktop/node_modules/electron/cli.js desktop
+# 或者直接双击包根的【打开桌面界面（源码运行）.bat】
+# 第一次若报"找不到 electron"：cd desktop && npm install --ignore-scripts && node scripts/fetch-electron.mjs
 ```
+
+**从源码打 exe** 也各有一个双击入口（以前是"三条命令、顺序不能错、而没有任何地方写着"）：
+
+| 双击 | 作用 |
+|---|---|
+| **`打开桌面界面（源码运行）.bat`** | 跑 `desktop/` 里那份源码开窗口（**改完 `desktop/*.cjs` 直接重启它**，不必打包） |
+| **`打包桌面程序.bat`** | 从源码打 exe（内部就是 `scripts/assemble-desktop.mjs`；工具链缺失时给你 setup 命令，不静默失败） |
 
 它跑的是 **`desktop/` 里那份源码**，行为与 exe 一致（同一个 `main.cjs`），
 而且**数据落在源码侧**（`packages/qq-bridge/{config.json,workspace-qq,logs,cache}`）——
-因为包根解析到的就是本包根。改完 `desktop/*.cjs` **直接重启这条命令**即可，
-**不需要**重新打包（`npm run desktop:pack` 只有要交付 exe 时才跑）。
+因为包根解析到的就是本包根。`npm run desktop:pack` 只有要交付 exe 时才跑。
 
 ★★ **exe 里装的是什么、没装什么**（问过一次，记这里）：
 `app/resources/app/` 里只有壳的那几个文件（`main/preload/lib/splash + 图标`）；
@@ -133,6 +138,8 @@ qq-bridge/
 ├── config.json       ← 全部运行配置
 ├── start.bat         ← 入口（优先用包内 Node）；发布包里由桌面壳接手
 ├── setup.mjs         ← 一次性准备
+├── 打包桌面程序.bat    ← ★ 0.2.4：**从源码打 exe**（双击即可；内部调 scripts/assemble-desktop.mjs）
+├── 打开桌面界面（源码运行）.bat ← ★ 0.2.4：**不打 exe 就开窗口**（跑 desktop/ 里那份源码）
 ├── backup-commands/  ← ★ 0.2.4：两个诊断入口（检查配置.bat / 体检.bat
 │                       = `start.bat --check` / `--doctor`）。界面里已有同样的按钮
 │                       （概览页「检查配置」、状态条「体检」），所以它们从包根挪到了这里 ——

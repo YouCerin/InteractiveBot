@@ -512,7 +512,7 @@
       "purpose": "★★ 桌面壳（0.2.4）：**不启动 Electron**，验\"桌面壳里的判断\"。★ 分界线是刻意的：窗口/托盘/菜单/双击 exe 的实际观感只能在真机上点一遍（如实记在 verificationStatus.notVerified），而**能被机器复核的那部分**必须由这一套盯着 —— 端口从哪来（config.json 有/没写/写坏/越界四种情形各自说什么话）、包根怎么解析（开发形态 vs 打包后 resources/app，且**不猜**）、`/api/status` 怎么翻译成中文、什么算\"启动成功\"、启动页那几条按钮能不能用、打包配置的三条硬约束、以及壳里**不许**出现第二份 src/ 或 config-ui。★★ 最值钱的三条（都照着真事故写）：① `describeStatus` 的字段名必须与 `src/index.mjs` 的 `getStatus()` 一致 —— 第一版写的是 `connection.connected`，**那个字段不存在**，于是托盘永远显示\"状态未知\"，不报错、不影响任何功能，只会一直错下去；这套把 `src/index.mjs` 读出来核对字段名，不是再抄一遍。② `describeStartResult` 必须认得 `--background` 那句\"已经有一个桥接在运行\"（双击 exe 时上一个桥接可能**正在启动**，那一刻 `--background` 是 exit 1）—— 当成失败就会在窗口上写一句吓人且不成立的话。③ 打包配置里 `asar: false` 必须生效：它写在 `win:` 底下会被静默忽略，**构建成功、exe 也出来了**，只是 app 变成 `resources/app.asar`，只有验收能发现。★ 另有一条诊断性的实现细节值得记住：本套结尾**故意**用 `process.exitCode` 而不是 `process.exit()`（本套跑过真实 HTTP 往返，强退会触发 libuv 的 `UV_HANDLE_CLOSING` 断言、退出码变成 -1073740791 ⇒ 链上看到\"套件崩了\"而其实全绿）。 ★★★ 0.2.4 补的一节：**按真实发布包布局验包根解析**（`app\\resources\\app` → 发布包根）。为什么补：第一版依赖 `app.isPackaged` 进\"打包形态\"分支，而**实测 `asar: false` 时它是 `false`**（Electron 看的是有没有 `app.asar`，我们故意不打 asar）⇒ 打包分支根本没进，壳**静默把 `app\\` 当成了包根**：读不到使用者的 `config.json`（真机日志里写着 `ENOENT`）、日志写进 `app\\logs\\`。离线断言当时全绿 —— 因为它只验了\"参数怎么用\"，**没验真实布局长什么样**。现在那一节会**造出**发布包的真实目录形状（含 `app/resources/app`）再断言，覆盖六种形态：发布包布局 / `isPackaged` 两种取值答案一致 / 环境变量优先 / 环境变量指错时回落且**喊一声** / 开发侧 `desktop/` / 找不到标记时不猜（返回真实存在的祖先 + 把候选喊出来）。",
       "network": false,
       "costs": "none",
-      "assertions": 152
+      "assertions": 159
     },
     {
       "cmd": "node mocks/verify-manifest.mjs",
