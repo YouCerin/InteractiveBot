@@ -44,7 +44,16 @@ const SKILL_MARK_END = '# <<< qq-bridge: skill tools (MCP) <<<'
  *   · 只写到 cache 目录，不进 git（见 .gitignore）
  *   · 不写进 workspace（那里会被 agent 读到，而 agent 不该看到 token）
  */
-export function writeMcpConfig({ cacheDir, httpUrl, httpToken, timeoutMs, workspace = null, configPath = null }) {
+export function writeMcpConfig({
+  cacheDir,
+  httpUrl,
+  httpToken,
+  timeoutMs,
+  workspace = null,
+  configPath = null,
+  profile = 'full',
+  genericApi = true,
+}) {
   mkdirSync(cacheDir, { recursive: true })
   const path = join(cacheDir, 'mcp-qq.config.json')
   // ★ `workspace` 是 H7 加的：`qq_search_history` 工具要读工作区里的语料库
@@ -61,6 +70,12 @@ export function writeMcpConfig({ cacheDir, httpUrl, httpToken, timeoutMs, worksp
         timeoutMs: timeoutMs ?? 20_000,
         ...(workspace ? { workspace } : {}),
         ...(configPath ? { configPath } : {}),
+        // ★ 0.2.3：暴露档位与通用口开关 —— MCP 子进程读它们决定 tools/list 放哪些工具。
+        //   写在**这份 configuration**（而不是重写 cordis.patch.yml）的原因：
+        //   存档位不需要动 profile 补丁，而且 `loadConfig()` 本来就在读这个文件。
+        //   ⚠️ 代价是要重启 DSH 子进程才重新 `tools/list`（与 mcp.enabled 同一条语义）。
+        profile,
+        genericApi,
       },
       null,
       2,

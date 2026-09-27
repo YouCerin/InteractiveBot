@@ -439,42 +439,80 @@ export function buildExtractPrompt({ task = null, ops = [], kind = 'group' } = {
  * @param {string} [opts.cwd]
  * @param {string} [opts.nodePath]
  * @param {Function} [opts.log]
- * @returns {Promise<{ok: boolean, text?: string, why?: string, ms?: number}>}
+ * @param {string} [opts.label]  只影响报错文案（0.2.3）
+ * @param {AbortSignal} [opts.signal] 取消（0.2.3）
+ * @returns {Promise<{ok: boolean, text?: string, why?: string, ms?: number, aborted?: boolean}>}
+ *
+ * ── 0.2.3：加了 `label` 与 `signal`（唤醒判定器要用同一个函数）──────────────
+ * 唤醒判定器（`src/wake-judge.mjs`）是**第二个**需要"一次额外模型调用"的功能，
+ * 它**复用本函数**是刻意的：spawn 只有一份，key 处理/超时/沙箱/windowsHide
+ * 才不会各长一套。为此补两个参数：
+ *   · `label`：报错文案原来是硬编码的"抽取"，判定器里会变成误导（"抽取超时"）；
+ *   · `signal`：**能真的取消**。唤醒闸门的硬纪律之一是"新消息到来时必须能取消旧判定"，
+ *     而这个子进程是我们自己起的，所以可以 `kill()` —— 这一点比"race 一下就返回"
+ *     强得多：后者会让被取消的那次调用照样把 token 烧完。
+ * 默认值不变 ⇒ 抽取那条链路的行为一个字都没改。
  */
-export function runHeadless({ cliPath, prompt, timeoutMs = DEFAULT_TIMEOUT_MS, cwd, nodePath, log = () => {} }) {
+export function runHeadless({
+  cliPath,
+  prompt,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  cwd,
+  nodePath,
+  log = () => {},
+  label = '抽取',
+  signal,
+}) {
   return new Promise((resolve) => {
     const started = Date.now()
+    if (signal?.aborted) {
+      resolve({ ok: false, why: `${label}在开始前已被取消`, ms: 0, aborted: true })
+      return
+    }
     if (!cliPath || !existsSync(cliPath)) {
       resolve({ ok: false, why: `找不到 dsh CLI：${cliPath ?? '(空)'}` })
       return
     }
     const bin = nodePath || process.execPath
     let child = null
+    // ★ 取消 = 真的杀掉子进程（能省掉这一轮 token），而不是仅仅不再等它
+    const onAbort = () => {
+      try {
+        child?.kill()
+      } catch {
+        /* 已经退出：kill 抛错无所谓 */
+      }
+    }
     try {
+      signal?.addEventListener('abort', onAbort, { once: true })
       child = execFile(
         bin,
         [cliPath, '--profile', 'headless', String(prompt)],
         { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
         (error, stdout, stderr) => {
+          signal?.removeEventListener('abort', onAbort)
           const ms = Date.now() - started
           const text = String(stdout ?? '').trim()
           if (error) {
-            // 超时/非零退出：**如实报**，但不抛（增强路径）
-            const why = error.killed
-              ? `抽取超时（${timeoutMs}ms）`
-              : `抽取进程失败：${String(error.message).slice(0, 120)}${stderr ? `｜stderr: ${String(stderr).slice(0, 160)}` : ''}`
-            resolve({ ok: false, why, ms, text })
+            // 超时/取消/非零退出：**如实报**，但不抛（增强路径）
+            const why = signal?.aborted
+              ? `${label}被取消`
+              : error.killed
+                ? `${label}超时（${timeoutMs}ms）`
+                : `${label}进程失败：${String(error.message).slice(0, 120)}${stderr ? `｜stderr: ${String(stderr).slice(0, 160)}` : ''}`
+            resolve({ ok: false, why, ms, text, aborted: Boolean(signal?.aborted) })
             return
           }
           if (!text) {
-            resolve({ ok: false, why: '抽取没有输出（stdout 为空）', ms })
+            resolve({ ok: false, why: `${label}没有输出（stdout 为空）`, ms })
             return
           }
           resolve({ ok: true, text, ms })
         },
       )
     } catch (error) {
-      resolve({ ok: false, why: `起不了抽取进程：${error?.message ?? error}` })
+      signal?.removeEventListener('abort', onAbort)
+      resolve({ ok: false, why: `起不了${label}进程：${error?.message ?? error}` })
       return
     }
     child?.on?.('error', (e) => log(`[extract] 子进程错误：${e?.message ?? e}`))

@@ -171,6 +171,25 @@ export function createExtensionService({
           status: 400,
         }
       }
+      // 二选一（`choice`，0.2.3）：**没有"开/关"这个动作** —— 它不是开关，
+      // 是"选了哪一个"。
+      //
+      // ★ 这条守卫是**必须的，不是礼貌**：没有它，下面那行
+      //   `setPath(raw, plugin.enabledPath, enabled)` 会把布尔值写进一个
+      //   只认字符串的键（`wake.policy`），于是配置里出现 `"policy": true`，
+      //   而运行期按"不是 semantic"处理 ⇒ **界面显示保存成功、实际什么都没发生**。
+      //   这正是本项目最忌讳的"说了做不到"。
+      // ★ 选择走的是 `/api/config` 的 patch 通道（写 `{wake:{policy:'semantic'}}`），
+      //   与其它"需要重启"的设置同一条路 —— 不给同一个键开第二条写入口。
+      if (kind.kind === 'choice') {
+        return {
+          error:
+            `${plugin.name}是二选一，没有"开/关"：请把 ${plugin.enabledPath} 设成 ` +
+            kind.options.map((o) => `「${o.value}」`).join(' 或 ') +
+            '（界面上的按钮走的是改配置那条通道）。',
+          status: 400,
+        }
+      }
       // 枚举类开关（目前只有 persona.preset）："关"= 取值 none，"开"= 回到精简档。
       // ★ 如实说明：打开时用的是**默认档**而不是"你上次用的那一档" —— 我们没有存历史档位，
       //   假装记得会让用户以为设置被保留了。要换档请到「人设」页里选。

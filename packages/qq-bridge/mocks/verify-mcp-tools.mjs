@@ -26,6 +26,10 @@
  * 用法：node mocks/verify-mcp-tools.mjs
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { TOOLS, BLOCKED_ACTIONS, described, runTool, __setConfig } from '../mcp/mcp-qq-server.mjs'
 
 let passed = 0
@@ -149,6 +153,95 @@ section('④ 黑名单没有因为新增工具而变松')
     ['set_msg_emoji_like', 'set_input_status', 'forward_friend_single_msg', 'forward_group_single_msg',
      'send_forward_msg', 'get_group_at_all_remain'].every((a) => !BLOCKED_ACTIONS[a]))
   check('  名单项数没减少（15 项以上）', Object.keys(BLOCKED_ACTIONS).length >= 15, `${Object.keys(BLOCKED_ACTIONS).length} 项`)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('⑤ qq_api 的**白名单**（2026-09-27 修的漏洞）与暴露档位')
+// ══════════════════════════════════════════════════════════════════════════
+{
+  // 这一节盯的是实测漏洞：`get_cookies` 与 `upload_group_file` 曾经**在描述里被广告给模型**、
+  // 却**都不在黑名单里**。对具名工具黑名单够用（动作写死），但 `qq_api` 的 action 是
+  // **模型自选的任意字符串** —— 黑名单天然只拦得住"想得到的"。现在改成 fail-closed 白名单。
+  // 下面每条都指向一个"曾经会漏过去"的具体动作。
+  __setConfig({ httpUrl: 'http://127.0.0.1:9', selfId: '1' })
+
+  const gated = (r) => /不在允许清单/.test(String(r.text))
+
+  for (const action of [
+    'get_cookies',        // ← 实测漏网：账号网页凭据
+    'upload_group_file',  // ← 实测漏网：把本机文件外发
+    'send_group_msg',     // ← 发送类：会绕过桥接的分条/节奏/节流/投递前终检门
+    'send_private_msg',
+    'delete_msg',
+    'set_group_card',
+  ]) {
+    const r = await runTool('qq_api', { action })
+    check(`★ 白名单拒绝：${action}`, gated(r), String(r.text).split('\n')[0].slice(0, 56))
+  }
+
+  const allowed = await runTool('qq_api', { action: 'get_group_list' })
+  check('★ 白名单内的只读动作**放行到网络层**（这里连不上是预期的，但不能是"被清单拒绝"）', !gated(allowed))
+
+  check('工具总数没变（这次改动只加闸门、不增删工具）', TOOLS.length === 14, `${TOOLS.length} 个`)
+  check('★ qq_api 被标记为万能口（闸门靠这个标记判断，不靠名字猜）', byName('qq_api')?.generic === true)
+
+  // 档位：被隐藏的工具**即使被直接调用也要拒** —— 只过滤 tools/list 是不够的
+  __setConfig({ httpUrl: 'http://127.0.0.1:9', selfId: '1', genericApi: false })
+  check('★★ genericApi=false：直接调用 qq_api 也被拒（fail-closed，不只是从列表里藏掉）',
+    /当前档位下不可用/.test(String((await runTool('qq_api', { action: 'get_group_list' })).text)))
+
+  __setConfig({ httpUrl: 'http://127.0.0.1:9', selfId: '1', profile: 'readonly' })
+  check('★★ profile=readonly：写入/互动类被拒（qq_poke 是 adminOnly）',
+    /当前档位下不可用/.test(String((await runTool('qq_poke', { peerId: '1' })).text)))
+  check('★ profile=readonly：只读工具**仍然放行**（不能把只读也一起挡了）',
+    !/当前档位下不可用/.test(String((await runTool('qq_group_members', { groupId: '1' })).text)))
+
+  __setConfig({ httpUrl: 'http://127.0.0.1:9', selfId: '1' }) // 还原，免得影响后续断言
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('⑥ 本地语料库开关（0.2.3）：关掉时两个入口**当场拒绝**，而且不许说"搜不到"')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 这一节盯的是**fail-closed 的方向**：
+//   · 关掉之后必须回"**被关掉了**"。回"没搜到"会被模型转述成"语料库里没有这条记录"
+//     —— 那是一句**谎话**（本项目最忌讳的"说了做不到"）。
+//   · `readLiveConfig()` 每调用现读 config.json ⇒ 这个开关是真正的"随时开关"。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-mcptools-'))
+  const cfgPath = join(dir, 'config.json')
+  const point = (body) => {
+    writeFileSync(cfgPath, JSON.stringify(body), 'utf8')
+    return { httpUrl: 'http://127.0.0.1:9', workspace: dir, selfId: '1', configPath: cfgPath }
+  }
+  try {
+    __setConfig(point({ corpus: { enabled: false } }))
+    const entries = [
+      ['qq_search_history', { query: '茶', kind: 'private', peerId: '1' }],
+      ['qq_forward_log', { query: '茶', kind: 'private', peerId: '1', toId: '1', toKind: 'private' }],
+    ]
+    for (const [tool, args] of entries) {
+      const r = await runTool(tool, args)
+      check(`★★ ${tool} 在 corpus.enabled=false 时当场拒绝`, r.isError === true && /被关掉了/.test(String(r.text)), String(r.text).slice(0, 50))
+      check('  └ 并且明说"不要凭印象编 / 不要说没有这条记录"（挡住那句谎话）',
+        /不要凭印象编|没有这条记录/.test(String(r.text)))
+    }
+
+    // 打开时不该再被这个开关拦（会走到真正的检索：这个临时工作区里还没有库）
+    __setConfig(point({ corpus: { enabled: true } }))
+    const on = await runTool('qq_search_history', { query: '茶', kind: 'private', peerId: '1' })
+    check('★ 打开时不再被开关拦（放行到真正的检索那一步）', !/被关掉了/.test(String(on.text)), String(on.text).slice(0, 60))
+
+    // 读不到配置 ⇒ 按"开着"处理。方向与发图那边的保守**相反**，理由是这里只读：
+    // 误判成"关"会让模型平白说一句"我搜不了"，误判成"开"最多是照常查一次本地库。
+    __setConfig({ httpUrl: 'http://127.0.0.1:9', workspace: dir, selfId: '1', configPath: join(dir, '不存在.json') })
+    const unknown = await runTool('qq_search_history', { query: '茶', kind: 'private', peerId: '1' })
+    check('★ 配置读不到 ⇒ 按"开着"处理（只读工具；误判成关会让模型说假话）',
+      !/被关掉了/.test(String(unknown.text)), String(unknown.text).slice(0, 60))
+  } finally {
+    __setConfig({ httpUrl: 'http://127.0.0.1:9', selfId: '1' })
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 console.log('')

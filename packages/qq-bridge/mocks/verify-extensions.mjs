@@ -453,6 +453,14 @@ section('⑧ 内置插件登记表')
   check('★ 每个插件都写了"关掉会怎样"', BUILTIN_PLUGINS.every((p) => String(p.offEffect).length > 5))
   check('记忆默认开（!== false 的既有语义）', plugins.find((p) => p.id === 'memory').enabled === true)
   check('把记忆关掉后登记表如实反映', listPlugins({ config: { memory: { enabled: false } } }).find((p) => p.id === 'memory').enabled === false)
+  // ── 投递可靠性（0.2.3）：账本开关 ────────────────────────────────────────
+  check('★ 投递账本默认开（`!== false` 的既有语义 = 升级前的行为）',
+    pluginById('delivery')?.enabledPath === 'delivery.ledger' && isPluginOn(pluginById('delivery'), cfg) === true)
+  check('★ 把投递账本关掉后登记表如实反映',
+    listPlugins({ config: { delivery: { ledger: false } } }).find((p) => p.id === 'delivery').enabled === false)
+  check('★ 投递可靠性是 hot（每次投递前现读 config.delivery.ledger）', pluginById('delivery').hot === true)
+  check('★ offEffect 里必须说清"另两块不受它影响"（否则使用者以为关掉它 = 关掉整条出站链路）',
+    /终检门/.test(pluginById('delivery').offEffect) && /幂等键/.test(pluginById('delivery').offEffect))
   check('★ 名单类不提供开关（列表没有"关"这个动作）', pluginSwitchKind(pluginById('access')).kind === 'list')
   check('名单类的 enabled 是 null（界面据此渲染成"去维护"而不是一个点不动的开关）',
     listPlugins({ config: cfg }).find((p) => p.id === 'access').enabled === null)
@@ -461,6 +469,33 @@ section('⑧ 内置插件登记表')
   check('mcp.enabled 是 cold（只在启动时决定挂不挂 MCP）', pluginById('qq-tools').hot === false)
   check('记忆是 hot（每轮重读 config.memory.enabled）', pluginById('memory').hot === true)
   check('isPluginOn 对枚举的口径：none = 关', isPluginOn(pluginById('persona'), { persona: { preset: 'none' } }) === false)
+
+  // ── choice（二选一）：**两个功能冲突时**的插槽 ────────────────────────────
+  //
+  // 现在还没有真插件用上它（`wake.policy` 要等语义唤醒落地才能登记 —— 登记前
+  // 必须先有真配置键且运行期真的读它，见 src/plugins.mjs 的三条纪律）。
+  // 所以这里用一份**合成 spec** 把契约先钉住：形状或语义写错了，等真插件登记时
+  // 会立刻被这几条断言挡住，而不是等使用者发现"两个都能开"。
+  const synthChoice = {
+    id: 'synth-choice',
+    enabledPath: 'wake.policy',
+    choice: {
+      options: [
+        { value: 'rule', label: '规则唤醒（现状）' },
+        { value: 'semantic', label: '语义唤醒（可沉默）', experimental: true },
+      ],
+    },
+  }
+  const synthKind = pluginSwitchKind(synthChoice)
+  check('★ 二选一被识别为 choice，且选项（含「实验性」标注）带给了界面',
+    synthKind.kind === 'choice' && synthKind.options.length === 2 && synthKind.options[1].experimental === true)
+  check('★ 二选一没有"关"：isPluginOn 返回 null —— 否则界面会出现一个语义错误的开关',
+    isPluginOn(synthChoice, { wake: { policy: 'rule' } }) === null)
+  check('★ 互相排斥是这个键的天然语义（单值键：选了 B 就等于 A 不在）',
+    isPluginOn(synthChoice, { wake: { policy: 'semantic' } }) === null &&
+      pluginSwitchKind(synthChoice).options.length === 2)
+  check('没有声明 choice 的插件不受影响（仍按 enabledPath 推导成布尔开关）',
+    pluginSwitchKind({ enabledPath: 'x.enabled' }).kind === 'boolean')
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -513,6 +548,55 @@ section('⑨ 扩展服务：写盘 + 改活配置（两件事都要做）')
 
   const listToggle = await svc.toggle({ type: 'plugin', id: 'access', enabled: false })
   check('名单类插件没有开关 → 400 并说明去别处维护', listToggle.status === 400)
+
+  // ── 二选一插件（0.2.3 起是**真插件**，不再是合成 spec）──────────────────
+  //
+  // ★ 这条守卫必须存在，否则 `toggle` 会把**布尔值**写进一个只认字符串的键
+  //   （`wake.policy`）—— 配置里出现 `"policy": true`，运行期按"不是 semantic"
+  //   处理，于是**界面显示保存成功、实际什么都没发生**。这正是本项目最忌讳的
+  //   "说了做不到"，而且它不会报错。
+  {
+    const card = svc.list().plugins.find((p) => p.id === 'wake-policy')
+    check('★ 唤醒策略已登记为插件卡', Boolean(card), JSON.stringify(svc.list().plugins.map((p) => p.id)))
+    check('★★ 它的开关语义是 choice（第一个真正用上它的插件）', card?.switchKind === 'choice' && card?.enabled === null, `${card?.switchKind}/${card?.enabled}`)
+    check('★ 两个候选：rule（现状）与 semantic（实验性）',
+      card?.options?.length === 2 && card.options[0].value === 'rule' && card.options[1].value === 'semantic',
+      JSON.stringify(card?.options?.map((o) => o.value)))
+    check('★★ hermes 式的那一侧标了「实验性」', card?.options?.find((o) => o.value === 'semantic')?.experimental === true)
+    check('现状那一侧**不标**实验性（它是本项目一直在跑的行为）', card?.options?.find((o) => o.value === 'rule')?.experimental !== true)
+    check('★ 每个选项都各有一句"选它会怎样"（二选一没有"关"，不能沿用 offEffect 的写法）',
+      card?.options?.every((o) => typeof o.desc === 'string' && o.desc.length > 0))
+    check('enabledPath 指向真实配置键', card?.enabledPath === 'wake.policy')
+
+    const before = JSON.parse(readFileSync(configPath, 'utf8'))
+    const choiceToggle = await svc.toggle({ type: 'plugin', id: 'wake-policy', enabled: true })
+    check('★ 对二选一插件调"开关" → 400（它不是开/关，是选了哪一个）', choiceToggle.status === 400, JSON.stringify(choiceToggle))
+    check('★ 拒绝时把可选取值说出来（调用方知道该往哪走）', /rule/.test(choiceToggle.error) && /semantic/.test(choiceToggle.error))
+    const after = JSON.parse(readFileSync(configPath, 'utf8'))
+    check('★★ 拒绝时**盘上一个字节都没写**（绝不留下 `"policy": true` 这种坏配置）',
+      JSON.stringify(before) === JSON.stringify(after))
+  }
+
+  // ── 本地语料库（0.2.3 加的开关）────────────────────────────────────────
+  {
+    const card = svc.list().plugins.find((p) => p.id === 'corpus')
+    check('★ 本地语料检索已登记为插件卡', Boolean(card), JSON.stringify(svc.list().plugins.map((p) => p.id)))
+    check('  它是**布尔开关**（不是二选一：语料库只有"采不采"，没有第二种策略）',
+      card?.switchKind === 'boolean' && card?.enabledPath === 'corpus.enabled')
+    // ★ hot 必须取证过：写入侧每条消息现读、读取侧每次调用现读 —— 见 plugins.mjs 的 why
+    check('★ 标的是 hot，且 why 里给得出取证位置（不是猜的）',
+      card?.hot === true && /#recordCorpus/.test(String(card?.why)) && /readLiveConfig/.test(String(card?.why)), String(card?.why).slice(0, 80))
+    check('★「关掉会怎样」写清了两件最容易被误解的事：工具是**当场拒绝**（不是搜不到）、且有库文件不删',
+      /当场拒绝/.test(String(card?.offEffect)) && /不会被删/.test(String(card?.offEffect)))
+    check('  没有详情页（就一个开关，指过去也会是死链）', card?.uiTab === null)
+
+    const off = await svc.toggle({ type: 'plugin', id: 'corpus', enabled: false })
+    check('★ 关掉它：写盘 + 改活配置（立刻生效）', off.restartRequired === false &&
+      JSON.parse(readFileSync(configPath, 'utf8')).corpus?.enabled === false && live.corpus?.enabled === false)
+    check('  └ 提示语说明"立刻生效"', /立刻生效/.test(String(off.hint)))
+    const on = await svc.toggle({ type: 'plugin', id: 'corpus', enabled: true })
+    check('  再打开也立刻生效（这一格不需要重启）', on.restartRequired === false && live.corpus?.enabled === true)
+  }
 
   const badType = await svc.toggle({ type: 'nope', id: 'x', enabled: true })
   check('type 非法 → 400', badType.status === 400)

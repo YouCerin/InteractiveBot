@@ -193,6 +193,61 @@ export function normalizeConfig(c) {
       // ⚠️ 只接受**值全是数字**的条目，别的形状直接丢掉（不报错、不猜）。
       stickers: normalizeStickerTable(src.send?.stickers),
     },
+    // ── 投递可靠性（0.2.3）─────────────────────────────────────────────────
+    //
+    // ★ 这一块只有**一个**开关，而且默认开（= 升级前的行为）。
+    //   另外两块**故意不给开关** —— 它们是边界，不是功能：
+    //     · 投递前终检门（`delivery-gate.mjs` 的 `gateDelivery`，`bridge.mjs` 调用）：
+    //       拦内部泄漏（工具 JSON / 系统占位符 / 注入指令）。关掉 = 把这些直接发到 QQ。
+    //     · 出站幂等键（`transport.mjs` 的 `deliveryKey`，H9）：关掉会**退回"裸文本当键"**，
+    //       于是"同一句话 8 秒内发给两个不同会话"会被误判成重复、第二个被丢掉 —— 那是已修的缺陷。
+    //   给它们做开关，等于让"关掉功能"这个动作制造出新缺陷（同 src/plugins.mjs 的口径）。
+    delivery: { ledger: src.delivery?.ledger !== false },
+    // ── 本地语料库（0.2.3 给它一个开关）────────────────────────────────────
+    //
+    // 它是什么：每条消息落进 `runtime/corpus.sqlite`（FTS5 + trigram 中文检索），
+    // 于是"我上次说的那个方案叫什么来着"这类问题能查（在此之前只能现拉协议端历史，
+    // 拉一次算一次、不能检索、对面一重启就没了）。
+    //
+    // ★ 默认 `true` = **升级前的行为**（它 0.2.1 就在跑，只是当时没有开关）。
+    //   所以这个键的存在**不改变任何现有部署的行为** —— 这一点必须守住：
+    //   加开关的目的是"能看见、能关"，不是"顺手把默认值收紧"。
+    //
+    // ★ 关掉之后**已有的库文件不删**。这条要写清楚，否则使用者会以为"关掉 = 清空"，
+    //   于是不敢关。反过来，清理由 `--corpus --prune` 单独负责（默认预演）。
+    corpus: { enabled: src.corpus?.enabled !== false },
+    // ── 唤醒策略（0.2.3）：规则唤醒 ⟷ 语义唤醒 ─────────────────────────────
+    //
+    // ★★ 这是一个**二选一**，不是两个开关。为什么：
+    //   两者回答的是**同一个问题** ——「这条消息要不要回」。
+    //   做成两个独立开关会出现两种无意义状态：
+    //     · 两个都开 ⇒ 两套判据同时生效、互相打架；
+    //     · 两个都关 ⇒ 机器人不知道该不该回（哑掉）。
+    //   所以两个功能放**同一个插槽、同一个单值键**：选了 `semantic`
+    //   就**天然**等于 `rule` 不在了 —— 后端**没有任何"互斥检查"**，也不该有。
+    //   （界面上的两个按钮就是 `wake-policy` 这张卡的 `choice.options`。）
+    //
+    // ★ 默认 `rule` = 今天的行为，**一次判定都不跑、一个子进程都不起**。
+    //   语义唤醒是**实验性**的（从 hermes 借鉴），而且它在本项目里要起一次性
+    //   `dsh --profile headless` 进程才能判定 —— 见 `src/wake-judge.mjs` 顶部
+    //   关于成本的如实说明。所以它必须是**显式选择**。
+    //
+    // ★ 未知取值**原样保留**（不偷偷改成 rule）：`validateConfig` 会把它报出来。
+    //   悄悄回落是最难排查的一类问题（"我明明设了，怎么没生效"）。
+    wake: {
+      policy: typeof src.wake?.policy === 'string' && src.wake.policy.trim() ? src.wake.policy.trim() : 'rule',
+      judge: {
+        // ★★ 默认 **true**：语义模式**先只记账、不改行为**。
+        //   理由是这块功能的失败方向很糟 —— 判错成"沉默"时，**没有人会收到
+        //   任何提示**，只是那个人永远等不到回复。所以先用影子模式跑一段，
+        //   拿 oplog 里的"本会拦掉 N 条"清单看它到底想拦什么，再决定要不要真开。
+        //   ⚠️ 代价是"选了 semantic 却发现行为没变" —— 所以卡片文案必须
+        //   明说当前处于影子模式（已写进 CONFIG-UI.md §2.10 的 choice 一节）。
+        shadow: src.wake?.judge?.shadow !== false,
+        timeoutMs: src.wake?.judge?.timeoutMs ?? 6000,
+        maxPerHour: src.wake?.judge?.maxPerHour ?? 60,
+      },
+    },
     turn: { timeoutMs: src.turn?.timeoutMs ?? 10 * 60_000 },
     // 人味层：默认**开启**。这不是体验优化，是账号存活相关配置 ——
     // 秒回 + 7×24 在线是行为风控最典型的特征。
@@ -311,6 +366,15 @@ export function normalizeConfig(c) {
     mcp: {
       enabled: src.mcp?.enabled !== false,
       toolTimeoutMs: src.mcp?.toolTimeoutMs ?? 20_000,
+      // ★ 0.2.3：暴露档位与通用口。
+      //   两者默认值**刻意等于今天的行为**（full + 通用口开）—— 这样升级上来的人
+      //   行为零变化，收紧是**显式选择**。理由见 mcp/mcp-qq-server.mjs 的 ALLOWED_API_ACTIONS
+      //   与 CONFIG-UI.md §2.6：默认收紧会把 qq_send_image 一起藏掉（P站发图链路正在用它）。
+      //
+      //   取值**不做白名单收敛**（保留原样），这样写错值时 validateConfig 能就原值报警；
+      //   MCP 侧只认严格的 'readonly'，其余一律按 full 处理（fail-open 到"与今天一致"）。
+      profile: typeof src.mcp?.profile === 'string' && src.mcp.profile.trim() ? src.mcp.profile.trim() : 'full',
+      genericApi: src.mcp?.genericApi !== false,
     },
     // 协议端进程（SnowLuma）：让界面能"探测它在不在线 / 把它拉起来"。
     // 桥接本身**不需要**这些值就能工作 —— 它只影响界面上的那张进程卡。
@@ -428,6 +492,68 @@ export function validateConfig(config) {
     }
   }
 
+  // ── 本地语料库（0.2.3）──────────────────────────────────────────────────
+  //
+  // 只对**非默认值**告警（默认是开 = 升级前的行为，安静）。
+  // 口径同 `mcp.profile = readonly`：把"你关掉了一个能力"如实说出来，
+  // 免得排查时对着 `qq_search_history` 报的"搜不到"去找别的原因。
+  if (config.corpus?.enabled === false) {
+    warn.push(
+      'corpus.enabled = false：**不再把消息落进本地语料库**，`qq_search_history` / ' +
+        '`qq_forward_log` 会**当场拒绝**（不是"搜不到"）。★ 已有的 `runtime/corpus.sqlite` ' +
+        '**不会被删**，重新打开就还能搜到旧消息；清理要单独用 `--corpus --prune`。',
+    )
+  }
+
+  // ── 唤醒策略（0.2.3）────────────────────────────────────────────────────
+  //
+  // 这一节的三条告警都围绕同一件事：**语义唤醒是有代价的、而且会改变行为**。
+  // 它是本轮唯一"用户选了之后成本会上升"的开关，所以宁可多说一句。
+  {
+    const policy = config.wake?.policy
+    if (policy !== 'rule' && policy !== 'semantic') {
+      warn.push(
+        `wake.policy「${policy}」不是有效值（可选 rule / semantic），已按 rule（规则唤醒）处理。` +
+          `注意：这个键是**二选一**，写别的值不会"两个都开"，只会退回规则唤醒。`,
+      )
+    }
+    if (policy === 'semantic') {
+      const j = config.wake.judge ?? {}
+      warn.push(
+        'wake.policy = semantic：**判定器会决定要不要沉默**。' +
+          '它只做减法（规则说回、它才能说不回），且失败/超时/超预算一律**放过**。' +
+          '★ 代价：每条候选消息要**起一个一次性 DSH 进程**做判定（约 3~5 秒），' +
+          '上限由 wake.judge.maxPerHour 兜住。',
+      )
+      if (j.shadow !== false) {
+        warn.push(
+          'wake.judge.shadow = true（默认）：判定照跑、结论只写进 oplog（runtime/oplog/），' +
+            '**行为一个字都没变**。要真正生效，把 wake.judge.shadow 改成 false。',
+        )
+      } else {
+        warn.push(
+          'wake.judge.shadow = false：语义判定**已经生效** —— 被判为"沉默"的消息不会得到回复，' +
+            '而且**不会有任何提示**。建议先用影子模式跑一段，看 oplog 里它到底想拦什么。',
+        )
+      }
+      // ★ 与 interim（"回合还在跑，先应一声"）的顺序关系：判定比它慢的话，
+      //   用户会先看到"我在想"、然后什么都没有 —— 比直接不回更怪。这条不是风格。
+      const interimMs = config.humanize?.interim?.afterMs ?? 8000
+      if (Number.isFinite(j.timeoutMs) && j.timeoutMs >= interimMs) {
+        warn.push(
+          `wake.judge.timeoutMs（${j.timeoutMs}ms）不小于 humanize.interim.afterMs（${interimMs}ms）：` +
+            `会出现"先弹一句‘我在想’，然后什么都没有"。建议把判定超时压到 ${interimMs} 以下。`,
+        )
+      }
+      if (!Number.isFinite(j.maxPerHour) || j.maxPerHour <= 0) {
+        warn.push(
+          `wake.judge.maxPerHour（${j.maxPerHour}）不是正数：判定额度永远为 0，` +
+            `等于语义唤醒**完全没生效**（每条都按规则结论放过）。`,
+        )
+      }
+    }
+  }
+
   // ── 看图 ────────────────────────────────────────────────────────────────
   //
   // 这里的告警都围绕一件事：**图片是有成本的**（vision token + 磁盘），
@@ -520,6 +646,21 @@ export function validateConfig(config) {
 
   // ── 扩展（技能 / 插件）相关 ──────────────────────────────────────────────
   //
+  // ── QQ 工具暴露档位（0.2.3）────────────────────────────────────────────
+  //
+  // 归一化**刻意不收敛**非法值（见 normalizeConfig）：就是为了在这里拿原值报警。
+  // 否则把 'readonly' 写成 'read-only' 会被静默当成 full ——
+  // 表现是"我明明收紧了，它却还是全都放行"，属于最难查的一类。
+  const mcpProfile = config.mcp?.profile
+  if (mcpProfile !== 'full' && mcpProfile !== 'readonly') {
+    warn.push(`mcp.profile「${mcpProfile}」不是有效值（只能是 full / readonly）—— 已按 full 处理（= 与升级前一致）。`)
+  } else if (mcpProfile === 'readonly') {
+    warn.push('mcp.profile = readonly：模型只会拿到**只读**工具，发送/互动类工具不再给它 —— 确认这是你要的。')
+  }
+  if (config.mcp?.genericApi === false) {
+    warn.push('mcp.genericApi = false：模型看不到 qq_api（那个万能只读口）—— 具名工具不受影响。')
+  }
+
   // 这里只能做**与清单无关**的检查（config.mjs 刻意不 import 技能发现 —— 那会把
   // 文件系统扫描带进一处本该是纯函数的地方）。逐技能的清单校验在
   // `src/extensions.mjs` / `--extensions` 自检里做。

@@ -53,10 +53,11 @@ import { beginDelivery, orphanedDeliveries, renderOrphans, ownerId } from './del
 const PROCESS_STARTED_AT = Date.now()
 import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './memory-stats.mjs'
 import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
-import { appendTurnOps } from './oplog.mjs'
+import { appendTurnOps, appendOp } from './oplog.mjs'
 import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } from './tasks.mjs'
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
 import { extractRecipe, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './extract.mjs'
+import { createWakeJudge, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
@@ -115,6 +116,31 @@ export class Bridge extends EventTarget {
    * chatKey → string
    */
   #lastDelivered = new Map()
+
+  /**
+   * 唤醒判定器（0.2.3，**实验性**：`wake.policy = 'semantic'`）。
+   *
+   * ★ **懒建 + 只建一次**，两个理由缺一不可：
+   *   · 懒建：`wake.policy` 是**活配置**（`/api/extensions` 会就地把配置文件对象
+   *     改掉），构造时若写死 `null` 就再也开不了判定器 → 那样这个插件就是 cold 的。
+   *     懒建之后闸门每轮现读 policy ⇒ **hot**，与 `src/plugins.mjs` 里那条 `why` 一致。
+   *   · 只建一次：判定器带一个"本小时用了几次"的滑动窗口，每条消息重建
+   *     等于把 `wake.judge.maxPerHour` 这个成本上限变成摆设。
+   * @type {{judge: Function, budget: Function}|null}
+   */
+  #wakeJudge = null
+
+  /**
+   * 每个会话"正在飞的那次判定"的取消柄（chatKey → AbortController）。
+   *
+   * 为什么要有它：判定要 3~5 秒，而这期间同一会话又来了新消息时，旧判定
+   * 的结论已经**指向一个过期的问题** —— 让它继续跑既浪费一次模型调用，
+   * 又可能让它把新消息当成旧上下文来否决。新消息到来 = 旧的立刻让路。
+   * （设计文档 §10.3 说这一步"可选、非必需"，但既然 `runHeadless` 现在
+   *   能真的 `kill()` 子进程，那它就值得做 —— 它不是"少等一下"，是**少烧一次调用**。）
+   * @type {Map<string, AbortController>}
+   */
+  #wakeAborts = new Map()
 
   /**
    * 已经喊过"零写入告警"的会话（只喊一次，避免刷屏把日志淹掉）。
@@ -259,13 +285,22 @@ export class Bridge extends EventTarget {
    * @param {import('./session-bridge.mjs').SessionRouter} opts.router
    * @param {object} opts.config
    */
-  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, log = () => {} }) {
+  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, log = () => {} }) {
     super()
     this.rpc = rpc
     this.onebot = onebot
     this.sendQueue = sendQueue
     this.router = router
     this.config = config
+    // ── 唤醒判定器（0.2.3）：**可注入** ──────────────────────────────────
+    // ★ 为什么留这个口子：判定器正常路径要**起一次性 DSH 子进程**，那在测试里
+    //   既慢又不可控（受限沙箱里还会 EPERM）。注入一个桩之后，测的就不再是
+    //   "模型会怎么判"（那是人品问题），而是**桥接拿判定结论做了什么** ——
+    //   而这一层恰恰是最容易接错的地方（本项目已经栽过一次：任务段的 `chatKey`
+    //   不在作用域、被空 catch 吞掉，124 项纯函数断言全绿，而那个段在真机上
+    //   从未注入过）。同一套辩证法在这里复用：**接线必须有它自己的断言。**
+    //   不传 = 按配置现造（生产路径）。
+    this.wakeJudgeInjected = wakeJudge
     // ── 外部技能（0.2.2）──────────────────────────────────────────────────
     // ★ 这里只拿到**已发现的技能清单**（index.mjs 在启动时扫一次）。
     //   `promptSections()` 是每轮现调的（纯函数），所以界面上开关技能**下一轮就生效**，
@@ -415,6 +450,13 @@ export class Bridge extends EventTarget {
       skipped: 0,
       denied: 0,
       failed: 0,
+      // ── 唤醒判定器（0.2.3）──────────────────────────────────────────────
+      // `wakeJudged` 数的是**真的问了模型**的次数（超预算/取消不算），
+      // `wakeSilenced` 数的是**真的被判为沉默**的次数。
+      // 影子模式下 `wakeSilenced` 照样会涨 —— 它表达的是"判定器想拦多少"，
+      // 而"实际拦了多少"看 `skipped` 有没有跟着动。分开数就是为了这个对照。
+      wakeJudged: 0,
+      wakeSilenced: 0,
     }
   }
 
@@ -735,8 +777,17 @@ export class Bridge extends EventTarget {
    *
    * ★ `record()` 是同步的：sqlite 的一次 INSERT 是亚毫秒级；
    *   而"要不要落库"必须在**唤醒判定之前**决定（没被唤醒的群消息也要进库）。
+   *
+   * ★ 0.2.3：这里**每条消息现读** `this.config.corpus.enabled`。
+   *   为什么不建对象时就定死：`corpus.enabled` 是**活配置对象**上的键
+   *   （`/api/extensions` 的 toggle 会就地改），定死就变成 cold 了 ——
+   *   而这个开关的全部价值就是"随时开关"。现读的代价是一次属性访问。
+   *   ⚠️ 句柄本身照旧在构造时建：`createCorpus()` **不碰磁盘**
+   *   （`node:sqlite` 与建表都推迟到第一次真正用，见 corpus.mjs 的 `open()`），
+   *   所以"关着"的时候这里是**零 fs 成本**，不是"少一次写入"。
    */
   #recordCorpus(opts) {
+    if (this.config.corpus?.enabled === false) return
     try {
       this.#corpus?.record(opts)
     } catch (error) {
@@ -750,6 +801,11 @@ export class Bridge extends EventTarget {
    */
   searchHistory({ chatKey = null, query = '', limit = 8 } = {}) {
     try {
+      // 关掉时**如实说"关掉了"**，不说"没搜到" —— 后者会让模型转述成
+      // "语料库里没有这条"，那是一句谎话（本项目最忌讳的"说了做不到"）。
+      if (this.config.corpus?.enabled === false) {
+        return { ok: false, text: '', rows: [], why: '本地语料库已关闭（corpus.enabled = false）' }
+      }
       if (!this.#corpus) return { ok: false, text: '', rows: [], why: '语料库未启用' }
       const r = this.#corpus.search({ query, chatKey, limit })
       if (!r.ok) return { ok: false, text: '', rows: [], why: r.why }
@@ -1150,6 +1206,45 @@ export class Bridge extends EventTarget {
       return { handled: false, reason: verdict.reason, peerId, senderId }
     }
 
+    // ④ 唤醒闸门（0.2.3，**实验性**：`wake.policy = 'semantic'`）
+    //
+    // ══════════════════════════════════════════════════════════════════════
+    // 它是什么：规则说"回"之后，再问一次**判定器**"这条该不该沉默"。
+    // 它**只做减法** —— 规则说"不回"的消息根本走不到这里（上面就 return 了），
+    // 所以判定器没有任何办法让机器人多说一句话。这条边界是本设计成立的前提：
+    // 一旦"判定器可以主动发起回复"，就需要 hermes 那一整套状态机
+    // （对话态窗口 / epoch / 退出闸门 / episode），成本从 ~200 行抬到 ~1000+ 行。
+    //
+    // ══════════════════════════════════════════════════════════════════════
+    // 为什么插在**这里**（三条理由，第三条是决定性的）
+    // ══════════════════════════════════════════════════════════════════════
+    //   ① 必须在 roster 准入**之后**：否则任何一个陌生人（没进名单的）
+    //      都能让桥接不停起判定子进程 —— 等于一个免费的拒绝服务面；
+    //   ② 必须在 `#withLock(chatKey)` **之外**（那把锁在 `#runTurn` 里）：
+    //      判定是一次 0~6 秒的网络调用，放进锁里会让同一会话的请求队头阻塞；
+    //   ③ ★ 必须在 `#runTurn` **之前**：DSH 的 SDK 只暴露 initialize /
+    //      session/prompt / shutdown，**没有 cancel/abort/steer**，所以进了
+    //      `#runTurn` 的那一轮**注定把 token 烧完**。∴ 只有否决发生在这里，
+    //      "沉默"才真的省钱 —— 放在投递层过滤只能省一条消息，省不掉那一轮。
+    //
+    // ★ `wake.policy` 是**每轮现读**的（活配置对象会被 /api/extensions 就地改），
+    //   所以这个开关是 hot 的。见 `src/plugins.mjs` 里 wake-policy 的 `why`。
+    if (this.config.wake?.policy === 'semantic') {
+      const gate = await this.#wakeGate({
+        kind,
+        peerId,
+        senderId,
+        chatKey: mirrorKey,
+        rendered,
+        decision,
+        identity,
+      })
+      if (!gate.pass) {
+        this.stats.skipped += 1
+        return { handled: false, reason: gate.reason, peerId, senderId }
+      }
+    }
+
     // ④⑤⑥ 串行执行（带上权限等级，提示词据此决定能不能"动手"）
     return this.#runTurn({
       kind,
@@ -1184,6 +1279,162 @@ export class Bridge extends EventTarget {
    */
   #isSelfAuthored(payload) {
     return isSelfAuthored(payload, this.onebot.selfId)
+  }
+
+  /**
+   * 取（必要时建）唤醒判定器。**不抛错**：建不起来就返回 null，
+   * 调用方按"放过"处理 —— 判定器是增强路径，它坏了不能让机器人哑掉。
+   */
+  #ensureWakeJudge() {
+    if (this.wakeJudgeInjected) return this.wakeJudgeInjected
+    if (this.#wakeJudge) return this.#wakeJudge
+    const cliPath = this.config.dsh?.cliPath
+    const cwd = this.config.dsh?.workspace
+    if (!cliPath || !cwd) return null
+    const j = this.config.wake?.judge ?? {}
+    try {
+      this.#wakeJudge = createWakeJudge({
+        cliPath,
+        cwd,
+        timeoutMs: j.timeoutMs,
+        maxPerHour: j.maxPerHour,
+        log: (m) => this.log(m),
+      })
+      this.log(
+        `[wake] 判定器已就绪：policy=semantic · shadow=${j.shadow !== false ? '开（只记账，不改行为）' : '**关**（判定已生效）'}` +
+          ` · timeout=${j.timeoutMs}ms · 上限 ${j.maxPerHour} 次/小时`,
+      )
+    } catch (error) {
+      this.log(`❌ [wake] 判定器建不起来（这一层停用，按规则结论放过）：${error?.message ?? error}`)
+      return null
+    }
+    return this.#wakeJudge
+  }
+
+  /**
+   * 判定器的上下文：**从已有的会话镜像里投影一份**，零新增状态。
+   *
+   * ★ 为什么是"投影"而不是把镜像数组直接递进去：镜像的用途是**给界面看**
+   *   （`listConversations` 会原样吐给 UI），它哪天因为界面需求变了形状，
+   *   判定器的输入就会跟着变 —— 那是一种很隐蔽的耦合。所以这里只取需要的子集。
+   * ★ 镜像里 `role` 只有三档（user / bot / notice），且**在判定之前就已经写好**
+   *   （`#mirror` 在 `decideTrigger` 之前调用），所以判定器天然看得到"刚刚发生了什么"。
+   * ★ 只在内存里、重启即空，且空着也必须正确 —— 满足"状态可随时丢弃"这条纪律。
+   */
+  #wakeContext(chatKey) {
+    const msgs = this.#conversations.get(chatKey)?.messages ?? []
+    return msgs.slice(-WAKE_JUDGE_DEFAULTS.contextMessages).map((m) => ({
+      role: m.role,
+      text: m.text,
+      senderName: m.senderName ?? '',
+    }))
+  }
+
+  /**
+   * 唤醒闸门：规则已经说"回"，再问判定器"该不该沉默"。
+   *
+   * @returns {Promise<{pass: boolean, reason?: string, verdict?: string}>}
+   *   `pass:false` 表示**不要回**：`reason` 直接进日志与返回值，接口上要说得清。
+   */
+  async #wakeGate({ kind, peerId, senderId, chatKey, rendered, decision, identity }) {
+    const j = this.config.wake?.judge ?? {}
+    const shadow = j.shadow !== false
+
+    // ── ① 必答的直接放行（零延迟）────────────────────────────────────────
+    // 私聊 = 一对一找它说话；被 @ = 明确点名。这两类让判定器去审
+    // 既浪费额度，又会让"被 @ 时它 3 秒后才动"这种劣化落到用户身上。
+    if (kind === 'private' || rendered.mentioned === true || decision?.reason === REASON.MENTION) {
+      return { pass: true, verdict: 'bypass' }
+    }
+
+    // ── ② 重复内容在闸门**之前**短路 ──────────────────────────────────────
+    // `#runTurn` 里本来就有这个判定，但它在闸门**之后** —— 不在这里短路的话，
+    // 一条重复消息会先白烧一次判定，然后才被判成 duplicate。
+    // ⚠️ 条件与 `#runTurn` 里那段**逐字对齐**（都是"先有在飞的那条，再比内容"），
+    //    否则同一条消息会在两处得到不同结论。
+    const normalized = String(rendered.text ?? '').trim()
+    const prior = this.#pending.get(chatKey) ?? null
+    if (prior && (prior.text === normalized || this.#lastDelivered.get(chatKey) === normalized)) {
+      this.log('[wake] 重复内容：在判定之前就短路（不白烧一次判定）')
+      return { pass: false, reason: 'duplicate' }
+    }
+
+    const judge = this.#ensureWakeJudge()
+    // 没有 cliPath / judge 建不起来 ⇒ 退回规则结论（也就是放过）
+    if (!judge) return { pass: true, verdict: 'fallback' }
+
+    // ── ③ 取消上一次同会话的判定（它在回答一个已经过期的问题）────────────
+    this.#wakeAborts.get(chatKey)?.abort()
+    const ac = new AbortController()
+    this.#wakeAborts.set(chatKey, ac)
+    const releaseAc = () => {
+      if (this.#wakeAborts.get(chatKey) === ac) this.#wakeAborts.delete(chatKey)
+    }
+
+    let r
+    try {
+      r = await judge.judge(
+        {
+          kind,
+          senderId,
+          senderName: identity?.ok ? identity.name : '',
+          text: rendered.text,
+          hitAt: rendered.mentioned === true,
+          recent: this.#wakeContext(chatKey),
+          selfNames: this.wakeKeywords ?? this.config.trigger?.keywords ?? [],
+        },
+        { signal: ac.signal },
+      )
+    } finally {
+      releaseAc()
+    }
+
+    // ── ④ 记账（影子模式下这就是**全部**的效果）──────────────────────────
+    if (r.judged) {
+      this.stats.wakeJudged += 1
+      if (r.verdict === WAKE_VERDICT.SILENT) this.stats.wakeSilenced += 1
+    }
+    const tail = r.judged ? `${r.verdict}（${r.reason || '未给理由'}）${r.ms}ms` : `未判定（${r.why ?? '未知原因'}）`
+    const mark = shadow && r.verdict === WAKE_VERDICT.SILENT ? '影子：本会拦下' : ''
+    this.log(
+      `[wake] 群 ${peerId} 判定=${tail}${mark ? ` ★${mark}` : ''}` +
+        `${r.fallback ? '（判定失败，已按规则结论放过）' : ''}`,
+    )
+    // 影子模式：**只记账、不改行为**。
+    // ★ 为什么影子模式值得单独一条 oplog：它回答的是"判定器到底想拦什么"。
+    //   没有它，用户开了 semantic 就只能凭"回复变少了"这种模糊感受去判断 ——
+    //   而那正是这块功能最容易被误判成"机器人坏了"的地方。
+    // ★ `excerpt` 是 oplog **唯一会被 privacy.mjs 自动筛**的字段（oplog.mjs:83），
+    //   所以原消息只放这里，别的字段只放数字与结论。
+    try {
+      appendOp({
+        workspace: this.config.dsh?.workspace,
+        chatKey,
+        op: {
+          kind: 'wake',
+          policy: 'semantic',
+          verdict: r.verdict,
+          shadow,
+          fallback: Boolean(r.fallback),
+          judged: Boolean(r.judged),
+          ms: r.ms,
+          reason: r.reason || r.why || '',
+          excerpt: String(rendered.text ?? '').slice(0, 80),
+        },
+      })
+    } catch (error) {
+      // 观测手段写不进去不能影响聊天（与整份 oplog 同一条纪律）
+      this.log(`[wake] 判定流水写不进去（已忽略）：${error?.message ?? error}`)
+    }
+
+    // ── ⑤ 结论 ───────────────────────────────────────────────────────────
+    // fail-open 就落在这一行：只有"真的判完了、而且明确说沉默"才拦。
+    // 超时 / 抛错 / 认不出输出 / 超预算 / 被取消 —— 全部 `judged:false`
+    // 或 `fallback:true`，一律放过。
+    if (r.verdict === WAKE_VERDICT.SILENT && r.judged && !shadow) {
+      return { pass: false, reason: 'wake-silent', verdict: r.verdict }
+    }
+    return { pass: true, verdict: r.verdict }
   }
 
   /** 每个 QQ 会话保留的最近消息条数上限（内存镜像，不是归档）。 */
@@ -2217,7 +2468,19 @@ export class Bridge extends EventTarget {
    */
   async close(timeoutMs = 8000) {
     this.#closing = true
-    // ★ 先停掉定时整理：它会在收尾过程中重写记忆文件，而收尾本身可能正在
+    // ★ 先取消**在飞的唤醒判定**（0.2.3）。
+    //   为什么它要排在最前面：判定是"起一个子进程问模型"，一次 3~5 秒。
+    //   收尾时它既没有价值（机器人都要关了），又会把子进程留到进程退出之后 ——
+    //   `runHeadless` 现在会真的 `kill()`，所以这里是唯一能干净收掉它们的地方。
+    for (const ac of this.#wakeAborts.values()) {
+      try {
+        ac.abort()
+      } catch {
+        /* 取消失败无所谓 */
+      }
+    }
+    this.#wakeAborts.clear()
+    // ★ 再停掉定时整理：它会在收尾过程中重写记忆文件，而收尾本身可能正在
     //   等回复发完 —— 没必要在这个窗口里再去动用户的记忆文件。
     try {
       this.#consolidate?.stop()
@@ -2270,6 +2533,10 @@ export class Bridge extends EventTarget {
     try {
       const workspace = this.config?.dsh?.workspace
       if (!workspace) return null
+      // ★ 0.2.3：`delivery.ledger` 开关（**默认开 = 升级前的行为**）。
+      //   关掉只是"不再落账"（于是"已生成未发出"这件事没有记录可查），**发送完全照常** ——
+      //   返回 null 正是这条增强路径既有的"失败"语义（调用方照发，不阻塞）。
+      if (this.config?.delivery?.ledger === false) return null
       if (!this.#deliveryOwner) {
         this.#deliveryOwner = ownerId({ pid: process.pid, startedAt: PROCESS_STARTED_AT })
       }

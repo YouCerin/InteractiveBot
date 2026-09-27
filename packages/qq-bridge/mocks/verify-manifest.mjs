@@ -439,6 +439,10 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
   const knownPrefixes = [
     'dsh', 'onebot', 'access', 'trigger', 'send', 'turn',
     'humanize', 'session', 'persona', 'memory', 'image', 'ui',
+    // ★ 0.2.3 补：`wake`（唤醒策略二选一）与 `delivery`（投递账本）都是**真的配置键**，
+    //   以前不在这个表里 ⇒ 反向核对（"文档提到的键必须存在"）对它们**根本没生效**。
+    //   一个只在部分前缀上生效的检查比没有检查更危险：它会给出"文档已核对"的假象。
+    'wake', 'delivery',
   ]
   const mentioned = [
     ...new Set(

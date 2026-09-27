@@ -61,6 +61,20 @@ import { inspectMemory } from './memory-inspect.mjs'
 
 // ── 日志：同时写控制台和文件 ──────────────────────────────────────────────
 let logFile = null
+/**
+ * `logFile` 就绪之前产生的日志先攒在这里。
+ *
+ * ⚠️ 为什么必须有：`logFile` 是在启动流程**后段**才赋值的（见下面"日志文件"那段），
+ *    而 MCP 接线、技能依赖桥这些**启动期**的告警都发生在它之前。
+ *    桥接是**无窗口**运行的 —— 那些只进 console 的告警等于"写了没人看得见"，
+ *    与"根本没写日志"一样糟（同一条教训见下面「模型凭据自检」的注释）。
+ *
+ *    实测（2026-09-27）：技能缺 undici 的告警正好落在这个窗口里，
+ *    排查"P站插件为什么不动"时 logs/bridge.log 里一个字都没有。
+ */
+const earlyLogLines = []
+/** 缓冲上限：正常启动远小于它；只防某种异常路径把内存吃掉。 */
+const EARLY_LOG_MAX = 800
 let logBomWritten = false
 
 /**
@@ -168,9 +182,28 @@ async function printExtensions({ config, configPath, log = () => {} }) {
 
   console.log(`\n── 插件（${data.counts.plugins} 个，开启 ${data.counts.pluginsOn} 个）──`)
   for (const p of data.plugins) {
-    const on = p.enabled === null ? '—（名单类）' : p.enabled ? '✅ 开' : '⭕ 关'
+    // ★ 0.2.3：`choice`（二选一）不能被塞进"名单类"那一格 —— 它是**另一个种类**：
+    //   名单是"去别处维护"，而二选一是"当前选了哪个"，后者**必须把取值打出来**，
+    //   否则命令行上根本看不出它现在处于什么状态（`enabled` 恒为 null）。
+    const on =
+      p.switchKind === 'choice'
+        ? `—（二选一：${p.value ?? '未设置'}）`
+        : p.enabled === null
+          ? '—（名单类）'
+          : p.enabled
+            ? '✅ 开'
+            : '⭕ 关'
     const hot = p.switchKind === 'list' ? '' : p.hot ? '｜即时生效' : '｜★ 需重启'
     console.log(`  ${p.icon} ${p.name}  ${on}${hot}  [${p.enabledPath}]`)
+    // 候选与"实验性"标注也要打出来：命令行是排障入口，它不该比界面知道得更少
+    if (p.switchKind === 'choice' && Array.isArray(p.options)) {
+      for (const o of p.options) {
+        const cur = o.value === p.value ? '←当前' : ''
+        console.log(
+          `       ${o.value === p.value ? '●' : '○'} ${o.value}（${o.label}）${o.experimental ? '【实验性】' : ''} ${cur}`.trimEnd(),
+        )
+      }
+    }
   }
   console.log('')
   for (const n of data.notes) console.log(`  · ${n}`)
@@ -237,6 +270,9 @@ function makeLogger(verbose) {  return (message) => {
       } catch {
         /* 写日志失败不该影响主流程 */
       }
+    } else if (earlyLogLines.length < EARLY_LOG_MAX) {
+      // 日志文件还没就绪：先攒着，等 `logFile` 赋值后一次性补写（见 earlyLogLines 的说明）
+      earlyLogLines.push(line)
     }
   }
 }
@@ -407,6 +443,52 @@ async function main() {
       process.exit(1)
     })
     return
+  }
+
+  // ── 后台启动（给 start.bat 用）─────────────────────────────────────────
+  //
+  //   node src/index.mjs --background
+  //
+  // ★ 为什么需要它：start.bat 原来在**前台**跑 `node src/index.mjs`，于是那个
+  //   cmd 窗口成了父进程、与 node **共享同一个 console** —— 关掉窗口（或 Ctrl+C）
+  //   会把整个 console 的进程组带走，机器人就下线了。而窗口**不是必需的**：
+  //   `/api/restart` 一直在用 `respawnBridge()`（detached + stdio:'ignore' +
+  //   unref）起进程，那条路径与任何终端无关。这里把同一条路径开放给命令行，
+  //   于是 start.bat 可以"发起后立刻返回"，不再需要留一个窗口。
+  //
+  // ★ 拒绝重复实例：已经有一个活着的桥接就不起第二个。两个会抢同一个 OneBot
+  //   事件流（同一句话可能被回两次）—— 这正是 process-guard 要防的事，
+  //   判据直接用 runningBridges()（按**数量**判定，见它的注释）。
+  //
+  // ★ 位置纪律（见下面 --delivery 的注释，那里记着一次"只读命令却启动了服务"的事故）：
+  //   顶层命令必须放在这一段**之上**，否则会落进某个 async 分支内部、
+  //   分支不命中时一路走到真的启动桥接。
+  if (process.argv.includes('--background')) {
+    const live = runningBridges(guard.list())
+    if (live.length > 0) {
+      console.error(
+        `❌ 已经有一个桥接在运行（pid ${live.map((e) => e.pid).join('、')}）—— 不再起第二个。\n` +
+          `   同时跑两个会抢同一个 OneBot 事件流（同一句话可能被回两次）。\n` +
+          `   要重启：控制台点「重启」，或 POST http://127.0.0.1:${config.ui?.apiPort ?? 3410}/api/restart\n` +
+          `   要强停：node src/index.mjs --processes --kill <pid>`,
+      )
+      process.exit(1)
+    }
+    let spawned = null
+    try {
+      spawned = respawnBridge(log, { port: config.ui?.apiPort ?? null })
+    } catch (error) {
+      console.error(`❌ 后台启动失败：${error?.message ?? error}`)
+      process.exit(1)
+    }
+    const origin = `http://127.0.0.1:${config.ui?.apiPort ?? 3410}/`
+    console.log('')
+    console.log(`✅ 已在后台启动（pid ${spawned.pid}）`)
+    console.log(`   控制台：${origin}`)
+    console.log(`   日志  ：${config.ui?.logFile ?? 'logs/bridge.log'}`)
+    console.log('   这个窗口可以关掉 —— 关掉不会让机器人下线；要停请用控制台的「停止」。')
+    console.log('')
+    process.exit(0)
   }
 
 
@@ -845,6 +927,19 @@ async function main() {
         return i >= 0 ? process.argv[i + 1] : null
       }
       const corpus = createCorpus({ workspace, log: (m) => console.log(m) })
+
+      // ★ 0.2.3：`corpus.enabled = false` 时**不拒绝**这个命令，只**大声说明**。
+      //   为什么不拒绝：关掉的是**采集**，而库里的旧数据还在 —— 排查/清理/统计
+      //   这些只读动作正是关掉之后更需要能用的（否则"关掉"就变成了"看不见"，
+      //   而看不见的东西最容易出问题）。所以这里只提醒，不拦。
+      if (config.corpus?.enabled === false) {
+        console.log(
+          '⚠️  配置里 corpus.enabled = false：桥接**不再把新消息落库**，' +
+            '`qq_search_history` / `qq_forward_log` 会当场拒绝。',
+        )
+        console.log('    下面看到的是**已有**的数据（关掉不会删库；清理用 --corpus --prune）。')
+        console.log('')
+      }
 
       if (process.argv.includes('--search')) {
         const query = argOf('--search')
@@ -1618,6 +1713,10 @@ async function main() {
         // ★ 0.2.2：`qq_send_image` 要**每次调用现读** `security.allowPrivateImageHosts`，
         //   否则界面上打开那个开关还要重启才生效。
         configPath,
+        // ★ 0.2.3：暴露档位与通用口开关 —— MCP 子进程据此决定 `tools/list` 放哪些工具。
+        //   两者默认值都等于"升级前的行为"（full + 通用口开），收紧是显式选择。
+        profile: config.mcp?.profile ?? 'full',
+        genericApi: config.mcp?.genericApi !== false,
       })
 
       // ── 技能工具服务器（0.2.2）────────────────────────────────────────
@@ -1715,6 +1814,20 @@ async function main() {
   const logPath = join(PKG_ROOT, config.ui.logFile)
   mkdirSync(dirname(logPath), { recursive: true })
   logFile = logPath
+
+  // ★ 把 `logFile` 就绪**之前**攒下的日志补写进去（顺序不变，仍在"桥接启动"之前）。
+  //   为什么必须有：启动期的告警（MCP 接线、技能依赖桥…）发生在这里之前，
+  //   而无窗口运行时它们的 console 输出没人看得见 —— 等于没写。见 earlyLogLines 的说明。
+  if (earlyLogLines.length > 0) {
+    try {
+      ensureLogBom(logFile)
+      appendFileSync(logFile, earlyLogLines.join('\n') + '\n')
+    } catch {
+      /* 写日志失败不该影响主流程 */
+    }
+    earlyLogLines.length = 0
+  }
+
   log(`=== 桥接启动 === 工作区=${config.dsh.workspace} 权限=${config.dsh.permissionMode}`)
 
   // ── 模型凭据自检（★ "机器人不输出内容"那个故障的护栏）────────────────

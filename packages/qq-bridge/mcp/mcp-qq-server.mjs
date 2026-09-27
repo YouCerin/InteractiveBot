@@ -25,13 +25,18 @@
  * 本文件再通过 HTTP 调 SnowLuma 的 OneBot API 完成真实动作。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 安全策略：**黑名单，不是白名单**
+ * 安全策略：**具名工具用黑名单；`qq_api` 用白名单**（0.2.3 起，见下）
  * ══════════════════════════════════════════════════════════════════════════
- * 需求是"能调用所有 SnowLuma 中的 QQ 功能"，所以白名单会不断漏 ——
- * 而且我们无法穷举 SnowLuma 支持的全部 action。
- * 因此这里用**动作黑名单**：默认放行，只拦"会伤害他人或账号"的动作
- * （踢人、禁言、删好友、退群、改名片、批量操作…）。
- * 这样任何 SnowLuma 能力都能用，而危险面是显式列出的。
+ * 需求是"能调用所有 SnowLuma 中的 QQ 功能"，所以对**具名工具**用枚举不完 ——
+ * 那些工具的动作是写死的，所以用**动作黑名单**：默认放行，只拦"会伤害他人或账号"
+ * 的动作（踢人、禁言、删好友、退群、改名片、批量操作…）。
+ *
+ * ★★ **但 `qq_api` 不一样**：它的 action 是**模型自选的任意字符串**，
+ *    对它就等于"默认放行一切"。实测漏过两个高危动作（`get_cookies` = 账号网页凭据、
+ *    `upload_group_file` = 一条把本机文件外发的通道）—— 详见 `ALLOWED_API_ACTIONS`
+ *    的说明。所以那个口是**只读白名单**（fail-closed）：不在清单里的动作一律拒。
+ *
+ * ∴ 一句话：**能穷举的用黑名单，不能穷举的用白名单。**
  *
  * 用法：由 DSH 的 MCP 客户端拉起（stdio）。
  *   node mcp-qq-server.mjs --config <mcp-qq.config.json>
@@ -44,7 +49,7 @@ import { pathToFileURL } from 'node:url'
 
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
-const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.2.2' }
+const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.2.3' }
 
 /**
  * ★ 危险动作黑名单（默认放行其余一切）。
@@ -74,6 +79,51 @@ const BLOCKED_ACTIONS = {
   '_send_group_notice': '会发群公告',
   'send_group_sign': '会群打卡（可能被判定为刷分）',
 }
+
+/**
+ * `qq_api`（万能口）允许的动作 —— **白名单**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么从"黑名单"改成"白名单"（2026-09-27 实测漏洞）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 原先只有 `BLOCKED_ACTIONS` 这张**黑名单**。对**具名工具**它够用（动作是写死的），
+ * 但 `qq_api` 的 action 是**模型自选的任意字符串** —— 对它来说黑名单就是全部防线，
+ * 而黑名单天然只拦得住"想得到的"。
+ *
+ * 实测的漏网：`get_cookies` 与 `upload_group_file` **在描述里被广告给模型**，
+ * 却**都不在黑名单里** —— 前者是账号网页凭据（Cookie），后者是一条把本机文件外发的通道。
+ * 这不是"忘了加两条"，是**方向错了**：未知的危险动作会永远漏过去。
+ * 所以改成白名单：**没列出的一律拒绝**（fail-closed）。
+ *
+ * ── 为什么"发送类"一律不放行 ────────────────────────────────────────────
+ * `send_private_msg` / `send_group_msg` / `send_msg` 看着无害，但**它们是绕过**：
+ * 桥接的回复要经过 分条 → 拟人延迟 → 三道节流 → 投递前终检门 → 投递账本；
+ * 从 `qq_api` 直发会**跳过全部这些**（包括账号风控相关的节流）。
+ * 要发文字就让模型正常回复，要发图用 `qq_send_image`（它自己下载 + 守卫 + base64）。
+ * 同理不放行 `delete_*` / `set_*` / `upload_*`。
+ *
+ * 这一条**不可关**：它是边界，不是功能（同 src/plugins.mjs 的三条纪律口径）。
+ */
+const ALLOWED_API_ACTIONS = new Set([
+  // 只读查询
+  'get_status',
+  'get_version_info',
+  'get_group_list',
+  'get_friend_list',
+  'get_group_info',
+  'get_group_member_info',
+  'get_group_member_list',
+  'get_group_msg_history',
+  'get_friend_msg_history',
+  'get_forward_msg',
+  // 取媒体（下载与守卫都在宿主这一侧做，本身不产生对外副作用）
+  'get_image',
+  'get_record',
+  'get_file',
+  // 能力探测
+  'can_send_image',
+  'can_send_record',
+])
 
 // ── 工具定义（写给模型的说明；措辞直接影响它用不用、怎么用） ─────────────
 //
@@ -391,15 +441,16 @@ const TOOLS = [
   {
     name: 'qq_api',
     adminOnly: true,
+    generic: true,
     description:
-      '直接调用任意 SnowLuma/OneBot 动作。当上面那些具名工具没覆盖你要做的事时用这个。' +
-      '常见可用动作（不限于这些）：send_private_msg、send_group_msg、send_msg、' +
-      'delete_msg、get_msg、get_group_list、get_friend_list、get_group_member_info、' +
-      'get_group_member_list、get_group_msg_history、get_friend_msg_history、' +
-      'get_forward_msg、group_poke、friend_poke、set_input_status、mark_msg_as_read、' +
-      'set_msg_emoji_like、get_image、get_record、get_file、upload_group_file、' +
-      'get_status、get_version_info、get_cookies、can_send_image、can_send_record。' +
-      '如果动作名不存在，SnowLuma 会返回错误，届时换一个动作名即可。',
+      '直接调用 SnowLuma/OneBot 的**只读**动作。当上面那些具名工具没覆盖你要查的东西时用这个。' +
+      '允许的动作（**白名单，没列出的一律会被拒绝**）：get_status、get_version_info、' +
+      'get_group_list、get_friend_list、get_group_info、get_group_member_info、' +
+      'get_group_member_list、get_group_msg_history、get_friend_msg_history、get_forward_msg、' +
+      'get_image、get_record、get_file、can_send_image、can_send_record。' +
+      '⚠️ 发送类动作（send_private_msg / send_group_msg / send_msg / delete_msg / upload_group_file…）' +
+      '**不在这里面、也不会放行** —— 要说话就直接回复，要发图用 qq_send_image。' +
+      '如果动作名不在白名单里，工具会明确告诉你"不在允许清单里"，换一个已列出的动作即可。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -672,15 +723,57 @@ async function runForwardLog({ query, kind, peerId, toId, toKind, limit } = {}) 
   }
 }
 
+/** 当前档位下**对模型可见**的工具（`tools/list` 用它；`runTool` 也用它做 fail-closed 校验）。 */
+function visibleTools() {
+  const readonly = config?.profile === 'readonly'
+  return TOOLS.filter((t) => {
+    if (t.generic && config?.genericApi === false) return false
+    if (readonly && t.adminOnly) return false
+    return true
+  })
+}
+
 /** 执行一个工具调用，返回 MCP 的 content 数组。 */
 async function runTool(name, args) {
   const tool = TOOLS.find((t) => t.name === name)
   if (!tool) return { isError: true, text: `没有这个工具：${name}` }
+  // ★ fail-closed：被档位隐藏的工具，**即使被直接调用也要拒**。
+  //   只过滤 `tools/list` 是不够的 —— 模型（或任何本地进程）可以照旧按名字调用。
+  if (!visibleTools().includes(tool)) {
+    return {
+      isError: true,
+      text: `工具 ${name} 在当前档位下不可用（控制台 →「扩展」→ QQ 原生功能 里可调整档位）。`,
+    }
+  }
 
-  // ── H7：本地语料库检索（**不走 OneBot**，也不经过 build/黑名单那条路）──────
-  if (tool.local === 'corpus') return runCorpusSearch(args ?? {})
-  // ── H14：本地语料库打包成合并转发 ──────────────────────────────────────
-  if (tool.local === 'forwardLog') return runForwardLog(args ?? {})
+  // ── H7/H14：本地语料库（**不走 OneBot**，也不经过 build/黑名单那条路）──────
+  //
+  // ★ 0.2.3：语料库的开关在**分派这一层**统一拦，而不是在两个实现里各写一遍。
+  //   理由有两个，第二个才是要紧的：
+  //     ① 两个入口（`qq_search_history` / `qq_forward_log`）共用同一份库，
+  //        守卫写两处必然有一天只改一处；
+  //     ② ★ **fail-closed 的方向要选对**：关掉之后必须回"**被关掉了**"，
+  //        绝不能回"没搜到" —— 后者会被模型转述成"语料库里没有这条记录"，
+  //        那是一句**谎话**（本项目最忌讳的"说了做不到"）。
+  //
+  //   `readLiveConfig()` 是**每次调用现读** config.json 的，所以这个开关是
+  //   真正的"随时开关"（与技能的开关同一条纪律，见文件头）。
+  //   读不到配置（文件被删/写坏）时**按"开着"处理** —— 方向与 `runSendImage`
+  //   那边的保守相反，因为这里是**只读**的：误判成"关"会让模型平白说一句
+  //   "我搜不了"，而误判成"开"最多是照常查一次本地库。
+  if (tool.local === 'corpus' || tool.local === 'forwardLog') {
+    const live = readLiveConfig()
+    if (live?.corpus?.enabled === false) {
+      return {
+        isError: true,
+        text:
+          `本地语料库被关掉了（配置里 corpus.enabled = false），所以现在${tool.local === 'corpus' ? '搜不了' : '打包不了'}历史。` +
+          '★ 请**如实告诉对方你查不了**，不要凭印象编，也不要说"没有这条记录"。',
+      }
+    }
+    if (tool.local === 'corpus') return runCorpusSearch(args ?? {})
+    return runForwardLog(args ?? {})
+  }
   // ── 0.2.2：发图（自己下载 + 守卫 + base64 段）────────────────────────────
   if (tool.local === 'sendImage') return runSendImage(args ?? {})
 
@@ -691,14 +784,27 @@ async function runTool(name, args) {
     return { isError: true, text: `参数不对：${error.message}` }
   }
 
-  // ★ 黑名单拦截
+  // ★★ 两道闸，顺序固定（2026-09-27 起）：
+  //   ① 万能口 `qq_api` 走**白名单**（fail-closed）：没列出的一律拒。
+  //      这是修掉实测漏洞的那一步 —— 详见 ALLOWED_API_ACTIONS 的说明。
+  //   ② 黑名单**保留**作为第二层：具名工具的动作是写死的，但黑名单能挡住
+  //      "某个具名工具日后被改成危险动作"这类回归。
+  if (tool.generic && !ALLOWED_API_ACTIONS.has(built.action)) {
+    return {
+      isError: true,
+      text:
+        `这个动作不在允许清单里：${built.action}。\n` +
+        `qq_api 只放行**只读**动作（查群/好友/成员/历史、取媒体、能力探测）。\n` +
+        `要发消息就直接回复、要发图就用 qq_send_image —— 它们会走完整的投递链` +
+        `（分条 / 拟人节奏 / 节流 / 投递前终检门），而从 qq_api 直发会**绕过全部这些**。`,
+    }
+  }
+
   const blockedReason = BLOCKED_ACTIONS[built.action]
   if (blockedReason) {
     return {
       isError: true,
-      text:
-        `我这边把这个动作禁用了：${built.action}（${blockedReason}）。\n` +
-        `如果确实需要，请让使用者在配置里放开 —— 我不会自己绕过这条限制。`,
+      text: `我这边把这个动作禁用了：${built.action}（${blockedReason}）。我不会自己绕过这条限制。`,
     }
   }
 
@@ -741,7 +847,8 @@ async function handle(frame) {
 
     case 'tools/list':
       return reply(id, {
-        tools: TOOLS.map((t) => ({
+        // ★ 用 visibleTools()：档位（readonly / 通用口）在这里生效
+        tools: visibleTools().map((t) => ({
           name: t.name,
           // ★ H14：描述统一经 `described()` 拼上权限提示与"如实"提示 ——
           //   写在这里而不是每个工具手抄一遍，避免漏掉某个工具、也避免两处措辞漂移。
@@ -791,7 +898,13 @@ function startServer() {
     process.exit(1)
   }
 
-  log(`已启动，OneBot 端点 ${config.httpUrl}，工具 ${TOOLS.length} 个，黑名单 ${Object.keys(BLOCKED_ACTIONS).length} 项`)
+  log(
+    `已启动，OneBot 端点 ${config.httpUrl}，工具 ${TOOLS.length} 个，` +
+      // ★ 两个数都要报：只报黑名单会让人以为 `qq_api` 是"默认放行"的口，
+      //   而它现在恰恰是**最严**的那一层（只读白名单）。这两个数字合起来才是真实防线。
+      `黑名单 ${Object.keys(BLOCKED_ACTIONS).length} 项、qq_api 只读白名单 ${ALLOWED_API_ACTIONS.size} 项` +
+      `（档位 ${config.profile ?? 'full'}）`,
+  )
 
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
   rl.on('line', (line) => {

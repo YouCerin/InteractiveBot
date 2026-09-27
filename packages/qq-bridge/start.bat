@@ -90,12 +90,40 @@ if /i not "%~1"=="--no-browser" (
   start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/api/status && start http://127.0.0.1:3410/"
 )
 
-echo Starting QQ bridge...
+rem --- QQ bridge ---------------------------------------------------------------
+rem BACKGROUND by default. Why this changed: this line used to run node in the
+rem FOREGROUND, so this cmd window was node's parent and shared the console with
+rem it -- closing the window (or Ctrl+C) killed the whole console process group
+rem and took the bot offline. The window was never REQUIRED: /api/restart has
+rem always started the bridge detached (respawnBridge: detached + stdio ignore +
+rem unref) and that process is tied to no terminal. --background reuses the very
+rem same path, so this launcher can fire and return instead of holding a window.
+rem Want live output / Ctrl+C? Use: start.bat --foreground
+rem
 rem NOTE: %* is deliberately NOT forwarded. These scripts are launchers and the
-rem only flags they take (--check/--doctor/--setup/--no-browser/--no-snowluma)
-rem all return before this line -- forwarding them would be a footgun, because
-rem src/index.mjs treats --snowluma / --open-console as "do that and exit",
-rem which would silently skip starting the bridge.
+rem only flags they take (--check/--doctor/--setup/--no-browser/--no-snowluma/
+rem --foreground) all return before this line -- forwarding them would be a
+rem footgun, because src/index.mjs treats --snowluma / --open-console as
+rem "do that and exit", which would silently skip starting the bridge.
+
+if /i "%~1"=="--foreground" goto :foreground
+
+echo Starting QQ bridge (background)...
+"%NODE%" "%~dp0src\index.mjs" --background
+set "EXITCODE=%ERRORLEVEL%"
+
+if not "%EXITCODE%"=="0" (
+  echo.
+  echo [!] Could not start (exit %EXITCODE%) -- see the message above.
+  echo.
+  pause
+)
+
+rem exit /b on ONE line: %EXITCODE% must expand BEFORE endlocal clears it.
+endlocal & exit /b %EXITCODE%
+
+:foreground
+echo Starting QQ bridge (foreground; Ctrl+C stops it)...
 "%NODE%" "%~dp0src\index.mjs"
 set "EXITCODE=%ERRORLEVEL%"
 
@@ -103,6 +131,10 @@ if not "%EXITCODE%"=="0" (
   echo.
   echo [!] Bridge exited with code %EXITCODE%.
 )
+
+echo.
+pause
+endlocal & exit /b %EXITCODE%
 
 :end
 echo.

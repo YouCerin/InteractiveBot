@@ -41,6 +41,20 @@
  * @property {string} what          这个插件是什么（一句话）
  * @property {string} offEffect     关掉之后会发生什么（界面直接显示这句）
  * @property {string} uiTab         详细设置在哪一页（界面跳转用；`null` = 只有开关）
+ * @property {{options: PluginChoiceOption[]}} [choice]
+ *   二选一 / N 选一：**当两个功能冲突时用**（见下面 pluginSwitchKind 的说明）。
+ *   声明了它，`switchKind` 就是 `'choice'`，界面应渲染成 N 个并列按钮而不是开关。
+ */
+
+/**
+ * @typedef {object} PluginChoiceOption
+ * @property {string} value        写进配置的值
+ * @property {string} label        按钮上的字
+ * @property {string} [desc]       按钮下的小字（一句话说清选它的后果）
+ * @property {boolean} [experimental]
+ *   true = 标注「实验性」。口径：**从外部项目借来、尚未在本项目长期验证**的那一侧
+ *   （例如 hermes 式语义唤醒 vs 现有规则唤醒）。界面必须显示出来 ——
+ *   使用者有权知道自己在开一个还没被时间检验的东西。
  */
 
 /** 桥接内置插件（顺序 = 界面上显示的顺序：总开关类在前，细节类的在后）。 */
@@ -120,6 +134,95 @@ export const BUILTIN_PLUGINS = [
     uiTab: 'overview',
   },
   {
+    id: 'wake-policy',
+    name: '唤醒策略',
+    icon: '📣',
+    enabledPath: 'wake.policy',
+    // ★ hot：闸门**每条消息现读** `this.config.wake.policy`（`bridge.mjs` 的
+    //   `handleEvent` 里那一行 `if (this.config.wake?.policy === 'semantic')`），
+    //   而 `wake.policy` 是**活配置对象**上的键（`extensions-service.mjs:186` 就地改）。
+    //   ⚠️ 但**不是全部**都即时：`wake.judge.timeoutMs` / `maxPerHour` 在判定器
+    //   首次被用到时装配一次（预算计数器必须跨消息累积，不能每条重建），
+    //   所以改这两个要重启。`shadow` 是每轮现读的。
+    hot: true,
+    why:
+      '闸门每条消息现读 this.config.wake.policy（bridge.mjs 的 handleEvent）——' +
+      '判定器本身懒建、只建一次（预算计数器要跨消息累积），所以 policy 与 judge.shadow 即时生效；' +
+      'judge.timeoutMs / judge.maxPerHour 只在首次装配时读一次，改这两个要重启',
+    what:
+      '决定"这条消息要不要回"用哪一套判据。**这两者回答的是同一个问题**，' +
+      '所以它们是**二选一**（同一个键），不是两个开关 —— 两个都开会让两套判据打架，' +
+      '两个都关等于机器人不知道该不该回。',
+    offEffect:
+      '这一格**没有"关"**：它不是开关，是二选一。选「规则唤醒」= 今天的行为' +
+      '（私聊/@/关键词 → 必答，一次额外调用都不产生）；' +
+      '选「语义唤醒」= 规则先唤醒、再由判定器否决（可以沉默），' +
+      '代价是每条候选消息要起一个一次性 DSH 进程做判定，且**默认只记账不改行为**（影子模式）。',
+    uiTab: 'extensions:wake-policy',
+    choice: {
+      options: [
+        {
+          value: 'rule',
+          label: '规则唤醒（现状）',
+          desc: '私聊 / 被 @ / 命中关键词 → 必答。零额外调用、零新进程。',
+        },
+        {
+          value: 'semantic',
+          label: '语义唤醒（可沉默）',
+          desc:
+            '规则先唤醒，再由判定器决定说不说 —— 它可以否决（让机器人沉默）。' +
+            '★ 默认是**影子模式**：判定照跑、结论只写进 oplog，行为不变。',
+          experimental: true,
+        },
+      ],
+    },
+  },
+  {
+    id: 'delivery',
+    name: '投递可靠性',
+    icon: '📮',
+    enabledPath: 'delivery.ledger',
+    hot: true,
+    why: '每次投递落账前现读 config.delivery.ledger（bridge.mjs 的 #beginDelivery 每次投递都调用它）',
+    what:
+      '把"已经生成好、但还没发出去"的回复先落一份账（投递账本）。' +
+      '于是崩溃 / 重启之后能回答"丢的是哪一条、给谁的"—— 这件事以前没有任何地方能回答。',
+    offEffect:
+      '关掉后：不再落账 —— 回复**照样发**，但"已生成未发出"这件事就没有记录可查了' +
+      '（历史账本文件不会删）。' +
+      '★ 另外两块**不受这个开关影响**，它们是边界不是功能：投递前终检门（关掉会把内部文本发到 QQ）、' +
+      '出站幂等键（关掉会误丢"不同会话里的同一句话"）。',
+    uiTab: 'advanced',
+  },
+  {
+    id: 'corpus',
+    name: '本地语料检索',
+    icon: '🗂️',
+    enabledPath: 'corpus.enabled',
+    // ★ hot：取证位置有三处，都在**每次使用**时现读 `this.config.corpus.enabled`
+    //   （它是活配置对象上的键，`/api/extensions` 的 toggle 会就地改）：
+    //     · 写入侧：`bridge.mjs` 的 `#recordCorpus` —— **每条消息**都过一遍；
+    //     · 读取侧（桥接内）：`bridge.mjs` 的 `searchHistory`；
+    //     · 读取侧（MCP 工具）：`mcp/mcp-qq-server.mjs` 的 `runTool` 分派处，
+    //       用 `readLiveConfig()` **每次调用现读 config.json**。
+    //   ⚠️ 句柄本身在构造时建，但 `createCorpus()` **不碰磁盘**（`node:sqlite`
+    //   与建表都推迟到第一次真正用）⇒ 关着的时候是**零 fs 成本**，不是"少一次写入"。
+    hot: true,
+    why:
+      '写入侧每条消息现读 this.config.corpus.enabled（bridge.mjs 的 #recordCorpus）；' +
+      '读取侧桥接内走 searchHistory、MCP 工具走 readLiveConfig() 每次现读 config.json。' +
+      '语料库句柄虽然构造时就建，但它不碰磁盘（createCorpus 是懒的），所以关着时零 fs 成本',
+    what:
+      '把每条消息落进本地 SQLite 并支持中文全文检索 —— 于是"我上次说的那个方案叫什么来着"' +
+      '这类问题能查（在此之前只能现拉协议端历史：拉一次算一次、不能检索、对面一重启就没了）。',
+    offEffect:
+      '关掉后：不再把新消息落进本地库，`qq_search_history`（搜历史）与 `qq_forward_log`' +
+      '（把历史打包成合并转发）会**当场拒绝** —— 注意是"被关掉了"，不是"搜不到"。' +
+      '★ **已有的库文件不会被删**，重新打开就还能搜到旧消息；清理由 `--corpus --prune` 单独负责。' +
+      '★ 这一层是纯词法检索（零模型调用、零网络），关掉不影响回复质量。',
+    uiTab: null,
+  },
+  {
     id: 'persona',
     name: '人设',
     icon: '🎭',
@@ -154,6 +257,21 @@ export const BUILTIN_PLUGINS = [
  * @returns {{ kind: 'boolean'|'enum'|'list', value?: unknown, offValue?: unknown }}
  */
 export function pluginSwitchKind(plugin) {
+  // ★ choice（二选一 / N 选一）：**两个功能冲突时**的做法。
+  //
+  //   为什么不做成两个独立开关：那会出现两种无意义状态 ——
+  //     · 两个都开 ⇒ 两套判据同时生效，互相打架；
+  //     · 两个都关 ⇒ 功能哑掉（例如机器人不知道该不该回）。
+  //
+  //   做法是**两个功能放同一个插槽、用同一个单值配置键**。于是
+  //   「启动一个自动关掉另一个」是这个键的**天然语义**，不需要任何额外机制 ——
+  //   选了 `semantic` 就等于 `rule` 不在了。
+  //
+  //   ∴ choice **没有"关"**：isPluginOn() 对它返回 null（与 list 同类）。
+  //     界面也不该给它渲染开关或"关掉会怎样"，而应写成「选这个会怎样」×N。
+  if (plugin.choice && Array.isArray(plugin.choice.options) && plugin.choice.options.length > 0) {
+    return { kind: 'choice', options: plugin.choice.options }
+  }
   if (plugin.enabledPath === 'persona.preset') return { kind: 'enum', offValue: 'none', onValue: 'mermaid-lite' }
   if (plugin.enabledPath.endsWith('Users') || plugin.enabledPath.endsWith('Allowlist')) return { kind: 'list' }
   return { kind: 'boolean' }
@@ -180,7 +298,11 @@ export function readPath(obj, path) {
 export function isPluginOn(plugin, config) {
   const value = readPath(config, plugin.enabledPath)
   const kind = pluginSwitchKind(plugin).kind
-  if (kind === 'list') return null
+  // list（名单）与 choice（二选一）**都没有"关"这个动作**：
+  //   · 名单为空是安全状态，不是"关闭"；
+  //   · choice 是"选了哪一个"，没有第三个"都不选"。
+  // 返回 null 让界面据此换成别的控件 —— 硬套一个开关就是"点了没反应"的控件。
+  if (kind === 'list' || kind === 'choice') return null
   if (kind === 'enum') return Boolean(value) && String(value) !== 'none'
   return value !== false
 }
@@ -201,8 +323,10 @@ export function listPlugins({ config } = {}) {
       offEffect: p.offEffect,
       enabledPath: p.enabledPath,
       switchKind: kind.kind,
+      // choice 的选项要带给界面（渲染成 N 个并列按钮，含「实验性」标注）；其余类型为 null
+      options: kind.kind === 'choice' ? kind.options : null,
       enabled: isPluginOn(p, config),
-      value: kind.kind === 'list' ? readPath(config, p.enabledPath) : readPath(config, p.enabledPath),
+      value: readPath(config, p.enabledPath),
       hot: p.hot,
       why: p.why,
       uiTab: p.uiTab,

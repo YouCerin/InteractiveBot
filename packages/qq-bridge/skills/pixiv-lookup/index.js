@@ -261,6 +261,37 @@ async function loadProxyAgentFactory() {
 }
 
 /**
+ * undici 代理能力：`{ state: 'unknown' | 'ok' | 'missing', why }`。
+ *
+ * ── 为什么单独探测，而不复用 loadProxyAgentFactory ────────────────────────
+ * ① 复用它会**顺手缓存工厂**，而 `__setNetAdapter` 的注释写过：真实解析出来的
+ *    undici 工厂会盖过测试注入的假工厂（断言全错，且现象极具误导性）。
+ *    所以这里只记录结论，**不建工厂、不碰 testNet**。
+ * ② 不探测的话，"缺 undici"这件事只有等**一次请求真的失败之后**才会被写进
+ *    proxyNote —— 于是 diagnose() 在事前答不出"代理到底能不能用"。
+ *
+ * ★★ 这正是实测那次排查卡住的地方（2026-09-27）：
+ *    界面自检只说"代理：未配置"，日志里没有任何线索，而第二重故障（缺依赖）
+ *    必须**先填了 proxy 才会暴露** —— 两个缺陷互相遮蔽，看起来完全无解。
+ *    预热之后，自检可以一次性把两件事都报出来。
+ */
+let undiciCapability = { state: 'unknown', why: '' }
+
+/** 预热探测 undici 是否可用。只记录结论，不建工厂、不碰 testNet。 */
+async function probeUndiciCapability() {
+  if (undiciCapability.state !== 'unknown') return undiciCapability
+  try {
+    const undici = await import('undici')
+    undiciCapability = typeof undici.ProxyAgent === 'function' && typeof undici.fetch === 'function'
+      ? { state: 'ok', why: '' }
+      : { state: 'missing', why: 'undici 里没有 ProxyAgent/fetch' }
+  } catch (e) {
+    undiciCapability = { state: 'missing', why: `无法加载 undici：${e && e.message ? e.message : e}` }
+  }
+  return undiciCapability
+}
+
+/**
  * 按代理地址取（并缓存）dispatcher；没有代理时返回 null。
  *
  * 「代理地址」填 `auto` 时会自动探测本机代理（见 resolveProxySetting）——
@@ -1232,7 +1263,7 @@ export function available(context = {}) {
   return { ok: true }
 }
 
-export function setup(api) {
+export async function setup(api) {
   cfgOf = (context) => {
     const fromRun = context && context.config && context.config.skills && context.config.skills[SKILL_ID]
     if (fromRun && typeof fromRun === 'object') return fromRun
@@ -1366,6 +1397,12 @@ export function setup(api) {
       }
     },
   })
+
+  // ★ 预热探测 undici（代理能力）。**放在所有 registerTool 之后** ——
+  //   这样 setup 的函数体在前半段仍是同步执行完的，不改变"注册完工具才算装载好"的时序；
+  //   宿主侧本来就是 `await mod.setup(api)`（src/extensions.mjs:700），所以改成 async 安全。
+  //   探测失败也**不让 setup 抛错**：缺一个可选依赖不该让整个技能装不上（与 available() 只判开关同一条口径）。
+  await probeUndiciCapability()
 }
 
 /**
@@ -1453,6 +1490,13 @@ export function diagnose(context = {}) {
         ? `auto（自动探测本机代理）${proxyNote ? ` · ${proxyNote}` : ' · 尚未发起请求，未生效判定'} · 仅作用于本插件请求，不影响 QQ Agent 主程序`
         : `${c.proxy}（${proxyNote || '尚未发起请求，未生效判定'}）· 仅作用于本插件请求，不影响 QQ Agent 主程序`)
       : '未配置（本插件走直连；不改动宿主任何全局网络设置）',
+    // ★ 独立于上面的「代理」一栏：上面说的是"配了什么"，这里说的是"**配了能不能用**"。
+    //   两件事必须分开报 —— 实测那次两个缺陷互相遮蔽，只看「代理：未配置」永远发现不了缺依赖。
+    代理能力: undiciCapability.state === 'ok'
+      ? '✅ undici 已就绪（填了 proxy 就能走代理）'
+      : undiciCapability.state === 'missing'
+        ? `❌ 不可用 —— ${undiciCapability.why}。补装：在 packages/qq-bridge 下 npm install undici → node setup.mjs → 重启机器人`
+        : '未探测（本进程还没装载技能）',
     图片桥: c.imageBridge === false
       ? '已关闭（扩展设置里的「本地图片桥」）'
       : (bs && bs.running

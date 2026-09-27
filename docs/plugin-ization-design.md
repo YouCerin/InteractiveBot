@@ -184,6 +184,18 @@ origin(含分钟级时间戳) + 正文 ← :1631
 
 ## 4. 配置 schema 草案
 
+> ⚠️ **本节是"草案"，最终落地的形状与它不同**（2026-09-27 已实施，以代码为准）：
+> 实际用的是 **`wake.policy: 'rule' | 'semantic'`**（二选一，**一个键**）+
+> **`wake.judge.{shadow,timeoutMs,maxPerHour}`**，**不是**下面的 `wake.mode: off|gate`
+> + `wake.gate.*`。两处差异与理由：
+> ① `off` **不是一个策略**，只是"没开" ⇒ 放进同一个键里当取值，会出现"两个都关"这种
+>    无意义状态（`mode:'off'` 与 `gate.enabled:false` 是同一个状态的两种写法）；
+> ② `gate.enabled` + `gate.shadow` 是**两个开关**，会出现 `enabled:false` 但
+>    `shadow:true` 这种组合 —— "影子模式"本来就该是 `semantic` 内部的子设置。
+> ③ `continuation` 按 §11.2 的结论**没做**（它唯一会新增消息量）。
+> 完整的落地边界、三处收窄与"成本估算不成立"的更正见
+> `docs/plugin-packaging-plan.md` §5.1，与 `src/wake-judge.mjs` 顶部。
+
 沿用你们现有的 `_说明` 内联注释 + `enabled` 约定（`config.example.json` 已全篇如此）：
 
 ```jsonc
@@ -247,10 +259,20 @@ await judgeWake(input, { signal })
 | 阶段 | 改动面 | 行为变更 | 验收 | 回滚点 |
 |---|---|---|---|---|
 | **P0** 抽缝 | ① `decideTrigger` 改为 policy 列表（现只含 rule policy）② 判定结论进 `oplog` | **零** | `pnpm test` 全绿；影子关闭时 oplog 无新增事件 | git revert |
-| **P1** 工具面（**已提前，见 §12.5**） | `mcp/mcp-qq-server.mjs` 工具清单可窄化 + deny→allow-list；`src/mcp-profile.mjs` 装配开关 | ⚠️ **默认档位从"全部 7 个"收到"只读 3 个"** —— 这是一次显式行为变更 | §12.4 的 8 条用例；`profile="full"` 时与 0.2.0 逐字一致 | 配置开关（改回 `full`） |
+| **P1** 工具面（**已提前，见 §12.5**） | `mcp/mcp-qq-server.mjs`：`qq_api` 白名单 + 档位过滤；`src/mcp-profile.mjs` 装配；`config.mjs` 两个键 | ✅ **已实现（第 7 轮）**：默认 `full` = 升级前的行为（**零回归**）+ 白名单修掉 `get_cookies` 漏洞 | §12.4 的用例；`verify-mcp-tools.mjs` 新增 11 条断言 | 配置开关（`mcp.profile` / `mcp.genericApi`） |
 | **P2** 人设段落化 | 把 8 处 `lines.push` 收进**段表**（§13.3 契约）+ `persona.enabled`；段级失败沿用 `#warnInjectOnce` | 关掉人设 ⇒ 提示词少一段（其余段逐字不变） | §13.7 的 8 条用例，尤其**第 6 条（权限词扫描，回归 `:1503-1518` 事故）**与第 8 条（段序快照） | 配置开关 |
 | **P3** 唤醒 gate 影子 | 判定器 + `shadow:true` | **零** | 跑 1~2 周，产出"本会拦掉 N 条"清单（§10.5） | 配置开关 |
 | **P4** 唤醒 gate 生效 | `enabled:true` | 可能少回 | 直接触发零延迟（对比 `speed.mjs`）；**漏回率**低于门槛 | 配置开关 |
+
+> ★ **P0/P3/P4 已在 0.2.3 一次性落地**（2026-09-27），但**命名与本表不同、且 P3 是默认态**：
+> `wake.policy = 'semantic'` 就是 P3+P4 的合体，`wake.judge.shadow` **默认 true** ⇒
+> 选 `semantic` 之后**先进入 P3（影子）**，要真的生效必须显式把 `shadow` 改成 false。
+> 为什么把"影子"做成默认而不是先跑一段再改代码：判错成"沉默"的失败方向**没有提示**
+> （那个人只是永远等不到回复），所以这道门槛必须在**配置**里，而不是靠人记得先开影子。
+> P0（"抽缝"）**没有单独做** —— `decideTrigger` 保持原样、没有被改成 policy 列表；
+> 闸门是加在它**外面**的一层。理由：`decideTrigger` 的矩阵本身没有第二套实现，
+> 为了"将来可能有别的 policy"去改它属于投机抽象；而闸门放在 `handleEvent` 里
+> 反而让"这一层只做减法"这件事在阅读时一眼可见。
 | **P5** 投递可靠性 | ① E1 幂等键（键并入来源消息 ID）② E2 可选账本 ③ 部分投递留下已发记录 ④ 暴露"当轮投递结果"（供记忆 D1） | 默认关 ⇒ **零行为变更、零额外写盘** | §14.7 的 8 条用例，尤其第 1（关闭即零成本）与第 8（`markSent` 时机回归） | 配置开关 |
 
 **已移出本表**：
@@ -287,7 +309,7 @@ await judgeWake(input, { signal })
 | 4 | 闸门判定用哪个模型与预算？ | **待定**（见 §10.7） |
 | 5 | `continuation`（对话态内延长响应窗口）做不做？ | **已决：本期不做。** 它唯一会"新增消息量"，与 `src/trigger.mjs:51-54` 的群聊风控立场冲突；且需要 hermes 整套窗口/epoch/退出闸门 —— 见 §11.2 |
 | 6 | `episodeState`（16 字段对话状态）做不做？ | **已决：本期不做。** 它只服务 `continuation`；`gate` 需要的上下文用现成的 `#mirror`（`:969`，每会话 50 条，判定前已写好）—— 见 §11.4 |
-| 7 | 工具面默认档位？ | **待定**（§12.3 建议 `tools.profile` 默认 `"readonly"`＝只读 3 个。**注意这与今天不同，是一次显式行为变更**，需你确认） |
+| 7 | 工具面默认档位？ | **已决（第 7 轮，实测修正）**：默认 **`mcp.profile = 'full'`**（= 升级前的行为，零回归）。⚠️ 我先前的建议 `readonly` **被推翻**：它会把 `qq_send_image` 一起藏掉，而 P站发图链路正在用它。收紧改为**显式选择** |
 
 **"只讨论"工作进度**：
 1. ✅ `wake.gate` 完整时序图 → §10.3
@@ -556,13 +578,25 @@ hermes 有一条 `mode="continuation"`：一轮回答完，如果期间又来了
 
 | 层 | 落点 | 作用 |
 |---|---|---|
-| **① 工具声明** | `mcp/mcp-qq-server.mjs` 的 `TOOLS` 数组（`:78-189`） | **模型能看到的工具清单就在这里**，共 7 个 |
+| **① 工具声明** | `mcp/mcp-qq-server.mjs` 的 `TOOLS` 数组 | **模型能看到的工具清单就在这里**，共 **14** 个（⚠️ 初稿写 7 个，是读漏 —— 见下方更正） |
 | **② 真正执行的闸门** | 同文件 `runTool()`（`:244-273`），按 `BLOCKED_ACTIONS`（`:53-75`）拦截 | **唯一硬闸** |
 | **③ 装配到 DSH** | `src/mcp-profile.mjs:76-94` 写进 `profiles/sdk/cordis.patch.yml` 的**标记块**（`# >>> qq-bridge: qq tools (MCP) >>>`），注册 `@deepseek-ai/dsh-mcp-client`，`transport: stdio`、`serverName: qq` | 开关在这里关/开 |
 | ④ 桥接侧分类与提示词 | `src/roster.mjs`：`MODIFY_TOOLS`(`:54`) / `MODIFY_QQ_TOOLS`(`:84`) / `READONLY_QQ_TOOLS`(`:94`) / `READONLY_TOOLS`(`:105`) → `classifyTool`(`:122`) + `buildPermissionInstructions`(`:143`) | 决定提示词怎么写"你能/不能做什么"，**不决定工具是否可见** |
 
-**7 个工具**：`qq_poke` / `qq_send_sticker` / `qq_recall` / `qq_group_members` / `qq_message_detail` / `qq_group_history` / **`qq_api`**（通用动作透传，`:169-188`）。
-其中只有 3 个是只读档（`roster.mjs:94`），另 4 个属"会改变外部世界"。
+**⚠️ 更正（第 7 轮实测）**：本节初稿写"7 个工具"，**这是读漏了 —— 实际是 14 个**。
+完整清单（`mcp/mcp-qq-server.mjs` 的 `TOOLS`）：
+
+```
+只读（adminOnly:false）：qq_group_members  qq_message_detail  qq_group_history
+                        qq_search_history  qq_at_all_remain
+写入/互动（adminOnly:true）：qq_poke  qq_send_sticker  qq_send_image  qq_recall
+                            qq_emoji_like  qq_typing  qq_forward_msg  qq_forward_log
+万能口：qq_api            ← 动作由**模型自选**，所以黑名单对它是唯一防线
+```
+
+**∴ 只读的是 5 个（不是 3 个）**，写入侧 8 个 + 万能口 1 个。
+`roster.mjs:94` 的 `READONLY_QQ_TOOLS` 只列了 3 个 —— 它**没跟上这 7 个新工具**，
+所以它**不能**当作"哪些工具只读"的唯一判据（MCP 侧自带的 `adminOnly` 才是）。
 
 ### 12.2 ⚠️ 本轮发现：现有闸门是**黑名单**，且有两个已知漏口
 
@@ -611,7 +645,7 @@ const result = await callOneBot(built.action, built.params)
 | 轴 | 开关 | 性质 | 默认 | 关闭/收紧时 |
 |---|---|---|---|---|
 | **A. 是否装配** | `mcp.enabled` | **现有键** | `true` | 不写 MCP 标记块 ⇒ DSH 里**没有 `mcp__qq__*` 工具**。`failOnStartupError:false`（`mcp-profile.mjs:92`）已保证"QQ 工具不是启动必需" |
-| **B. 暴露档位** | `mcp.profile` | 新增 | `"readonly"`（**建议值，需你确认**） | `readonly`＝只声明 `qq_group_members`/`qq_message_detail`/`qq_group_history`；`full`＝全部 7 个（**今天的实际行为**） |
+| **B. 暴露档位** | `mcp.profile` | **✅ 已实现** | `"full"`（**= 升级前的行为，且经实测确认必须留作默认** —— `readonly` 会把 `qq_send_image` 一起藏掉，而 P站发图链路正在用它） | `readonly`＝只声明 `adminOnly:false` 的 5 个只读工具（见 §12.1 的更正清单）；`full`＝全部 14 个 | 个（**今天的实际行为**） |
 | **C. 通用口** | `mcp.genericApi` | 新增 | `false`（**建议值**） | 不声明 `qq_api`。它是**最大风险面**（任意动作透传），建议默认关 |
 
 **档位怎么传进去（一个能省很多事的实现选择）**：
@@ -633,8 +667,8 @@ const result = await callOneBot(built.action, built.params)
 | # | 用例（新增 `mocks/verify-mcp-tools.mjs` 或扩 `verify-mcp.mjs` / `verify-mcp-profile.mjs`） | 断言 |
 |---|---|---|
 | 1 | `tools.enabled=false` | `tools/list` 里**没有**任何 `qq_*`；`cordis.patch.yml` 里**没有**标记块 |
-| 2 | `tools.profile="readonly"`（默认） | `tools/list` 恰好 3 个，且都是只读三个 |
-| 3 | `tools.profile="full"` | 7 个（**与 0.2.0 行为一致** —— 这是"打开即回到今天"的回归锚点） |
+| 2 | `mcp.profile="readonly"` | `tools/list` 只剩 **5 个**（`adminOnly:false` 的那些）；直接调用被隐藏的工具也要被拒 | 
+| 3 | `mcp.profile="full"`（**默认**） | **14 个**（**= 升级前的行为** —— 这是"默认即回到今天"的回归锚点） |
 | 4 | `tools.genericApi=false`（默认） | `qq_api` 不在列表里 |
 | 5 | allow-list：`qq_api(action='get_cookies')` | **被拒**，且错误文案说明"被禁用"（沿用 `:258-263` 的措辞风格） |
 | 6 | allow-list：`qq_api(action='get_group_list')` | 放行 |
@@ -797,7 +831,22 @@ const result = await callOneBot(built.action, built.params)
 
 > 「只在**发送成功后**才记账（见 `markSent`）。若在检查时就记账，一次合法重试会被误判成重复而丢失。」
 
-### 14.2 现有去重**不是**幂等（缺口逐条对照）
+### 14.2 ⚠️ 更正：现有去重**已经是**幂等（本节初稿的缺口分析是错的）
+
+**第 8 轮实测（2026-09-27）**：本节初稿说"键＝分片全文、不含来源消息 id"—— **不成立**。实际：
+
+- `src/transport.mjs:175` 有 `deliveryKey({chatKey, text, replyTo, faceId})`；
+- `src/onebot.mjs` 的 `SendQueue.check(text, key = null)` / `markSent(text, key = null)` **接受调用方给的键**（`:405`/`:439`，`this.#recent.set(key ?? text, now)`）；
+- `src/bridge.mjs:2353` 每次投递都传：
+  `deliveryKey({ chatKey: \`${kind}:${peerId}\`, text: chunk, replyTo: isFirst ? replyTo : null, faceId: isLast ? faceId : null })`
+- 而那里的注释（`:2350-2352`）描述的 bug ——「用裸文本当键时，同一句话 8 秒内发给两个不同会话会被误判成重复而丢掉第二个」—— **正是本节初稿想提的问题，而它早已被修好**（H9）。
+
+**∴ 本节的 E1（幂等键）与 E2（投递账本）都已存在**，且 E1 比初稿的方案更完整（多带了 `replyTo` / `faceId`）。
+**仍然成立的部分**：`#recent` 是**仅内存**的（跨重启失效）——但账本（`delivery-ledger.mjs`）已经承担了"跨重启可查"的职责，两者分工正确。
+
+**本节的实际结论**：投递块**没有需要新建的功能**，只剩"给账本一个开关 + 登记成插件"（0.2.3 已做，见 §14.6 的更正）。
+
+### 14.2-old（初稿的缺口逐条对照，保留以便对照）
 
 | 维度 | 现状 | 缺什么 |
 |---|---|---|

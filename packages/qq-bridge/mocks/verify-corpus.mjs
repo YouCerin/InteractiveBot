@@ -227,6 +227,127 @@ try {
   rmSync(ROOT, { recursive: true, force: true })
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+section('⑦ ★★ 开关（0.2.3）：关掉真的不落库，而且**能随时开关**（走完整 Bridge）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 为什么这一段必须走真 Bridge：`corpus.mjs` 本身没有 `enabled` 这个概念 ——
+// 开关落在**接线**上（`#recordCorpus` / `searchHistory` / MCP 分派）。本项目栽过
+// 同一类事故：任务段的 `chatKey` 在错的作用域、被空 catch 吞掉，那个段在真机上
+// **从未注入过一次**，而纯函数断言全绿。**错在接线，纯函数测试看不见接线。**
+{
+  const { Bridge } = await import('../src/bridge.mjs')
+  const { SendQueue } = await import('../src/onebot.mjs')
+  const { SessionRouter } = await import('../src/session-bridge.mjs')
+
+  const mkBridge = ({ enabled }) => {
+    const ws = mkdtempSync(join(tmpdir(), 'qq-bridge-corpus-sw-'))
+    tmpDirs.push(ws)
+    const router = new SessionRouter({ log: () => {} })
+    const config = {
+      dsh: { workspace: ws, permissionMode: 'workspace-write' },
+      onebot: {},
+      access: { adminUsers: ['100000001'], dmAllowlist: [], groupAllowlist: ['700000001'] },
+      // groupEnabled=false ⇒ 群消息**不被唤醒**，但 `#recordCorpus` 在唤醒判定**之前**
+      // 就已经跑过 —— 这正好让我们用一条"不回"的消息来测落库，不必搭整套 rpc 回合。
+      trigger: { private: true, mention: true, keyword: true, groupEnabled: false, keywords: [] },
+      send: { minGapMs: 0, maxGapMs: 0, maxPerMinute: 100, maxPerHour: 1000, dedupeWindowMs: 0, maxCharsPerMessage: 1500 },
+      turn: { timeoutMs: 5000 },
+      humanize: { enabled: false, chunkChars: 300 },
+      persona: { preset: 'none' },
+      memory: { enabled: false },
+      image: { enabled: false },
+      ...(enabled === undefined ? {} : { corpus: { enabled } }),
+    }
+    const rpc = new EventTarget()
+    const onebot = new EventTarget()
+    onebot.selfId = '200000001'
+    onebot.call = async () => ({ status: 'ok', retcode: 0, data: null })
+    onebot.send = async () => {}
+    const bridge = new Bridge({
+      rpc,
+      onebot,
+      sendQueue: new SendQueue({ ...config.send, log: () => {} }),
+      router,
+      config,
+      log: () => {},
+    })
+    return { bridge, config, ws }
+  }
+  const groupMsg = (text, id) => ({
+    post_type: 'message',
+    message_type: 'group',
+    sub_type: 'normal',
+    group_id: '700000001',
+    user_id: '100000002',
+    self_id: '200000001',
+    message: [{ type: 'text', data: { text } }],
+    raw_message: text,
+    message_id: id,
+    sender: { user_id: '100000002', nickname: '路人甲' },
+  })
+  const dbExists = (ws) => existsSync(join(ws, CORPUS_REL))
+
+  const live = []
+  const tmpDirs = []
+  try {
+    // ── ① 缺键 = 开（升级前的行为，零回归）──────────────────────────────
+    {
+      const { bridge, ws } = mkBridge({ enabled: undefined })
+      live.push(bridge)
+      await bridge.handleEvent(groupMsg('茶姬好喝吗', 1001))
+      check('★ 缺 corpus.enabled ⇒ 照旧落库（默认 = 升级前的行为，零回归）', dbExists(ws), ws)
+      const s = bridge.searchHistory({ chatKey: 'group:700000001', query: '茶姬' })
+      check('  └ 落进去的能搜到（3 字走 FTS）', s.ok === true && s.rows.length === 1, `${s.ok}/${s.rows?.length} ${s.why ?? ''}`)
+    }
+
+    // ── ② 关掉 = 一条都不写，而且**库文件都不产生** ──────────────────────
+    {
+      const { bridge, ws } = mkBridge({ enabled: false })
+      live.push(bridge)
+      await bridge.handleEvent(groupMsg('茶姬好喝吗', 2001))
+      check('★★ corpus.enabled=false ⇒ **一个字节都没写**（连接都不开，不是"少写一条"）',
+        !dbExists(ws), ws)
+      const s = bridge.searchHistory({ chatKey: 'group:700000001', query: '茶姬' })
+      check('★★ 关掉时说的是"**被关掉了**"，不是"没搜到"（后者会被模型转述成谎话）',
+        s.ok === false && /已关闭/.test(s.why ?? ''), s.why)
+    }
+
+    // ── ③ hot：运行中把关掉再打开，立刻生效（不是"启动时读一次"）─────────
+    {
+      const { bridge, config, ws } = mkBridge({ enabled: false })
+      live.push(bridge)
+      await bridge.handleEvent(groupMsg('第一条 茶姬', 3001))
+      check('关着的时候不落库', !dbExists(ws))
+      // ★ 模拟 `/api/extensions` 的 toggle：**就地把活配置对象改掉**（不重启）
+      config.corpus.enabled = true
+      await bridge.handleEvent(groupMsg('第二条 茶姬', 3002))
+      check('★★ 运行中打开（只改活配置）⇒ **立刻**开始落库（这条是 hot 的取证）', dbExists(ws))
+      const s = bridge.searchHistory({ chatKey: 'group:700000001', query: '茶姬' })
+      check('  └ 只搜到打开之后那条（关着期间的没进来，如实）',
+        s.ok === true && s.rows.length === 1 && String(s.rows[0].preview).includes('第二条'),
+        JSON.stringify(s.rows?.map((r) => r.preview)))
+      // 反向：再关掉，立刻停写
+      config.corpus.enabled = false
+      await bridge.handleEvent(groupMsg('第三条 茶姬', 3003))
+      const s2 = bridge.searchHistory({ chatKey: 'group:700000001', query: '茶姬' })
+      check('★★ 反向也立刻生效：再关掉就不再落库、查询也当场拒绝',
+        s2.ok === false && /已关闭/.test(s2.why ?? ''), s2.why)
+      check('  └ 已有的库文件**不在关掉时被删**（关 ≠ 清空）', dbExists(ws))
+    }
+  } finally {
+    // 先 close（H7 的 SQLite 句柄要显式关，否则临时目录删不掉），再删临时工作区
+    for (const b of live) {
+      try {
+        await b.close(200)
+      } catch {
+        /* 收尾失败不影响断言结果 */
+      }
+    }
+    for (const ws of tmpDirs) rmSync(ws, { recursive: true, force: true })
+  }
+}
+
 console.log('')
 if (failed === 0) {
   console.log(`🎉 本地语料库测试全部通过（${passed} 项）`)
