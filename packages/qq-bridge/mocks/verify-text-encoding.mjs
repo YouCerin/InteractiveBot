@@ -259,6 +259,46 @@ section('① 全仓库文本文件：不许 UTF-16 / U+FFFD / 误加的 BOM / �
       : '（0 个）',
   )
 
+  // ★★★ ①-c  `.bat` / `.cmd` 的**注释里不许出现裸的重定向符**（0.2.4 新增，被真事故逼出来的）
+  //
+  // 为什么这条比上一条还贵：`>` 对 cmd 是**重定向**，而 `rem` 只吃掉"命令"、
+  // **不吃掉重定向**。实测事故（0.2.4）：我在注释里写了
+  //     rem   DesktopBot.lnk -> 桌面端bot启动.bat
+  // cmd 于是去找一个叫 `DesktopBot.lnk` 的命令，并把**目标文件截断成 0 字节** ——
+  // 一次弄空了 `桌面端bot启动.bat` **和** `启动机器人.bat`（后者是用户的主入口）。
+  // 两个文件都变 0 字节，**而离线测试当时没红**：没有任何断言读那两个文件的**内容**。
+  //
+  // ∴ 判据：注释行（rem / ::）里不许有**未转义**的 `>` 或 `<`。
+  //   默认拒绝，不开"看起来无害就放行"的口子 —— 真事故正是从"看起来只是注释"开始的。
+  const batRedirect = []
+  for (const abs of walk(REPO_ROOT)) {
+    const rel = relative(REPO_ROOT, abs).split('\\').join('/')
+    if (!/\.(bat|cmd)$/i.test(rel)) continue
+    const text = readFileSync(abs, 'utf8')
+    text.split(/\r?\n/).forEach((line, i) => {
+      const t = line.trim()
+      if (!/^(rem\b|::)/i.test(t)) return
+      const bare = t.replace(/\^[<>]/g, '') // 去掉已转义的 ^> ^<
+      if (/[<>]/.test(bare)) batRedirect.push(`${rel}(第 ${i + 1} 行：${t.slice(0, 60)})`)
+    })
+  }
+  check(
+    '★★★ .bat/.cmd 注释里没有裸的 > 或 <（rem 不阻止重定向 —— 实测把文件截断成 0 字节）',
+    batRedirect.length === 0,
+    batRedirect.length
+      ? `${batRedirect.join('；')}\n      —— 注释里要写箭头就写 "to"，或用 ^> 转义。` +
+        '\n      0.2.4 真事故：一句 `rem  foo.lnk -> bar.bat` 把两个启动器都截成了 0 字节，而测试全绿。'
+      : '（0 个）',
+  )
+
+  // ★ 顺带：那两个启动器**必须有内容**（0 字节是这次事故的形态，而"存在性"断言看不出它）
+  for (const rel of ['packages/qq-bridge/启动机器人.bat', 'packages/qq-bridge/桌面端bot启动.bat']) {
+    const abs = join(REPO_ROOT, rel)
+    if (!existsSync(abs)) continue
+    const size = statSync(abs).size
+    check(`★ ${rel.replace('packages/qq-bridge/', '')} 不是空文件（>0 字节）`, size > 200, `${size} 字节`)
+  }
+
   // 豁免清单本身也要有纪律：条目必须存在、必须写理由。
   check(
     '★ 乱码豁免清单里的文件都真实存在且写了理由',

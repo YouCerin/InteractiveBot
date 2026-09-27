@@ -25,7 +25,7 @@
  *   node scripts/assemble-release.mjs --force             # 允许覆盖已存在的输出目录（默认拒绝）
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -60,6 +60,10 @@ const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 const COPY_DIRS = [
   'src',
   'mcp',
+  // ★ `assets/` 必须在清单里：它装着 `icon.ico`，而 `创建带图标的快捷方式.bat`
+  //   生成的 .lnk 里写的是**相对路径** `assets\icon.ico,0` —— 少了它，快捷方式
+  //   能建出来但**图标是空白**，而且不报错（只会看起来"没生效"）。
+  //   （0.2.4 核对过它确实在清单里；这条注释是补上"为什么不能删"。）
   'assets',
   'skills',
   'personas',
@@ -88,7 +92,11 @@ const COPY_FILES = [
   'start.bat',
   // ★ 这两个中文名入口必须在清单里 —— 上一次组装是手敲的、把它们漏了，
   //   于是它们**只存在于发布包里、仓库里没有源**（这次已把源补回项目）。
+  //   0.2.4：`桌面端bot启动.bat` 是"只开独立界面"的那个入口（用户要求），
+  //   与 `启动机器人.bat`（全能启动器：还分派 --check/--doctor… 且没有 exe 时退回浏览器）
+  //   并列存在 —— 两个都得进包。
   '启动机器人.bat',
+  '桌面端bot启动.bat',
   '创建带图标的快捷方式.bat',
   // ⚠️ `QQ机器人.lnk` **不在清单里**（0.2.4 更正）。
   //
@@ -315,8 +323,38 @@ if (existsSync(OUT)) {
   //   实测：`cpSync(srcDir, existingDir, {recursive:true})` 在这种"目录已存在
   //   且里面有同名目录"的情形下会抛 EIO（errno 5）—— 报错指向 `cp` 那个 syscall，
   //   完全看不出是"目标目录没清"造成的。删了重建最省事也最可预期。
-  rmSync(OUT, { recursive: true, force: true })
-  log('   （--force：已清掉旧的输出目录再重建）')
+  //
+  // ★★★ 但"删到一半失败"会留下一个**半份发布包**，而那比"没组装"更坏：
+  //   它看起来像一份发布包（目录在、文件有几个），实际缺 Electron 运行时。
+  //   0.2.4 实测事故：Windows 上有进程/扫描器占着 `default_app.asar` ⇒ `rmSync` 抛
+  //   EPERM，而**已经删掉的那一半不会回来** —— 两个旧发布包因此变成 133/134 个文件
+  //   （正常 209），而使用者无从判断哪一份能跑。
+  //   ∴ 先删到临时名、**确认删得掉**，再真正删；删不掉就**明确报错并退出**，
+  //     绝不留下半份目录（宁可什么都不做）。
+  const tmp = `${OUT}.deleting-${Date.now()}`
+  try {
+    renameSync(OUT, tmp)
+  } catch (error) {
+    log('')
+    bad(
+      `旧输出目录不能改名（${error?.code ?? error?.message}）：${OUT}\n` +
+        '   通常是有进程/扫描器占着里面的文件（Defender、搜索索引器，或**这个包里的程序正在运行**）。\n' +
+        '   ⇒ **本次不组装**：继续下去会把旧目录删掉一半，留下一个看起来像发布包、实际不全的目录。\n' +
+        '   怎么办：① 关掉正在跑的 InteractBot / 等一会儿再试；② 或者换一个输出目录：' +
+        '`--out <新目录>`（推荐，旧目录留着不动）。',
+    )
+    process.exit(1)
+  }
+  try {
+    rmSync(tmp, { recursive: true, force: true })
+    log('   （--force：旧输出目录已清掉再重建）')
+  } catch (error) {
+    // 名字已经改掉了 ⇒ 不会污染 OUT；但临时目录留着要说清
+    bad(
+      `已把旧目录改名成 ${tmp}，但删不掉（${error?.code ?? error?.message}）—— 它是个残留，不会影响本次组装。\n` +
+        '   稍后（重启后）手工删掉它即可。',
+    )
+  }
 }
 mkdirSync(OUT, { recursive: true })
 for (const d of COPY_DIRS) {

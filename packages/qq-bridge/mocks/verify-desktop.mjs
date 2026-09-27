@@ -275,6 +275,22 @@ async function main () {
     // 启动器显式设置它 —— 否则打包形态只能靠向上找（能work，但少一层确定证据）
     const launchBat = readFileSync(join(PKG_ROOT, '启动机器人.bat'), 'utf8')
     check('★ 启动机器人.bat 显式设置 INTERACTBOT_PKG_ROOT', /set\s+"INTERACTBOT_PKG_ROOT=%~dp0"/.test(launchBat))
+
+    // ★★ 0.2.4：**只开独立界面**的那个入口（用户要求："一份能方便打开带独立界面的后台的文件"）。
+    //    它与"全能启动器"（启动机器人.bat，还会分派 --check/--doctor 并在没有 exe 时退回浏览器）
+    //    并列存在 —— 目标单一，双击就开窗口。
+    {
+      const deskPath = join(PKG_ROOT, '桌面端bot启动.bat')
+      check('★ 存在 桌面端bot启动.bat（只开桌面窗口的那个入口）', existsSync(deskPath))
+      if (existsSync(deskPath)) {
+        const desk = readFileSync(deskPath, 'utf8')
+        check('★ 它直接 start app\\InteractBot.exe（不再二次分派）', /start "" "%~dp0app\\InteractBot\.exe"/.test(desk))
+        check('★ 它也设 INTERACTBOT_PKG_ROOT（否则包根会被猜错）', /set\s+"INTERACTBOT_PKG_ROOT=%~dp0"/.test(desk))
+        check('★ 缺 exe 时**明确说不存在**并指向 start.bat（不静默什么都不做）', /app\\InteractBot\.exe not found/.test(desk) && /start\.bat/.test(desk))
+        // 与"全能启动器"的关键差别：它**不**转调 start.bat 去分派参数
+        check('★ 它不把参数转交给 start.bat（目标单一）', !/call\s+"%~dp0start\.bat"/.test(desk))
+      }
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════

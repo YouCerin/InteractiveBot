@@ -37,6 +37,7 @@ const rel = (p) => relative(root, p).replace(/\\/g, '/')
 // ── ① 结构：该有的必须都在 ─────────────────────────────────────────────
 const MUST_EXIST = [
   '启动机器人.bat',
+  '桌面端bot启动.bat',
   '先读我-首次使用.txt',
   '创建带图标的快捷方式.bat',
   'start.bat',
@@ -108,7 +109,10 @@ for (const f of MUST_EXIST) {
 // `backup-commands/`。这条断言防的是**它们被悄悄放回包根**（比如有人
 // 手工拷一份 "方便使用"）—— 那会让"包根只有两个入口"这件事静默地不成立。
 {
-  const ROOT_BATS = ['启动机器人.bat', '创建带图标的快捷方式.bat', 'start.bat']
+  // ★ 0.2.4：`桌面端bot启动.bat` = **只开独立界面**的那个入口（用户要求），
+  //   与全能启动器 `启动机器人.bat` 并列。它必须在包里 —— 缺了它，
+  //   "方便地打开带独立界面的后台"这件事就退回成"得先分辨哪个 bat 是干嘛的"。
+  const ROOT_BATS = ['启动机器人.bat', '桌面端bot启动.bat', '创建带图标的快捷方式.bat', 'start.bat']
   const bats = files.map((p) => rel(p)).filter((r) => r.toLowerCase().endsWith('.bat') && !r.includes('/'))
   for (const b of bats) {
     if (!ROOT_BATS.includes(b)) {
