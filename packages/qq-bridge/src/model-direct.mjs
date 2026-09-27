@@ -2,15 +2,25 @@
  * 直连模型通路：**一次 HTTP 调用**（Chat Completions），给"需要额外一次模型调用"的功能用。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 为什么现在才加它（本项目一直没有直连模型的代码）
+ * 它现在服务于谁、以及**由谁决定走它**
+ * ══════════════════════════════════════════════════════════════════════════
+ * 唤醒判定器（`src/wake-judge.mjs`）是当前唯一的调用方。它走哪条路由
+ * **`wake.judge.apiKey` 有没有值唯一决定**（0.2.3 用户决定）：
+ *   · 留空 ⇒ **不走这里**，用一次性 DSH 进程（`runHeadless`）；
+ *   · 填了 ⇒ 走这里，而且**只用那把 key**。
+ * ∴ 这个模块**不读** `dsh.apiKey` / 环境变量 / DSH 凭据文件 —— 那是主对话的凭据。
+ *   "额外的一次调用"要花就花在一把**专门给它的** key 上（计费与限流能分开看）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么加它（本项目一直没有直连模型的代码）
  * ══════════════════════════════════════════════════════════════════════════
  * 在此之前，唯一取证过的"额外一次调用"通路是**起一个一次性 DSH 进程**
  * （`dsh --profile headless`，`src/extract.mjs`）。它有两个代价：
  *   · **慢**：起 node 进程 + 完整初始化 harness，实测 2.8~4.4 秒；
  *   · **贵**：那一次调用带着整套系统提示词与工具表。
- * 唤醒判定器（`src/wake-judge.mjs`）本来照抄了这条路，于是设计文档里那句
+ * 唤醒判定器本来照抄了这条路，于是设计文档里那句
  * "判定比一整轮 agent 便宜一个数量级" **不成立**（见 `wake-judge.mjs` 顶部的更正）。
- * 这个模块把那次调用压成一次普通的 HTTP 请求：判定从 3~5 秒降到约 1 秒，
+ * 这个模块把那次调用压成一次普通的 HTTP 请求：实测 **1092ms**，
  * 而且是**一次小 completion**，不是一轮 agent。
  *
  * ★ 顺带解锁的：`src/extract.mjs` 的回合后抽取（R4b）此前也卡在"没有这条通路"上，
@@ -44,8 +54,6 @@
  *    需要走代理才能访问模型端点的网络环境，请把 `wake.judge.transport` 设成 `headless`
  *    —— 那条路由 DSH 自己去处理网络，这是保留它的主要理由。
  */
-
-import { resolveModelCredentials } from './credentials.mjs'
 
 /** 直连的默认值。每个都写清为什么是这个数。 */
 export const DIRECT_DEFAULTS = {
@@ -96,22 +104,27 @@ export function checkEndpoint(baseUrl) {
 /**
  * 解析本次直连要用的端点 / 模型 / key。
  *
- * ★ **key 不新增任何配置字段**：直接复用 `src/credentials.mjs` 那套三处来源
- *   （环境变量 → `config.json` 的 `dsh.apiKey` → `$DSH_HOME/.credentials.yaml`）。
- *   那三处本来就用的是**同一把账号级 key**，为判定器再开一个 key 输入框
- *   只会多一处会漂的真值。
+ * ★★ **key 只认 `wake.judge.apiKey`（判定专用那一把）**，0.2.3 用户决定：
+ *   **填了才走直连，而且只用这把 key** —— 不拿 `dsh.apiKey` / 环境变量 / DSH 凭据文件
+ *   去替它发请求。那三处是**主对话**的凭据；判定是"额外的一次调用"，
+ *   要花就花在一把**专门给它的** key 上（于是计费与限流能分开看）。
+ *   ⇒ 所以"走直连却没有 key"在结构上不可能发生，`resolveDirectTarget` 返回 `ok:false`
+ *   只可能是端点不合法或模型解析不出来。
  *
  * @param {object} opts
  * @param {object} opts.config        归一化后的配置
- * @param {string|null} [opts.dshHome]
- * @param {NodeJS.ProcessEnv} [opts.env]
  * @returns {{ok: boolean, baseUrl?: string, model?: string, apiKey?: string,
- *            modelSource?: string, keySource?: string, why?: string}}
+ *            modelSource?: string, why?: string}}
  */
-export function resolveDirectTarget({ config, dshHome = null, env = process.env } = {}) {
+export function resolveDirectTarget({ config } = {}) {
   const judge = config?.wake?.judge ?? {}
   const ep = checkEndpoint(judge.baseUrl ?? DIRECT_DEFAULTS.baseUrl)
   if (!ep.ok) return { ok: false, why: ep.why }
+
+  const apiKey = String(judge.apiKey ?? '').trim()
+  if (!apiKey) {
+    return { ok: false, why: '没有配置 wake.judge.apiKey（判定专用 key）—— 留空时应该走一次性 DSH 进程' }
+  }
 
   // 模型：留空就用主对话那个（`dsh.model`，默认 deepseek-flash）。
   // ★ 这是刻意的默认：DSH 的模型 id 可以原样直连，所以"不配也能跑"；
@@ -120,21 +133,12 @@ export function resolveDirectTarget({ config, dshHome = null, env = process.env 
   const model = explicit || String(config?.dsh?.model ?? '').trim()
   if (!model) return { ok: false, why: '没有可用的模型：wake.judge.model 与 dsh.model 都是空的' }
 
-  const cred = resolveModelCredentials({ dshHome, env, apiKey: config?.dsh?.apiKey })
-  const key = String(cred?.env?.DEEPSEEK_API_KEY ?? '').trim()
-  if (!key) {
-    return {
-      ok: false,
-      why: cred?.warning ?? '拿不到模型 API key（既没配 dsh.apiKey，也没有环境变量与凭据文件）',
-    }
-  }
   return {
     ok: true,
     baseUrl: ep.url,
     model,
-    apiKey: key,
+    apiKey,
     modelSource: explicit ? 'wake.judge.model' : 'dsh.model（未单独指定）',
-    keySource: cred.source ?? '未知来源',
   }
 }
 

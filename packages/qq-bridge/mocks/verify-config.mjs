@@ -218,28 +218,34 @@ section('唤醒策略（0.2.3）：二选一的默认值与"不许静默回落"'
   check('★ wake.policy 默认 rule（= 升级前的行为：一次判定都不跑）', d.wake.policy === 'rule', d.wake.policy)
   check('★★ wake.judge.shadow 默认 **false**（判定真的生效 —— 0.2.3 用户决定）',
     d.wake.judge.shadow === false, String(d.wake.judge.shadow))
-  check('★ wake.judge.transport 默认 http（直连：约 1 秒、一次小调用）',
-    d.wake.judge.transport === 'http', d.wake.judge.transport)
+  check('★★ wake.judge.apiKey 默认空串 —— **它就是通路开关**：留空 ⇒ 走一次性 DSH 进程',
+    d.wake.judge.apiKey === '', `「${d.wake.judge.apiKey}」`)
   check('★ wake.judge.baseUrl 默认与 DSH 适配器一致，且**没有 /v1**',
     d.wake.judge.baseUrl === 'https://api.deepseek.com' && !d.wake.judge.baseUrl.includes('/v1'), d.wake.judge.baseUrl)
   check('★ wake.judge.model 默认空串（= 用 dsh.model，不配也能跑）', d.wake.judge.model === '', `「${d.wake.judge.model}」`)
   check('wake.judge.timeoutMs 默认 6000', d.wake.judge.timeoutMs === 6000, String(d.wake.judge.timeoutMs))
   check('wake.judge.maxPerHour 默认 60', d.wake.judge.maxPerHour === 60, String(d.wake.judge.maxPerHour))
+  // ★ 0.2.3：通路**不再是一个配置键**（改由 apiKey 推导），所以它必须从归一化结果里消失 ——
+  //   留着的话就会出现"两个真值"（键说 headless、key 说直连），而那种冲突是静默的。
+  check('★★ 归一化结果里**没有** wake.judge.transport（通路由 apiKey 推导，不能有两处真值）',
+    !('transport' in d.wake.judge), JSON.stringify(Object.keys(d.wake.judge)))
 
   // ── 用户设的值必须真的生效 ────────────────────────────────────────────
   const c = mk({
     wake: {
       policy: 'semantic',
-      judge: { shadow: true, timeoutMs: 2500, maxPerHour: 7, transport: 'headless', model: 'deepseek-v4-flash', baseUrl: 'https://llm.example.com' },
+      judge: { shadow: true, timeoutMs: 2500, maxPerHour: 7, model: 'deepseek-v4-flash', baseUrl: 'https://llm.example.com', apiKey: 'sk-judge-only' },
     },
   })
   check('wake.policy 生效', c.wake.policy === 'semantic', c.wake.policy)
   check('wake.judge.shadow=true 生效（想先观察的人设得回去）', c.wake.judge.shadow === true, String(c.wake.judge.shadow))
   check('wake.judge.timeoutMs 生效', c.wake.judge.timeoutMs === 2500, String(c.wake.judge.timeoutMs))
   check('wake.judge.maxPerHour 生效', c.wake.judge.maxPerHour === 7, String(c.wake.judge.maxPerHour))
-  check('wake.judge.transport 生效', c.wake.judge.transport === 'headless', c.wake.judge.transport)
+  check('★ wake.judge.apiKey 生效（填了它就等于选了直连）', c.wake.judge.apiKey === 'sk-judge-only', c.wake.judge.apiKey)
   check('wake.judge.model 生效', c.wake.judge.model === 'deepseek-v4-flash', c.wake.judge.model)
   check('wake.judge.baseUrl 生效', c.wake.judge.baseUrl === 'https://llm.example.com', c.wake.judge.baseUrl)
+  check('  key 两侧空白被去掉（粘贴常带空格，不去会 401）',
+    mk({ wake: { judge: { apiKey: '  sk-x  ' } } }).wake.judge.apiKey === 'sk-x')
 
   // ★★ 未知取值**原样保留**：静默改成 rule 会让"我明明设了"变成最难查的一类问题
   const weird = mk({ wake: { policy: 'smart' } })
@@ -253,9 +259,15 @@ section('唤醒策略（0.2.3）：二选一的默认值与"不许静默回落"'
   // ── semantic 的告警（都是"选了之后会变贵/会变哑"的如实告知）─────────────
   const sem = validateConfig(mk({ wake: { policy: 'semantic' } }))
   check(
-    '★ semantic → 说清走哪条通路（默认直连，约 1 秒）',
-    sem.warn.some((w) => /直连/.test(w) && /api\.deepseek\.com/.test(w)),
+    '★ semantic + 没配专用 key ⇒ 告警里说清走**一次性 DSH 进程**，并给出去处（填 key 就自动改直连）',
+    sem.warn.some((w) => /一次性 DSH 进程/.test(w) && /wake\.judge\.apiKey/.test(w)),
     sem.warn.filter((w) => /通路/.test(w)).join(' | '),
+  )
+  const semKey = validateConfig(mk({ wake: { policy: 'semantic', judge: { apiKey: 'sk-judge' } } }))
+  check(
+    '★ semantic + 配了专用 key ⇒ 告警里说清走**直连**，并点明"因为你配了 apiKey"',
+    semKey.warn.some((w) => /直连/.test(w) && /wake\.judge\.apiKey/.test(w)),
+    semKey.warn.filter((w) => /通路/.test(w)).join(' | '),
   )
   check(
     '★ semantic + shadow 默认(false) → 警告里明说"已经被判沉默的消息不会有任何提示"',
@@ -272,34 +284,19 @@ section('唤醒策略（0.2.3）：二选一的默认值与"不许静默回落"'
     semShadow.warn.some((w) => /行为一个字都没变/.test(w)),
     semShadow.warn.filter((w) => /shadow/.test(w)).join(' | '),
   )
-  // ★ 通路写错一个字就会静默走另一条 —— 必须报（与"不静默回落"同一条纪律）
-  const badTransport = validateConfig(mk({ wake: { policy: 'semantic', judge: { transport: 'http2' } } }))
-  check('★ wake.judge.transport 写错 → 明确警告（并说明已按 http 处理）',
-    badTransport.warn.some((w) => /transport/.test(w) && /不是有效值/.test(w)), badTransport.warn.join(' | '))
-  check('  └ 这个检查在 policy=rule 时也照跑（配置错误与开不开语义模式无关）',
-    validateConfig(mk({ wake: { judge: { transport: 'nope' } } })).warn.some((w) => /transport/.test(w)))
-  check('  合法值 http / headless 不报',
-    validateConfig(mk({ wake: { judge: { transport: 'http' } } })).warn.every((w) => !/transport/.test(w)) &&
-      validateConfig(mk({ wake: { judge: { transport: 'headless' } } })).warn.every((w) => !/transport/.test(w)))
-  // ★ "开了但其实没跑"要说出来 —— 但**只在配置层查得到的那一条**上查
+  // ★ "开了但其实没跑"要说出来 —— 现在只剩**一条**查得出的（见下）
   const headNoCli = validateConfig(
-    normalizeConfig({ dsh: { cliPath: '' }, wake: { policy: 'semantic', judge: { transport: 'headless' } } }),
+    normalizeConfig({ dsh: { cliPath: '' }, wake: { policy: 'semantic' } }),
   )
-  check('★★ headless 通路下 cliPath 为空 → 警告（否则判定器每一轮都白白放过）',
-    headNoCli.warn.some((w) => /transport = headless/.test(w) && /cliPath/.test(w)), headNoCli.warn.join(' | '))
-  check('  └ 并给出两条出路（配 cliPath / 改回 http）',
-    headNoCli.warn.some((w) => /配好/.test(w) && /http/.test(w)))
-  // ★★ 反面：**不查直连缺 key** —— key 可能只在 $DSH_HOME/.credentials.yaml 里
-  //    （DSH 桌面版最常用的那种），校验层看不到那份文件，硬判就会对着一个
-  //    完全正常的部署报假警告。那条由判定器自己的启动日志报（bridge.mjs）。
-  //    这里断言"校验层不会因为缺 key 而误报"。
-  const noKeyButHealthy = validateConfig(
-    normalizeConfig({ dsh: { apiKey: '' }, wake: { policy: 'semantic' } }),
-  )
-  check('★★ 直连 + 没配 dsh.apiKey ⇒ 校验层**不报** key 的警告（key 可能在凭据文件里，硬判会误报）',
-    noKeyButHealthy.warn.every((w) => !/API key/.test(w)), noKeyButHealthy.warn.join(' | '))
-  check('  直连且 dsh.model 留空 ⇒ 归一化后仍有默认模型（所以这里也无需警告）',
-    normalizeConfig({ dsh: { model: '' } }).dsh.model === 'deepseek-flash')
+  check('★★ 走 DSH 但没有 cliPath ⇒ 警告（否则判定器每一轮都白白放过）',
+    headNoCli.warn.some((w) => /dsh\.cliPath 是空的/.test(w) && /wake\.judge\.apiKey/.test(w)), headNoCli.warn.join(' | '))
+  check('  └ 并给出两条出路（配 cliPath / 填一把专用 key）',
+    headNoCli.warn.some((w) => /配好/.test(w) && /apiKey/.test(w)))
+  // ★★ 反面：**不查"走直连却没 key"** —— 那在结构上不可能发生（填了 key 才走直连），
+  //    硬查只会制造假红，而**假红会训练人忽略红色**。
+  const keyNoCli = validateConfig(normalizeConfig({ dsh: { cliPath: '' }, wake: { policy: 'semantic', judge: { apiKey: 'sk-judge' } } }))
+  check('★★ 配了专用 key（走直连）⇒ **不再**报 cliPath 的警告（那条只对 DSH 那条路有意义）',
+    keyNoCli.warn.every((w) => !/dsh\.cliPath 是空的/.test(w)), keyNoCli.warn.join(' | '))
   // ★ 判定超时必须小于 interim（否则"先弹一句我在想，然后什么都没有"）
   const slowJudge = validateConfig(mk({ wake: { policy: 'semantic', judge: { timeoutMs: 9000 } } }))
   check(

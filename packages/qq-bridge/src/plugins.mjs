@@ -111,17 +111,17 @@ export const BUILTIN_PLUGINS = [
       '这是账号存活相关配置，不是体验优化。',
     uiTab: 'pace',
   },
-  {
-    id: 'trigger',
-    name: '唤醒规则',
-    icon: '📣',
-    enabledPath: 'trigger.groupEnabled',
-    hot: true,
-    why: '每条消息都重读 this.config.trigger 决定回不回（bridge.mjs:1054-1055）',
-    what: '群聊总开关 + 关键词 + 私聊/被 @ 的唤醒方式（这一格只显示群聊总开关）。',
-    offEffect: '关掉后：群里**即使被 @ 也不回**（私聊不受影响）。',
-    uiTab: 'persona',
-  },
+  // ★★ 0.2.3：这里**删掉了原来的「唤醒规则」卡**（`id: 'trigger'`，只显示
+  //   `trigger.groupEnabled` 一个开关）。用户的原话是「功能太过简单且与唤醒策略冲突」，
+  //   而实际情况比"太简单"更糟：它和下面的 `wake-policy` **回答的是同一个问题**
+  //   （这条消息要不要回），一张卡显示判据里的一个开关、另一张显示"用哪套判据"，
+  //   两处各说一半，使用者拼不出全貌 —— 而且两张卡都叫「唤醒」开头的名字。
+  //   ∴ 现在：**判据本身**（群聊总开关 / 私聊 / 被 @ / 关键词 / 关键词表）归属
+  //   `wake-policy` 那张卡的「唤醒方式」一节（界面侧 `config-ui` 的 `WakeRulesSection`，
+  //   从「人设」页搬了过来），这里不再单独占一张卡。
+  //   ★ 证据：`wake-policy` 的 `enabledPath` 是 `wake.policy`，而那一节改的全是
+  //     `trigger.*` —— 它们本来就是同一件事的两半（`trigger.groupEnabled` 还是
+  //     `semantic` 的前置总开关）。
   {
     id: 'usage',
     name: '用量记账',
@@ -141,23 +141,25 @@ export const BUILTIN_PLUGINS = [
     // ★ hot：闸门**每条消息现读** `this.config.wake.policy`（`bridge.mjs` 的
     //   `handleEvent` 里那一行 `if (this.config.wake?.policy === 'semantic')`），
     //   而 `wake.policy` 是**活配置对象**上的键（`extensions-service.mjs:186` 就地改）。
-    //   ⚠️ 但**不是全部**都即时：`wake.judge.timeoutMs` / `maxPerHour` 在判定器
-    //   首次被用到时装配一次（预算计数器必须跨消息累积，不能每条重建），
-    //   所以改这两个要重启。`shadow` 是每轮现读的。
+    //   它名下那一节（`trigger.*`）同样是每条消息现读的。
+    //   ⚠️ 但 `wake.judge` 里那几个（apiKey / model / baseUrl / timeoutMs / maxPerHour）
+    //   在判定器首次被用到时装配一次（预算计数器必须跨消息累积，不能每条重建），
+    //   所以改它们要重启。`shadow` 是每轮现读的。
     hot: true,
     why:
-      '闸门每条消息现读 this.config.wake.policy（bridge.mjs 的 handleEvent）——' +
-      '判定器本身懒建、只建一次（预算计数器要跨消息累积），所以 policy 与 judge.shadow 即时生效；' +
-      'judge.transport / model / baseUrl / timeoutMs / maxPerHour 只在首次装配时读一次，改这几个要重启',
+      '闸门每条消息现读 this.config.wake.policy（bridge.mjs 的 handleEvent），它名下那一节' +
+      '（trigger.* 群聊总开关/私聊/被@/关键词）同样是每条消息现读 —— 这两块即时生效；' +
+      '判定器本身懒建、只建一次（预算计数器要跨消息累积），所以 judge.shadow 也即时，' +
+      '但 judge.apiKey / model / baseUrl / timeoutMs / maxPerHour 只在首次装配时读一次，改它们要重启',
     what:
-      '决定"这条消息要不要回"用哪一套判据。**这两者回答的是同一个问题**，' +
-      '所以它们是**二选一**（同一个键），不是两个开关 —— 两个都开会让两套判据打架，' +
-      '两个都关等于机器人不知道该不该回。',
+      '决定"这条消息要不要回"用哪一套判据，**并且**配置那套判据本身（群聊总开关 / 私聊 / ' +
+      '被 @ / 关键词 / 关键词表 —— 见卡片里的「唤醒方式」一节）。',
     offEffect:
       '这一格**没有"关"**：它不是开关，是二选一。选「规则唤醒」= 今天的行为' +
       '（私聊/@/关键词 → 必答，一次额外调用都不产生）；' +
       '选「语义唤醒」= 规则先唤醒、再由判定器否决（可以沉默），' +
-      '代价是每条候选消息多一次模型调用（默认直连，约 1 秒），失败/超时/超预算一律放过。',
+      '代价是每条候选消息多一次模型调用（走一次性 DSH 进程约 3~5 秒；' +
+      '填一把判定专用 key 就自动改走直连、约 1 秒），失败/超时/超预算一律放过。',
     uiTab: 'extensions:wake-policy',
     choice: {
       options: [

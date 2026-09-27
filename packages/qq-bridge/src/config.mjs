@@ -237,17 +237,21 @@ export function normalizeConfig(c) {
     wake: {
       policy: typeof src.wake?.policy === 'string' && src.wake.policy.trim() ? src.wake.policy.trim() : 'rule',
       judge: {
-        // ── 通路（0.2.3 起默认直连 HTTP）──────────────────────────────────
+        // ── 通路：**由"有没有专用 key"推导**，不让使用者选（0.2.3）──────────
         //
-        // `http`：一次 `/chat/completions`，约 1 秒、一次小 completion（`src/model-direct.mjs`）。
-        // `headless`：起一个一次性 `dsh --profile headless` 进程（2.8~4.4 秒）。
-        //   ★ 它不是摆设，是**逃生舱**：直连那条**没有做代理发现**（Node 的 fetch 不认
-        //     HTTP_PROXY），而且非 Chat Completions 形状的 provider 也说不了。
-        //     有它在，"直连不通"就还有一个明确的去处，而不是只能关掉整个功能。
-        transport:
-          typeof src.wake?.judge?.transport === 'string' && src.wake.judge.transport.trim()
-            ? src.wake.judge.transport.trim()
-            : 'http',
+        //   · `wake.judge.apiKey` **留空** ⇒ 用**一次性 DSH 进程**做判定
+        //     （约 3~5 秒；用主对话那套凭据，不需要在这里配任何东西）；
+        //   · **填了** ⇒ 改成**直连**一次 `/chat/completions`（约 1 秒），
+        //     而且**只用这把 key**（不拿主对话那把去发请求）。
+        //
+        // ★ 为什么不再做成一个二选一开关：两条路在唤醒流程里做的是**同一件事**
+        //   （让一个模型判断"这句话是不是说给我听的"），让使用者选一个自己无法判断
+        //   好坏的东西没有意义；而"要不要单独配一把 key"本身就是那个选择的
+        //   **可观察依据** —— 它会带来独立计费/限流与"不动主 key"这两个真实差别。
+        // ★ 这条推导必须与两处**完全一致**：`bridge.mjs` 的 `#ensureWakeJudge`
+        //   （真正建判定器的地方）与 `model-direct.mjs` 的 `resolveDirectTarget`（取 key）。
+        //   界面也按同一条件渲染（见 `config-ui` 的 ExtensionsTab）。
+        apiKey: typeof src.wake?.judge?.apiKey === 'string' ? src.wake.judge.apiKey.trim() : '',
         // 直连端点。默认与 DSH 的 `dsh-llm-deepseek` 一致（**注意没有 `/v1`**）。
         // ⚠️ 只有 https、或回环地址的 http 会被放行 —— 理由见 model-direct.mjs 的文件头
         //    （Authorization 头在明文 HTTP 上等于把 key 裸奔）。
@@ -255,7 +259,7 @@ export function normalizeConfig(c) {
           typeof src.wake?.judge?.baseUrl === 'string' && src.wake.judge.baseUrl.trim()
             ? src.wake.judge.baseUrl.trim()
             : 'https://api.deepseek.com',
-        // 判定用哪个模型。**留空 = 用 `dsh.model`**（默认 deepseek-flash）。
+        // 判定用哪个模型（只在直连那条路上有意义）。**留空 = 用 `dsh.model`**。
         // ★ 为什么留空也能跑：DSH 模型表里的 id 就是直接发给接口的 id（按源码核对过），
         //   所以"不配也对"；而"换成更便宜的小模型"应当是一次**显式**选择。
         model: typeof src.wake?.judge?.model === 'string' ? src.wake.judge.model.trim() : '',
@@ -532,14 +536,6 @@ export function validateConfig(config) {
   // 它是本轮唯一"用户选了之后成本会上升"的开关，所以宁可多说一句。
   {
     const policy = config.wake?.policy
-    // 通路名写错属于**配置错误**，与开不开语义模式无关 ⇒ 一律报出来（不静默回落）。
-    // 现在任何非 'headless' 的值都会被当成 http，写错一个字就会静默走另一条通路。
-    const transport = config.wake?.judge?.transport
-    if (transport !== undefined && transport !== 'http' && transport !== 'headless') {
-      warn.push(
-        `wake.judge.transport「${transport}」不是有效值（可选 http / headless），已按 http（直连）处理。`,
-      )
-    }
     if (policy !== 'rule' && policy !== 'semantic') {
       warn.push(
         `wake.policy「${policy}」不是有效值（可选 rule / semantic），已按 rule（规则唤醒）处理。` +
@@ -548,13 +544,15 @@ export function validateConfig(config) {
     }
     if (policy === 'semantic') {
       const j = config.wake.judge ?? {}
-      const viaHttp = j.transport !== 'headless'
+      // ★ 通路**由"有没有专用 key"推导**（唯一判据，与 bridge.mjs / model-direct.mjs 一致）
+      const viaHttp = Boolean(String(j.apiKey ?? '').trim())
       warn.push(
         'wake.policy = semantic：**判定器会决定要不要沉默**。' +
           '它只做减法（规则说回、它才能说不回），且失败/超时/超预算一律**放过**。' +
           (viaHttp
-            ? `★ 通路：直连 ${j.baseUrl}（模型 ${j.model || config.dsh?.model || '?'}，约 1 秒、一次小调用）。`
-            : '★ 通路：起一个一次性 DSH 进程做判定（约 3~5 秒、比直连贵）。') +
+            ? `★ 通路：**直连** ${j.baseUrl}（模型 ${j.model || config.dsh?.model || '?'}，约 1 秒、一次小调用）—— 因为你配了 wake.judge.apiKey。`
+            : '★ 通路：起一个**一次性 DSH 进程**做判定（约 3~5 秒、用主对话那套凭据）。' +
+              '★ 想让它变快、或想给判定单独计费，就填一把 `wake.judge.apiKey`：填了就自动改走直连，只用那把 key。') +
           `上限由 wake.judge.maxPerHour 兜住。`,
       )
       if (j.shadow === true) {
@@ -571,19 +569,16 @@ export function validateConfig(config) {
       // 通路配不全 ⇒ 判定器**每一轮都会白白放过**，而日志里只有一行"没配好"。
       // 这种"功能开了但其实没跑"必须尽早说出来（静默失效是本项目最忌讳的）。
       //
-      // ★ 这里**只查 headless 那一条**，因为另一条在配置层查不了、硬查会误报：
-      //   · 直连缺模型？**不可能**：`normalizeConfig` 对 `dsh.model` 有默认值
-      //     （`deepseek-flash`），所以 `wake.judge.model` 留空也总有模型可用。
-      //   · 直连缺 key？**校验层看不见**：key 可能只在 `$DSH_HOME/.credentials.yaml`
-      //     里（DSH 桌面版「模型」页填的那种，也是最常见的一种），而那份文件要
-      //     `dshHome` 才找得到 —— 在这里判就会对着一个完全正常的部署报假警告。
-      //   ∴ 直连缺 key 由**判定器自己的启动日志**报（`bridge.mjs` 的 `#ensureWakeJudge`
-      //     拿得到 `dshHome` 与 `env`，能给出真正的原因）。两处分工写在这里，免得
-      //     以后有人"顺手补一条校验"补出假红 —— 假红会训练人忽略红色。
+      // ★ 这里**只查 headless 那一条**，理由：直连那条的 key 由使用者自己填在
+      //   `wake.judge.apiKey` 里 —— **填了才会走直连**，所以"走直连却没有 key"
+      //   在结构上不可能发生（不需要校验）。而 DSH 的 cliPath 完全可能为空
+      //   （机器上没装/没找到 DSH），那时判定器一次都跑不起来。
+      //   ∴ 只报这一条。假红会训练人忽略红色，宁可少查。
       if (!viaHttp && !config.dsh?.cliPath) {
         warn.push(
-          'wake.judge.transport = headless，但 dsh.cliPath 是空的：判定器无法工作（每一轮都会按放过处理）。' +
-            '要么把 dsh.cliPath 配好，要么把通路改回 http（直连，默认）。',
+          'wake.policy = semantic，但没有配 wake.judge.apiKey（所以走一次性 DSH 进程），' +
+            '而 dsh.cliPath 是空的：判定器无法工作（每一轮都会按放过处理）。' +
+            '要么把 dsh.cliPath 配好，要么填一把 wake.judge.apiKey（填了就自动改走直连）。',
         )
       }
       // ★ 与 interim（"回合还在跑，先应一声"）的顺序关系：判定比它慢的话，

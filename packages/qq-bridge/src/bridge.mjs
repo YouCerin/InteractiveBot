@@ -57,9 +57,8 @@ import { appendTurnOps, appendOp } from './oplog.mjs'
 import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } from './tasks.mjs'
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
 import { extractRecipe, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './extract.mjs'
-import { createWakeJudge, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
+import { createWakeJudge, judgeTransport, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
 import { resolveDirectTarget } from './model-direct.mjs'
-import { resolveDshHome } from './local.mjs'
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
@@ -1293,21 +1292,24 @@ export class Bridge extends EventTarget {
     const cliPath = this.config.dsh?.cliPath
     const cwd = this.config.dsh?.workspace
     const j = this.config.wake?.judge ?? {}
-    const transport = j.transport === 'headless' ? 'headless' : 'http'
 
-    // ── 直连通路要的三样：端点 / 模型 / key ──────────────────────────────
+    // ── 通路：**由"有没有判定专用 key"推导**，不让使用者选（0.2.3 用户决定）──
     //
-    // ★ key **不新增配置字段**：`resolveDirectTarget()` 内部复用 `credentials.mjs`
-    //   那套三处来源（环境变量 → `dsh.apiKey` → `$DSH_HOME/.credentials.yaml`）。
-    //   那三处本来就用同一把账号级 key，为判定器再开一个输入框只会多一处会漂的真值。
-    // ★ `dshHome` 的取法与 `index.mjs` 建 DSH 子进程时**完全一致**（先看环境变量，
-    //   再按 cliPath 反推），否则会出现"子进程能拿到 key、判定器拿不到"这种
-    //   只在某些部署下才出现的怪事。
-    let direct = null
-    if (transport === 'http') {
-      const dshHome = process.env.DSH_HOME ?? resolveDshHome({ cliPath })?.home ?? null
-      direct = resolveDirectTarget({ config: this.config, dshHome, env: process.env })
-    }
+    //   · `wake.judge.apiKey` 留空 ⇒ **一次性 DSH 进程**（约 3~5 秒，用主对话那套凭据）
+    //   · 填了 ⇒ **直连**一次 `/chat/completions`（约 1 秒），**只用那把 key**
+    //
+    // ★ 为什么不做成一个开关：两条路在唤醒流程里做的是**同一件事**（让一个模型判断
+    //   "这句话是不是说给我听的"），让使用者选一个自己无法判断好坏的东西没有意义；
+    //   而"要不要单独配一把 key"本身就是那个选择的**可观察依据**。
+    // ★ 这条推导必须与 `config.mjs` 的 `validateConfig` 告警、
+    //   `model-direct.mjs` 的 `resolveDirectTarget`、以及界面的渲染条件**完全一致** ——
+    //   否则界面说的和实际跑的不是一条路，那正是本项目最忌讳的"说了做不到"。
+    const judgeKey = String(j.apiKey ?? '').trim()
+    // ★ 推导只有一处实现（`wake-judge.mjs` 的 `judgeTransport`），这里与界面都调它 ——
+    //   否则"界面说走直连、实际走 DSH"这种静默不一致迟早会发生。
+    const transport = judgeTransport(j)
+    const direct = judgeKey ? resolveDirectTarget({ config: this.config }) : null
+
     // 通路配不全时**仍然建**判定器：`judge()` 会立刻按"放过"返回并留下一行日志。
     // 为什么不在这里直接不建：那会让"配错了"表现成"判定器根本没启动"，
     // 而配置校验层已经会把这条明确报出来（见 validateConfig 的 wake 一节）。
@@ -1327,8 +1329,9 @@ export class Bridge extends EventTarget {
         `[wake] 判定器已就绪：policy=semantic · shadow=${j.shadow === true ? '开（只记账，不改行为）' : '**关**（判定已生效）'}` +
           ` · 通路=${transport}` +
           (transport === 'http'
-            ? `（${direct?.ok ? direct.baseUrl : '**未配好**'} · 模型 ${direct?.model ?? '?'} · key 来源 ${direct?.keySource ?? '无'}）`
-            : `（${cliPath ?? '**未配好**'}）`) +
+            ? `（配了 wake.judge.apiKey ⇒ 直连 ${direct?.ok ? direct.baseUrl : '**端点不合法**'}` +
+              ` · 模型 ${direct?.model ?? '?'} · **只用这把 key**）`
+            : '（没配 wake.judge.apiKey ⇒ 用一次性 DSH 进程；填一把专用 key 就会自动改走直连）') +
           ` · timeout=${j.timeoutMs}ms · 上限 ${j.maxPerHour} 次/小时`,
       )
       if (transport === 'http' && direct && !direct.ok) {

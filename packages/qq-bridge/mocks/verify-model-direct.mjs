@@ -87,45 +87,45 @@ section('① 端点白名单：https 随便用，http 只允许回环（别让 A
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-section('② resolveDirectTarget：key 复用既有三处来源，不新增配置字段')
+section('② resolveDirectTarget：**只认那把判定专用 key**（它就是通路开关）')
 // ══════════════════════════════════════════════════════════════════════════
+//
+// ★★ 0.2.3 用户决定：**填了 `wake.judge.apiKey` 才走直连，而且只用这把 key** ——
+//    不拿 `dsh.apiKey` / 环境变量 / DSH 凭据文件去替它发请求（那是主对话的凭据）。
+//    所以下面有一半断言是**反面**的：那些来源**不许**被当成判定的 key。
 {
-  const base = { dsh: { model: 'deepseek-flash', apiKey: 'sk-from-config' }, wake: { judge: {} } }
+  const base = { dsh: { model: 'deepseek-flash', apiKey: 'sk-from-main' }, wake: { judge: {} } }
 
-  const a = resolveDirectTarget({ config: base, env: {} })
-  check('★ key 取自 config.json 的 dsh.apiKey（发布包的主路径）',
-    a.ok === true && a.apiKey === 'sk-from-config' && /dsh\.apiKey/.test(a.keySource ?? ''), a.keySource)
+  const empty = resolveDirectTarget({ config: base })
+  check('★★ 没配 wake.judge.apiKey ⇒ 明确失败（此时应该走一次性 DSH 进程，而不是直连）',
+    empty.ok === false && /wake\.judge\.apiKey/.test(empty.why ?? ''), empty.why)
+  check('★★★ 而且**不许**退回 dsh.apiKey（那是主对话的凭据，不是判定的）',
+    empty.ok === false && empty.apiKey === undefined, JSON.stringify(empty))
+  check('★★ 环境变量里的 DEEPSEEK_API_KEY 也不许被拿去用',
+    resolveDirectTarget({ config: base, env: { DEEPSEEK_API_KEY: 'sk-env' } }).ok === false)
+
+  const j = resolveDirectTarget({ config: { ...base, wake: { judge: { apiKey: 'sk-judge-only' } } } })
+  check('★ 配了专用 key ⇒ ok，且 key **就是那一把**（不是主对话那把）',
+    j.ok === true && j.apiKey === 'sk-judge-only' && j.apiKey !== 'sk-from-main', j.apiKey)
   check('★ 模型留空 ⇒ 回落到 dsh.model（不配也能跑）',
-    a.model === 'deepseek-flash' && /dsh\.model/.test(a.modelSource ?? ''), a.modelSource)
-  check('端点默认', a.baseUrl === 'https://api.deepseek.com', a.baseUrl)
+    j.model === 'deepseek-flash' && /dsh\.model/.test(j.modelSource ?? ''), j.modelSource)
+  check('端点默认', j.baseUrl === 'https://api.deepseek.com', j.baseUrl)
+  check('  返回里**不再有** keySource（已经没有"多来源"这回事了）', j.keySource === undefined)
 
-  const b = resolveDirectTarget({
-    config: { ...base, wake: { judge: { model: 'deepseek-v4-flash' } } },
-    env: {},
-  })
+  const m = resolveDirectTarget({ config: { ...base, wake: { judge: { apiKey: 'sk-j', model: 'deepseek-v4-flash' } } } })
   check('★ wake.judge.model 显式给了就用它（换成更便宜的小模型是一次显式选择）',
-    b.model === 'deepseek-v4-flash' && b.modelSource === 'wake.judge.model', b.model)
+    m.model === 'deepseek-v4-flash' && m.modelSource === 'wake.judge.model', m.model)
 
-  const c = resolveDirectTarget({ config: base, env: { DEEPSEEK_API_KEY: 'sk-from-env' } })
-  check('环境变量优先于配置文件（与 resolveModelCredentials 同口径）',
-    c.apiKey === 'sk-from-env' && c.keySource === '环境变量', c.keySource)
-
-  const d = resolveDirectTarget({ config: { dsh: { model: 'm', apiKey: '' }, wake: { judge: {} } }, env: {}, dshHome: null })
-  check('★ 拿不到 key ⇒ 明确失败（而不是带着空 key 去请求）',
-    d.ok === false && /key/.test(d.why ?? ''), d.why)
-
-  const e = resolveDirectTarget({
-    config: { dsh: { model: '', apiKey: 'k' }, wake: { judge: {} } },
-    env: {},
+  const noModel = resolveDirectTarget({
+    config: { dsh: { model: '', apiKey: '' }, wake: { judge: { apiKey: 'sk-j' } } },
   })
-  check('★ 模型也拿不到 ⇒ 明确失败', e.ok === false && /模型/.test(e.why ?? ''), e.why)
+  check('★ 模型也拿不到 ⇒ 明确失败', noModel.ok === false && /模型/.test(noModel.why ?? ''), noModel.why)
 
-  const f = resolveDirectTarget({
-    config: { dsh: { model: 'm', apiKey: 'k' }, wake: { judge: { baseUrl: 'http://evil.example.com' } } },
-    env: {},
+  const badEp = resolveDirectTarget({
+    config: { dsh: { model: 'm' }, wake: { judge: { apiKey: 'sk-j', baseUrl: 'http://evil.example.com' } } },
   })
   check('★★ 端点不合规时**整个解析就失败**（不会带着 key 去请求）',
-    f.ok === false && /key/.test(f.why ?? ''), f.why)
+    badEp.ok === false && /key/.test(badEp.why ?? ''), badEp.why)
 }
 
 // ══════════════════════════════════════════════════════════════════════════

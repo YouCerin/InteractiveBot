@@ -88,6 +88,9 @@ function buildPatch(
   delete clean.hasWsToken
   delete clean.hasHttpToken
   delete clean.hasApiKey
+  // ★ 0.2.3：判定专用 key 的标记。**必须一起删** —— 它是后端给界面看的标记，
+  //   留着就会被当成配置永久写进 config.json（没有任何测试会拦住这种脏键）。
+  delete clean.hasJudgeKey
   if (tokens.wsToken.trim()) {
     ;(clean.onebot as Record<string, unknown>).wsToken = tokens.wsToken.trim()
   }
@@ -482,7 +485,9 @@ export default function Home() {
             />
           </TabsContent>
           <TabsContent value="persona">
-            <PersonaTab cfg={cfg} patch={patch} askConfirm={setConfirmReq} />
+            {/* ★ 0.2.3：本页**不再需要** cfg / patch / askConfirm —— 它唯一用到它们的
+                那一节（「什么时候回我」）已搬到「扩展 → 唤醒策略」卡里（`WakeRulesSection`）。 */}
+            <PersonaTab />
           </TabsContent>
           <TabsContent value="pace">
             <PaceTab cfg={cfg} patch={patch} patchMany={patchMany} askConfirm={setConfirmReq} />

@@ -62,6 +62,29 @@ export const VERDICT = {
 }
 
 /**
+ * **判定走哪条通路 —— 由"有没有判定专用 key"唯一决定**（0.2.3 用户决定）。
+ *
+ *   · `wake.judge.apiKey` 留空 ⇒ `'headless'`：起一个一次性 DSH 进程（约 3~5 秒，
+ *     用主对话那套凭据，使用者不需要额外配任何东西）；
+ *   · 填了（去掉空白后非空）⇒ `'http'`：直连一次 `/chat/completions`（约 1 秒），
+ *     而且 `resolveDirectTarget` **只用那把 key**。
+ *
+ * ★ 为什么做成**一个导出的纯函数**而不是在 bridge 里写个三元表达式：
+ *   这条推导有**四处**必须在语义上完全一致 —— 这里、`bridge.mjs` 建判定器的地方、
+ *   `model-direct.mjs` 取 key 的地方、以及界面的渲染条件。写成一处实现 + 三处调用，
+ *   才不会出现"界面说走直连、实际走 DSH"这种**静默**不一致（本项目最忌讳的那类）。
+ * ★ 为什么不让使用者直接选通路（原来那两个按钮已去掉）：两条路在唤醒流程里做的是
+ *   **同一件事**（让一个模型判断"这句话是不是说给我听的"），让人选一个自己无法判断
+ *   好坏的东西没有意义；而"要不要单独配一把 key"本身就是那个选择的**可观察依据**。
+ *
+ * @param {{apiKey?: string}|null|undefined} judge
+ * @returns {'http'|'headless'}
+ */
+export function judgeTransport(judge) {
+  return String(judge?.apiKey ?? '').trim() ? 'http' : 'headless'
+}
+
+/**
  * 默认值。**每一个都写清为什么是这个数**，因为它们直接决定成本与体验。
  */
 export const JUDGE_DEFAULTS = {

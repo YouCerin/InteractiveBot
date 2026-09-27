@@ -558,6 +558,18 @@ section('⑨ 扩展服务：写盘 + 改活配置（两件事都要做）')
   {
     const card = svc.list().plugins.find((p) => p.id === 'wake-policy')
     check('★ 唤醒策略已登记为插件卡', Boolean(card), JSON.stringify(svc.list().plugins.map((p) => p.id)))
+    // ★★ 用户要求（0.2.3）：「唤醒规则」那张卡删掉 —— 它和这张卡回答同一个问题
+    //    （这条消息要不要回），一张只显示判据里的一个开关、另一张显示"用哪套判据"，
+    //    两处各说一半。判据本身搬进本卡的「唤醒方式」一节（界面侧 WakeRulesSection）。
+    check('★★ 原来那张「唤醒规则」卡（id: trigger）**已删除**（与唤醒策略回答同一个问题）',
+      !svc.list().plugins.some((p) => p.id === 'trigger'),
+      JSON.stringify(svc.list().plugins.map((p) => p.id)))
+    check('  └ 但 `trigger.*` 那几个键仍然是真的、仍被运行期读（只是不再单独占一张卡）',
+      svc.list().plugins.every((p) => p.enabledPath !== 'trigger.groupEnabled'))
+    check('★ 唤醒策略的 why 里说清了它名下还有「唤醒方式」那一节（同样是每轮现读）',
+      /trigger\.\*/.test(String(card?.why)), String(card?.why).slice(0, 80))
+    check('  └「关掉会怎样」里说明了判定那段调用的代价与两条通路',
+      /一次性 DSH 进程/.test(String(card?.offEffect)) && /直连/.test(String(card?.offEffect)))
     check('★★ 它的开关语义是 choice（第一个真正用上它的插件）', card?.switchKind === 'choice' && card?.enabled === null, `${card?.switchKind}/${card?.enabled}`)
     check('★ 两个候选：rule（现状）与 semantic（实验性）',
       card?.options?.length === 2 && card.options[0].value === 'rule' && card.options[1].value === 'semantic',

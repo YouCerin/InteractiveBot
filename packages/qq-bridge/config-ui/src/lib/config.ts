@@ -264,6 +264,9 @@ export const DEMO_CONFIG: Record<string, unknown> = {
   hasWsToken: true,
   hasHttpToken: true,
   hasApiKey: true,
+  // ★ 0.2.3：判定专用 key 配没配（值不回显）。它同时是**通路开关** ——
+  //   填了才走直连、而且只用这把；留空 ⇒ 一次性 DSH 进程。
+  hasJudgeKey: false,
   access: { adminUsers: ['100000001'] },
   trigger: {
     private: true,

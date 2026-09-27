@@ -43,6 +43,10 @@ const SECRET_FIELDS = [
   { path: ['onebot', 'wsToken'], flag: 'hasWsToken' },
   { path: ['onebot', 'httpToken'], flag: 'hasHttpToken' },
   { path: ['dsh', 'apiKey'], flag: 'hasApiKey', clearable: true },
+  // ★ 0.2.3：判定专用 key。它同时是**通路开关**（填了才走直连、且只用这把），
+  //   所以界面必须能知道"配没配"却看不到值 —— 正是这一档存在的理由。
+  //   `clearable`（允许 `null` 清空）在这里更要紧：清空它 = 从直连退回一次性 DSH 进程。
+  { path: ['wake', 'judge', 'apiKey'], flag: 'hasJudgeKey', clearable: true },
 ]
 
 const JSON_HEADERS = {

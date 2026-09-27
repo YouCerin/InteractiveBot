@@ -31,6 +31,7 @@ import {
   buildJudgePrompt,
   parseJudgeVerdict,
   createWakeJudge,
+  judgeTransport,
   JUDGE_DEFAULTS,
   VERDICT,
 } from '../src/wake-judge.mjs'
@@ -270,6 +271,19 @@ section('③ 判定器：六条纪律里的前四条 + 预算 + 取消')
   const bHead = createWakeJudge({ transport: 'headless' }).budget()
   check('★ budget() 报出通路与模型（排查"它到底走哪条"）',
     bHttp.transport === 'http' && bHttp.model === 'deepseek-v4-flash' && bHead.transport === 'headless', JSON.stringify(bHttp))
+
+  // ── ★★ 通路推导：**唯一实现**，四处共用（0.2.3 用户决定去掉那两个按钮）────────
+  //
+  //   规则：填了判定专用 key ⇒ 直连；留空 ⇒ 一次性 DSH 进程。
+  //   这条推导必须在 `bridge.mjs`（建判定器）、`model-direct.mjs`（取 key）、
+  //   `config.mjs`（告警）与界面渲染上**语义一致** —— 所以它只有一处实现，
+  //   这里断言的就是那一处。
+  check('★★ 没配判定专用 key ⇒ headless（使用者不需要额外配任何东西）',
+    judgeTransport({}) === 'headless' && judgeTransport({ apiKey: '' }) === 'headless')
+  check('★★ 配了 ⇒ http（而且只用那把 key）', judgeTransport({ apiKey: 'sk-judge' }) === 'http')
+  check('★ 只有空白也算"没配"（否则粘贴一个空格就会静默切到直连）',
+    judgeTransport({ apiKey: '   ' }) === 'headless')
+  check('  null / undefined 不抛', judgeTransport(null) === 'headless' && judgeTransport(undefined) === 'headless')
 
   // runHeadless 的取消分支：**在 spawn 之前**就返回，所以这里能离线断言
   const preAborted = new AbortController()

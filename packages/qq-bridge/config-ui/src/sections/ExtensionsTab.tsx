@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   ChevronDown,
   ChevronRight,
+  KeyRound,
   Puzzle,
   RefreshCw,
   ShieldAlert,
@@ -23,6 +24,9 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { FieldRow, InlineNote, NumInput, type ConfirmRequest } from '@/components/common'
+// ★ 0.2.3：「唤醒方式」从人设页搬到这里（见该文件顶部的说明）——
+//   `wake.policy = rule` 时它就是那条策略的全部内容，放在别的页会让同一个问题被劈成两处。
+import { WakeRulesSection } from '@/sections/WakeRulesSection'
 import { cn } from '@/lib/utils'
 
 /**
@@ -170,6 +174,7 @@ export function ExtensionsTab({
           patch={patch}
           onToggle={(en) => void toggle('plugin', p.id, en)}
           onNavigateTab={onNavigateTab}
+          askConfirm={askConfirm}
         />
       ))}
     </div>
@@ -497,12 +502,14 @@ function PluginCard({
   patch,
   onToggle,
   onNavigateTab,
+  askConfirm,
 }: {
   plugin: PluginInfo
   cfg: Record<string, unknown>
   patch: (path: string, value: unknown) => void
   onToggle: (enabled: boolean) => void
   onNavigateTab: (tab: string) => void
+  askConfirm: (req: ConfirmRequest) => void
 }) {
   const [open, setOpen] = useState(false)
   const isList = p.switchKind === 'list'
@@ -520,7 +527,14 @@ function PluginCard({
   //   而实际行为正好相反 —— 那是最伤信任的一种不一致。
   const shadowOn = getBool(cfg, 'wake.judge.shadow', false)
   const mcpProfile = String(getPath(cfg, 'mcp.profile') ?? 'full')
-  const transport = String(getPath(cfg, 'wake.judge.transport') ?? 'http')
+  // ★★ 0.2.3：判定通路**不再让用户选**（原来那两个按钮已去掉）。
+  //   规则：**填了「判定专用 key」→ 直连用它；没填 → 用一次性 DSH 进程。**
+  //   为什么不给按钮：两条路在唤醒流程里做的事是同一件（都只是让一个模型判断
+  //   "这句话是不是说给我听的"），让用户选一个自己无法判断好坏的东西没有意义；
+  //   而"要不要单独配一把 key"本身就是那个选择的**可观察依据**。
+  //   ★ 推导必须与后端一致（`bridge.mjs#ensureWakeJudge` 用同一条件），否则界面说的
+  //     和实际跑的不是一条路 —— 那正是本项目最忌讳的"说了做不到"。
+  const hasJudgeKey = getBool(cfg, 'hasJudgeKey', false) || Boolean(String(getPath(cfg, 'wake.judge.apiKey') ?? '').trim())
 
   return (
     <Card>
@@ -617,6 +631,16 @@ function PluginCard({
             这是枚举开关：打开时用的是<strong>默认档</strong>，不是「你上次选的那档」。
           </p>
         )}
+
+        {/* ── ★★ 0.2.3：「唤醒方式」搬到这里（原「人设」页的「什么时候回我」）──
+            为什么搬：`wake.policy = rule` 时，**这一节就是那条策略的全部内容**；
+            `semantic` 也只是在它之上加一层否决。放在人设页会让"它用什么判据决定回不回"
+            被劈成两处（策略在扩展页、规则在人设页），而原来那张只显示"群聊总开关"的
+            「唤醒规则」卡又只说了三分之一 —— 三处各说一半。
+            ★ 它不藏在「详细设置」里：那是每天要看的东西。 */}
+        {isWakePolicy && (
+          <WakeRulesSection cfg={cfg} patch={patch} askConfirm={askConfirm} />
+        )}
         {!p.hot && p.why && (
           <p className="text-xs text-amber-700">
             为什么要重启：{p.why}
@@ -711,46 +735,59 @@ function PluginCard({
         )}
 
         {/* 唤醒策略的判定器设置（0.2.3）。★ 生效边界：shadow 即时（每轮现读）；
-            transport / model / baseUrl / timeoutMs / maxPerHour 在判定器首次用到时装配一次
+            apiKey / model / baseUrl / timeoutMs / maxPerHour 在判定器首次用到时装配一次
             —— 改这几个要重启，别因为卡片头上写着「即时生效」就把它们也当即时的。 */}
         {isWakePolicy && open && (
           <div className="rounded-md border p-3">
+            {/* ★★ 判定通路**不给按钮**（0.2.3 用户要求去掉）。
+                规则只有一条：**填了这把 key → 直连用它；没填 → 用一次性 DSH 进程。**
+                为什么这样分：两条路在唤醒流程里做的是同一件事（让一个模型判断
+                "这句话是不是说给我听的"），让使用者选一个自己无法判断好坏的东西没有意义；
+                而"要不要单独配一把 key"本身就是那个选择的**可观察依据**。
+                ★ 这条推导必须与后端 `bridge.mjs#ensureWakeJudge` **完全一致** ——
+                  否则界面说的和实际跑的不是一条路。 */}
             <FieldRow
-              label="判定通路"
+              label="判定专用 API key"
               hint={
                 <>
-                  <strong>直连</strong>：一次 HTTP 调用（约 1 秒、一次小 completion），用下面那个模型。
-                  <strong>一次性 DSH 进程</strong>：约 3~5 秒、更贵，但 DSH 自己处理网络 ——
-                  <strong>需要走代理才能访问模型端点时选它</strong>（直连那条不做代理发现）。
+                  <strong>留空</strong> = 走<strong>一次性 DSH 进程</strong>做判定（约 3~5 秒，
+                  用主对话那套凭据，不需要在这里配任何东西）。
+                  <strong>填上</strong> = 改成<strong>直连</strong>（约 1 秒），
+                  <strong>并且只用这把 key</strong> —— 不会拿主对话那把去发请求。
+                  ★ 想给判定单独计费 / 单独限流，或者想用更便宜的小模型，就填它。
                 </>
               }
             >
-              <div className="flex flex-col gap-2 sm:flex-row">
-                {[
-                  { v: 'http', label: '直连（默认）', desc: '一次 /chat/completions，约 1 秒。' },
-                  { v: 'headless', label: '一次性 DSH 进程', desc: '约 3~5 秒；要走代理时用它。' },
-                ].map((o) => (
-                  <button
-                    key={o.v}
-                    type="button"
-                    onClick={() => patch('wake.judge.transport', o.v)}
-                    className={cn(
-                      'flex-1 rounded-md border p-2.5 text-left transition-colors',
-                      transport === o.v ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
-                    )}
+              <div className="flex max-w-md items-center gap-2">
+                <Input
+                  type="password"
+                  value={String(getPath(cfg, 'wake.judge.apiKey') ?? '')}
+                  onChange={(e) => patch('wake.judge.apiKey', e.target.value)}
+                  autoComplete="new-password"
+                  className="font-mono text-sm"
+                  placeholder={hasJudgeKey ? '已配置（留空即不修改）' : '留空 = 用一次性 DSH 进程'}
+                />
+                {hasJudgeKey && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 shrink-0 text-xs"
+                    onClick={() => patch('wake.judge.apiKey', null)}
                   >
-                    <div className="text-sm font-medium">
-                      {o.label}
-                      {transport === o.v && <Badge className="ml-1.5 bg-primary hover:bg-primary">当前</Badge>}
-                    </div>
-                    <div className="mt-0.5 text-xs text-muted-foreground">{o.desc}</div>
-                  </button>
-                ))}
+                    <KeyRound className="mr-1 h-3.5 w-3.5" />
+                    清除
+                  </Button>
+                )}
               </div>
+              <InlineNote level="info">
+                当前实际走的是：<strong>{hasJudgeKey ? '直连（用上面这把 key）' : '一次性 DSH 进程'}</strong>
+                {hasJudgeKey ? ' —— 约 1 秒，不会碰主对话那把 key。' : ' —— 约 3~5 秒，不需要额外配 key。'}
+                {hasJudgeKey ? '' : ' 想让判定变快、或想单独计费，就在上面填一把专用 key。'}
+              </InlineNote>
             </FieldRow>
             <p className="-mt-1 mb-2 text-xs text-amber-700">★ 改它要重启（判定器首次被用到时装配一次）。</p>
 
-            {transport === 'http' && (
+            {hasJudgeKey && (
               <>
                 <FieldRow
                   label="判定模型"
@@ -783,10 +820,7 @@ function PluginCard({
                     onChange={(e) => patch('wake.judge.baseUrl', e.target.value)}
                   />
                 </FieldRow>
-                <p className="-mt-1 mb-2 text-xs text-muted-foreground">
-                  key 复用「模型」页那一把（<code>dsh.apiKey</code> / 环境变量 / DSH 凭据文件），这里不用再填。
-                  ★ 改上面两项也要重启。
-                </p>
+                <p className="-mt-1 mb-2 text-xs text-muted-foreground">★ 改上面两项也要重启。</p>
               </>
             )}
 

@@ -3,10 +3,14 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { Switch } from '@/components/ui/switch'
-import { FieldRow, InlineNote, TagInput, type ConfirmRequest } from '@/components/common'
+// ★ 0.2.3：「唤醒方式」（原「什么时候回我」）已搬到「扩展 → 唤醒策略」下面 ——
+//   见 `sections/WakeRulesSection.tsx`。它本来就该跟 `wake.policy` 在一起：
+//   那条策略说的是"用哪一套判据决定回不回"，而这一节就是 `rule` 那套判据的全部内容。
+//   于是 `Switch` / `TagInput` / `keywordWarnings` / `getBool` / `getStrArr` /
+//   `ConfirmRequest` 在本页都不再需要（tsconfig 开了 noUnusedLocals，删干净）。
+import { InlineNote } from '@/components/common'
 import { FancySelect } from '@/components/FancySelect'
-import { getBool, getStrArr, keywordWarnings, personaMentionsTools } from '@/lib/config'
+import { personaMentionsTools } from '@/lib/config'
 import { api, isNotImplemented, type PersonaItem, type PersonaShelf } from '@/lib/api'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -25,17 +29,12 @@ import { cn } from '@/lib/utils'
  * ★ 列表、字数、当前生效、模板、上限一律由后端给（GET /api/personas）——
  *   前端硬编码就会出现第二份真值。
  * ★ 本页**不再有**：「用户怎么叫它」栏（名字块在正文里，直接改正文）、
- *   「它怎么称呼对方」（0.2.2 已移除，改为记忆页的按人昵称）、内置三选一（老路径，不伸手）。
+ *   「它怎么称呼对方」（0.2.2 已移除，改为记忆页的按人昵称）、内置三选一（老路径，不伸手）、
+ *   **「什么时候回我」**（0.2.3 搬到「扩展 → 唤醒策略」卡里的「唤醒方式」一节）。
+ * ★ **所以这一页现在一个配置键都不碰** —— 它只跟 `personas/*.md` 与那几个接口打交道。
+ *   这就是它不再需要 `cfg` / `patch` / `askConfirm` 的原因（不是漏传）。
  */
-export function PersonaTab({
-  cfg,
-  patch,
-  askConfirm,
-}: {
-  cfg: Record<string, unknown>
-  patch: (path: string, value: unknown) => void
-  askConfirm: (req: ConfirmRequest) => void
-}) {
+export function PersonaTab() {
   const [shelf, setShelf] = useState<PersonaShelf | null>(null)
   const [loadErr, setLoadErr] = useState('')
   const [unsupported, setUnsupported] = useState(false)
@@ -92,7 +91,8 @@ export function PersonaTab({
       {loadErr && <InlineNote level="warn">{loadErr}</InlineNote>}
       <CurrentPersonaCard shelf={shelf} runAction={runAction} />
       <PersonaTextCard shelf={shelf} runAction={runAction} />
-      <TriggerSection cfg={cfg} patch={patch} askConfirm={askConfirm} />
+      {/* ★ 0.2.3：这里**不再有**「唤醒方式」卡 —— 它搬到了「扩展 → 唤醒策略」下面
+          （`WakeRulesSection`）。留在本页会让"用什么判据决定回不回"被劈成两处。 */}
     </div>
   )
 }
@@ -424,119 +424,6 @@ function PersonaTextCard({
             {saving ? '保存中…' : dirty ? '保存这套人设' : '已保存'}
           </Button>
         </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── 卡片 3：什么时候回我（原「触发」页，0.2.2 并入本页）──────────────────────
-// 字段与规则见 CONFIG-UI.md §2.3（那一节保留为字段真值）。
-// 必须保留：群聊总开关的风控文案、关掉总开关时另外三个开关一起变灰、
-// 关键词的高频词告警与成本提示。
-
-function TriggerSection({
-  cfg,
-  patch,
-  askConfirm,
-}: {
-  cfg: Record<string, unknown>
-  patch: (path: string, value: unknown) => void
-  askConfirm: (req: ConfirmRequest) => void
-}) {
-  const groupEnabled = getBool(cfg, 'trigger.groupEnabled', false)
-  const keywords = getStrArr(cfg, 'trigger.keywords', [])
-  const warnings = keywordWarnings(keywords)
-
-  const toggleGroup = (next: boolean) => {
-    if (next) {
-      // ★ 群聊总开关：开启前必须二次确认（文案照抄 CONFIG-UI.md §2.3）
-      askConfirm({
-        title: '开启群聊回复？',
-        description: (
-          <>
-            群聊回复涉及<strong className="text-red-600">账号风控风险</strong>。
-            上一个 QQ 号就是因此被处置的。开启前请确认你了解这一点。
-          </>
-        ),
-        confirmText: '我了解风险，开启',
-        onConfirm: () => patch('trigger.groupEnabled', true),
-      })
-    } else {
-      patch('trigger.groupEnabled', false)
-    }
-  }
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-base">什么时候回我</CardTitle>
-        <p className="text-xs text-muted-foreground">
-          群里只有「被 @」和「命中关键词」两种唤醒方式，没有自动搭话、随机插嘴 —— 这是刻意的。
-          人设里的名字（正式名 + 别名）会自动并进唤醒词，不在这里重复列出。
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="divide-y">
-          <FieldRow
-            star
-            label="群聊总开关"
-            hint="fail-closed：缺省关。总开关一关，即使 @ 了也不回。"
-          >
-            <div className="space-y-2">
-              <Switch checked={groupEnabled} onCheckedChange={toggleGroup} />
-              <InlineNote level="danger">
-                群聊回复涉及<strong>账号风控风险</strong>。上一个 QQ 号就是因此被处置的。
-                开启前请确认你了解这一点。开启后机器人<strong>只会在被 @ 或说到关键词时</strong>回答，
-                不会自己冒出来说话。
-              </InlineNote>
-            </div>
-          </FieldRow>
-          {/* ★ 关掉总开关时，另外三个开关一起变灰 —— 否则会让人以为"@ 开关还开着，@ 它应该会回" */}
-          <div className={cn(!groupEnabled && 'pointer-events-none opacity-50')}>
-            <FieldRow label="私聊响应" hint="私聊消息是否响应（一对一找它说话，不看关键词）。">
-              <Switch
-                checked={getBool(cfg, 'trigger.private', true)}
-                onCheckedChange={(v) => patch('trigger.private', v)}
-              />
-            </FieldRow>
-            <FieldRow label="群里被 @ 响应" hint="需群聊总开关打开。">
-              <Switch
-                checked={getBool(cfg, 'trigger.mention', true)}
-                onCheckedChange={(v) => patch('trigger.mention', v)}
-              />
-            </FieldRow>
-            <FieldRow label="关键词响应" hint="群里命中关键词时是否响应（需群聊总开关打开）。">
-              <Switch
-                checked={getBool(cfg, 'trigger.keyword', true)}
-                onCheckedChange={(v) => patch('trigger.keyword', v)}
-              />
-            </FieldRow>
-          </div>
-        </div>
-
-        <FieldRow
-          label="关键词列表"
-          hint="包含匹配，且只在群聊里生效（私聊不受它影响）。不要填单字或群聊高频词（如「我」「哈哈」），那等于让机器人对每句话都响应。"
-        >
-          <TagInput
-            values={keywords}
-            onChange={(v) => patch('trigger.keywords', v)}
-            placeholder="输入关键词，回车添加"
-            warnWords={warnings.map((w) => w.word)}
-          />
-          {warnings.length > 0 && (
-            <div className="mt-2 space-y-1">
-              {warnings.map((w) => (
-                <InlineNote key={w.word} level="warn">
-                  {w.reason}
-                </InlineNote>
-              ))}
-            </div>
-          )}
-          <p className="mt-2 text-xs text-muted-foreground">
-            成本提示：每个命中关键词的群消息都会产生一次模型调用。
-          </p>
-        </FieldRow>
       </CardContent>
     </Card>
   )
