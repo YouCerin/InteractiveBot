@@ -504,6 +504,22 @@ async function quitApp ({ stopBot }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 启动流程
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * 读桥接日志，判断它是不是**已经启动失败**了（判据在 `lib.cjs`，这里只负责读文件）。
+ *
+ * ★ 读不到日志**绝不是**失败理由 —— 它只影响"能不能早点说"，不影响"要不要继续等"。
+ *   所以这里把所有异常都吞掉并返回 null（同本项目其它"观测手段不许弄挂主流程"的地方）。
+ */
+function readBridgeLogFailure (absPath) {
+  try {
+    if (!absPath || !existsSync(absPath)) return null
+    const v = lib.readBridgeLogVerdict(readFileSync(absPath, 'utf8'))
+    return v && v.failed ? v : null
+  } catch {
+    return null
+  }
+}
+
 async function waitForBridge (sendSplash) {
   const t0 = Date.now()
   let attempts = 0
@@ -513,12 +529,21 @@ async function waitForBridge (sendSplash) {
     if (r.ok) {
       updStatus(r.data)
       refreshTray()
-      return true
+      return { ok: true, reason: '', source: state.bridgeLogPath }
+    }
+    // ★★ 0.2.5：桥接是 detached + stdio:'ignore' 起来的 —— **它死了壳听不到声音**，
+    //    只能把 90 秒等满。实测那次（包内缺 `scripts/ui-build-stamp.cjs`）就是这样：
+    //    进程一秒就死，窗口却干等 90 秒才说一句"超时"（使用者的原话："exe 长时间无法唤起桥接"）。
+    //    ⇒ 等的时候顺便读一眼桥接自己的日志：它一旦写明原因，立刻停下来原样抬出来。
+    const died = readBridgeLogFailure(state.bridgeLogPath)
+    if (died) {
+      logLine(`❌ 桥接启动失败（${Math.round((Date.now() - t0) / 1000)} 秒就定了）：${died.line}`)
+      return { ok: false, reason: died.line, source: state.bridgeLogPath }
     }
     sendSplash(lib.describeWait({ elapsedMs: Date.now() - t0, attempts }))
     await sleep(1000)
   }
-  return false
+  return { ok: false, reason: '', source: state.bridgeLogPath }
 }
 
 async function boot () {
@@ -526,8 +551,12 @@ async function boot () {
   const portInfo = lib.readUiPort({ configPath: cfgPath, log: logLine })
   state.port = portInfo.port
   state.portWhy = portInfo.why
+  // 桥接的日志在哪（等它起来时壳要读它 —— 见 waitForBridge 里那段注释）
+  const logInfo = lib.readUiLogFile({ configPath: cfgPath })
+  state.bridgeLogPath = join(PKG_ROOT, logInfo.rel)
   logLine(`包根 ${PKG_ROOT}`)
   logLine(`控制台端口 ${state.port} —— ${portInfo.why}`)
+  logLine(`桥接日志 ${state.bridgeLogPath} —— ${logInfo.why}`)
 
   showSplash()
   sendSplash({ kind: 'phase', phase: 'probe', text: `正在看桥接在不在（127.0.0.1:${state.port}）…` })
@@ -570,10 +599,22 @@ async function boot () {
   }
 
   // ③ 等它真的好（能回答 /api/status 才算好；端口连上但接口没装配完不算）
-  const ok = await waitForBridge((p) => sendSplash(p))
-  if (!ok) {
-    logLine('❌ 等桥接超时（90 秒）')
-    sendSplash({ kind: 'failed', text: '等了 90 秒桥接还没好 —— 点「看日志」看它卡在哪。' })
+  const waited = await waitForBridge((p) => sendSplash(p))
+  if (!waited.ok) {
+    if (waited.reason) {
+      // 桥接自己写明了原因 ⇒ 原样抬出来（不替它改写、也不加自己的猜测）
+      sendSplash({
+        kind: 'failed',
+        text: `桥接没能起来：${waited.reason}（详见 ${waited.source}）`,
+      })
+    } else {
+      const secs = Math.round(WAIT_BRIDGE_MS / 1000)
+      logLine(`❌ 等桥接超时（${secs} 秒）`)
+      sendSplash({
+        kind: 'failed',
+        text: `等了 ${secs} 秒桥接还没好 —— 先看 ${waited.source}（它没写失败原因，说明是"起得来但一直没好"）。`,
+      })
+    }
     return
   }
   logLine('桥接已就绪')

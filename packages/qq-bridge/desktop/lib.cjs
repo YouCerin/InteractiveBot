@@ -267,10 +267,65 @@ function describeWait ({ elapsedMs = 0, attempts = 0, phase = 'bridge' } = {}) {
   return { text: `还在等桥接… 已等 ${secs} 秒`, hint: '如果超过 90 秒还没好，点「看日志」看看卡在哪' }
 }
 
+/**
+ * 桥接日志文件在哪：读 `config.json` 的 `ui.logFile`（默认 `logs/bridge.log`）。
+ *
+ * ★ 立场与 `readUiPort` 一样：读不到也要**说得出话**；但这里必须有**能用的默认值** ——
+ *   调用方（桌面壳）只是想"看一眼日志"，不该因为读不到配置就放弃这件事。
+ *
+ * @returns {{rel:string, why:string}}
+ */
+function readUiLogFile ({ configPath } = {}) {
+  const fallback = join('logs', 'bridge.log')
+  if (!configPath) return { rel: fallback, why: '没给 configPath —— 用默认 logs/bridge.log' }
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    const raw = cfg?.ui?.logFile
+    if (typeof raw === 'string' && raw.trim() !== '') {
+      return { rel: raw.trim(), why: `config.json 的 ui.logFile = ${raw.trim()}` }
+    }
+    return { rel: fallback, why: 'config.json 没写 ui.logFile —— 用默认 logs/bridge.log' }
+  } catch (error) {
+    return { rel: fallback, why: `读不到 config.json（${error?.code ?? error?.message}）—— 用默认 logs/bridge.log` }
+  }
+}
+
+/**
+ * 从桥接日志里判断"它是不是已经启动失败了"，好让桌面壳**早点**把原因说出来（0.2.5）。
+ *
+ * ★★ 为什么需要它（实测真事，就是"exe 长时间无法唤起桥接"那次）：
+ *   桥接是 `--background` + `detached` + `stdio:'ignore'` 起来的 —— 它的输出**被丢掉**，
+ *   于是它**一秒就死了，桌面壳这边一点声音都听不到**，只能把 `waitForBridge` 的 90 秒
+ *   上限等满，然后说一句"等桥接超时"。使用者看到的是"卡着不动"，而不是"缺了 X"。
+ *   ⇒ 桥接自己会把原因写进 `logs/bridge.log`（单一真相仍在桥接那边），**壳读它就行**。
+ *
+ * 判据（**只认桥接自己写的记号，不猜**）：
+ *   · 先按 `=== 桥接启动 ===` 切出**最后一次启动**那一段（日志是追加的，上一次的失败
+ *     不该粘到这一次）；
+ *   · 命中 `❌` / `启动失败` / `Error:` ⇒ 已失败，把**那一行原文**带出来；
+ *   · 看到 `桥接已启动` / `已在后台启动` ⇒ 已成功（还在等接口起来，可能只是慢）；
+ *   · 都不命中 ⇒ `null`（什么都别说，继续等）。
+ *
+ * @returns {{failed:boolean,line:string}|null}
+ */
+function readBridgeLogVerdict (text) {
+  if (!text || typeof text !== 'string') return null
+  const mark = '=== 桥接启动 ==='
+  const idx = text.lastIndexOf(mark)
+  const scope = idx >= 0 ? text.slice(idx) : text
+  const lines = scope.split(/\r?\n/).filter((l) => l.trim() !== '').slice(-40)
+  if (lines.some((l) => /桥接已启动|已在后台启动/.test(l))) return { failed: false, line: '' }
+  const bad = lines.filter((l) => /❌|启动失败|Error:/.test(l))
+  if (bad.length) return { failed: true, line: bad[bad.length - 1].trim() }
+  return null
+}
+
 module.exports = {
   DEFAULT_UI_PORT,
   resolvePkgRoot,
   readUiPort,
+  readUiLogFile,
+  readBridgeLogVerdict,
   consoleUrl,
   statusUrl,
   describeStatus,

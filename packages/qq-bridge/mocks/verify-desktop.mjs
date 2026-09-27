@@ -321,6 +321,41 @@ async function main () {
         !/\.bat/i.test(`${s.desktop ?? ''} ${s['desktop:pack'] ?? ''}`),
       )
     }
+
+    // ── ★★ 桥接日志判据（0.2.5）：把"长时间无法唤起桥接"变成一两秒的明确结论 ──
+    //
+    // 背景（真事）：桥接是 detached + `stdio:'ignore'` 起来的，它**死了壳听不到声音**，
+    // 只能把 90 秒等满、然后说一句"等桥接超时"。判据放在 `lib.cjs`（纯函数、可离线测），
+    // 壳只负责读文件；这里连**接线**一起断言 —— 否则判据写对了也不会被调用。
+    {
+      const tag = '[t]'
+      const healthy = `${tag} === 桥接启动 === 工作区=…\n${tag} 控制台界面：http://127.0.0.1:3410/\n${tag} 桥接已启动，等待消息…\n`
+      const dead = `${tag} === 桥接启动 === 工作区=…\n${tag} ❌ 无法启动 DSH：没找到 DSH（DeepSeek Harness）。\n`
+      const quiet = `${tag} === 桥接启动 === 工作区=…\n${tag} 正在连 OneBot…\n`
+      eq('健康日志 → 判成"不是失败"', lib.readBridgeLogVerdict(healthy).failed, false)
+      eq('失败日志 → 判成"失败"', lib.readBridgeLogVerdict(dead).failed, true)
+      check(
+        '★ 把那一行**原文**带出来（壳要原样抬给使用者，不替它改写）',
+        lib.readBridgeLogVerdict(dead).line.includes('无法启动 DSH'),
+        lib.readBridgeLogVerdict(dead).line,
+      )
+      eq('还没结论 → null（不猜、继续等）', lib.readBridgeLogVerdict(quiet), null)
+      eq('空日志 → null', lib.readBridgeLogVerdict(''), null)
+      // ★ 日志是**追加**的：上一次的失败不许粘到这一次
+      const twoRuns = dead + `${tag} === 桥接启动 === 工作区=…\n${tag} 正在连 OneBot…\n`
+      eq('★ 只看最后一次启动那一段（上一次的失败不粘）', lib.readBridgeLogVerdict(twoRuns), null)
+      // 接线：main.cjs 必须真的在等的过程中用它
+      check(
+        '★★ main.cjs 在等桥接时读日志并据此提前收尾（判据写对了 ≠ 它在跑）',
+        /readBridgeLogVerdict/.test(mainSrc) && /readBridgeLogFailure/.test(mainSrc) && /died\.line/.test(mainSrc),
+      )
+      const lf = lib.readUiLogFile({ configPath: join(PKG_ROOT, 'config.json') })
+      check(
+        '★ 日志路径从 config.json 的 ui.logFile 读（读不到也有默认值，且说得出话）',
+        typeof lf.rel === 'string' && lf.rel.length > 0 && typeof lf.why === 'string',
+        `${lf.rel} —— ${lf.why}`,
+      )
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
