@@ -63,6 +63,41 @@ section('① 解析与剥离：标记一定进不了正文')
   const r6 = parseOutMarkers('[reply:1] [reply:2]')
   check('多个引用 → 只取第一个，并说明', r6.replyTo === '1' && r6.notes.some((n) => n.includes('多个')), JSON.stringify(r6))
 
+  // ── ★★★ 负数 id：本机 SnowLuma 的消息 id 就是负的 ───────────────────────
+  //
+  // 这一段盯的是一处**真机上"引用回复永远失效"**（0.2.3 从 bridge.log 抓到的）：
+  // 真机事件里 `message_id` 是**负数**（日志里能看到 `-429124262`），而这里的
+  // `ID_RE` 原来只认**非负**整数 ⇒ 模型照提示词写的 `[reply:#-429124262]`
+  // **一次都没生效过**。注意 `#` 前缀本来就是会去掉的，**卡住的是那个负号** ——
+  // 所以下面第一条断言用的是**真机原文**。
+  {
+    const real = parseOutMarkers('就是你说的那个。[reply:#-429124262]')
+    check('★★★ 真机原文 `[reply:#-429124262]` 现在认得出（修前 replyTo 是 null）',
+      real.replyTo === '-429124262', JSON.stringify(real))
+    check('  └ 而且**不再有**"已丢弃"那条 note', real.notes.length === 0, JSON.stringify(real.notes))
+    check('  └ 标记照样被剥掉', !real.text.includes('[reply'), JSON.stringify(real.text))
+
+    check('裸负号也认', parseOutMarkers('[reply:-429124262]').replyTo === '-429124262')
+    check('带空格的负数也认', parseOutMarkers('[reply:  -12  ]').replyTo === '-12')
+    check('★ 包着引号/反引号也认（模型可能按 JSON 习惯写）',
+      parseOutMarkers('[reply:"-429124262"]').replyTo === '-429124262' &&
+        parseOutMarkers('[reply:`#-1`]').replyTo === '-1')
+
+    // ★ 放宽的是**形状**，不是**校验**：仍然只认整数，认不出就丢弃并说明
+    for (const [bad, why] of [
+      ['[reply:abc]', '非数字'],
+      ['[reply:#]', '只有前缀'],
+      ['[reply:1.5]', '小数'],
+      ['[reply:1e5]', '科学计数法'],
+    ]) {
+      const r = parseOutMarkers(bad)
+      check(`★ ${why} 仍然被丢弃（不猜 id）`, r.replyTo === null && r.notes.some((n) => n.includes('不是消息 id')),
+        `${JSON.stringify(r.replyTo)} ${JSON.stringify(r.notes)}`)
+    }
+    check('  └ 失败提示里说明了**可带负号与 # 前缀**（不然看日志的人会以为只能写正数）',
+      parseOutMarkers('[reply:abc]').notes[0]?.includes('可带负号'))
+  }
+
   const r7 = parseOutMarkers('[sticker:偷笑] 好')
   check('★ `[sticker:名]` 被认出来并剥掉', r7.sticker === '偷笑' && r7.text === '好', JSON.stringify(r7))
 

@@ -713,6 +713,32 @@ async function main() {
       check('★ 正文其余部分照常', String(first.text ?? '').includes('就是你说的那样'))
     }
 
+    // ── ⑩-2b ★★★ **负数消息 id**：本机 SnowLuma 的 id 就是负的 ───────────────
+    //
+    // 这一段盯的是一处**真机上"引用回复永远失效"**的缺陷（0.2.3 从 bridge.log 里抓到的）：
+    // 真机事件里 `message_id` 是**负数**（日志里能看到 `-429124262`），而
+    // `markers.mjs` 的 `ID_RE` 原来只认非负整数 ⇒ 模型照提示词写的
+    // `[reply:#-429124262]` **一次都没生效过**，只在日志里留一行"已丢弃"。
+    // 症状是功能静默消失：机器人照样回话，只是永远不引用。
+    // ★ 为什么这条必须走真 Bridge：`#` 前缀、负号、以及"见过的 id"白名单
+    //   分处三个模块（markers / bridge 的 #seenMsgIds / 提示词渲染），
+    //   纯函数测试只能覆盖第一处。
+    {
+      const { bridge, rpc, sent } = makeBridge({
+        replies: ['就是你说的那个。[reply:#-429124262]'],
+      })
+      await bridge.handleEvent(privateMsg(ADMIN, '这个报错怎么修', -429124262))
+      const prompt = String(rpc.prompts[0] ?? '')
+      check('★★ 来源标注里带上了**负数** id（`#-429124262`）',
+        prompt.includes('#-429124262'), (prompt.match(/\[来自 QQ 私聊[^\]]*\]/) ?? ['(没找到来源标注)'])[0])
+      const m = sent[0] ?? {}
+      check('★★★ 负 id 的引用**真的随消息发出去了**（修前这里是 null）',
+        m.replyTo === '-429124262', JSON.stringify(m))
+      check('★ 标记仍然被剥离（用户看不到 [reply:…]）',
+        !String(m.text ?? '').includes('[reply'), JSON.stringify(m.text))
+      check('★ 正文其余部分照常', String(m.text ?? '').includes('就是你说的那个'))
+    }
+
     // ── ⑩-3 没见过的 id → 丢掉引用、正文照发（不猜）────────────────────────
     {
       const { bridge, sent, logs } = makeBridge({
@@ -724,6 +750,15 @@ async function main() {
       check('★ 正文照发（丢引用不等于丢回复）', String(m.text ?? '').includes('我记得是这个'))
       check('★ 日志里说清了为什么丢掉', logs.some((l) => l.includes('999999') && l.includes('不猜')),
         logs.filter((l) => l.includes('999999')).join('｜') || '（没有日志）')
+    }
+
+    // ── ⑩-3b ★ 负 id 也一样受白名单约束（放宽形状 ≠ 放宽校验）─────────────
+    {
+      const { bridge, sent } = makeBridge({ replies: ['我记得。[reply:#-999999]'] })
+      await bridge.handleEvent(privateMsg(ADMIN, '什么来着', -111))
+      const m = sent[0] ?? {}
+      check('★★ 没见过的**负** id → 照样丢掉引用（只放宽形状，不放宽校验）',
+        m.replyTo === undefined || m.replyTo === null, JSON.stringify(m))
     }
 
     // ── ⑩-4 表情：没配表 → 剥标记但不发；配了表 → 发到**最后一条**上 ────────
