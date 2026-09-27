@@ -1485,6 +1485,10 @@ export class Bridge extends EventTarget {
           shadow,
           fallback: Boolean(r.fallback),
           judged: Boolean(r.judged),
+          // ★ `via`：结论是从哪种形状里解析出来的（json / loose / scan / phrase）。
+          //   不是 `json` 就说明**模型没照提示词的格式写** —— 那是这个问题唯一的观测点，
+          //   放进 oplog 才能在事后回答"提示词到底被遵守了没有"。
+          via: r.via ?? null,
           ms: r.ms,
           reason: r.reason || r.why || '',
           excerpt: String(rendered.text ?? '').slice(0, 80),

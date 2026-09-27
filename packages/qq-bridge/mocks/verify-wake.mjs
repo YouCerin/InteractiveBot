@@ -152,36 +152,99 @@ section('① 判定提示词：装了什么、以及"资料 ≠ 指令"的边界
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-section('② 判定输出解析：认得出就认，认不出就回落（回落 = 放过）')
+section('② 判定输出解析：**四段递降，尽量把结论救回来**（认不出才回落 = 放过）')
 // ══════════════════════════════════════════════════════════════════════════
+//
+// ★★ 0.2.3 用户指出来的问题：「判定输出不是纯 JSON 就整条丢掉」。
+//    原来只有两段（严格 JSON + 宽松 JSON），**认不出就整条丢掉** —— 而"丢掉"的代价
+//    不是报错，是 **fail-open 放过**：消息照常回、行为上看不出异常，但
+//    **那一次模型调用白花了**，而且这个功能在悄悄失效（该沉默的没沉默）。
+//    所以补了 ③ 纯文本配对（**不要求有大括号**）与 ④ 明确短语两段。
+// ★ 安全线：**绝不猜**。同一段文本里两种结论都出现、或一个都没出现 ⇒ 一律 `ok:false`
+//    （回到 fail-open）。猜错成"沉默"会让一个人永远等不到回复，而且**没有任何提示**。
 {
+  // ── 认得出来的形状（第三项是"哪一段救回来的"，via）────────────────────
   const cases = [
-    ['{"answer": true, "reason": "在问我"}', 'answer', true],
-    ['{"answer": false, "reason": "群友闲聊"}', 'silent', true],
-    // ★ 模型稳定输出裸词 JSON（extract.mjs 顶部记着这条实测），所以必须走修复器
-    ['{answer: false, reason: 群友之间在聊天}', 'silent', true],
-    ['```json\n{"answer": false}\n```', 'silent', true],
-    ['好的，我的判断是：{"answer":true,"reason":"答疑"} 就这样', 'answer', true],
-    ['{"verdict": "silent", "reason": "与我无关"}', 'silent', true],
-    ['{"silent": true, "reason": "过场话"}', 'silent', true],
-    ['{"answer": "false"}', 'silent', true],
-    ['{"answer": "TRUE"}', 'answer', true],
+    ['{"answer": true, "reason": "在问我"}', 'answer', 'json'],
+    ['{"answer": false, "reason": "群友闲聊"}', 'silent', 'json'],
+    // 裸词 JSON（extract.mjs 顶部记着的那条实测事实）
+    ['{answer: false, reason: 群友之间在聊天}', 'silent', 'loose'],
+    ['```json\n{"answer": false}\n```', 'silent', 'loose'],
+    ['好的，我的判断是：{"answer":true,"reason":"答疑"} 就这样', 'answer', 'loose'],
+    // 同义结论键
+    ['{"verdict": "silent", "reason": "与我无关"}', 'silent', 'json'],
+    ['{"silent": true, "reason": "过场话"}', 'silent', 'json'],
+    ['{"decision": "answer"}', 'answer', 'json'],
+    ['{"should_reply": false}', 'silent', 'json'],
+    ['{"reply": "no"}', 'silent', 'json'],
+    ['{"respond": "yes"}', 'answer', 'json'],
+    // 值的写法：字符串布尔 / 数字 / 中文 / 大小写 / 中文键
+    ['{"answer": "false"}', 'silent', 'json'],
+    ['{"answer": "TRUE"}', 'answer', 'json'],
+    ['{"answer": 0}', 'silent', 'json'],
+    ['{"answer": 1}', 'answer', 'json'],
+    ['{"answer": "否", "reason": "不是跟我说话"}', 'silent', 'json'],
+    ['{"answer": "是"}', 'answer', 'json'],
+    ['{"Answer": true}', 'answer', 'json'],
+    ['{"应回答": true}', 'answer', 'json'],
+    ['{"沉默": true}', 'silent', 'json'],
+    // ★★ ③ 没有大括号：`parseLooseJson` 要求出现 `{` 或 `[`，这类以前**整条丢掉**
+    ['answer: true, reason: 在跟我说话', 'answer', 'scan'],
+    ['silent: true', 'silent', 'scan'],
+    ['verdict = silent', 'silent', 'scan'],
+    // ★★ ④ 正文里明说了结论（两边不冲突时才用）
+    ['应当沉默', 'silent', 'phrase'],
+    ['这条应该回答，他在问我', 'answer', 'phrase'],
+    ['答案：不应该回答，他在跟别人说话', 'silent', 'phrase'],
   ]
-  for (const [raw, want, ok] of cases) {
+  for (const [raw, want, via] of cases) {
     const r = parseJudgeVerdict(raw)
-    check(`解析 ${JSON.stringify(raw).slice(0, 46)} → ${want}`, r.ok === ok && r.verdict === want, `${r.ok}/${r.verdict}/${r.why ?? ''}`)
+    check(
+      `解析 ${JSON.stringify(raw).slice(0, 38)} → ${want}`,
+      r.ok === true && r.verdict === want && r.via === via,
+      `${r.ok}/${r.verdict}/via=${r.via}${r.ok ? '' : ` ${r.why}`}`,
+    )
   }
+
+  // ── ★★ 认不出 / 自相矛盾的**一律不猜**（回到 fail-open 的"放过"）───────
   const bad = [
-    '我不知道',
-    '',
-    '{"reason":"没给结论"}',
-    '[1,2,3]',
-    '{"answer": "maybe"}',
+    ['我哪知道', '完全看不出结论'],
+    ['', '空输出'],
+    ['{"reason":"没给结论"}', 'JSON 在、但没有结论字段'],
+    ['[1,2,3]', '数组不是判定对象'],
+    ['{"answer": "maybe"}', '值认不出'],
+    ['{"answer": true, "silent": true}', '★ 两种结论同时出现'],
+    ['判定应当沉默，但也可能应当回答', '★ 正文里两种短语都有'],
   ]
-  for (const raw of bad) {
+  for (const [raw, why] of bad) {
     const r = parseJudgeVerdict(raw)
-    check(`认不出的输出 → ok:false（而不是猜一个结论）：${JSON.stringify(raw).slice(0, 24)}`, r.ok === false, r.why ?? '')
+    check(`认不出就不猜 → ok:false（${why}）`, r.ok === false, `${r.ok}/${r.verdict} ${r.why ?? ''}`)
   }
+  check('★ 矛盾时给出的是**说清矛盾**的理由（不是含糊的"解析失败"）',
+    /互相矛盾/.test(parseJudgeVerdict('{"answer": true, "silent": true}').why ?? ''))
+
+  // ── ★★★ 否定词**绝不能被吃掉**（这两条是测试当场抓出来的两个真 bug）──────
+  //
+  // ① 短语兜底原为 `应该回答` 会命中 `不应该回答` ⇒ 结论正好反了。
+  // ② 配对扫描原为不要求"键是一个完整的词"，于是 `不应该回答: true` 里的
+  //    `应该回答` 被当成键 ⇒ 同样反了。
+  // 两处都补了边界（短语用 `(?<![不非])`，配对要求键左边不是汉字/字母/数字）。
+  check('★★ `不应该回答` 判成 **silent**（否定词不许被吃掉）',
+    parseJudgeVerdict('不应该回答，他在跟别人说话').verdict === 'silent',
+    JSON.stringify(parseJudgeVerdict('不应该回答，他在跟别人说话')))
+  check('★★ `不应该回答: true` 也判成 **silent**（配对扫描要求键是完整的词）',
+    parseJudgeVerdict('不应该回答: true').verdict === 'silent',
+    JSON.stringify(parseJudgeVerdict('不应该回答: true')))
+  check('★ 对照：`应该回答` 仍然是 **answer**（别把边界修得过严）',
+    parseJudgeVerdict('应该回答，他在问我').verdict === 'answer')
+  check('★ 对照：`answer: true` 仍然是 **answer**',
+    parseJudgeVerdict('answer: true').verdict === 'answer' && parseJudgeVerdict('answer: true').via === 'scan')
+
+  // ── 理由的取法 ────────────────────────────────────────────────────────
+  check('理由优先取对象里的 reason', parseJudgeVerdict('{"answer":false,"reason":"群友闲聊"}').reason === '群友闲聊')
+  check('  中文键也认（原因/理由/说明）', parseJudgeVerdict('{"answer":true,"原因":"在问我"}').reason === '在问我')
+  check('  没有 reason 字段时从文本里扫一个', parseJudgeVerdict('verdict: silent, reason: 与我无关').reason === '与我无关')
+  check('  实在没有就是空串（不编）', parseJudgeVerdict('{"answer":true}').reason === '')
   check('理由被截断并压成一行', parseJudgeVerdict(`{"answer":false,"reason":"${'啊'.repeat(300)}"}`).reason.length <= 121)
 }
 

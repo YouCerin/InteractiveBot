@@ -247,37 +247,227 @@ export function buildJudgePrompt({
 }
 
 /**
- * 解析判定输出。
+ * 判定输出里"结论字段"的名字 → 它的语义。
  *
- * ★ 为什么不能直接 `JSON.parse`：实测（`src/extract.mjs` 顶部记着）模型**稳定**
- *   输出无引号的"裸词 JSON"，强化措辞无效 ⇒ 一律走 `parseLooseJson`。
- * ★ 为什么容忍多种形状：小模型有时写 `{"verdict":"silent"}`、有时写
- *   `{"silent":true}`。**认得出就认**，认不出才回落 —— 回落是"放过"，
- *   而"放过"是安全的那个方向。
+ * ★ 为什么要认这么多名字：**模型不会只写 `answer`**。真机上见过 `verdict` / `silent`，
+ *   而中文提示词下它还可能写 `回答` / `沉默` / `结论`，或者用 `reply` / `respond` /
+ *   `should_answer` 这类同义键。认不出那个键的后果**不是报错**，而是整条判定被
+ *   当成"没判出来"丢掉（fail-open 放过）—— 于是**钱花了、结论没了**，而且从行为上
+ *   完全看不出来（消息照常回）。
+ *
+ * 语义三档：
+ *   · `answer`：值 true(是/1/yes) = 回答，false = 沉默；
+ *   · `silent`：值 true = **沉默**（语义相反，必须分开）；
+ *   · `enum`：值是 `answer` / `silent` 这样的字样。
+ */
+const DECISION_KEYS = {
+  answer: 'answer',
+  reply: 'answer',
+  respond: 'answer',
+  response: 'answer',
+  should_answer: 'answer',
+  should_reply: 'answer',
+  should_respond: 'answer',
+  should_speak: 'answer',
+  is_answer: 'answer',
+  speak: 'answer',
+  回答: 'answer',
+  应答: 'answer',
+  应回答: 'answer',
+  silent: 'silent',
+  should_silent: 'silent',
+  be_silent: 'silent',
+  is_silent: 'silent',
+  沉默: 'silent',
+  应沉默: 'silent',
+  verdict: 'enum',
+  decision: 'enum',
+  result: 'enum',
+  conclusion: 'enum',
+  结论: 'enum',
+  判定: 'enum',
+  答案: 'enum',
+}
+
+/** "回答"侧的字样（大小写不敏感；中文一律去掉两侧空白后精确比对）。 */
+const TRUTHY_WORDS = new Set(['true', '1', 'yes', 'y', 'on', '是', '对', '真', '回答', '应答', '应该'])
+/** "沉默"侧的字样。 */
+const FALSY_WORDS = new Set(['false', '0', 'no', 'n', 'off', '否', '不', '假', '沉默', '不用说', '不该'])
+/** `enum` 类键的值 → 结论。 */
+const ENUM_ANSWER = new Set(['answer', 'reply', 'respond', 'response', 'true', 'yes', '回答', '应答'])
+const ENUM_SILENT = new Set(['silent', 'ignore', 'false', 'no', '沉默', '忽略', '不回'])
+
+/** 去引号 + 去首尾空白 + 转小写。 */
+function normToken(v) {
+  return String(v ?? '')
+    .trim()
+    .replace(/^["'「『]+|["'」』]+$/g, '')
+    .trim()
+    .toLowerCase()
+}
+
+/** 一个键值对 → `'answer'` / `'silent'` / `null`（认不出）。 */
+function classifyPair(key, value) {
+  const kind = DECISION_KEYS[String(key ?? '').trim().toLowerCase()]
+  if (!kind) return null
+  const t = normToken(value)
+  if (kind === 'enum') {
+    if (ENUM_ANSWER.has(t)) return VERDICT.ANSWER
+    if (ENUM_SILENT.has(t)) return VERDICT.SILENT
+    return null
+  }
+  const truthy = TRUTHY_WORDS.has(t)
+  const falsy = FALSY_WORDS.has(t)
+  if (!truthy && !falsy) return null
+  if (kind === 'answer') return truthy ? VERDICT.ANSWER : VERDICT.SILENT
+  // kind === 'silent'：值 true 表示"要沉默"，语义与上面相反
+  return truthy ? VERDICT.SILENT : VERDICT.ANSWER
+}
+
+/**
+ * 从**一段纯文本**里扫 `键 冒号/等号 值` 配对（不需要它是合法 JSON）。
+ *
+ * 为什么需要它：`parseLooseJson` 要求文本里出现 `{` 或 `[` —— 而模型完全可能只写
+ *   `answer: true, reason: 在跟我说话`（**没有大括号**）。那种输出以前**整条丢掉**。
+ */
+function scanPairs(text) {
+  const src = String(text ?? '')
+  const out = []
+  // 键：英文标识符或 2~4 个汉字；分隔符接受 `:` / `：` / `=`
+  //
+  // ★★ 前面那个 `(?:^|[^A-Za-z0-9_\u4e00-\u9fff])` **不是装饰** —— 它要求键
+  //   左边不是字母/数字/汉字，也就是**要求键是一个完整的词**。
+  //   没有它的后果刚被测试抓出来：`不应该回答，他在跟别人说话` 里的 `应该回答`
+  //   会被当成一个键，于是**否定词被吃掉**、结论正好反了。
+  //   （中文没有词边界，所以只能自己用"前一个字符不能是汉字"来近似。）
+  const re =
+    /(?:^|[^A-Za-z0-9_\u4e00-\u9fff])["'「『]?\s*([A-Za-z_][A-Za-z0-9_]{1,23}|[\u4e00-\u9fff]{2,4})\s*["'」』]?\s*[:：=]\s*/g
+  let m
+  while ((m = re.exec(src)) !== null) {
+    // 值：从分隔符后面读一个 token（遇分隔符/空白/引号/括号即停）
+    const rest = src.slice(re.lastIndex)
+    const v = /^\s*["'「『]?\s*([A-Za-z\u4e00-\u9fff0-9_]{1,12})/.exec(rest)
+    out.push({ key: m[1], value: v ? v[1] : '' })
+    if (out.length >= 40) break // 防御：畸形输入不许把这里变成热点
+  }
+  return out
+}
+
+/**
+ * 只在"文字里明说了"时才敢用的兜底短语（两边都不重叠，避免自造歧义）。
+ *
+ * ★★ 那个 `(?<![不非])` 是**必需的**：没有它，`不应该回答` 会命中 `应该回答`
+ *    —— 否定词被吃掉，结论正好反了。这条同样是测试抓出来的。
+ */
+const SILENT_PHRASES =
+  /(?<![不非])(?:判定为沉默|应当沉默|应该沉默|建议沉默|保持沉默|不应回答|不需要回答|不必回答|无需回答|不该回答|不应该回答)/
+const ANSWER_PHRASES =
+  /(?<![不非])(?:判定为回答|应当回答|应该回答|建议回答|需要回答|值得回应|应当回应|应该回应)/
+
+/**
+ * 解析判定输出 —— **四段递降，尽量把结论救回来**（0.2.3 加强）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么必须"尽量救"（这条是用户指出来的）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 原来只有前两段（严格 JSON + 宽松 JSON）。**认不出就整条丢掉** —— 而"丢掉"的代价
+ * 不是报错，是 **fail-open 放过**：消息照常回、行为上看不出任何异常，但
+ * **那一次模型调用白花了**，而且这个功能在悄悄失效（该沉默的没沉默）。
+ *
+ * 所以现在是四段：
+ *   ① `json`   —— 严格 JSON（唯一"模型照格式写了"的证据）；
+ *   ② `loose`  —— 宽松修复（裸键裸值 / 代码围栏 / 前后有废话）；
+ *   ③ `scan`   —— **不要求有大括号**：直接扫 `answer: true` 这样的配对；
+ *   ④ `phrase` —— 只在正文里**明说了**"应当沉默/应当回答"这类话时才用。
+ *
+ * ★ 安全线：第 ④ 段**只在两边不冲突时**才给结论；如果同一段文本里两种都出现，
+ *   或者一个都没出现 —— 一律 `ok:false`（回到 fail-open 的"放过"）。
+ *   **绝不猜**：猜错成"沉默"会让一个人永远等不到回复，而那是**没有提示**的失败。
  *
  * @param {string} raw
- * @returns {{ok: boolean, verdict?: string, reason?: string, why?: string}}
+ * @returns {{ok: boolean, verdict?: string, reason?: string, via?: string, why?: string}}
+ *   `via` 如实标出结论是哪一段救回来的（`json` 之外的都说明"模型没照格式写"，值得盯）。
  */
 export function parseJudgeVerdict(raw) {
-  const obj = parseLooseJson(raw)
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-    return { ok: false, why: '判定输出解析不出 JSON 对象' }
-  }
-  const reason = typeof obj.reason === 'string' ? oneLine(obj.reason, 120) : ''
+  const text = String(raw ?? '')
+  let obj = null
+  let via = null
 
-  let answer = null
-  if (typeof obj.answer === 'boolean') answer = obj.answer
-  else if (typeof obj.answer === 'string' && /^(true|false)$/i.test(obj.answer.trim())) {
-    answer = obj.answer.trim().toLowerCase() === 'true'
-  } else if (typeof obj.silent === 'boolean') answer = !obj.silent
-  else if (typeof obj.verdict === 'string') {
-    const v = obj.verdict.trim().toLowerCase()
-    if (v === VERDICT.ANSWER) answer = true
-    else if (v === VERDICT.SILENT) answer = false
+  // ── ①② JSON / 宽松 JSON ────────────────────────────────────────────────
+  try {
+    const strict = JSON.parse(text.trim())
+    if (strict && typeof strict === 'object' && !Array.isArray(strict)) {
+      obj = strict
+      via = 'json'
+    }
+  } catch {
+    /* 落到宽松解析 */
+  }
+  if (!obj) {
+    const loose = parseLooseJson(text)
+    if (loose && typeof loose === 'object' && !Array.isArray(loose)) {
+      obj = loose
+      via = 'loose'
+    }
   }
 
-  if (answer === null) return { ok: false, why: '判定输出里没有能认出来的 answer 字段', reason }
-  return { ok: true, verdict: answer ? VERDICT.ANSWER : VERDICT.SILENT, reason }
+  if (obj) {
+    // 对象里挨个键看一遍（键名大小写不敏感，另外把 snake_case 与连字符统一）
+    const hits = new Set()
+    for (const [k, v] of Object.entries(obj)) {
+      const r = classifyPair(String(k).replace(/[-\s]/g, '_'), typeof v === 'string' || typeof v === 'number' ? v : String(v))
+      if (r) hits.add(r)
+    }
+    if (hits.size === 1) {
+      return { ok: true, verdict: [...hits][0], reason: pickReason(obj, text), via }
+    }
+    if (hits.size > 1) {
+      return { ok: false, why: '判定输出里同时出现了"回答"与"沉默"两种结论（互相矛盾），不敢猜', via }
+    }
+    // 对象在、但结论字段认不出 ⇒ 不放弃，继续往下扫（③ 会在原文里再找一遍）
+  }
+
+  // ── ③ 纯文本配对扫描（**不要求有大括号**）───────────────────────────────
+  const hits = new Set()
+  for (const { key, value } of scanPairs(text)) {
+    const r = classifyPair(key, value)
+    if (r) hits.add(r)
+  }
+  if (hits.size === 1) {
+    return { ok: true, verdict: [...hits][0], reason: pickReason(null, text), via: via ?? 'scan' }
+  }
+  if (hits.size > 1) {
+    return { ok: false, why: '判定输出里同时出现了"回答"与"沉默"两种结论（互相矛盾），不敢猜', via: via ?? 'scan' }
+  }
+
+  // ── ④ 只在"明说了"时才敢用的短语兜底 ───────────────────────────────────
+  const saysSilent = SILENT_PHRASES.test(text)
+  const saysAnswer = ANSWER_PHRASES.test(text)
+  if (saysSilent && !saysAnswer) {
+    return { ok: true, verdict: VERDICT.SILENT, reason: pickReason(null, text), via: 'phrase' }
+  }
+  if (saysAnswer && !saysSilent) {
+    return { ok: true, verdict: VERDICT.ANSWER, reason: pickReason(null, text), via: 'phrase' }
+  }
+  if (saysSilent && saysAnswer) {
+    return { ok: false, why: '判定输出里同时出现了"应当沉默"与"应当回答"，互相矛盾，不敢猜', via: 'phrase' }
+  }
+  return { ok: false, why: obj ? '判定输出里没有能认出来的结论字段' : '判定输出解析不出 JSON 对象，也没从文字里看出结论' }
+}
+
+/** 取理由：先看对象里的 `reason`/`原因`/`理由`，没有就从文本里扫一个。 */
+function pickReason(obj, text) {
+  const KEYS = ['reason', 'rationale', 'why', 'explanation', '原因', '理由', '说明']
+  if (obj) {
+    for (const k of Object.keys(obj)) {
+      const norm = String(k).trim().toLowerCase()
+      if (KEYS.includes(norm) && typeof obj[k] === 'string') return oneLine(obj[k], 120)
+    }
+  }
+  for (const { key, value } of scanPairs(text)) {
+    if (KEYS.includes(String(key).trim().toLowerCase()) && value) return oneLine(value, 120)
+  }
+  return ''
 }
 
 /**
@@ -413,12 +603,24 @@ export function createWakeJudge({
       log(`[wake] 判定输出认不出来（按放过处理）：${parsed.why}｜原文前 200 字：${String(r.text).slice(0, 200)}`)
       return answer(parsed.why, { fallback: true })
     }
+    // ★★ 模型没照格式写时**必须留下证据**：`via !== 'json'` 说明这一段结论是从
+    //    宽松 JSON / 纯文本配对 / 明确短语里救回来的。以前这件事是完全隐形的 ——
+    //    救不回来就静默 fail-open，救回来了也没人说，于是"提示词没被遵守"这个
+    //    信号**永远不会浮出水面**（也就永远没人去改提示词）。
+    if (parsed.via && parsed.via !== 'json') {
+      log(
+        `[wake] ⚠️ 判定输出不是标准 JSON（via=${parsed.via}），已救回结论=${parsed.verdict}` +
+          `｜原文前 200 字：${String(r.text).slice(0, 200)}`,
+      )
+    }
     return {
       verdict: parsed.verdict,
       reason: parsed.reason,
       judged: true,
       fallback: false,
       ms: now() - t0,
+      // `via` 一路带出去（进 oplog 行）：它是"模型有没有照格式写"的唯一观测点
+      via: parsed.via,
       // token 用量只透出去供记日志 —— **不进 `usage` 账本**（那是按回合的，
       // 详见 bridge.mjs 里的说明）。如实带出来，免得以后有人以为它被记过账。
       usage: r.usage ?? null,
