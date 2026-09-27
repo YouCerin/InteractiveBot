@@ -215,6 +215,50 @@ section('① 全仓库文本文件：不许 UTF-16 / U+FFFD / 误加的 BOM / �
   if (precautionary.length) console.log(`   ℹ️  豁免·预防性（暂时没命中，但这类文件故意引用样本）：${precautionary.join(', ')}`)
   if (batBom.length) console.log(`   ℹ️  .bat 带 UTF-8 BOM（历史用法，豁免不判红）：${batBom.join(', ')}`)
 
+  // ★★ ①-b  `.bat` / `.cmd` **必须纯 ASCII**（0.2.4 新增；这条是被真事故逼出来的）
+  //
+  // 为什么单独一条、而且必须是**硬**判据：
+  //   cmd 用**系统代码页**（中文 Windows = GBK）解析批处理文件，而本仓库的文件是 UTF-8。
+  //   一个中文字符的字节被当成 GBK 读时，**行尾会被吞掉** —— cmd 于是把下一行当成
+  //   这一行的一部分，整个 if-block 从中间断开。症状不是"报错停住"，而是：
+  //       'em' is not recognized as an internal or external command
+  //       'his' is not recognized as an internal or external command
+  //   …十几行碎片，而**真正的那条命令根本没跑**（启动器看起来"什么都没做"）。
+  //
+  // 这个坑本仓库踩过三次（`创建带图标的快捷方式.bat` / `scripts/build-tools/npm.cmd` /
+  //   0.2.4 的 `start.bat`）。第三次的代价是：`start.bat` 的中文注释让 **0.2.4 的
+  //   启动链整个坏掉**（`启动机器人.bat --check` 那条分支直接不可用），而
+  //   51 套离线测试全绿 —— 因为在那之前**没有任何东西**在检查这件事，
+  //   `AGENT.md` 里那句"`.bat` 必须纯 ASCII"只是文档里的一句话。
+  //   ∴ 现在它是可执行的判据（`AGENT.md` 第 11 条）。
+  //
+  // ⚠️ 判据是"**任何**非 ASCII 字节"（不是"中文字符"）：GBK 里行尾字节 0x5C 之类的
+  //   边界情况太绕，而"批处理文件纯 ASCII"本来就没有代价（要解释就写在 .md / .mjs 里）。
+  const batNonAscii = []
+  for (const abs of walk(REPO_ROOT)) {
+    const rel = relative(REPO_ROOT, abs).split('\\').join('/')
+    if (!/\.(bat|cmd)$/i.test(rel)) continue
+    const buf = readFileSync(abs)
+    const bad = []
+    for (let i = 0; i < buf.length; i += 1) if (buf[i] > 127) bad.push(i)
+    if (bad.length) {
+      // 报出**第一处**所在的整行，让人一眼看到是哪句话写坏的（而不是只知道有 N 个字节）
+      const text = buf.toString('utf8')
+      const upto = buf.subarray(0, bad[0]).toString('utf8')
+      const lineNo = upto.split(/\r?\n/).length
+      const lineText = text.split(/\r?\n/)[lineNo - 1] ?? ''
+      batNonAscii.push(`${rel}(第 ${lineNo} 行，${bad.length} 个字节：${lineText.trim().slice(0, 60)})`)
+    }
+  }
+  check(
+    '★★ 所有 .bat / .cmd 都是纯 ASCII（cmd 按系统代码页解析，非 ASCII 会吞掉换行）',
+    batNonAscii.length === 0,
+    batNonAscii.length
+      ? `${batNonAscii.join('；')}\n      —— 把中文/全角符号**删掉或改写成 ASCII**（要解释就写在 .md/.mjs 里）。` +
+        '\n      症状不是"报错停住"，而是十几行 `\'em\' is not recognized...` 且真正的命令没跑。'
+      : '（0 个）',
+  )
+
   // 豁免清单本身也要有纪律：条目必须存在、必须写理由。
   check(
     '★ 乱码豁免清单里的文件都真实存在且写了理由',

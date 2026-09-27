@@ -272,9 +272,13 @@ InteractBot-<版本>-win-x64/
 ├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
 ├── 启动机器人.bat           ← ★ 用户的入口：有 app\InteractBot.exe 就起桌面程序
 ├── 创建带图标的快捷方式.bat  ← 双击生成 QQbot.lnk（指向 .bat）与 InteractBot.lnk（指向 exe）
-├── 检查配置.bat             ← 给小白：双击 = start.bat --check
-├── 体检.bat                 ← 给小白：双击 = start.bat --doctor（真连一次 SnowLuma）
 ├── start.bat                ← 脚本入口（桌面程序不在时的老路子；有它时不再开浏览器）
+├── backup-commands/         ← ★ 0.2.4：包根只留"真要双击"的那几个
+│   ├── 检查配置.bat          = start.bat --check（界面里也有：概览页「检查配置」）
+│   ├── 体检.bat              = start.bat --doctor（界面里也有：状态条「体检」）
+│   └── 读我.txt              为什么还留着它们（不经过界面与 HTTP，所以界面打不开时唯一能用）
+│   ⚠️ 目录名必须是 ASCII：中文名目录 + `cpSync(..., {recursive:true})` 会让进程崩掉
+│      （实测 Access Violation），组装会半途而废。文件名是中文没问题
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
 ├── prices.json  package.json
@@ -292,6 +296,19 @@ InteractBot-<版本>-win-x64/
     ├── node/node.exe       85.6 MB
     └── node_modules/ws/
 ```
+
+> ★★ **包根只允许三个 `.bat`**（`启动机器人.bat` / `创建带图标的快捷方式.bat` / `start.bat`）。
+> 用户 0.2.4 的要求：UI 里已有同样按钮的东西别摆在最显眼处 —— 两个诊断入口因此收进了
+> `backup-commands/`。**收起来不是删掉**：它们不经过界面、也不经过桥接的
+> HTTP 接口，所以恰恰在"控制台打不开 / 桥接起不来"时是唯一能拿到诊断的路。
+> `check-release-package.mjs` 有一条断言盯着"包根不许出现别的 `.bat`"，
+> 防止它们被手工"图方便"拷回包根。
+>
+> ⚠️ 那个目录名**必须是纯 ASCII**（`backup-commands`）。实测（Node v24.9.0 / Windows）
+> `cpSync(中文名目录, dst, {recursive:true})` 会让**整个组装进程** Access Violation 崩掉
+> （`-1073740791`），没有任何异常可捕获 ⇒ 组装**静默半途而废**（目录只拷了一半）。
+> 第一版叫「备用命令（界面起不来时用）」，正好踩中。这是 `AGENT.md` 第 8 条
+> （`rmSync` 删中文名**文件**会崩）的兄弟：**目录**名 + `cpSync`。文件名里的中文没事。
 
 **★ 老版本不要删**：`_release/` 里每个版本各留一份目录
 （旧版本与新版本**并存**，文件名前缀一样、只有版本号不同），

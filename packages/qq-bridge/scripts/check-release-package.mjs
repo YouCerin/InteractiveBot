@@ -38,8 +38,6 @@ const rel = (p) => relative(root, p).replace(/\\/g, '/')
 const MUST_EXIST = [
   '启动机器人.bat',
   '先读我-首次使用.txt',
-  '检查配置.bat',
-  '体检.bat',
   '创建带图标的快捷方式.bat',
   'start.bat',
   'config.json',
@@ -51,6 +49,12 @@ const MUST_EXIST = [
   'config-ui/dist/index.html',
   'vendor/node/node.exe',
   'vendor/node_modules/ws/index.js',
+  // ★ 0.2.4：两个诊断入口收进了子目录（包根只留用户真要双击的那几个）。
+  //   ⚠️ 目录名是 `backup-commands`（纯 ASCII）—— 中文目录名会让 `cpSync(..., {recursive:true})`
+  //   把进程崩掉（见 assemble-release.mjs 里那段注释）。改这个名字请先读那里。
+  'backup-commands/检查配置.bat',
+  'backup-commands/体检.bat',
+  'backup-commands/读我.txt',
 ]
 for (const f of MUST_EXIST) {
   if (!files.some((p) => rel(p) === f)) problems.push(`缺少必需文件：${f}`)
@@ -96,6 +100,28 @@ for (const f of MUST_EXIST) {
       }
     }
   }
+}
+
+// ── ①-c ★ 包根只该有"用户真要双击"的那几个 .bat（0.2.4）────────────────
+//
+// 用户 0.2.4 的要求：UI 里已有同样按钮的东西别摆在包根。两个诊断入口因此收进了
+// `backup-commands/`。这条断言防的是**它们被悄悄放回包根**（比如有人
+// 手工拷一份 "方便使用"）—— 那会让"包根只有两个入口"这件事静默地不成立。
+{
+  const ROOT_BATS = ['启动机器人.bat', '创建带图标的快捷方式.bat', 'start.bat']
+  const bats = files.map((p) => rel(p)).filter((r) => r.toLowerCase().endsWith('.bat') && !r.includes('/'))
+  for (const b of bats) {
+    if (!ROOT_BATS.includes(b)) {
+      problems.push(
+        `包根不该有这个 .bat：${b}\n` +
+          `      （包根只留：${ROOT_BATS.join(' / ')}；诊断类的收在「backup-commands/」里）`,
+      )
+    }
+  }
+  for (const b of ROOT_BATS) {
+    if (!bats.includes(b)) problems.push(`包根缺少入口：${b}`)
+  }
+  notes.push(`包根入口：${bats.join('、')}（其余 .bat 都在「备用命令」子目录里）`)
 }
 
 // ── ①-b ★ 界面产物的**构建溯源标记**必须在 ──────────────────────────────

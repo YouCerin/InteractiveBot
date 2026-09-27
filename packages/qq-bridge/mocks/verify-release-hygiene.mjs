@@ -158,6 +158,133 @@ section('⑤ 接线：发布脚本**真的**用了这些检查（纯函数测过
     /VENDOR_PKG_ALLOW\s*=\s*\/\^vendor\\\/node_modules/.test(checker) && /\(ws\|undici\)/.test(checker))
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+section('⑥ ★★ 拷贝清单里的目录名必须是纯 ASCII（中文名会让组装**崩掉**）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 为什么值得一条硬断言：实测（Node v24.9.0 / Windows）
+//     cpSync('中文名目录', dst, { recursive: true })  ⇒ **进程 Access Violation 崩掉**
+//     （退出码 -1073740791 = STATUS_STACK_BUFFER_OVERRUN），**没有可捕获的异常**。
+// 后果不是"报错停下"，而是组装**静默半途而废**：日志停在上一项、目录只拷了一半，
+// 而脚本自己以为还在继续。0.2.4 第一次组装就是这样失败的（目录名原本叫
+// 「备用命令（界面起不来时用）」）。
+//
+// ⚠️ 这是 `AGENT.md` 第 8 条的**兄弟**：那条记的是"`rmSync` 删中文名**文件**会崩"。
+//   同族、同退出码 —— 当初只记了文件那一半，所以这里补上目录这一半，并且**让它可执行**。
+//
+// ★ 判据用的是**实际读出来的清单**（不是拿正则扫源码）：扫源码只能证明"有人写过
+//   一个 ASCII 名字"，证明不了"清单里现在没有非 ASCII 项"。
+{
+  const scriptPath = join(PKG_ROOT, 'scripts', 'assemble-release.mjs')
+  const text = readFileSync(scriptPath, 'utf8')
+
+  /**
+   * 从 `const COPY_DIRS = [ … ]` 里取出**每一项**（项可能是 `'src'`，
+   * 也可能是 `join('vendor','node')`）。
+   *
+   * ⚠️ 两个已经踩过的坑（都让提取结果"看起来对、其实少了一项"）：
+   *   ① 第一版用 `/'([^']+)'/g` 抓所有引号里的东西 —— `join('a','b')` 被拆成两个
+   *      "目录名"，断言随即误报"dist / node / ws 不存在"；
+   *   ② 第二版按括号配平切项，但**没有跳过注释** —— 而那段注释里恰好写着
+   *      `{recursive:true}`，那个 `}` 被当成结构收尾 ⇒ 数组提前结束 ⇒
+   *      **最后一项（backup-commands）被静默漏掉**。这条断言原本要防的正是它。
+   *   ∴ 现在按**括号配平 + 跳过字符串与注释**来切，并且把项数列出来接受人工核对。
+   */
+  function extractDirItems (src) {
+    const start = src.indexOf('const COPY_DIRS = [')
+    if (start < 0) return null
+    const open = src.indexOf('[', start)
+
+    /** i 落在注释开头时返回注释结束下标，否则返回 -1。 */
+    const skipComment = (s, i) => {
+      if (s[i] !== '/' || s[i + 1] === undefined) return -1
+      if (s[i + 1] === '/') {
+        const nl = s.indexOf('\n', i)
+        return nl < 0 ? s.length - 1 : nl
+      }
+      if (s[i + 1] === '*') {
+        const endC = s.indexOf('*/', i + 2)
+        return endC < 0 ? s.length - 1 : endC + 1
+      }
+      return -1
+    }
+
+    let depth = 0
+    let end = -1
+    for (let i = open; i < src.length; i += 1) {
+      const c = src[i]
+      if (c === "'" || c === '"' || c === '`') {
+        const quote = c
+        for (i += 1; i < src.length; i += 1) {
+          if (src[i] === '\\') { i += 1; continue }
+          if (src[i] === quote) break
+        }
+        continue
+      }
+      const cm = skipComment(src, i)
+      if (cm >= 0) { i = cm; continue }
+      if (c === '[') depth += 1
+      else if (c === ']') {
+        depth -= 1
+        if (depth === 0) { end = i; break }
+      }
+    }
+    if (end < 0) return null
+
+    // 按**顶层逗号**切项（跳过字符串与注释）
+    const body = src.slice(open + 1, end)
+    const items = []
+    let buf = ''
+    let d2 = 0
+    for (let i = 0; i < body.length; i += 1) {
+      const c = body[i]
+      if (c === "'" || c === '"' || c === '`') {
+        const quote = c
+        buf += c
+        for (i += 1; i < body.length; i += 1) {
+          buf += body[i]
+          if (body[i] === '\\') { i += 1; buf += body[i]; continue }
+          if (body[i] === quote) break
+        }
+        continue
+      }
+      const cm = skipComment(body, i)
+      if (cm >= 0) { i = cm; buf += '\n'; continue }
+      if (c === '(' || c === '[' || c === '{') d2 += 1
+      if (c === ')' || c === ']' || c === '}') d2 -= 1
+      if (c === ',' && d2 === 0) { items.push(buf.trim()); buf = ''; continue }
+      buf += c
+    }
+    if (buf.trim()) items.push(buf.trim())
+
+    // 每一项归一化成"相对包根的路径"：`join('a','b')` → `a/b`
+    return items
+      .filter((it) => it && !it.startsWith('//'))
+      .map((it) => {
+        const parts = [...it.matchAll(/'([^']*)'/g)].map((x) => x[1])
+        return parts.filter(Boolean).join('/')
+      })
+      .filter(Boolean)
+  }
+
+  const items = extractDirItems(text)
+  check('能从发布脚本里读出 COPY_DIRS 清单', items !== null)
+  if (items) {
+    check(`★ 清单里读到 ${items.length} 个目录项`, items.length >= 8, items.join('、'))
+    const nonAscii = items.filter((it) => [...it].some((c) => c.charCodeAt(0) > 127))
+    check(
+      '★★ 清单里的目录名都是纯 ASCII（中文名 + cpSync 递归会让进程崩掉，且没有异常可捕获）',
+      nonAscii.length === 0,
+      nonAscii.length
+        ? `非 ASCII：${nonAscii.join('、')}\n      改成 ASCII 名字（文件名可以是中文，目录名不行）`
+        : '（0 个）',
+    )
+    // 顺带：清单里的目录都得真的在磁盘上（写错名字要到组装第③步才报，太晚）
+    const missing = items.filter((it) => !existsSync(join(PKG_ROOT, it)))
+    check('★ 清单里的目录在磁盘上都存在', missing.length === 0, missing.join('、'))
+  }
+}
+
 console.log('')
 if (failed === 0) {
   console.log(`🎉 发布与升级卫生检查全部通过（${passed} 项）`)

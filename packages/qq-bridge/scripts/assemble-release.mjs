@@ -57,16 +57,38 @@ const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 // ★ `personas` 必须在清单里（0.2.2）：它是**出厂默认那两套人设**的文件。
 //   漏了它的后果是「发布包里一套人设都没有」—— 界面人设栏空着，而且**不会报错**
 //   （启动时的 `ensureDefaultPersonas` 只在人员没动过手时补默认，用户自己建过就什么都不补）。
-const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
-/** 要单文件拷贝的（相对包根）。★ `启动机器人.bat` 等三个入口**必须**在这里 —— 上次就是漏了它们。 */
+const COPY_DIRS = [
+  'src',
+  'mcp',
+  'assets',
+  'skills',
+  'personas',
+  join('config-ui', 'dist'),
+  join('vendor', 'node'),
+  join('vendor', 'node_modules', 'ws'),
+  // ★ 0.2.4：两个"界面里已有同样按钮"的诊断入口被收进了这个子目录
+  //   （用户要求：包根别摆那么多东西）。**收起来 ≠ 删掉**：
+  //   它们不经过界面也不经过桥接的 HTTP 接口，所以恰恰在"控制台打不开 /
+  //   桥接起不来"时是唯一能拿到诊断的路。理由写在那个目录自己的 读我.txt 里。
+  //
+  // ★★ 目录名**必须是纯 ASCII** —— 这不是风格问题，是**会崩**：
+  //   实测（Node v24.9.0 / Windows）`cpSync(中文名目录, dst, {recursive:true})`
+  //   让**整个进程**以 Access Violation 崩掉（退出码 -1073740791 /
+  //   STATUS_STACK_BUFFER_OVERRUN），没有任何异常可捕获 —— 于是组装走到这一项就
+  //   **静默半途而废**（目录只拷了一半，日志停在上一行）。
+  //   第一版叫「备用命令（界面起不来时用）」，正好踩中。
+  //   ⚠️ 同一族的坑本仓库早有记录（`AGENT.md` 第 8 条：`rmSync` 删中文名**文件**会崩），
+  //   这里是它的兄弟：**目录**名 + `cpSync`。文件名里的中文没事（一直这么用）。
+  //   回归断言在 `mocks/verify-release-hygiene.mjs`（把这条钉住，防它被改回中文名）。
+  'backup-commands',
+]
+/** 要单文件拷贝的（相对包根）。★ `启动机器人.bat` 等入口**必须**在这里 —— 上次就是漏了它们。 */
 const COPY_FILES = [
   'package.json',
   'start.bat',
-  // ★ 这三个中文名入口必须在清单里 —— 上一次组装是手敲的、把它们漏了，
+  // ★ 这两个中文名入口必须在清单里 —— 上一次组装是手敲的、把它们漏了，
   //   于是它们**只存在于发布包里、仓库里没有源**（这次已把源补回项目）。
   '启动机器人.bat',
-  '检查配置.bat',
-  '体检.bat',
   '创建带图标的快捷方式.bat',
   // ⚠️ `QQ机器人.lnk` **不在清单里**（0.2.4 更正）。
   //
