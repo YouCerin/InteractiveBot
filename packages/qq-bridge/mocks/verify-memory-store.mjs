@@ -22,11 +22,18 @@
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/** 包根（接线断言要读源码）。 */
+const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 import {
   SCOPE,
+  __resetReadWarnings,
   applyMemoryItems,
   buildMemoryInstructionsV2,
+  memoryLinesFromRaw,
+  nonInjectableReason,
   parseMemoryMarkers,
   readMemoryForPrompt,
   screenEntry,
@@ -399,6 +406,127 @@ function main() {
   console.log('')
   if (failures === 0) console.log('🎉 桥接托管记忆测试全部通过')
   else console.log(`⚠️ ${failures} 项失败`)
+  // ══════════════════════════════════════════════════════════════════════
+  section('⑧ ★★ 两处静默失效的回归锁（0.2.1 收尾补的）')
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // ── ① 非 `- ` 开头的行也要注入（但 `#` 排版行除外）──────────────────
+    //   原实现只认 `- ` 开头的行，于是"模型或人写的普通句子"**永远进不了上下文**，
+    //   而且是静默的（文件里有、模型看不到 = 等于没记）。
+    const ws = mkdtempSync(join(tmpdir(), 'dsh-memstore-plain-'))
+    mkdirSync(join(ws, 'memory'), { recursive: true })
+    writeFileSync(
+      join(ws, 'MEMORY.md'),
+      [
+        '# 记忆（桥接维护，勿手改）', // 桥接自己的文件头：跳过（是我们的样板）
+        '',
+        '- 他喜欢冰美式', // 老格式：照旧
+        '他其实更喜欢冰拿铁，只是不说', // ★ 没有短横线的散文：以前**看不到**
+        '---', // 分隔线：跳过
+        '项目名是 InteractBot', // 另一句散文
+      ].join('\n'),
+      'utf8',
+    )
+    const seen = readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: '1' })
+    check('★★ 非 `- ` 开头的普通句子**同样注入**（以前是静默看不到）',
+      seen.text.includes('他其实更喜欢冰拿铁'), seen.text.slice(0, 120))
+    check('★ 老格式（`- ` 开头）不受影响', seen.text.includes('他喜欢冰美式'))
+    check('  桥接自己的文件头被跳过（那是我们的样板）', !seen.text.includes('桥接维护'))
+    check('  纯分隔线被跳过', !seen.text.includes('---'))
+
+    // ★★ `#` 开头的行**不注入** —— 这条是拿真机文件打回来的：
+    //    `memory/contacts.md` 里 6 行 `#` 是**文件用法说明**（"一行一个人：- <QQ号> = <昵称>"、
+    //    "由控制台/接口维护；模型被明确禁止改这个文件"），真数据只有 2 行 `- `。
+    //    第一版"所有非空行都注入"会把说明书当记忆喂给模型。
+    const wsLegend = mkdtempSync(join(tmpdir(), 'dsh-memstore-legend-'))
+    mkdirSync(join(wsLegend, 'memory'), { recursive: true })
+    writeFileSync(
+      join(wsLegend, 'memory', 'contacts.md'),
+      [
+        '# 联系人昵称（机器人怎么称呼他们）',
+        '#',
+        '# 一行一个人：- <QQ号> = <昵称>',
+        '# ⚠️ 由控制台/接口维护；模型被明确禁止改这个文件（改了会被回滚）。',
+        '',
+        '- 100000001 = 管理员',
+        '- 100000002 = 阿玮',
+      ].join('\n'),
+      'utf8',
+    )
+    // 联系人文件不在注入清单里（那是控制台维护的），所以直接测纯函数——规则只有那一份
+    check('★★ 文件用法说明（`#` 行）**不进记忆**（真机 contacts.md 的实测教训）',
+      !memoryLinesFromRaw([
+        '# 一行一个人：- <QQ号> = <昵称>',
+        '# ⚠️ 由控制台/接口维护；模型被明确禁止改这个文件',
+        '- 100000001 = 管理员',
+      ]).some((l) => l.includes('一行一个人') || l.includes('控制台')),
+      JSON.stringify(memoryLinesFromRaw(['# 说明', '- 数据'])))
+    check('  但同一份文件里的真数据照常进（只跳排版，不跳内容）',
+      memoryLinesFromRaw(['# 说明', '- 100000001 = 管理员']).join('|') === '100000001 = 管理员')
+    check('  报告原因时能区分"我们的文件头"与"普通说明行"（诊断工具要用）',
+      nonInjectableReason('# 记忆（桥接维护，勿手改）').includes('桥接文件头') &&
+        nonInjectableReason('# 随便一句说明').includes('说明行') &&
+        nonInjectableReason('- 真数据') === null)
+
+    check('  只有 `- ` 行时行为与以前一致（不引入噪音）', (() => {
+      const ws2 = mkdtempSync(join(tmpdir(), 'dsh-memstore-dash-'))
+      writeFileSync(join(ws2, 'MEMORY.md'), '- A\n- B\n', 'utf8')
+      const s2 = readMemoryForPrompt({ workspace: ws2, kind: 'private', peerId: '1' })
+      return s2.text.includes('A') && s2.text.includes('B') && s2.counts['MEMORY.md'] === 2
+    })())
+    check('★ `memoryLinesFromRaw` 是纯函数（给测试与诊断工具共用同一份规则）',
+      JSON.stringify(memoryLinesFromRaw(['- x', '## y', '', '---', 'z'])) === JSON.stringify(['x', 'z']),
+      JSON.stringify(memoryLinesFromRaw(['- x', '## y', '', '---', 'z'])))
+
+    // ── ② 读不出来必须喊一声（原来两处都是静默 continue / return []）──────
+    //   用"目录冒充文件"制造必然的读失败（Windows/Linux 都稳定触发 EISDIR）。
+    __resetReadWarnings()
+    const ws3 = mkdtempSync(join(tmpdir(), 'dsh-memstore-badread-'))
+    mkdirSync(join(ws3, 'MEMORY.md'), { recursive: true }) // ← 同名目录：readFileSync 必失败
+    const logs = []
+    const r = readMemoryForPrompt({ workspace: ws3, kind: 'private', peerId: '1', log: (m) => logs.push(String(m)) })
+    check('★★ 记忆文件读不出来 → **必须留痕**（原来静默返回空、不注入、不报错）',
+      logs.some((l) => l.includes('读不出来')), logs[0] ?? '（没有日志）')
+    check('  日志说清了后果与排查方向（"这一段没被注入" + 先看占用/权限/编码）',
+      logs.some((l) => l.includes('没有被注入')) && logs.some((l) => l.includes('占用')))
+    check('  读失败不影响其它文件（照常返回结果，不抛）', typeof r.text === 'string')
+
+    const logs2 = []
+    readMemoryForPrompt({ workspace: ws3, kind: 'private', peerId: '1', log: (m) => logs2.push(String(m)) })
+    check('★★ **只喊一次**（注入每轮都跑，逐轮刷屏会把该看的那行埋掉）',
+      logs2.filter((l) => l.includes('读不出来')).length === 0, `${logs2.length} 条日志`)
+
+    // 篡改检测那条路的读失败：★ **没法用真文件确定性触发** ——
+    //   它只遍历 `dirent.isFile()` 为真的条目，而"同名目录 / 坏符号链接"都进不了扫描，
+    //   Windows 上也没有可移植的办法让一个正常文件读失败（chmod 只改只读属性）。
+    //   所以这里改成**接线断言**（与 `verify-release-hygiene.mjs` 检查发布脚本同一手法）：
+    //   直接读源码，确认那条 `catch` 走的是共享的 `warnReadOnce`，而不是又变回静默 `continue`。
+    const src = readFileSync(join(PKG_ROOT, 'src', 'memory-store.mjs'), 'utf8')
+    // ⚠️ 切片必须**只取这个函数**：第一版从函数名切到文件末尾，
+    //    把后面几个函数也算了进来，于是断言被别处的代码判红（假阳性）。
+    const fromFn = src.slice(src.indexOf('export function verifyAndRestoreMemory') + 1)
+    const nextFn = fromFn.indexOf('\nexport function')
+    const body = nextFn > 0 ? fromFn.slice(0, nextFn) : fromFn
+    // ⚠️ 扫源码前**必须剥注释**：第一版直接把正则套在源码上，结果命中了
+    //    **我自己刚写的那句注释**（注释里引用了旧写法 `catch { continue }`）——
+    //    断言就会永远红，而代码其实是对的。（`verify-imports.mjs` 踩过同一个坑。）
+    const stripComments = (t) =>
+      String(t)
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .map((l) => (/^\s*\/\//.test(l) ? '' : l))
+        .join('\n')
+    const code = stripComments(body)
+    check('★ 篡改检测的读失败走的是共享的 `warnReadOnce`（不是静默 continue）',
+      code.includes('warnReadOnce({ rel, error, log })') && code.includes('warnReadOnce({ rel: dir'),
+      `函数体 ${body.length} 字（去掉注释后 ${code.length} 字）`)
+    check('★ 三处读失败共用**同一个**告警函数（修一处不会漏另一处）',
+      (src.match(/warnReadOnce\(/g) ?? []).length >= 3, `${(src.match(/warnReadOnce\(/g) ?? []).length} 处`)
+    check('  并且读失败时**不是**直接吞掉（代码里没有 `catch` + `continue` 的空处理）',
+      !/catch[^\n]*\{\s*continue\s*\}/.test(code),
+      (/catch[^\n]*\{\s*continue\s*\}/.exec(code) ?? ['（没有，正确）'])[0])
+  }
+
   rmSync(WORK, { recursive: true, force: true })
   process.exit(failures === 0 ? 0 : 1)
 }

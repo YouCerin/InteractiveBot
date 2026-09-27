@@ -64,7 +64,7 @@ node mocks/verify-units.mjs      # 纯逻辑：文本/唤醒/会话/防自环/�
 node mocks/verify-persona.mjs    # ★★ 人设加固：反注入拦得住、正常人设不许误伤、名字表真的能唤醒（52 项）
 node mocks/verify-images.mjs     # 看图：SSRF 防护 + 防 DoS（145 项）
 node mocks/verify-identity.mjs   # ★ 身份核实：谁在说话、会话名、"身份不得变成权限"、权限判据自解释（57 项）
-node mocks/verify-memory-store.mjs # 记忆存储层：分档、内容过滤、篡改回滚（78 项）
+node mocks/verify-memory-store.mjs # 记忆存储层：分档、内容过滤、篡改回滚、**注入面规则**（97 项）
 node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线** + **段顺序快照 / 逐字基线**（130 项）
 node mocks/verify-session-state.mjs # ★★ 会话状态机：与任务台账**两条轴**、水位（旧回合作废的显式形式）、话头恰好活一轮（48 项）
 node mocks/verify-memory-stats.mjs # ★★ 记忆可观测性：计数、零写入告警、体检漏报修复（29 项）
@@ -99,6 +99,8 @@ node mocks/session-grep.mjs "直接写事实"   # 搜最近 3 个会话；没命
 node mocks/probe-ui-bundle.mjs       # 界面产物探针：**正在伺服的那份 UI** 有没有本轮新功能（改了 React 忘了 build 不会报错）
 node mocks/probe-memory-search.mjs   # 记忆检索接口探针：501 与 200 能分开（依赖名写错会伪装成"未实现"）
 node mocks/probe-h13-endpoints.mjs   # H13 四个接口探针（含 preflight / 日志流 / 账号 / 语料检索）
+node mocks/probe-memory-injection.mjs # ★ 记忆**注入面**：哪些行会注入、哪些不会、为什么（加 private:<QQ号> 看某会话真实注入正文）
+node mocks/probe-memory-injection.mjs private:100000001   # 某个会话**真实**会收到的记忆正文
 node mocks/session-grep.mjs --list        # 只列有哪些会话、多大、什么时候写的
 
 # ⑤ 体检（真正检查连接是否可用，强烈建议先跑）

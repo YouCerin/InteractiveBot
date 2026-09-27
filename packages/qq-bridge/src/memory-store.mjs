@@ -99,6 +99,20 @@ const MAX_ENTRIES = 60
 /** 注入提示词时的条数上限（超出只报"还有几条"，不截断句子）。 */
 const INJECT_ENTRIES = 25
 
+/** 给诊断工具用的同一个数字（`mocks/probe-memory-injection.mjs` 要报"超上限几条"）。 */
+export const INJECT_LIMIT_HINT = INJECT_ENTRIES
+
+/**
+ * 桥接给**新建**记忆文件写的文件头。
+ *
+ * 它其实已经被"以 `#` 开头的行不注入"这条规则覆盖（见 `memoryLinesFromRaw`）；
+ * 单独留一个常量是为了**诊断工具能把它单独报出来**（"这行是我们的样板，不是你的内容"）。
+ */
+export const MEMORY_FILE_HEADER = '# 记忆（桥接维护，勿手改）'
+
+/** 纯排版分隔线（注入时跳过）。 */
+const SEPARATOR_RE = /^(?:-{3,}|\*{3,}|_{3,}|={3,})$/
+
 /** 目录与文件名约定。 */
 const FILE = {
   /**
@@ -173,11 +187,9 @@ export function readMemoryForPrompt({ workspace, kind, peerId, log = () => {} })
   const detail = []
   for (const [label, rel] of wanted) {
     const abs = join(root, rel)
-    const all = readEntryLines(abs)
-      // 注入给模型看的是"条目列表"，不是 markdown 文档：把 `- ` 剥掉，
-      // 否则会把 `〔指令〕- （指令）…` 这种噪音喂进去。
-      .map((l) => l.slice(2).trim())
-      .filter(Boolean)
+    // ★★ 注入的是"记忆行"，不是"带短横线的行"：非 `- ` 开头的普通句子同样注入
+    //   （原实现只认 `- `，于是模型/人写的散文永远进不了上下文，且静默 —— 见 `memoryLinesFromRaw`）。
+    const all = memoryLinesFromRaw(readRawLines(abs, { log, rel }))
     // ★ H4：**已被更正**的条目不注入 —— 它们的结论已经被推翻，
     //   再喂给模型就是让它拿一个错的事实当依据。它们仍在文件里（可查、可追溯）。
     const supersededCount = all.filter((t) => isSuperseded(t)).length
@@ -291,16 +303,106 @@ export function screenEntry(scope, entry) {
  *   两者条目都以 `- ` 开头，所以统一按行抓；分节标题被丢掉 ——
  *   可接受：分节只是给人看的排版，条目本身才是记忆。
  */
-function readEntryLines(abs) {
+/**
+ * 读文件失败时**只喊一次**（每个文件一次）。
+ *
+ * ★★ 为什么必须喊（这是 0.2.1 收尾时补的一个**静默失效**）：
+ *    原实现 `catch { return [] }` —— 文件被占用/权限异常/编码坏掉时，那一段记忆
+ *    **不注入、不报错、不留痕**，表现就是"它突然忘了某件事"，而排查时什么都看不到。
+ *    与本项目第 9 条（增强路径可以失败，但不许安静地失败）直接冲突。
+ * ★ 为什么"只喊一次"：注入是**每轮**都跑的，坏文件会每轮都失败 —— 每轮一条日志
+ *   会把该看的那行埋掉（与 `#warnInjectOnce` 同一个理由）。
+ */
+const readWarned = new Set()
+function warnReadOnce({ rel, error, log }) {
+  const key = String(rel ?? '')
+  if (readWarned.has(key)) return
+  readWarned.add(key)
+  try {
+    log?.(
+      `❌ [memory] 记忆文件**读不出来**（${key}）：${error?.message ?? error} —— ` +
+        '这一段记忆这一轮**没有被注入**（只报这一次）。表现会是"它突然忘了某件事"，' +
+        '所以这条日志很重要：先看文件是不是被占用/权限变了/内容不是 UTF-8。',
+    )
+  } catch {
+    /* 日志本身失败就算了，不能反过来影响注入 */
+  }
+}
+
+/** 测试用：清掉"已经喊过"的记录。 */
+export function __resetReadWarnings() {
+  readWarned.clear()
+}
+
+/** 读文件的所有行；失败时**喊一次**并返回空数组（不抛）。 */
+function readRawLines(abs, { log = null, rel = abs } = {}) {
   try {
     if (!existsSync(abs)) return []
-    return readFileSync(abs, 'utf8')
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('- '))
-  } catch {
+    return readFileSync(abs, 'utf8').split('\n')
+  } catch (error) {
+    warnReadOnce({ rel, error, log })
     return []
   }
+}
+
+/**
+ * ★★ 注入时**什么样的行算记忆**（0.2.1 收尾时放宽过一次，理由与边界都在下面）。
+ *
+ * 原实现只认以 `- ` 开头的行 —— 于是**模型或人写的普通句子永远进不了上下文**，
+ * 而且**静默**（文件里有、模型看不到 = 等于没记）。真机举例：`private-<QQ>.md` 里
+ * "我给的思路：表情包=离线一次性打标签+本地检索…" 这种**真内容**以前是隐形的。
+ *
+ * ── 现在的边界（不是"所有非空行"—— 试过，被真文件打回来了）────────────────
+ *   ✅ **注入**：所有非空行（剥掉 `- `/`* `/`• ` 列表符号后保留原文）
+ *   ❌ **跳过**：空行、纯分隔线（`---`/`***`/`===`）、**以 `#` 开头的行**
+ *
+ * 为什么 `#` 行要跳过（真机证据，`workspace-qq/memory/contacts.md`）：
+ * 那个文件里 6 行 `#` 是**文件用法说明**（"一行一个人：- <QQ号> = <昵称>"、
+ * "由控制台/接口维护；模型被明确禁止改这个文件"），而真数据只有 2 行 `- `。
+ * 第一版"所有非空行都注入"把这些说明当记忆喂给模型 —— 联系人那一段**大部分成了说明书**，
+ * 还把"改完下一轮就生效"这种维护说明混进事实列表。
+ * ⇒ 因此约定：**想让它被记住，就不要用 `#` 开头**（已写进 `--memory` 的说明与文档）。
+ */
+export function memoryLinesFromRaw(rawLines = []) {
+  const out = []
+  for (const raw of rawLines) {
+    const t = String(raw ?? '').trim()
+    if (!t) continue
+    if (SEPARATOR_RE.test(t)) continue
+    if (t.startsWith('#')) continue // 排版/说明行（含桥接自己写的文件头）
+    const line = t.replace(/^[-*•]\s+/, '').trim()
+    if (line) out.push(line)
+  }
+  return out
+}
+
+/**
+ * 这一行为什么**不注入**（返回原因；`null` = 会注入）。
+ *
+ * 注入规则**只有这一份**：`readMemoryForPrompt` 与诊断工具
+ * （`mocks/probe-memory-injection.mjs`）都调它 —— 免得两处各写一套、迟早分叉
+ * （这个项目已经为"测试里二次实现"付过两次学费）。
+ */
+export function nonInjectableReason(rawLine) {
+  const line = String(rawLine ?? '').trim()
+  if (!line) return '空行（排版）'
+  if (SEPARATOR_RE.test(line)) return '纯分隔线（排版）'
+  if (line.startsWith('#')) {
+    return line === MEMORY_FILE_HEADER ? '桥接文件头（我们自己的样板）' : '排版/说明行（以 # 开头）'
+  }
+  return null
+}
+
+/**
+ * 读"条目行"（**带 `- ` 前缀的原样行**）。
+ *
+ * ⚠️ 写入侧的去重/计数用的就是它（`appendEntry` 拿 `- ${entry}` 来比），
+ *   所以**返回形状不能改**。注入那条路走 `memoryLinesFromRaw`。
+ */
+function readEntryLines(abs, { log = null, rel = abs } = {}) {
+  return readRawLines(abs, { log, rel })
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('- '))
 }
 
 /**
@@ -316,7 +418,9 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false }) {
   const abs = resolved.abs
   // 用**原始行**（带 `- ` 前缀）做去重与计数：比较的是"要写的这一行"
   // 与"文件里已有的那些行"。用去掉前缀的内容比较会导致每次都判定为新条目。
-  const entries = readEntryLines(abs)
+  // ⚠️ 读失败时这里也会**喊一次**（`log` 传下去）——写入侧读不到文件意味着
+  //    去重与计数都不可信，那也必须让人看得见。
+  const entries = readEntryLines(abs, { log, rel })
   const line = `- ${entry}`
   if (entries.includes(line)) return { ok: true, deduped: true, rel }
   if (entries.length >= MAX_ENTRIES) {
@@ -571,7 +675,10 @@ export function verifyAndRestoreMemory({ workspace, log = () => {} }) {
       names = readdirSync(abs, { withFileTypes: true })
         .filter((e) => e.isFile() && e.name.endsWith('.md'))
         .map((e) => e.name)
-    } catch {
+    } catch (error) {
+      // ★ 目录**列不出来**也是同一类静默失效（原来这里是空 `catch { continue }`）：
+      //   整个目录会被跳过，篡改检测对它**静默失效** —— 表现是"记忆像是没生效"。
+      warnReadOnce({ rel: dir || '（工作区根）', error, log })
       continue
     }
     for (const name of names) {
@@ -585,7 +692,11 @@ export function verifyAndRestoreMemory({ workspace, log = () => {} }) {
       let snap = null
       try {
         cur = readFileSync(join(root, rel), 'utf8')
-      } catch {
+      } catch (error) {
+        // ★ 读不出来**必须喊**（原来这里是 `continue`，静默）——
+        //   后果是"篡改检测静默失效"：文件读不到就永远不会被判成篡改，
+        //   而使用者只会看到"记忆像是没生效"。
+        warnReadOnce({ rel, error, log })
         continue
       }
       try {
