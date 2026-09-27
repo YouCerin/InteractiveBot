@@ -455,7 +455,7 @@ export function parseJudgeVerdict(raw) {
   return { ok: false, why: obj ? '判定输出里没有能认出来的结论字段' : '判定输出解析不出 JSON 对象，也没从文字里看出结论' }
 }
 
-/** 取理由：先看对象里的 `reason`/`原因`/`理由`，没有就从文本里扫一个。 */
+/** 取理由：先看对象里的 `reason`/`原因`/`理由`，没有就从文本里扫一段。 */
 function pickReason(obj, text) {
   const KEYS = ['reason', 'rationale', 'why', 'explanation', '原因', '理由', '说明']
   if (obj) {
@@ -464,8 +464,20 @@ function pickReason(obj, text) {
       if (KEYS.includes(norm) && typeof obj[k] === 'string') return oneLine(obj[k], 120)
     }
   }
-  for (const { key, value } of scanPairs(text)) {
-    if (KEYS.includes(String(key).trim().toLowerCase()) && value) return oneLine(value, 120)
+  // ★ 文本路径：**整段取**，不是取一个 token —— 真机上抓到的原文里，
+  //   reason 的值里嵌了**未转义的双引号**（模型写 `虽提到"小鲸鱼"但…`），
+  //   按 token 扫会在第一个引号处截断，理由只剩半句（实测："发言者是在向群友说明机器"）。
+  //   这里直接取到行尾/对象尾，再把两端的引号与 `}` 收拾掉。
+  const m =
+    /(?:^|[^A-Za-z0-9_\u4e00-\u9fff])["'「『]?(reason|rationale|why|explanation|原因|理由|说明)["'」』]?\s*[:：=]\s*([\s\S]{1,400})/.exec(
+      String(text ?? ''),
+    )
+  if (m) {
+    const v = String(m[2])
+      .replace(/["'」』]?\s*\}?\s*$/, '')
+      .replace(/^["'「『\s]+/, '')
+      .trim()
+    if (v) return oneLine(v, 120)
   }
   return ''
 }

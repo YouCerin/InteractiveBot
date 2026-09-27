@@ -240,6 +240,35 @@ section('② 判定输出解析：**四段递降，尽量把结论救回来**（
   check('★ 对照：`answer: true` 仍然是 **answer**',
     parseJudgeVerdict('answer: true').verdict === 'answer' && parseJudgeVerdict('answer: true').via === 'scan')
 
+  // ── ★★★ 真机原文：判定结论在最开头，而 reason 里嵌了**未转义的双引号** ───────
+  //
+  // 这一段是这一节存在的**直接原因**。真机日志（`logs/bridge.log` 14:47:47）：
+  //     [wake] 判定输出认不出来（按放过处理）：判定输出解析不出 JSON 对象｜原文前 200 字：
+  //     {"answer": false, "reason": "…虽提到"小鲸鱼"但只是陈述/转述，收件人是群里的人…"}
+  // **模型的理由里直接写了中文引号形式的 `"小鲸鱼"`（半角双引号）**，于是整个字符串
+  // 对 JSON 来说是坏的 —— `JSON.parse` 失败，`parseLooseJson` 的补引号修复也救不回来
+  // （同一段文本里既有"该补的引号"又有"该转义的引号"，对人都是合法的中文，对 JSON 不是）。
+  // 结论 `"answer": false` 明明写在**最开头**，就因为后面半句的理由坏掉而**整条丢掉** ——
+  // 白花一次调用、该沉默的没沉默，而且从行为上看不出任何异常。
+  {
+    const REAL =
+      '{"answer": false, "reason": "发言者是在向群友说明机器人现在的判定逻辑，虽提到"小鲸鱼"但只是陈述/转述，收件人是群里的人，不是说给机器人听的。"}'
+    let strictOk = true
+    try {
+      JSON.parse(REAL)
+    } catch {
+      strictOk = false
+    }
+    check('★★★ 真机原文确实**不是**合法 JSON（这段 fixture 的前提）', strictOk === false)
+    const r = parseJudgeVerdict(REAL)
+    check('★★★ 但结论能救回来（`"answer": false` → silent，via=scan）',
+      r.ok === true && r.verdict === 'silent' && r.via === 'scan', JSON.stringify(r))
+    check('★★ 理由也**整段**取回来（不是被内层引号截成半句）',
+      r.reason.includes('收件人是群里的人') && r.reason.includes('不是说给机器人听的'),
+      `「${r.reason}」`)
+    check('  └ 理由里那对引号原样保留（我们不改写模型的话）', r.reason.includes('小鲸鱼'))
+  }
+
   // ── 理由的取法 ────────────────────────────────────────────────────────
   check('理由优先取对象里的 reason', parseJudgeVerdict('{"answer":false,"reason":"群友闲聊"}').reason === '群友闲聊')
   check('  中文键也认（原因/理由/说明）', parseJudgeVerdict('{"answer":true,"原因":"在问我"}').reason === '在问我')
