@@ -440,12 +440,6 @@ async function auditForRelease() {
       problems.push(
         `config-ui/dist **无法自证来源**（缺 ui-build.json）—— ${ui.why}。${ui.advice}`,
       )
-    } else if (ui.status === 'uncheckable') {
-      // ★ 0.2.5 补：这一条在**源码树里**出现，说明 `config-ui/src` 不见了（发布包才没有它）——
-      //   那是"判不了"，不能当成同步（当同步就是假绿）。
-      problems.push(
-        `界面新鲜度**判不了** —— ${ui.why}。${ui.advice}`,
-      )
     } else if (ui.status === 'missing') {
       // 上面已经报过一次，这里不重复
     } else {

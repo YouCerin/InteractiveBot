@@ -2,10 +2,8 @@
 
 把**可配置的 QQ 对话机器人**接到 DeepSeek Harness（DSH）：QQ 消息 → DSH agent → 回答发回 QQ。
 
-> **当前状态：`packages/qq-bridge` 是仓库里唯一的实现（0.2.5）**。它**不是** DSH 插件，
+> **当前状态：`packages/qq-bridge` 是仓库里唯一的实现（0.2.2）**。它**不是** DSH 插件，
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
-> ★ 0.2.5 起控制台**不再是一张网页**，而是一个**真正的程序窗口**（Electron 桌面壳，
-> 打包成 `app\InteractBot.exe`，双击即可）—— 见下文「0.2.5 这一版加了什么」。
 > `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，**已在 0.2.5 按用户要求
 > 删除**（旧方案存档在 `docs/design.md`、`docs/implementation-plan.md`、`docs/m6-checklist.md`）——
 > 那是**有意删掉的**，不要再把它建回来。
@@ -24,7 +22,6 @@ project_InteractBot/
 │       ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
 │       ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
 │       ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
-│       ├── desktop/                # ★ 桌面壳源码（0.2.5，Electron：独立窗口 + 托盘 + 打 exe）
 │       └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
 ├── docs/                           # 版本级文档（设计 / 验收 / 适配存档）
 │   ├── 插件设计规范.md              # ★ 扩展体系的契约（技能清单、生命周期、安全、UI、验收）
@@ -33,42 +30,6 @@ project_InteractBot/
 │   └── 0.2.2-pixiv-skill-migration.md + 0.2.2-pixiv-adaptation.patch
 └── README.md
 ```
-
-## 0.2.5 这一版加了什么（一句话）
-
-**桌面壳**：把控制台 UI 从"浏览器里的一张网页"搬进一个**真正的程序窗口**
-（**Electron 38.8.6**，运行时**自带** —— 免安装、目标机器**不需要装 Node**），
-并把启动方式**打包成 .exe**：发布包的主入口 = `app\InteractBot.exe`，**双击即可**
-（它自己找到包根 → 用 `node src/index.mjs --background` 把桥接拉起来 → 开出控制台窗口）。
-源码侧**不必打包就能开窗口**：`npm run desktop`（跑 `desktop/` 那份壳源码，
-改完壳重启这条命令即可）；打 exe 用 `npm run desktop:pack`。
-★ 最省事的是**双击仓库根的 `desktop.bat`**：它用包内 `vendor\node\node.exe` 直接调同一个启动器
-（`scripts/run-desktop.mjs`），不需要终端、不需要 `cd`、不依赖 PATH 里的 node/npm；失败时会 `pause`，
-所以双击的窗口不会"一闪就没"。
-
-★ 这一版**没有 .bat 启动器**：0.2.4 曾用中文名 .bat 去设环境变量 `INTERACTBOT_PKG_ROOT`，
-那一类中文名入口已按用户要求删除（见 `packages/qq-bridge/mocks/verify-legacy-assets.mjs`）。
-发布包里**只剩 `start.bat` 一个 .bat**，它是"浏览器那条路"，一旦发现 `app\InteractBot.exe`
-存在就**不再打开浏览器**（避免同一台机器出现两个控制台）。
-所以「**没有启动器也能找到包根**」是硬要求 —— 包根由 `packages/qq-bridge/desktop/lib.cjs`
-的 `resolvePkgRoot` 按**三级判据**找：① 环境变量 `INTERACTBOT_PKG_ROOT`（若有人显式设）→
-② 从 `app.getAppPath()`（打包后是 `app\resources\app`、开发时是 `desktop/`）
-**逐级向上找包根标记**（**同时**有 `config.example.json` 与 `src/index.mjs` 的那一层）→
-③ 找不到就返回链上**真实存在**的一层并**在日志里喊一声**，**绝不猜**。
-★ 为什么是"看证据"而不是"数目录层数"：0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false`
-时它**是 `false`** ⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根（读不到使用者的
-`config.json`、日志写进了 `app\logs\`）。修法就是那三级判据，判据由
-`packages/qq-bridge/mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线一百多项）。
-
-★ 关窗口 = **收进托盘**，机器人**继续在线**；真正退出要用**托盘菜单的「退出并停止机器人」**
-（会先 `POST /api/stop`）。
-
-★ 代价与边界（如实标注）：`app/` 约 **324 MB**（其中 `InteractBot.exe` **200.5 MB**），
-发布包合计 **202 个文件 / 约 413 MB**（比不带桌面壳的 88.6 MB 大很多，代价就是 Electron 运行时）。
-窗口 / 托盘 / 菜单 / "关窗口不下线"这些**只能人在真机上点一遍**（受限沙箱里 Electron 起不来）；
-已被机器验证的只有壳的**判断逻辑**、**产物形状**（exe 在、asar 关着、PE 版本号 0.2.5、
-包里的壳代码与 `desktop/` 源码逐字节一致）以及**发布包验收** ——
-完整清单在 `packages/qq-bridge/PROJECT.json` 的 `verificationStatus.notVerified`。
 
 ## 0.2.2 这一版加了什么（一句话）
 
@@ -107,9 +68,6 @@ project_InteractBot/
   换机器时用 `start.bat --check` 看它解析到了哪、来源是什么。
 - 插件关键依赖（已验证）：`@deepseek-ai/cordis@4.0.2`、`@deepseek-ai/schemastery@3.18.2`、
   `@deepseek-ai/dsh-tools@0.1.5-rc.2`
-- 桌面壳（0.2.5）：**Electron 38.8.6**（版本在 `desktop/package.json` 里**写死**），
-  运行时由 `npm run desktop:fetch` 取到 `desktop/node_modules/electron/dist`
-  （约 136 MB，走 npmmirror 镜像）；`desktop/node_modules/` 与 `.build-desktop/` **都不进 git**
 
 ## 仓库与配置（首次使用）
 

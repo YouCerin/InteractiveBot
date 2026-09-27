@@ -40,15 +40,3 @@ config.json.bak-*
 # config-ui/.gitignore 负责；这里只挡根目录下零散的临时文件
 *.tmp
 .tmp-*
-
-# ── 桌面壳（0.2.5）：构建期产物一律不入库 ──
-# 每份 `.build-desktop/` 约 324 MB（Electron 运行时），`desktop/.npm-cache/` 约 200 MB
-# （Electron 的 zip）。它们都能一条命令重新生成。
-#
-# ★ 为什么这条要写成明文规矩：0.2.4 曾把 413 MB 的整份发布包提交进库（`.gitattributes`
-#   声明了 `*.exe/*.dll filter=lfs`，但本机 git-lfs 的 filter-process 起不来，实际以**普通 blob**
-#   入库）—— 二进制进历史会让仓库永久变大，而且**删掉也小不回来**（历史里那份还在）。
-.build-desktop/
-desktop/node_modules/
-desktop/.npm-cache/
-desktop/install.log

@@ -27,8 +27,7 @@
  *   node scripts/assemble-release.mjs --force             # 允许覆盖已存在的输出目录（默认拒绝）
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,26 +54,6 @@ const VERSION = pkg.version
 const DEFAULT_OUT = join(REPO_ROOT, '_release', `InteractBot-${VERSION}-win-x64`)
 const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 
-// ── 桌面壳（0.2.5）：先读"最近一次成功构建"在哪 ────────────────────────────
-//
-// ★ 读 `latest.json` 而**不猜目录名**：构建产物目录带时间戳（`pack-<时间戳>`），
-//   而"上一次到底是哪一个"只有构建脚本自己知道（它写这份文件就是为这件事）。
-//   0.2.4 那批 `pack-*` 里有 10 个是空壳、只有 1 个能用 —— 猜名字必然猜错。
-const DESKTOP_LATEST = join(PKG_ROOT, '.build-desktop', 'latest.json')
-let DESKTOP_UNPACKED = null
-let DESKTOP_META = null
-{
-  if (existsSync(DESKTOP_LATEST)) {
-    try {
-      DESKTOP_META = JSON.parse(readFileSync(DESKTOP_LATEST, 'utf8'))
-      const dir = resolve(PKG_ROOT, DESKTOP_META?.unpacked ?? '')
-      if (existsSync(join(dir, 'InteractBot.exe'))) DESKTOP_UNPACKED = dir
-    } catch {
-      /* 读不出来按"没有产物"处理，错误信息在 ④-b 统一说 */
-    }
-  }
-}
-
 /** 要整目录拷贝的（相对包根）。 */
 // ★ `personas` 必须在清单里（0.2.2）：它是**出厂默认那两套人设**的文件。
 //   漏了它的后果是「发布包里一套人设都没有」—— 界面人设栏空着，而且**不会报错**
@@ -95,14 +74,6 @@ const COPY_FILES = [
   'package.json',
   'start.bat',
   'setup.mjs',
-  // ★★ 0.2.5：这一个文件看着像"构建脚本"，其实是**运行期依赖** ——
-  //   `src/ui-status.mjs` 要在运行期 require 它（校验侧与构建侧共用同一份哈希实现）。
-  //   以前它不在清单里 ⇒ 包里的桥接**一启动就死**（MODULE_NOT_FOUND），
-  //   而且 `respawnBridge` 是 stdio:'ignore'，连 bridge.log 都不留。
-  //   实测：`_release/InteractBot-0.2.0` 起每一份包都有这个缺陷。
-  //   ⚠️ 将来往 `scripts/` 里加"运行期要用的东西"时，请一并加到这里；
-  //   `scripts/check-release-package.mjs` ①-e 会扫 `join(PKG_ROOT, …)` 指到的文件兜底。
-  'scripts/ui-build-stamp.cjs',
   'prices.json',
   'config.example.json',
   'AGENT.md',
@@ -280,102 +251,6 @@ for (const f of COPY_FILES) {
   log(`   📄 ${f}`)
 }
 
-// ── ④-b 桌面壳（0.2.5）：整目录搬进包根的 `app/` ─────────────────────────
-//
-// ★ 为什么进 `app/` 子目录、而不把 exe 与 Chromium 那几十个 dll 平铺在包根：
-//   ① 包根是"使用者要一眼认出该点哪个"的地方，铺二十个 dll 会把入口淹掉；
-//   ② `version` / `LICENSES.chromium.html` 这类通用名不再与我们的文件抢位；
-//   ③ 想删掉桌面壳时，删一个目录就干净了。
-//
-// ★★ exe 仍然找得到包根：它按**包根标记**往上找（`desktop/lib.cjs` 的 `resolvePkgRoot`）——
-//    `<包根>/app/resources/app` → `…/app/resources` → `…/app`（没有 config.example.json）
-//    → `<包根>`（有）⇒ 命中。这一段是**实测过**的（`mocks/verify-desktop.mjs` 有专门一节
-//    造出这个真实布局来断言），不是"应该能找到"。
-//
-// ★ 本版**没有** .bat 启动器：入口就是双击 `app\InteractBot.exe`。
-//   （0.2.4 靠一个中文名 .bat 去设 `INTERACTBOT_PKG_ROOT`，而那几个中文名入口已被用户
-//     要求删除 ⇒ "没有启动器也能定位包根"必须自己成立，上面那条就是它的判据。）
-if (!DESKTOP_UNPACKED) {
-  bad(
-    '没有找到桌面壳构建产物（读 `.build-desktop/latest.json`）—— 本版**必须有** InteractBot.exe。\n' +
-      '   先打一次：\n' +
-      '     npm run desktop:fetch              # 首次：取 Electron 运行时\n' +
-      '     npm run desktop:pack               # 打 exe\n' +
-      '   （0.2.5 的目标里有两个就落在桌面壳上：没有它，"独立界面"与"打包为 .exe"都不成立）',
-  )
-} else {
-  log('')
-  log('── ④-b 桌面壳（InteractBot.exe）──')
-  const appDir = join(OUT, 'app')
-  mkdirSync(appDir, { recursive: true })
-  cpSync(DESKTOP_UNPACKED, appDir, { recursive: true, force: true })
-  const exe = join(appDir, 'InteractBot.exe')
-  if (!existsSync(exe)) {
-    bad('拷完以后 app/InteractBot.exe 不存在 —— 桌面壳没进包')
-  } else {
-    // ★★ 自校验：包里的壳代码必须与 `desktop/` 那份源码**逐字节相同**。
-    //   为什么值得一条硬检查：0.2.4 的教训是"包里那份是不是当前源码构建的"这件事
-    //   **没有任何东西能判断**（UI 那次脱钩：包里 UI 与源码都旧约 5 小时，1100 项测试全绿）。
-    //   壳这边同理 —— 改了 main.cjs 却忘了重新打包，行为与源码说的不一致，而且**不报错**。
-    const APP_FILES = ['main.cjs', 'preload.cjs', 'lib.cjs', 'splash.html', join('assets', 'app-icon.ico')]
-    const stale = []
-    for (const rel of APP_FILES) {
-      const src = join(PKG_ROOT, 'desktop', rel)
-      const inPkg = join(appDir, 'resources', 'app', rel)
-      if (!existsSync(inPkg)) stale.push(`${rel}（包里没有）`)
-      else if (Buffer.compare(readFileSync(src), readFileSync(inPkg)) !== 0) stale.push(rel)
-    }
-    if (stale.length) {
-      bad(
-        `包里的壳代码与 desktop/ 源码不一致：${stale.join('、')}\n` +
-          '   说明这份 exe 是**旧代码**打的 —— 重新打一次：npm run desktop:pack',
-      )
-    } else {
-      let n = 0
-      let bytes = 0
-      const walkApp = (d) => {
-        for (const e of readdirSync(d, { withFileTypes: true })) {
-          const full = join(d, e.name)
-          if (e.isDirectory()) walkApp(full)
-          else if (e.isFile()) {
-            n += 1
-            bytes += statSync(full).size
-          }
-        }
-      }
-      walkApp(appDir)
-      log(`   📁 app/（${n} 个文件，${(bytes / 1024 / 1024).toFixed(1)} MB）`)
-      log(`   📄 app/InteractBot.exe（${(statSync(exe).size / 1024 / 1024).toFixed(1)} MB）`)
-      log(`   ✅ 包里的壳代码与 desktop/ 逐字节一致（${APP_FILES.length} 个文件）`)
-    }
-    // ★ 溯源：这份 exe 是哪份源码、哪个 Electron、什么时候打的（与 config-ui 的
-    //   ui-build.json 同一个理由 —— 发布包里的东西必须能自证来源）
-    const appMain = join(appDir, 'resources', 'app', 'main.cjs')
-    writeFileSync(
-      join(appDir, 'PROVENANCE.txt'),
-      [
-        `InteractBot 桌面壳（独立窗口 + 启动器）  版本 ${VERSION}`,
-        '',
-        `打包时间   ：${DESKTOP_META?.builtAt ?? '?'}`,
-        `Electron   ：${DESKTOP_META?.electronVersion ?? '?'}`,
-        '源文件     ：packages/qq-bridge/desktop/{main,preload,lib}.cjs + splash.html + assets/app-icon.ico',
-        `主进程哈希 ：${existsSync(appMain) ? createHash('sha256').update(readFileSync(appMain)).digest('hex').slice(0, 16) : '（读不到）'}`,
-        '',
-        '怎么启动：双击 app\\InteractBot.exe —— 它自己找到包根、把桥接拉起来、开出控制台窗口。',
-        '（本版没有 .bat 启动器。start.bat 仍在，走的是浏览器那条路；它在发现',
-        ' app\\InteractBot.exe 时不再开浏览器，避免同一台机器出现两个控制台。）',
-        '',
-        '窗口关掉只会收到右下角托盘，机器人**继续在线**；要它下线请用托盘菜单的「退出并停止机器人」。',
-        '',
-        '这份文件由 scripts/assemble-release.mjs 生成，用来回答"这个 exe 是哪来的"。',
-        '',
-      ].join('\n'),
-      'utf8',
-    )
-    log('   📄 app/PROVENANCE.txt（这份 exe 的来源）')
-  }
-}
-
 // ★ 空白 config.json：从**模板**复制，绝不拷你的真配置
 cpSync(join(OUT, 'config.example.json'), join(OUT, 'config.json'), { force: true })
 log('   📄 config.json（由 config.example.json 复制 —— 空白模板，不是你的真配置）')
@@ -400,34 +275,6 @@ log('   📄 config.json（由 config.example.json 复制 —— 空白模板，
   if (ids.length) bad(`包里的 config.json 名单非空（含 ${ids.length} 个具体号码）`)
   if (paths.length) bad(`包里的 config.json 有开发机路径（dsh.searchPaths ${paths.length} 条）`)
   if (!leaks.length && !ids.length && !paths.length) log('   ✅ 包里的 config.json 已确认是空白模板')
-}
-
-// ── ④-c 清掉"本机试跑过这个包"留下的运行痕迹 ─────────────────────────────
-//
-// 为什么要有这一步：组装完**在这个目录里双击过 exe / 跑过 start.bat** 是正常的验收动作，
-// 而那一刻桥接就会在**包内**建出 `logs/`（壳自己的 `logs/desktop.log` 也在这里）、`cache/`、
-// `workspace-qq/`。它们含使用者的路径与聊天痕迹，**绝不能发出去** —— 验收脚本（⑤）本来就会
-// 把它们判成"不该包含的东西"，但那时人容易去猜"是不是脚本误报"。所以在验收**之前**先清掉，
-// 并把"清卫生"这件事说出来。
-//
-// ⚠️ 尽力而为、删不掉**不算失败**：Windows 上文件可能被占（0.2.4 在这里栽过两次）。留着的
-//    痕迹会由 ⑤ 的验收如实报出来 —— 那比"脚本自己偷偷失败"好。
-{
-  const junk = ['logs', 'cache', 'workspace-qq']
-  const cleaned = []
-  const stuck = []
-  for (const rel of junk) {
-    const p = join(OUT, rel)
-    if (!existsSync(p)) continue
-    try {
-      rmSync(p, { recursive: true, force: true })
-      cleaned.push(rel)
-    } catch {
-      stuck.push(rel)
-    }
-  }
-  if (cleaned.length) log(`   · 清掉了本机试跑留下的运行痕迹：${cleaned.join('、')}`)
-  if (stuck.length) log(`   ⚠️ 有运行痕迹删不掉（多半被占）：${stuck.join('、')} —— 验收会报出来，别把它发出去`)
 }
 
 // ── ⑤ 验收 ───────────────────────────────────────────────────────────────

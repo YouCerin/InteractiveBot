@@ -5,12 +5,9 @@
 > **📖 先读哪一份？**
 > - **你想先知道"这项目是什么、各模块怎么实现的、agent 到底有多大权限"** →
 >   读 **`docs/项目简介.md`**（一页：数据流 / 模块表 / 12 条特色 / 权限硬墙与软墙 / 文档地图）
-> - **你只是想把它跑起来、不想看代码** → 在发布包里双击 **`app\InteractBot.exe`**
->   （★ 0.2.5 起的主入口：它自己找到包根 → 把桥接拉起来 → 开一个**真正的程序窗口**。
->   要自检就 `start.bat --check`，要真连一次 SnowLuma 体检就 `start.bat --doctor`）
->   ★ 0.2.5：原先那份 `先读我-首次使用.txt` 与 `检查配置.bat`、`体检.bat` 已删除；
->   ★ 本版**没有 .bat 启动器**（0.2.4 那批中文名 .bat 入口已按用户要求一并删除），
->   所以「**没有启动器也能找到包根**」是硬要求 —— 见下文「桌面壳」那一节
+> - **你只是想把它跑起来、不想看代码** → 双击 **`start.bat`**（要自检就
+>   `start.bat --check`，要真连一次 SnowLuma 体检就 `start.bat --doctor`）
+>   ★ 0.2.5：原先那份 `先读我-首次使用.txt` 与 `检查配置.bat`、`体检.bat` 已删除
 > - **你是 AI agent，或想五分钟上手** → 读 **[AGENT.md](AGENT.md)**（操作说明 + 绝对不能改的六件事）
 > - **你需要机器可读的包契约**（命令 / 配置键 / 不变量 / 故障特征） → 读 **[PROJECT.json](PROJECT.json)**
 > - **你要打发布包（zip）** → 读 **[RELEASE.md](RELEASE.md)**（前置条件 / 要清空的密钥 / 验收清单）
@@ -94,7 +91,6 @@ node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
 node mocks/verify-real-dsh.mjs   # 真实 dsh 能否被启动（零费用；★ 需要能起子进程）
 node mocks/verify-doctor.mjs     # 体检工具自身的准确性（30 项）
-node mocks/verify-desktop.mjs    # ★★ 桌面壳（0.2.5，一百多项，**不启动 Electron**）：包根三级判据**照真实发布包布局**断言、产物形状、状态翻译
 node mocks/verify-live.mjs       # ★ 真实端到端（会调用模型，有少量费用）
 node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
 
@@ -233,15 +229,10 @@ node src/index.mjs --ui               # fresh=0，stale/unstamped=1
 node src/index.mjs --ui --dist <某个包的 config-ui/dist>   # 查别人给的那份
 
 # ⑥ 启动
-#   发布包：双击 app\InteractBot.exe   ★ 0.2.5 主入口：开程序窗口，并自己把桥接拉起来
-#   源码侧：npm run desktop           ★ 跑 desktop/ 那份壳源码，数据落源码侧包根；
-#                                       改完壳重启这条命令即可，**不必重新打包**
-start.bat                        # "浏览器那条路"；或 node src/index.mjs
+start.bat                        # 双击；或 node src/index.mjs
 # ★ 0.2.5：带图标的快捷方式入口（旧 QQbot.lnk / 创建带图标的快捷方式.bat）已删除 ——
-#   要图标就右键 app\InteractBot.exe 自己建快捷方式，图标用 assets\icon.ico
-# start.bat 现在会先拉起 SnowLuma，再起桥接；一旦发现 app\InteractBot.exe 存在，
-# 它就**不再打开浏览器**（否则同一台机器上会出现两个控制台）。
-# 跳过 SnowLuma：start.bat --no-snowluma
+#   现在只有 start.bat 这一个入口（要图标就右键 start.bat 自己建快捷方式，图标用 assets\icon.ico）
+# start.bat 现在会先拉起 SnowLuma，再起桥接。跳过 SnowLuma：start.bat --no-snowluma
 ```
 
 当前状态：**离线 50 套全部退出码 0**（逐套数字见 `PROJECT.json` 的 `commands[].assertions`；另有 3 套在受限沙箱里**跳过**，见下）；真实 QQ 端到端实测通过（含 QQ 原生工具调用）。
@@ -259,83 +250,9 @@ start.bat                        # "浏览器那条路"；或 node src/index.mjs
 
 ---
 
-## 桌面壳：控制台从"浏览器里的一张网页"搬进**真正的程序窗口**（0.2.5 新增）
-
-这一版做了两件事：
-
-1. 把控制台 UI 从"浏览器里的一张网页"搬进一个**真正的程序窗口**
-   （**Electron 38.8.6**，运行时**自带** —— 免安装，目标机器**不需要装 Node**）；
-2. 把启动方式**打包成 .exe**。
-
-### 三种开法（发布包 / 源码侧 / 打 exe）
-
-| 场景 | 怎么做 |
-|---|---|
-| **最省事（源码侧双击）** | 双击**仓库根**的 **`desktop.bat`** —— 它用包内 `vendor\node\node.exe` 直接调 `scripts/run-desktop.mjs`，**不需要终端、不需要 `cd`、不依赖 PATH 里的 node/npm**；失败会 `pause`，双击的窗口不会一闪就没 |
-| **发布包里（普通使用者）** | 双击 `app\InteractBot.exe`。它自己找到包根 → 用 `node src/index.mjs --background` 把桥接拉起来 → 开出控制台窗口 |
-| **源码侧（不必打包就能开窗口）** | 首次准备：`cd desktop && npm install --ignore-scripts`，再回包根 `npm run desktop:fetch`（取 Electron 运行时，约 **136 MB**，走 npmmirror 镜像；github 在本机连不通）。之后 `npm run desktop` 就开窗口 —— 它跑的是 `desktop/` 那份壳源码，数据落**源码侧包根**；改完壳**重启这条命令即可，不必重新打包** |
-| **打 exe** | `npm run desktop:pack` → 产物在 `.build-desktop/pack-<时间戳>/win-unpacked/`，最近一次记在 `.build-desktop/latest.json`（发布组装读它，**不猜目录名**） |
-
-★ 发布包里**只有** `start.bat` 一个 .bat，它是"**浏览器那条路**"；
-它一旦发现 `app\InteractBot.exe` 存在就**不再打开浏览器**
-（否则同一台机器上会出现两个控制台）。
-
-★ 本版**没有 .bat 启动器**：0.2.4 曾用**中文名 .bat** 去设环境变量 `INTERACTBOT_PKG_ROOT`，
-那一类中文名入口已被用户要求删除（见 `mocks/verify-legacy-assets.mjs`）。
-所以「**没有启动器也能找到包根**」必须成立 —— 见下。
-
-★ **第一次跑发布包**：包里的 `config.json` 是**空白模板**（不含开发机路径），所以包内桥接会如实报
-`❌ 无法启动 DSH：没找到 DSH` —— DSH 是运行环境、**不随包分发**（见 `RELEASE.md` §7）。
-请在 `config.json` 里填 `dsh.cliPath` / `dsh.searchPaths`，或设环境变量 `DSH_DESKTOP_APP`。
-**窗口停在启动页超过 90 秒**时先看 `logs/bridge.log`，别猜（0.2.5 修掉的那个缺陷就是"桥接启动即死
-却一行日志都不留"，原因见下面"包根"那节之后的说明）。
-
-### 包根是怎么找的（`desktop/lib.cjs` 的 `resolvePkgRoot`，三级判据）
-
-1. **环境变量 `INTERACTBOT_PKG_ROOT`** —— 若有人显式设了它（留给"我知道根在哪、我要明确告诉壳"的情形）；
-2. 从 **`app.getAppPath()`**（打包后是 `app\resources\app`、开发时是 `desktop/`）
-   **逐级向上找包根标记**：**同时**有 `config.example.json` 与 `src/index.mjs` 的那一层就是包根；
-3. 找不到就返回链上**真实存在**的那一层，并**在日志里喊一声** —— **绝不猜**。
-
-★★ **为什么写成"看证据"而不是"数目录层数"（真实事故，值得记住）**：
-0.2.4 第一版依赖 `app.isPackaged`，而 `asar: false` 时它**是 `false`**
-⇒ 打包分支根本没进，壳**静默**把 `app\` 当成了包根：
-读不到使用者的 `config.json`（日志里 `ENOENT`）、把日志写进了 `app\logs\`。
-修法就是上面这三级判据 —— 而判据由 `mocks/verify-desktop.mjs` **造出真实发布包布局**来断言（离线 **一百多项**）。
-教训是：**只验「参数怎么用」、没验「真实布局长什么样」，等于没验。**
-
-### 关窗口 = 收进托盘（机器人**继续在线**）
-
-关窗口**不等于退出**：窗口收进右下角**托盘**，机器人**继续在线**。
-真正退出要用**托盘菜单里的「退出并停止机器人」**（它会先 `POST /api/stop`）。
-桌面壳自己的日志在 `logs/desktop.log`（与桥接的 `logs/bridge.log` **分开**）。
-
-### 体积（代价就是 Electron 运行时）
-
-`app/` 约 **324 MB**（其中 `InteractBot.exe` **200.5 MB**）；
-发布包合计 **202 个文件 / 约 413 MB** —— 比不带桌面壳的 **88.6 MB** 大很多。
-多出来的几乎全是 Electron 运行时；换来的是目标机器**不用装 Node**。
-
-### 诚实边界（只有人在真机上点得出来的那部分）
-
-窗口 / 托盘 / 菜单 / "关窗口不下线"这些**交互语义还没验完**。**已经实测到的**：从**发布包**里
-双击 `app\InteractBot.exe` 起过两次真窗口（窗口标题「QQ 机器人控制台」、4 个 Electron 进程、
-`logs/desktop.log` 第一行是正确的**发布包根**而不是 `app\`、端口来自 `config.json`），随后窗口已关闭；
-**没验的**是托盘图标、关窗口是否真的收进托盘（机器人不下线）、以及「退出并停止机器人」。
-已被机器验证的还有：壳的**判断逻辑**
-（端口从哪来 / 什么算启动成功 / 状态怎么翻译 / 包根怎么找）、
-**产物形状**（exe 在、asar 关着、PE 版本号 **0.2.5**、包里的壳代码与 `desktop/` 源码**逐字节一致**）
-以及**发布包验收**。完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`。
-
-**离线测试入口**：`npm run test:desktop`（= `node mocks/verify-desktop.mjs`，**一百多项**，不启动 Electron）。
-
----
-
 ## 依赖与前置条件（打发布包前必读）
 
 本包**自带**：Node 运行时（`vendor/node`）、`ws`、桥接代码、控制台界面（`config-ui/dist`）。
-★ 0.2.5 的**发布包**另外自带桌面壳 `app/`（含 Electron 运行时，见上文「桌面壳」）——
-那是 `npm run desktop:fetch` 取来、`npm run desktop:pack` 打出来的，**不归 `setup.mjs` 管**。
 以下四样**不在包里**，每一样都有明确理由：
 
 | 需要 | 谁提供 | 为什么不在包里 |
@@ -485,10 +402,7 @@ async createSession(sessionId) {
 
 ```
 qq-bridge/
-├── app/                   ★ 发布包里的桌面壳（`InteractBot.exe` 在这里；**含 Electron 运行时**，约 324 MB）
-├── desktop/               ★ 桌面壳源码（Electron：main.cjs 窗口/托盘/启停桥接、lib.cjs 纯逻辑、splash.html 启动页）
-│                          `npm run desktop` 跑的就是它；`npm run desktop:pack` 从它打出 `app/`
-├── start.bat              "浏览器那条路"（★ 0.2.5 起**不再是唯一入口**；发现 app\InteractBot.exe 就不再打开浏览器）
+├── start.bat              入口（★ 唯一入口；双击启动，优先用包内 Node；会先拉起 SnowLuma）
 ├── setup.mjs              一次性准备（幂等）
 ├── config.json            全部配置
 ├── prices.json            ★ 价目表 + 峰谷时段规则（改它不需要重启）
@@ -517,7 +431,6 @@ qq-bridge/
 │   └── api.mjs            本地配置 HTTP 接口
 ├── mcp/mcp-qq-server.mjs  ★ QQ 工具服务器（戳一戳等，手写 MCP）
 ├── config-ui/             ★ 控制台界面（React/Vite，构建产物 dist/ 由桥接伺服）
-├── scripts/               ★ 构建脚本：assemble-desktop.mjs 打 exe / fetch-electron.mjs 取运行时 / assemble-release.mjs 组装发布包
 ├── mocks/                 测试替身（不需要 QQ，不花钱）
 ├── vendor/                包内自带：node/ + node_modules/ws
 ├── logs/                  运行日志 + usage.jsonl
@@ -570,18 +483,12 @@ DSH 子进程死亡时优雅降级、体检工具的准确性（含防误报）�
 **真实模型经桥接读到了工作区文件、并如实报告越界被沙箱拒绝**、
 **真实 QQ 端到端**（管理员私聊 → 桥接 → DSH → 模型 → QQ 回复，全程无人工干预）、
 **模型在明确指令下调用了 QQ 原生工具**（戳一戳等，见 `mcp/mcp-qq-server.mjs`）、
-**用量记账**（真实回合的 token 与成本已落盘 `logs/usage.jsonl`）、
-**桌面壳（0.2.5）的判断逻辑与产物形状**（包根三级判据**照真实发布包布局**断言、
-端口从哪来 / 什么算启动成功 / 状态怎么翻译、exe 在 / asar 关着 / PE 版本号 0.2.5 /
-包里的壳代码与 `desktop/` 源码逐字节一致，`mocks/verify-desktop.mjs` 一百多项）。
+**用量记账**（真实回合的 token 与成本已落盘 `logs/usage.jsonl`）。
 
 **未验证：**
 跨重启的长期记忆（P4，目前重启即失忆，靠工作区的 `MEMORY.md` 兜底）、
 **群聊的真实端到端**（判定与投递已在全链路测试里验证过，
-但还没有在真实群里跑过一轮）、
-**桌面壳的窗口 / 托盘 / 菜单 / "关窗口不下线"**（0.2.5：这些**只能人在真机上点一遍** ——
-受限沙箱里 Electron 起不来；机器只验证了壳的判断逻辑与产物形状，
-完整清单在 `PROJECT.json` 的 `verificationStatus.notVerified`）。
+但还没有在真实群里跑过一轮）。
 
 ---
 
@@ -595,8 +502,4 @@ DSH 子进程死亡时优雅降级、体检工具的准确性（含防误报）�
 | `缺少依赖「ws」` | 没跑 `node setup.mjs` |
 | 机器人失忆 | 正常现象（见上文 §7）：重启后上下文会重置；`session.instance` 新的一天会自动换新 |
 | 报 `session "..." already exists` | `session.instance` 机制失效了。把 `config.json` 的 `session.instance` 改成任意新值后重启 |
-| 双击 `app\InteractBot.exe` 后窗口一直停在启动页 | 桌面壳自己的日志在 `logs/desktop.log`（与桥接的 `logs/bridge.log` **分开**）；启动页上也有「看日志」。0.2.5 起壳会**读桥接日志**：桥接若已写明失败原因，窗口与日志里会直接给出那一行（实测 1 秒就定，不再干等 90 秒） |
-| `npm run desktop` 报 `Electron failed to install correctly…` | 跳过官方 postinstall 后**缺 `desktop/node_modules/electron/path.txt`**（它决定二进制叫什么名字），而运行时其实好好的 ⇒ `npm run desktop:fetch`（**幂等**：只补这个文件，不会重新下载 200 MB） |
-| `npm run desktop` 报 `TypeError: Cannot read properties of undefined (reading 'getAppPath')` | 环境里有 **`ELECTRON_RUN_AS_NODE=1`**（DSH 的 `node` 垫片 `.desktop-bin\node.cmd` 会设它）⇒ electron 被"当 Node 用"，`require('electron')` 返回的是包路径字符串、没有 `app`。⇒ `npm run desktop` 现在由 `scripts/run-desktop.mjs` 启动并**摘掉**这个变量（不再走 `cli.js`）；双击 exe 不受影响 |
-| 关了窗口但机器人还在回话 | **这是设计如此**：关窗口 = 收进**托盘**，机器人继续在线；真要停它用**托盘菜单的「退出并停止机器人」** |
 | 留下 `.tmp-*` 目录 | Windows 句柄回收时机问题，无害。执行 `node mocks/verify-live.mjs --clean`，或下次运行会自动清掉 |
