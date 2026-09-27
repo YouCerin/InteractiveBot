@@ -24,7 +24,11 @@ import { join } from 'node:path'
 import { createProcessGuard, readInstanceArg, REGISTRY_REL, summarizeProcesses, runningBridges } from '../src/process-guard.mjs'
 
 let failures = 0
+// ★ 断言总数：原先只打印「全部通过」、不打印项数 ⇒ PROJECT.json 里那些「N 项断言」
+//   的数字**没法用机器核对**，只能人手求和 —— 而它已经漂了（见 README 里的旧数字）。
+let total = 0
 function check(name, ok, detail = '') {
+  total += 1
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
   if (!ok) failures += 1
 }
@@ -328,8 +332,8 @@ async function main() {
   }
 
   console.log('')
-  if (failures === 0) console.log('🎉 进程登记测试全部通过')
-  else console.log(`⚠️ ${failures} 项失败`)
+  if (failures === 0) console.log(`🎉 进程登记测试全部通过（${total} 项）`)
+  else console.log(`⚠️ ${failures} 项失败（共 ${total} 项）`)
   rmSync(ROOT, { recursive: true, force: true })
   process.exit(failures === 0 ? 0 : 1)
 }

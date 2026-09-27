@@ -27,8 +27,12 @@ import { SdkRpcClient } from '../src/sdk-rpc.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failures = 0
+// ★ 断言总数：原先只打印「全部通过」、不打印项数 ⇒ PROJECT.json 里那些「N 项断言」
+//   的数字**没法用机器核对**，只能人手求和 —— 而它已经漂了（见 README 里的旧数字）。
+let total = 0
 
 function check(name, ok, detail = '') {
+  total += 1
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
   if (!ok) failures += 1
 }
@@ -216,12 +220,12 @@ async function main() {
 
   console.log('')
   if (spawnBlocked && failures === 0) {
-    console.log('⚠️ 只跑了静态防线（行为断言因环境限制被跳过）—— 这**不算**完整通过，')
+    console.log(`⚠️ 只跑了静态防线（行为断言因环境限制被跳过，共 ${total} 项）—— 这**不算**完整通过，`)
     console.log('   请在能启动子进程的环境里再跑一次：node mocks/verify-lifecycle.mjs')
   } else if (failures === 0) {
-    console.log('🎉 进程生命周期测试全部通过')
+    console.log(`🎉 进程生命周期测试全部通过（${total} 项）`)
   } else {
-    console.log(`⚠️ ${failures} 项失败`)
+    console.log(`⚠️ ${failures} 项失败（共 ${total} 项）`)
   }
   process.exit(failures === 0 ? 0 : 1)
 }

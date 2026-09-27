@@ -247,6 +247,27 @@ export function buildJudgePrompt({
 }
 
 /**
+ * 把接口返回的用量**归一化**成本项目内部的口径（`{input, cacheRead, output}`）。
+ *
+ * ★ 为什么要归一化而不是原样带走：报表要拿它估成本，而 `prices.mjs` 的
+ *   `estimateCost()` 认的是 `{input, cacheRead, output}` —— 而直连接口给我们的是
+ *   `{prompt_tokens, completion_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens}`。
+ *   两套名字对不上的后果是**成本静默算不出来**（`estimateCost` 会返回 null，
+ *   报表显示 `—`，看起来像"没配价目表"）。
+ * ★ 走一次性 DSH 进程那条路**拿不到用量** ⇒ 返回 null。报表必须如实标出这一点
+ *   （否则"成本偏低"会被当成真实成本）。
+ */
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const cacheRead = Number(usage.prompt_cache_hit_tokens) || 0
+  const miss = Number(usage.prompt_cache_miss_tokens)
+  const input = Number.isFinite(miss) ? miss : Number(usage.prompt_tokens) || 0
+  const output = Number(usage.completion_tokens) || 0
+  if (!input && !cacheRead && !output) return null
+  return { input, cacheRead, output }
+}
+
+/**
  * 判定输出里"结论字段"的名字 → 它的语义。
  *
  * ★ 为什么要认这么多名字：**模型不会只写 `answer`**。真机上见过 `verdict` / `silent`，
@@ -633,8 +654,10 @@ export function createWakeJudge({
       ms: now() - t0,
       // `via` 一路带出去（进 oplog 行）：它是"模型有没有照格式写"的唯一观测点
       via: parsed.via,
-      // token 用量只透出去供记日志 —— **不进 `usage` 账本**（那是按回合的，
-      // 详见 bridge.mjs 里的说明）。如实带出来，免得以后有人以为它被记过账。
+      // token 用量：**不进 `usage` 账本**（那是按回合的），但**要进 oplog 行** ——
+      // 报表靠它回答"影子/生效这一段时间花了多少"。缺了它，成本那一栏永远是 `—`。
+      tokens: normalizeUsage(r.usage),
+      // 原始响应体也带出去（排查用，不进 oplog）
       usage: r.usage ?? null,
     }
   }

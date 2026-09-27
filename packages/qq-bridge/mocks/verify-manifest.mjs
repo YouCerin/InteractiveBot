@@ -27,7 +27,11 @@ const PKG_ROOT = resolve(HERE, '..')
 const REPO_ROOT = resolve(PKG_ROOT, '..', '..')
 
 let failures = 0
+// ★ 断言总数：原先只打印「全部通过」、不打印项数 ⇒ PROJECT.json 里那些「N 项断言」
+//   的数字**没法用机器核对**，只能人手求和 —— 而它已经漂了（见 README 里的旧数字）。
+let total = 0
 function check(name, ok, detail = '') {
+  total += 1
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
   if (!ok) failures += 1
 }
@@ -624,5 +628,5 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
   )
 }
 
-console.log(`\n${failures === 0 ? '🎉 包契约与代码一致' : `⚠️ ${failures} 项不一致 —— 文档需要同步`}\n`)
+console.log(`\n${failures === 0 ? `🎉 包契约与代码一致（${total} 项）` : `⚠️ ${failures} 项不一致 —— 文档需要同步（共 ${total} 项）`}\n`)
 process.exit(failures === 0 ? 0 : 1)

@@ -1334,6 +1334,116 @@ async function main() {
     return
   }
 
+  // ── 唤醒判定报表（影子模式的兑现路径）────────────────────────────────────
+  //
+  // 为什么它必须存在：`#wakeGate` 每条判定都往 oplog 写一行（无论 `shadow` 开不开），
+  // 但 `--ops` 的渲染是**为回合设计的**（按 `{turn}/{step}` 对齐），wake 行没有这两个
+  // 字段 ⇒ 打出来是畸形的 `t?s?   wake`。**结论有地方写、没有地方看**。
+  // 这个入口补上"看"的那一半，并且把设计文档 §10.5 要求的**抽样人工复核**与
+  // **漏回率**做出来 —— 那才是影子模式的全部价值所在。
+  //
+  //   --wake [--inject <会话>] [--limit N]      看报表（只读）
+  //   --wake --ok 1,3 --miss 2,4                记下人工复核结果（只写 runtime/wake-labels.json）
+  //   --wake --json                             机器可读（给界面/脚本用）
+  if (process.argv.includes('--wake')) {
+    ;(async () => {
+      const { readOps, listOplogs } = await import('./oplog.mjs')
+      const { summarizeWakeOps, renderWakeReport, readWakeLabels, writeWakeLabels, WAKE_LABELS_REL, DEFAULT_SAMPLE_LIMIT } =
+        await import('./wake-report.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位操作日志目录')
+        process.exit(2)
+      }
+      const argOf = (name) => {
+        const i = process.argv.indexOf(name)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+      const chatKey = argOf('--inject') ?? null
+      const sampleLimit = Math.max(1, Number(argOf('--limit')) || DEFAULT_SAMPLE_LIMIT)
+
+      // ★ 读多少条：wake 行只是 oplog 里的一小部分（还有 tool/call、assistant…），
+      //   所以这里要一个**足够大**的原始行数上限，不能只取 40 条然后统计出个笑话。
+      const raw = readOps({ workspace, chatKey, limit: 20_000 })
+
+      // ── 人工复核标注（可选动作）────────────────────────────────────────
+      //   编号 → 这一轮样本列表里的第 n 条；**按 ts 写盘**（编号会随新增行变化，
+      //   ts 不会）—— 并把写进去的是哪几条**回显出来**，标错了能一眼看到。
+      const okArg = argOf('--ok')
+      const missArg = argOf('--miss')
+      if (okArg || missArg) {
+        // 直接用文件顶部已有的 fs/path 导入，不再动态 import（少一层、也更好读）
+        const readFile = (abs) => (existsSync(abs) ? readFileSync(abs, 'utf8') : null)
+        const writeFile = (abs, body) => {
+          mkdirSync(join(abs, '..'), { recursive: true })
+          writeFileSync(abs, body, 'utf8')
+        }
+        const { labels } = readWakeLabels({ workspace, readFile })
+        const base = summarizeWakeOps({ rows: raw, labels, sampleLimit })
+        const nums = (v) => String(v ?? '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0)
+        const apply = (list, mark) => {
+          const done = []
+          for (const n of nums(list)) {
+            const s = base.samples.find((x) => x.index === n)
+            if (!s) continue
+            labels[String(s.ts)] = mark
+            done.push(s)
+          }
+          return done
+        }
+        const oks = apply(okArg, 'ok')
+        const misses = apply(missArg, 'miss')
+        const w = writeWakeLabels({ workspace, labels, write: writeFile })
+        console.log('')
+        console.log(`${w.ok ? '✅' : '❌'} 复核结果${w.ok ? '已写入' : '写入失败'} ${WAKE_LABELS_REL}（共 ${w.written} 条${w.why ? `｜${w.why}` : ''}）`)
+        for (const [mark, list] of [['✅ 判对', oks], ['❌ 漏回', misses]]) {
+          for (const s of list) console.log(`   ${mark}  #${s.index} [${new Date(s.ts).toLocaleString()}] 「${String(s.excerpt).slice(0, 40)}」`)
+        }
+        const bad = nums(`${okArg ?? ''},${missArg ?? ''}`).filter((n) => !base.samples.some((x) => x.index === n))
+        if (bad.length > 0) {
+          console.log(`   ⚠️ 编号 ${bad.join('、')} 不在这一轮样本里（没记）—— 编号会随新增判定而变，` +
+            `**以 ts 为准**：请重跑 --wake 看当前列表`)
+        }
+        console.log('')
+        console.log('（下面按最新标注重出报表）')
+      }
+
+      const { labels: labels2, why: labelWhy } = readWakeLabels({
+        workspace,
+        readFile: (abs) => (existsSync(abs) ? readFileSync(abs, 'utf8') : null),
+      })
+      const summary = summarizeWakeOps({
+        rows: raw,
+        labels: labels2,
+        sampleLimit,
+        window: { from: null, to: null, files: listOplogs({ workspace, chatKey }).length },
+      })
+      summary.workspace = workspace
+      // ── 成本估算（只在真拿到了 token 数时才算；取不到单价就如实显示 `—`）─────
+      //   ⚠️ 与 `usage.mjs` 的账本**互不相干**：账本记的是"回合"，判定是"账外的一次
+      //      小调用"。所以这里只给一个**参考量级**，不要把它当成账本的一部分。
+      try {
+        const { createPriceBook } = await import('./prices.mjs')
+        const { estimateCost } = await import('./prices.mjs')
+        if (summary.tokens.rows > 0) {
+          const book = createPriceBook({ file: resolveInPackage(config.usage?.pricesFile ?? 'prices.json'), log: () => {} })
+          const priced = book?.rateForAt?.(config.dsh?.model, new Date(summary.window.to || Date.now())) ?? null
+          const cost = priced ? estimateCost(summary.tokens, priced.rate, priced.rateKey) : null
+          summary.cost = cost === null ? null : { cny: cost, rateKey: priced?.rateKey ?? null, priced: true }
+        } else {
+          summary.cost = null
+        }
+      } catch {
+        summary.cost = null
+      }
+      if (labelWhy) summary.warnings.unshift(labelWhy)
+      console.log('')
+      console.log(renderWakeReport(summary, { json: process.argv.includes('--json') }))
+      console.log('')
+      process.exit(0)
+    })()
+  }
+
   // ── 操作日志（oplog）：agent"自己干过什么" ────────────────────────────────
   //
   // 两个入口（都在工作区的 runtime/oplog/ 下）：

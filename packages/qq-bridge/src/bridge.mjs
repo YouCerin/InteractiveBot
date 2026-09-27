@@ -1497,6 +1497,9 @@ export class Bridge extends EventTarget {
           //   放进 oplog 才能在事后回答"提示词到底被遵守了没有"。
           via: r.via ?? null,
           ms: r.ms,
+          // ★ token 用量进 oplog 行 —— 报表靠它回答"这一段时间的判定花了多少"。
+          //   走一次性 DSH 进程那条路拿不到 ⇒ null，报表会如实标出"成本偏低"。
+          tokens: r.tokens ?? null,
           reason: r.reason || r.why || '',
           excerpt: String(rendered.text ?? '').slice(0, 80),
         },

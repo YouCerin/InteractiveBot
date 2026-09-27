@@ -24,7 +24,11 @@ import { readYamlPath, resolveModelCredentials, CREDENTIALS_FILENAME } from '../
 import { PKG_ROOT } from '../src/local.mjs'
 
 let failures = 0
+// ★ 断言总数：原先只打印「全部通过」、不打印项数 ⇒ PROJECT.json 里那些「N 项断言」
+//   的数字**没法用机器核对**，只能人手求和 —— 而它已经漂了（见 README 里的旧数字）。
+let total = 0
 function check(name, ok, detail = '') {
+  total += 1
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
   if (!ok) failures += 1
 }
@@ -144,5 +148,5 @@ section('★ 绝不把密钥写进日志或接口')
 rmSync(TMP, { recursive: true, force: true })
 void existsSync
 
-console.log(`\n${failures === 0 ? '🎉 凭据读取测试全部通过' : `⚠️ ${failures} 项失败`}\n`)
+console.log(`\n${failures === 0 ? `🎉 凭据读取测试全部通过（${total} 项）` : `⚠️ ${failures} 项失败（共 ${total} 项）`}\n`)
 process.exit(failures === 0 ? 0 : 1)
