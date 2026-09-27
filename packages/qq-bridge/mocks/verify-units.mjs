@@ -1006,5 +1006,98 @@ section('「先应一声」必须诚实：按实际在做的事说话，不写�
   check('★ 全空白的话术也退回默认', blankPool.pick({}).length > 0, JSON.stringify(blankPool.pick({})))
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+section('project-doc.mjs · 项目简介副本（让 agent 需要时能自己读）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 这一节盯的是"agent 能不能真的拿到它自己的说明书"：
+// 文档在**包外**（agent 的沙箱根是工作区），所以桥接启动时要把它复制进工作区，
+// 提示词里只留**一行指针**。四件事必须成立：副本在（且不在 memory/ 下）、
+// 正文逐字不变、源文档不在时**不写空壳**、键为空时提示词里一个字都不出现。
+{
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const {
+    PROJECT_DOC_REL,
+    ensureProjectDocCopy,
+    findProjectDocSource,
+    renderProjectDocCopy,
+    projectDocLine,
+    projectDocStatus,
+  } = await import('../src/project-doc.mjs')
+  const { buildChannelPrompt } = await import('../src/channel-prompt.mjs')
+
+  // ① 真仓库里能找到源文档
+  const found = findProjectDocSource()
+  check('★ 在本仓库里找得到项目简介（docs/项目简介.md）', Boolean(found), found?.rel ?? '（没找到）')
+  check('★ 候选位置里第一个就是仓库里的那份（发布包可退到第二候选）',
+    found?.rel === '../../docs/项目简介.md', String(found?.rel))
+
+  // ② 副本：正文逐字保留 + 头部说清来源/时间/别改
+  const ROOT = mkdtempSync(join(tmpdir(), 'qq-bridge-doc-'))
+  const WS = join(ROOT, 'ws')
+  mkdirSync(WS, { recursive: true })
+  const srcText = readFileSync(found.abs, 'utf8')
+  const r = ensureProjectDocCopy({ workspace: WS, version: '9.9.9', now: '2026-01-02 03:04:05' })
+  check('★ 副本写成功并回报字符数', r.ok === true && r.chars > 1000, JSON.stringify(r))
+  check('★ 落在 store/ 下（**不是** memory/：那会被当记忆注入、还会被篡改检测扫）',
+    r.rel === PROJECT_DOC_REL && r.rel.startsWith('store/') && !r.rel.startsWith('memory/'), r.rel)
+  const copyAbs = join(WS, PROJECT_DOC_REL)
+  check('文件真的在盘上', existsSync(copyAbs))
+  const copyText = readFileSync(copyAbs, 'utf8')
+  check('★★ 正文**逐字**保留（副本不许改写内容）', copyText.includes(srcText.trim().slice(0, 200)) && copyText.endsWith(srcText))
+  check('★ 头部说清来源', copyText.includes('docs/项目简介.md'))
+  check('★ 头部写清生成时间（人能判断它是不是旧的）', copyText.includes('2026-01-02 03:04:05'))
+  check('★ 头部明确"别改这份文件"', /别改这份文件/.test(copyText))
+  check('★ 头部带上版本号', copyText.includes('9.9.9'))
+  check('幂等：再写一次内容一样', (() => {
+    ensureProjectDocCopy({ workspace: WS, version: '9.9.9', now: '2026-01-02 03:04:05' })
+    return readFileSync(copyAbs, 'utf8') === copyText
+  })())
+
+  // ③ 源文档不在（发布包不带 docs/）→ 不写空壳、给明确原因、也不留悬空指针
+  const PKG_FAKE = join(ROOT, 'pkg')
+  mkdirSync(PKG_FAKE, { recursive: true })
+  const WS2 = join(ROOT, 'ws2')
+  mkdirSync(WS2, { recursive: true })
+  const logs = []
+  const miss = ensureProjectDocCopy({ workspace: WS2, pkgRoot: PKG_FAKE, log: (m) => logs.push(m) })
+  check('★★ 源文档找不到 → ok=false 且说清原因', miss.ok === false && miss.skipped === 'no-source', JSON.stringify(miss))
+  check('★★ 而且**什么都没写**（绝不写空壳骗模型"读到了"）', !existsSync(join(WS2, PROJECT_DOC_REL)))
+  check('★ 留了一行日志（安静降级但可追溯）', logs.some((m) => /项目简介不在包里/.test(m)), logs.join(' | '))
+  check('没有工作区 → 也明确拒绝（而不是写到一个空路径）',
+    ensureProjectDocCopy({ workspace: '', pkgRoot: PKG_FAKE }).skipped === 'no-workspace')
+
+  // ④ 提示词：有副本才出现那一行；没有就一个字都不出现
+  const base = {
+    kind: 'private',
+    peerId: '1',
+    senderId: '1',
+    tier: 'admin',
+    reason: REASON.PRIVATE ?? 'private',
+    rendered: { text: '你好', images: 0 },
+    config: { humanize: {}, persona: {}, image: {} },
+  }
+  const withDoc = await buildChannelPrompt({ ...base, projectDocRel: PROJECT_DOC_REL })
+  check('★ 有副本 → 提示词里出现那一行指针', withDoc.includes(PROJECT_DOC_REL), '')
+  check('★ 指针明确指向 store/ 下的副本', projectDocLine().includes(PROJECT_DOC_REL))
+  check('★ 并且告诉模型"什么时候用它"（被问到权限/能力时）', /你能做什么|能改我的文件/.test(withDoc))
+  const withoutDoc = await buildChannelPrompt({ ...base, projectDocRel: '' })
+  check('★★ 没有副本 → 提示词里**一个字都不提**（不留悬空指针）',
+    !withoutDoc.includes(PROJECT_DOC_REL) && !/interactbot-intro/.test(withoutDoc))
+  check('两种情况下其余提示词内容一致（只差那一行）',
+    withoutDoc.length < withDoc.length && withDoc.replace(`\n\n${projectDocLine()}`, '') === withoutDoc,
+    `${withoutDoc.length} vs ${withDoc.length}`)
+
+  // ⑤ 状态摘要（给 --check 用）
+  const st = projectDocStatus({ workspace: WS })
+  check('状态摘要：源在、副本在', st.sourceFound === true && st.copyExists === true, JSON.stringify(st))
+  check('renderProjectDocCopy 是纯函数（同输入同输出）',
+    renderProjectDocCopy({ text: 'x', sourcePath: 'p', generatedAt: 't' }) === renderProjectDocCopy({ text: 'x', sourcePath: 'p', generatedAt: 't' }))
+
+  rmSync(ROOT, { recursive: true, force: true })
+}
+
 console.log(`\n${failures === 0 ? '🎉 单元测试全部通过' : `⚠️ ${failures} 项失败`}\n`)
 process.exit(failures === 0 ? 0 : 1)

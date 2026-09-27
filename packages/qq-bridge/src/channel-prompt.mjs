@@ -39,6 +39,7 @@ import { recordInjection } from './memory-usage.mjs'
 import { renderMarkerInstructions } from './markers.mjs'
 import { listRecipes, pickRecipes, renderRecipeBlock } from './recipes.mjs'
 import { buildPermissionInstructions } from './roster.mjs'
+import { projectDocLine } from './project-doc.mjs'
 import { renderSessionStateBlock } from './session-state.mjs'
 import { readTask, renderTaskBlock } from './tasks.mjs'
 import { describeGap } from './transport.mjs'
@@ -107,6 +108,7 @@ export async function buildChannelPrompt({
   consumeGap = () => null,
   skillSections = [],
   nickname = '',
+  projectDocRel = '',
 } = {}) {
   const stamp = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`
 
@@ -161,6 +163,18 @@ export async function buildChannelPrompt({
 
   // ── 权限等级（决定它能不能"动手"）────────────────────────────────────
   lines.push('', buildPermissionInstructions(tier, kind))
+
+  // ── 项目简介副本（0.2.2）：**一行指针**，不是文档本体 ────────────────────
+  //
+  // ★ 为什么需要它：文档在**包外**（agent 的工作区沙箱读不到），
+  //   而"你能做什么 / 你能改我的文件吗 / 这项目怎么做的"这类问题如果只能凭印象答，
+  //   答错的代价是使用者对权限的误判。桥接启动时把简介复制进 `store/`，
+  //   这里只告诉模型"有这么一份、需要时去读"（几行字的成本，换来的是它可以**先查再答**）。
+  // ★ 键**不存在或为空**时（发布包不带 docs/、或写失败）⇒ 一个字都不出现：
+  //   宁可它老实说"我不确定"，也不要留一个指向空气的文件名。
+  if (projectDocRel) {
+    lines.push('', projectDocLine({ rel: projectDocRel }))
+  }
 
   // ── 外部技能（`skills/`）给的指引（0.2.2）──────────────────────────────
   //

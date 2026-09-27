@@ -54,6 +54,7 @@ import { discoverSkills, loadSkill, describeSkill, callSkillDiagnose, ensureSkil
 import { createExtensionService } from './extensions-service.mjs'
 import { listPlugins, BUILTIN_PLUGINS } from './plugins.mjs'
 import { describePersonaShelf, applyPersonaAction, ensureDefaultPersonas } from './personas.mjs'
+import { projectDocStatus } from './project-doc.mjs'
 import { readContacts, writeContacts, summarizeContacts, CONTACTS_REL } from './contacts.mjs'
 import { readPrivacyAudit, scanPrivacy, PRIVACY_CATEGORIES } from './privacy.mjs'
 import { inspectMemory } from './memory-inspect.mjs'
@@ -1436,6 +1437,18 @@ async function main() {
       for (const e of s.errors) console.log(`⚠️ 技能 ${s.dirName}：${e}`)
       for (const w of s.warnings) console.log(`⚠️ 技能 ${s.dirName}：${w}`)
       if (s.ok && !s.loaded) console.log(`⚠️ 技能 ${s.id}：${s.loadError}`)
+    }
+    // 项目简介副本（agent 靠它回答"你能做什么 / 你能改我的文件吗"）。
+    // ★ 这里**只报告、不写文件** —— `--check` 的契约是"不连任何服务、也不改任何东西"。
+    {
+      const st = projectDocStatus({ workspace: config.dsh?.workspace })
+      if (!st.sourceFound) {
+        console.log('ℹ️  项目简介：这个包里没有 docs/项目简介.md（发布包不带它）—— agent 读不到自己的说明书')
+      } else if (!st.copyExists) {
+        console.log(`ℹ️  项目简介：源在，但工作区里还没有副本 —— 启动后会自动写到 ${st.copyRel}`)
+      } else {
+        console.log(`📄 项目简介副本：${st.copyRel}（源 ${st.source}）`)
+      }
     }
     console.log('\n✅ 配置自检通过（--check 模式，未连接任何服务）\n')
     return

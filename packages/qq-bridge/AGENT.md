@@ -104,7 +104,17 @@ qq-bridge/
 ├── vendor/           包内自带：node 运行时 + ws（由 setup.mjs 生成）
 ├── logs/             运行日志
 └── workspace-qq/     ★ agent 的工作区 = 权限沙箱的根
+    ├── MEMORY.md     全局记忆（agent 自己维护）
+    ├── memory/       按人/按群的记忆、指令、回执、快照（**篡改检测只扫这里和根**）
+    └── store/interactbot-intro.md
+                      ★ **项目简介的副本**（每次启动由 `src/project-doc.mjs` 重写）
+                        为什么在这里：文档源在**包外**，而 agent 的沙箱根就是这个工作区 ——
+                        放进来它才读得到。提示词里只留一行指针，模型被问到
+                        「你能做什么 / 你能改我的文件吗 / 这项目怎么做的」时自己去读。
+                        发布包不带 `docs/`，那时这份副本不会生成、提示词里也不提（不留悬空指针）。
 ```
+
+> ★ 改 `docs/项目简介.md` 之后**不用手抄一份**：桥接下次启动会自动重写 `store/interactbot-intro.md`。
 
 ---
 

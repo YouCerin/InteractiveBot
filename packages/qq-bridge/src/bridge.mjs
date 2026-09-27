@@ -61,6 +61,7 @@ import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
 import { resolveActivePersona } from './personas.mjs'
+import { ensureProjectDocCopy } from './project-doc.mjs'
 import { buildChannelPrompt } from './channel-prompt.mjs'
 import { collectSkillPromptSections } from './extensions.mjs'
 import { nicknameFor } from './contacts.mjs'
@@ -299,6 +300,26 @@ export class Bridge extends EventTarget {
         keepRecent: config?.humanize?.interim?.keepRecent,
       })
     this.log = log
+
+    // ── 项目简介的副本（0.2.2）：让 agent **需要时能自己读** ────────────────
+    // ★ 为什么要有它：`docs/项目简介.md` 在**包外**，而 agent 的沙箱根是工作区 —— 它读不到。
+    //   于是"你能不能删我的文件 / 你能做什么"这类问题只能凭提示词里那一小段权限说明猜。
+    //   这里启动时把文档复制进 `store/`（**不是** `memory/`：那会被当记忆注入、还被篡改检测扫），
+    //   提示词里只留**一行**指针，模型需要时用 read 只读它要的那一节。
+    // ★ 写失败/源文档不在（发布包不带 docs/）时：什么都不写、提示词里那一行也不出现
+    //   （不留悬空指针），并且**绝不写空壳**骗模型说"读到了"。
+    this.projectDocRel = ''
+    try {
+      if (config.dsh?.workspace) {
+        const r = ensureProjectDocCopy({ workspace: config.dsh.workspace, version: config.pkgVersion ?? '', log })
+        if (r.ok) {
+          this.projectDocRel = r.rel
+          log(`📄 项目简介副本已就绪：${r.rel}（${r.chars} 字，源 ${r.source}）`)
+        }
+      }
+    } catch (error) {
+      log(`⚠️  项目简介副本准备失败（不影响收发消息）：${error?.message ?? error}`)
+    }
 
     // 图片暂存区（`<工作区>/inbox/`）。
     //
@@ -2048,6 +2069,11 @@ export class Bridge extends EventTarget {
       // ★ 每轮现读 `memory/contacts.md`：改完**下一轮就生效**（不需要重启）。
       //   只取**当前说话人**那一条（群里也只看发言人，不列全群 —— 那是隐私面）。
       nickname: this.#nicknameFor(opts.senderId),
+      // ── 项目简介副本（0.2.2）────────────────────────────────────────────
+      // ★ 只是一行**指针**（不是文档本体）：模型被问到"你能做什么 / 能改我的文件吗 /
+      //   这项目怎么做的"时，用它去 `read` 那一节。副本在构造期写好，所以这里是常量；
+      //   没写成（发布包不带 docs/）时是空串 ⇒ 提示词里一个字都不出现（不留悬空指针）。
+      projectDocRel: this.projectDocRel,
       // ── 外部技能片段（0.2.2）────────────────────────────────────────────
       // ★ **每轮现收集**：开关一改，下一轮就不再有它的指引（即时生效）。
       // ★ 出错只降级：某个技能的 promptSections() 抛错，只记一行日志并跳过它，
