@@ -72,6 +72,14 @@ const SKIP_DIR = new Set([
   'node_modules', 'vendor', 'dist', 'logs', 'cache', '_release', 'snowluma',
   'workspace-qq', '.git', '.tmp-verify', '.tmp-verify-onebot', '.tmp-verify-doctor',
   '.tmp-live-workspace', '.tmp-live-outside', '.tmp-probe-dsh', 'reference',
+  // ★ 桌面壳的构建产物（0.2.4）。为什么必须跳过：它整份是 **Electron 的运行时**
+  //   （复制来的 Chromium），里面有几十 MB 的第三方文件 —— 比如
+  //   `LICENSES.chromium.html`。那是**别人写的**东西，既不是我们手写的、
+  //   也不该由我们的编码守卫来评判（实测它含 137 处 U+FFFD —— 那是 Chromium
+  //   自己在许可证文本里放的替换字符，天知道为什么，但与我们无关）。
+  //   ⚠️ 本套的判据是"我们自己的文本文件有没有被重编码写坏"，把它算进来只会
+  //   制造一条**永远红的假失败**，而假失败会让人去改守卫。
+  '.build-desktop',
 ])
 
 /**

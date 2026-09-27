@@ -25,7 +25,8 @@
  *   node scripts/assemble-release.mjs --force             # 允许覆盖已存在的输出目录（默认拒绝）
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -67,7 +68,17 @@ const COPY_FILES = [
   '检查配置.bat',
   '体检.bat',
   '创建带图标的快捷方式.bat',
-  'QQ机器人.lnk',
+  // ⚠️ `QQ机器人.lnk` **不在清单里**（0.2.4 更正）。
+  //
+  // 它曾经在这里，而包根**根本没有这个文件** ⇒ 只要跑组装就必然停在第③步
+  // （"包根缺少这些必需件：QQ机器人.lnk"）。查过才知道它的来历：只在
+  // `_release/` 的两个老包里存在（0.2.0 那份是**手敲组装**的、把开发机上现成的
+  // 快捷方式一起拷了进去），git 里从未有过源文件。
+  //
+  // 而它**本来就不该随包分发**：`.lnk` 存的是**绝对路径**，而且带的是本机图标缓存位置 ——
+  // 在别人机器上目标与图标都是坏的（`创建带图标的快捷方式.bat` 的注释里早就写着这条，
+  // 所以那个脚本是"在**使用者的机器上**生成 .lnk"）。现在由它生成两个：
+  // `QQbot.lnk`（指向 .bat 入口）与 `InteractBot.lnk`（指向 app\InteractBot.exe）。
   '先读我-首次使用.txt',
   'setup.mjs',
   'prices.json',
@@ -77,6 +88,58 @@ const COPY_FILES = [
   'README.md',
   'RELEASE.md',
 ]
+
+/**
+ * 桌面壳（0.2.4）：`InteractBot.exe` 那一份从 `.build-desktop/` 的**最近一次成功构建**取。
+ *
+ * 为什么读 `latest.json` 而不是"猜一个目录名"：`.build-desktop/` 下每次构建是一个新目录
+ * （`pack-<时间戳>`，见 scripts/assemble-desktop.mjs 的说明：Windows 上旧产物常被
+ * Defender/索引器占住、删不掉）。既然同时可能有好几份，**"哪一份是当前的"就必须是记下来的**，
+ * 而不是按名字排序猜 —— 猜错了会把一份旧 exe 打进新包，而且没有任何东西会报错。
+ *
+ * ⚠️ 这一段**只做查证、把结论记下来**，一条都不打印：`log` / `bad` 在下面才声明
+ * （const 的 TDZ），在这里调它们会直接 `ReferenceError: Cannot access 'bad' before initialization`
+ * —— 实测踩过。所以结论存进 `desktopNotice`，由下面那段按原顺序打出来。
+ */
+const DESKTOP_LATEST = join(PKG_ROOT, '.build-desktop', 'latest.json')
+let DESKTOP_UNPACKED = null
+let DESKTOP_META = null
+const desktopNotice = [] // { level: 'info'|'bad', text }
+{
+  if (existsSync(DESKTOP_LATEST)) {
+    try {
+      const meta = JSON.parse(readFileSync(DESKTOP_LATEST, 'utf8'))
+      const dir = join(PKG_ROOT, meta.unpacked ?? '')
+      if (existsSync(join(dir, 'InteractBot.exe'))) {
+        DESKTOP_UNPACKED = dir
+        DESKTOP_META = meta
+        desktopNotice.push({
+          level: 'info',
+          text: `桌面壳：用最近一次构建（${meta.builtAt ?? '?'}，Electron ${meta.electronVersion ?? '?'}）`,
+        })
+      } else {
+        desktopNotice.push({
+          level: 'bad',
+          text: `.build-desktop/latest.json 指向的目录里没有 InteractBot.exe：${dir}`,
+        })
+      }
+    } catch (error) {
+      desktopNotice.push({ level: 'bad', text: `读不出 .build-desktop/latest.json：${error?.message ?? error}` })
+    }
+  } else {
+    // ★ 不拦：没有桌面壳**也要能组出一个能用的包**（桌面壳是本机工具链打出来的，
+    //   换台机器可能没有）。但必须**说清楚** —— 否则"0.2.4 说好的独立窗口"会静默地不成立
+    //   （`启动机器人.bat` 会悄悄退回浏览器那条路）。
+    desktopNotice.push({
+      level: 'warn',
+      text:
+        '没有 .build-desktop/latest.json —— 本次**不带桌面壳**（InteractBot.exe 不会进包，' +
+        '「启动机器人.bat」会退回浏览器那条老路）',
+    })
+    desktopNotice.push({ level: 'info', text: '   要带的话：cd desktop && npm install --ignore-scripts' })
+    desktopNotice.push({ level: 'info', text: '             然后回到包根跑 node scripts/fetch-electron.mjs 与 node scripts/assemble-desktop.mjs' })
+  }
+}
 
 let failures = 0
 const log = (m) => console.log(m)
@@ -90,6 +153,11 @@ log(`组装发布包  InteractBot-${VERSION}-win-x64`)
 log(`  源  ：${PKG_ROOT}`)
 log(`  目标：${OUT}`)
 if (DRY) log('  ⚠️ --dry-run：只报告，不写盘')
+for (const n of desktopNotice) {
+  if (n.level === 'bad') bad(n.text)
+  else if (n.level === 'warn') log(`⚠️ ${n.text}`)
+  else log(n.text)
+}
 log('')
 
 // ⚠️ 子进程输出**不能用管道捕获**：受限沙箱禁止"通过管道截获另一个程序的输出"
@@ -245,6 +313,71 @@ for (const d of COPY_DIRS) {
 for (const f of COPY_FILES) {
   cpSync(join(PKG_ROOT, f), join(OUT, f), { force: true })
   log(`   📄 ${f}`)
+}
+
+// ── ④-b 桌面壳（0.2.4）：整目录搬进包根的 `app/` ─────────────────────────
+//
+// ★ 为什么是 `app/` 子目录、而不是把 exe 与 Chromium 的几十个 dll 平铺在包根：
+//   ① 包根现在有 16 个入口文件与 config.json，再铺 20 个 dll 会让人一眼看不出
+//      "该点哪个"；② 名字冲突不再是问题（`version` / `LICENSES.chromium.html`
+//      这类通用名不与我们的文件抢位）；③ 想删掉桌面壳时，删一个目录就干净了。
+//
+// ★★ exe 还是能从那儿找到包根：它按**存在性**往上找（`desktop/lib.cjs` 的
+//    `resolvePkgRoot`）—— `<包根>/app/resources/app` → 上两级是 `<包根>/app`（没有
+//    config.example.json）→ 再上两级就是 `<包根>`（有）⇒ 命中。这一段是**实测过**的，
+//    不是"应该能找到"（见下面 ⑤ 的验收）。
+if (DESKTOP_UNPACKED) {
+  log('')
+  log('── ④-b 桌面壳（InteractBot.exe）──')
+  const appDir = join(OUT, 'app')
+  mkdirSync(appDir, { recursive: true })
+  cpSync(DESKTOP_UNPACKED, appDir, { recursive: true, force: true })
+  const exe = join(appDir, 'InteractBot.exe')
+  if (!existsSync(exe)) {
+    bad(`拷完以后 app/InteractBot.exe 不存在 —— 桌面壳没进包`)
+  } else {
+    let n = 0
+    let bytes = 0
+    const walkApp = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const full = join(d, e.name)
+        if (e.isDirectory()) walkApp(full)
+        else if (e.isFile()) {
+          n += 1
+          bytes += statSync(full).size
+        }
+      }
+    }
+    walkApp(appDir)
+    log(`   📁 app/（${n} 个文件，${(bytes / 1024 / 1024).toFixed(1)} MB）`)
+    log(`   📄 app/InteractBot.exe（${(statSync(exe).size / 1024 / 1024).toFixed(1)} MB）`)
+    // ★ 溯源：把"这份 exe 是哪份源码、哪个 Electron、什么时候打的"写进包。
+    //   与 config-ui 的 ui-build.json 同一个理由 —— 发布包里的东西必须能自证来源。
+    const desktopMeta = DESKTOP_META ?? {}
+    const appMain = join(appDir, 'resources', 'app', 'main.cjs')
+    writeFileSync(
+      join(appDir, 'PROVENANCE.txt'),
+      [
+        'InteractBot 桌面壳（控制台窗口 + 启动器）',
+        '',
+        `打包时间   ：${desktopMeta.builtAt ?? '?'}`,
+        `Electron   ：${desktopMeta.electronVersion ?? '?'}`,
+        `源文件     ：packages/qq-bridge/desktop/{main,preload,lib}.cjs + splash.html + assets/app-icon.ico`,
+        `主进程哈希 ：${existsSync(appMain) ? createHash('sha256').update(readFileSync(appMain)).digest('hex').slice(0, 16) : '（读不到）'}`,
+        '',
+        '怎么启动：双击包根目录的「启动机器人.bat」（或创建带图标的快捷方式）。',
+        '直接双击 app\\InteractBot.exe 也可以 —— 它会自己找到包根、起桥接、开窗口。',
+        '',
+        '窗口关掉只会收到右下角托盘，机器人**继续在线**；要它下线请用托盘菜单的',
+        '「退出并停止机器人」。',
+        '',
+        '这份文件由 scripts/assemble-release.mjs 生成，用来回答"这个 exe 是哪来的"。',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    log('   📄 app/PROVENANCE.txt（这份 exe 的来源）')
+  }
 }
 
 // ★ 空白 config.json：从**模板**复制，绝不拷你的真配置

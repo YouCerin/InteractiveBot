@@ -38,14 +38,20 @@ rem       (Spelled as hex so this file stays ASCII even in comments.)
 rem ============================================================================
 
 chcp 65001 >nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $d=$PWD.Path; $lnk='QQbot.lnk'; $bat=[char]0x542F+[char]0x52A8+[char]0x673A+[char]0x5668+[char]0x4EBA+'.bat'; if(-not (Test-Path -LiteralPath (Join-Path $d $bat))){$bat='start.bat'}; $sh=New-Object -ComObject WScript.Shell; $l=$sh.CreateShortcut((Join-Path $d $lnk)); $l.TargetPath=(Join-Path $d $bat); $l.WorkingDirectory=$d; $l.IconLocation='assets\icon.ico,0'; $l.Description='InteractBot - QQ + DSH bridge'; $l.Save(); Write-Host ('OK -> ' + (Join-Path $d $lnk))"
+rem 0.2.4: when app\InteractBot.exe exists we ALSO create InteractBot.lnk pointing
+rem straight at the desktop app -- then the shortcut carries the icon that is
+rem already embedded IN the exe (added by electron-builder), and a pinned
+rem taskbar entry uses the app's own icon instead of a generic one.
+rem QQbot.lnk stays as it was (points at the .bat launcher, icon from the .ico
+rem file next to it): it keeps working even if the desktop app is missing.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $d=$PWD.Path; $lnk='QQbot.lnk'; $bat=[char]0x542F+[char]0x52A8+[char]0x673A+[char]0x5668+[char]0x4EBA+'.bat'; if(-not (Test-Path -LiteralPath (Join-Path $d $bat))){$bat='start.bat'}; $sh=New-Object -ComObject WScript.Shell; $l=$sh.CreateShortcut((Join-Path $d $lnk)); $l.TargetPath=(Join-Path $d $bat); $l.WorkingDirectory=$d; $l.IconLocation='assets\icon.ico,0'; $l.Description='InteractBot - QQ + DSH bridge'; $l.Save(); Write-Host ('OK -> ' + (Join-Path $d $lnk)); $exe=Join-Path $d 'app\InteractBot.exe'; if(Test-Path -LiteralPath $exe){ $l2=$sh.CreateShortcut((Join-Path $d 'InteractBot.lnk')); $l2.TargetPath=$exe; $l2.WorkingDirectory=(Join-Path $d 'app'); $l2.Description='InteractBot desktop console (window + launcher)'; $l2.Save(); Write-Host ('OK -> ' + (Join-Path $d 'InteractBot.lnk')) } else { Write-Host 'note: app\InteractBot.exe not found, skipped InteractBot.lnk' }"
 
 if errorlevel 1 (
   echo.
   echo [!] Failed to create the shortcut. See the message above.
 ) else (
   echo.
-  echo Shortcut created in this folder. Right-click it, or drag it to the
+  echo Shortcut(s) created in this folder. Right-click one, or drag it to the
   echo desktop, to keep it handy.
 )
 echo.

@@ -1,0 +1,20 @@
+{
+  "name": "qq-bridge-desktop",
+  "private": true,
+  "version": "0.0.0",
+  "description": "InteractBot 桌面壳：把控制台界面装进一个真正的程序窗口，并负责桥接的启停（构建期依赖，不是运行期依赖）",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "fetch": "node ../scripts/fetch-electron.mjs",
+    "pack": "node ../scripts/assemble-desktop.mjs"
+  },
+  "comment": {
+    "noRuntimeDeps": "★ 这里刻意**没有** dependencies。壳只 require electron 与 node 内置模块；打包时 scripts/assemble-desktop.mjs 会因此直接把文件摊进 app，不需要任何依赖收集（那一步在本机沙箱里会 EPERM，见 scripts/patch-electron-builder.mjs）。加一个 dependencies 会让前置检查直接拒绝组装。",
+    "electronIsPinned": "electron 版本**写死**（不是 ^ 范围）：Electron 的 Node 版本决定 node:sqlite 能不能用（本项目要 ≥22.5），而 33 及以下带的是 Node 20 —— 缓存里恰好躺着一份 33，用 ^ 很容易滑到不能用的那一档。"
+  },
+  "devDependencies": {
+    "electron": "38.8.6",
+    "electron-builder": "^26.0.12"
+  }
+}

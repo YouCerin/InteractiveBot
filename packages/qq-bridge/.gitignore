@@ -40,3 +40,20 @@ config.json.bak-*
 # config-ui/.gitignore 负责；这里只挡根目录下零散的临时文件
 *.tmp
 .tmp-*
+
+# ── 桌面壳（0.2.4）的**构建期**产物 ──
+# 为什么全都不进库：它们每一个都能用一条命令重新生成，而且体积是**百 MB 级**。
+#   ① desktop/node_modules/：Electron 工具链（~72 MB，且 electron 包本身还要另下一份运行时）
+#   ② desktop/.npm-cache/：npm 缓存 + Electron 运行时 zip（~200 MB）——
+#      沙箱只允许写工作区，所以缓存必须落在这里（见 desktop/.npmrc）
+#   ③ desktop/install.log、desktop/dist/：构建残留
+#   ④ .build-desktop/：electron-builder 的产物（InteractBot.exe 那一份，~250 MB）
+#   ⑤ cache/：已经在上面统一忽略（screen 的 stage 目录在 cache/desktop-stage）
+#
+# ⚠️ **发布包里的 InteractBot.exe 不走这里**：那是 _release/ 下的产物，
+#    由 scripts/assemble-release.mjs 从 .build-desktop/ 平铺进去。
+desktop/node_modules/
+desktop/.npm-cache/
+desktop/install.log
+desktop/dist/
+.build-desktop/

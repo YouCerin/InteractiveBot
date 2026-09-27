@@ -56,6 +56,48 @@ for (const f of MUST_EXIST) {
   if (!files.some((p) => rel(p) === f)) problems.push(`缺少必需文件：${f}`)
 }
 
+// ── ①-a ★ 桌面壳（0.2.4）：`app/InteractBot.exe` ─────────────────────────
+//
+// 为什么单列：桌面壳是**唯一**一个"没有它包也还能用、但用户会以为坏了"的东西 ——
+// `启动机器人.bat` 找不到 exe 时会退回旧路径（拉起浏览器）并打一句提示，
+// 于是"这一版说好的独立窗口"会**静默地不成立**。所以这里把它当硬项查。
+{
+  const exe = 'app/InteractBot.exe'
+  if (!files.some((p) => rel(p) === exe)) {
+    problems.push(
+      `缺少桌面壳：${exe}\n` +
+        '      （桌面壳不是可选项：没有它，0.2.4 的"独立窗口"这条就不成立；' +
+        '要重新打：node scripts/assemble-desktop.mjs）',
+    )
+  } else {
+    const mb = (statSync(join(root, exe.replace(/\//g, sep))).size / 1024 / 1024).toFixed(1)
+    notes.push(`桌面壳：${exe}（${mb} MB，Electron 运行时自带）`)
+    // ★ app 里的壳代码必须是**明文可读**的，而不是打进 asar。
+    //   理由：这份代码是给使用者/维护者看的（"如实、可查"），而且 app 只有 6 个小文件。
+    //   实测踩过：`asar: false` 写在 win: 下面会被 electron-builder 忽略，
+    //   构建**成功**、exe 也出来了，只是 app 变成了 resources/app.asar —— 只有验收能发现。
+    for (const f of ['app/resources/app/main.cjs', 'app/resources/app/preload.cjs', 'app/resources/app/lib.cjs', 'app/resources/app/splash.html']) {
+      if (!files.some((p) => rel(p) === f)) {
+        problems.push(
+          `桌面壳的 ${f.replace('app/resources/app/', '')} 不在（是不是被打进了 asar？）\n` +
+            '      （desktop/electron-builder.yml 的 `asar: false` 必须在**顶层**，放进 win: 里会被忽略）',
+        )
+      }
+    }
+    // 溯源文件：这份 exe 是哪份源码、哪个 Electron 打的
+    if (!files.some((p) => rel(p) === 'app/PROVENANCE.txt')) {
+      problems.push('缺少 app/PROVENANCE.txt（桌面壳的来源说明，由 assemble-release.mjs 生成）')
+    }
+    // ★ 壳的源码**只有一份**：包根不该再出现 main.cjs / preload.cjs / splash.html
+    //   （那意味着有人手工拷过一份，两份必然分叉）
+    for (const stray of ['main.cjs', 'preload.cjs', 'splash.html']) {
+      if (files.some((p) => rel(p) === stray)) {
+        problems.push(`包根出现了 ${stray} —— 桌面壳的源只该在 app/resources/app/ 里，不该平铺在包根`)
+      }
+    }
+  }
+}
+
 // ── ①-b ★ 界面产物的**构建溯源标记**必须在 ──────────────────────────────
 //
 // 为什么单列这一条而不是塞进 MUST_EXIST：没有它的时候，"`dist/index.html` 在不在"
@@ -112,6 +154,13 @@ const FORBIDDEN = [
   ['配置备份', /config\.json\.bak/],
   ['测试替身', /^mocks\//],
   ['测试残留', /\.tmp-/],
+  // ★ 桌面壳（0.2.4）：**只发打好的 app/**，不发它的构建源与工具链。
+  //   桌面壳的源在仓库里（desktop/），进包只会多一份会分叉的副本；
+  //   而 desktop/node_modules 是 300 MB 级的构建期依赖（Electron 工具链）。
+  ['桌面壳构建源（只发 app/）', /^desktop\//],
+  ['桌面壳构建产物（只发 app/）', /^\.build-desktop\//],
+  ['桌面壳的 npm 缓存', /\.npm-cache\//],
+  ['构建期脚本（staging 时才用）', /^scripts\//],
 ]
 for (const p of files) {
   const r = rel(p)

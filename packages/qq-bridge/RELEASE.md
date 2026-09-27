@@ -31,6 +31,10 @@ cd config-ui && npm run build && cd ..
 # ①-b ★ 确认"产物 = 当前源码"（构建溯源；这一步同时是发布门禁）
 node src/index.mjs --ui
 
+# ①-c ★ 桌面壳改过就必须重新打包（0.2.4 起它是用户的入口）
+#     第一次还要先在 desktop/ 装工具链并下 Electron 运行时（见 §2.1）
+node scripts/assemble-desktop.mjs
+
 # ② 备齐必需项 + 跑发布前体检（只报告，不改文件）
 node setup.mjs --release
 
@@ -106,8 +110,12 @@ npm test
 **要的：**
 
 ```
-启动机器人.bat            （可选，见 §4）
-start.bat
+启动机器人.bat            ★ 用户的入口：有 app\InteractBot.exe 就起桌面程序
+start.bat                 （脚本入口；桌面程序不在时它还是老路子）
+app/                      ★ 0.2.4 桌面壳：InteractBot.exe + Electron 运行时（约 324 MB）
+    InteractBot.exe
+    PROVENANCE.txt          这份 exe 是哪份源码/哪个 Electron 打的
+    resources/app/          壳的源码（main/preload/lib/splash）—— **明文，不打 asar**
 config.json               ★ 已清空密钥的模板
 prices.json
 src/                      （全部 .mjs）
@@ -120,15 +128,44 @@ vendor/node_modules/ws/
 **不要的：**
 
 ```
+desktop/                  桌面壳的**构建源与工具链**（进包只会多一份会分叉的副本）
+desktop/node_modules/     Electron 工具链（约 72 MB）
+.build-desktop/           打包中间产物（最新那份已经平铺进 app/ 了）
+scripts/                  构建脚本（staging 时才用）
 vendor/dsh/               DSH 本体（275MB，用户自己装）
 vendor/snowluma/          SnowLuma（许可证不允许）
 config-ui/src/            前端源码
 config-ui/node_modules/   约 202 MB
-logs/  cache/  workspace-qq/   运行痕迹（★ workspace-qq 里有模型读写的聊天内容）
+logs/  cache/  workspace-qq/   运行痕迹（★ workspace-qq 里有模型聊天的内容）
 config.json.bak*          历史备份，含旧密钥
 .tmp-*                    测试残留
 ../dsh-qq-bot（废弃）/     旧架构
 ```
+
+### 2.1 桌面壳怎么打（0.2.4）
+
+```bash
+cd packages/qq-bridge/desktop
+npm install --ignore-scripts     # ★ 必须带 --ignore-scripts，理由见下
+node scripts/fetch-electron.mjs  # 下 Electron 运行时（走 npmmirror 镜像，不用 github）
+cd ..
+node scripts/assemble-desktop.mjs   # 打 → .build-desktop/pack-<时间戳>/win-unpacked/
+```
+
+| 看起来多余的步骤 | 为什么不能省 |
+|---|---|
+| `--ignore-scripts` | `electron-winstaller`（electron-builder 的传递依赖）的 postinstall 在本机沙箱里会 `EPERM`，而 npm 一旦有 install 脚本失败就会把**整棵 `node_modules` 回滚** |
+| 单独下 Electron 运行时 | Electron 包自带的 postinstall 从 **github.com** 下（本机连不通，实测连接超时）。`scripts/fetch-electron.mjs` 换成镜像，并让 electron-builder 用 `electronDist` 直接吃这个目录 —— 于是它自己**不会再下一次** |
+| `scripts/assemble-desktop.mjs` 里的 stage 与补丁 | 见 `AGENT.md` §4.5：本机沙箱禁止任何 `stdio:'pipe'` 的 spawn，而 electron-builder 收集依赖时固定要管道读 `npm list`。stage（一份**没有 node_modules** 的 app 源）+ `patch-electron-builder.mjs` 一起绕开它。**补丁打不上会非零退出**（宁可构建停下，也不要一个"看起来成功"的包） |
+
+打包完**必须**跑 `node scripts/assemble-desktop.mjs` 自己那一段验收（它每次都跑）：
+它会逐字节比对 `app/resources/app/main.cjs` 与 `desktop/main.cjs`，并断言 app 里
+**没有** `node_modules` / `src/` / `config-ui/`。
+
+★ `.build-desktop/` 下每次构建是一个新目录（`pack-<时间戳>`），且**旧目录可能删不掉**
+（Windows 上 Defender / 搜索索引器会短暂占住里面的文件，实测 `EBUSY: unlink 'default_app.asar'`）——
+脚本只提示、不当失败。哪一份是当前的由 `.build-desktop/latest.json` 记着，
+**发布组装读它**，不按目录名猜（同时有好几份时，猜错会把一份旧 exe 打进新包，而且不会报错）。
 
 `.gitignore` 里已经排除了 `logs/`、`workspace-qq/`、`vendor/`、`node_modules/`。
 
@@ -219,28 +256,34 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 | ② | 输出目录已存在就**拒绝**（要覆盖得显式 `--force`，且先删干净再建） | 老版本要留着对照；而且 `cpSync` 往已有目录上拷会抛难懂的 EIO |
 | ③ | 清点源文件，缺一个都不组装 | 漏项不报错，所以要在组装**之前**数一遍 |
 | ④ | 组装 + **自校验包里的 config.json 确实是空白** | 光"从模板复制"不够，复制完要再验一次结果 |
+| ④-b | ★ 桌面壳（0.2.4）：把 `.build-desktop/latest.json` 指的 `win-unpacked` **整目录平铺到包根的 `app/`**，并写 `app/PROVENANCE.txt` | 拷进来的是 324 MB 的 Electron 运行时，所以"哪一份"必须是**记下来的**而不是猜的。★ 没有 `latest.json` 时**不拦**（换台机器可能没装工具链），但要**明说**这一次不带桌面壳 |
 | ⑤ | 跑 `check-release-package.mjs`，看**退出码** | 不要挑它的输出文案判通过 |
 | ⑥ | 可选 `--zip` | 用 `tar -a`（bsdtar），比 `Compress-Archive` 快且条目名用正斜杠 |
 
 版本号**只从 `package.json` 读**（脚本里不写第二遍）。升级版本要改的地方由
 `mocks/verify-manifest.mjs` 的一条断言盯着：**四处必须一致** ——
 `package.json` / `PROJECT.json` 的 `package.version` / MCP server info /
-`RELEASE.md` 里的包名。四处里漏改一处，症状是"包名写着 0.2.0、里面报的却是 0.1.0"。
+`RELEASE.md` 里的包名。四处里漏改一处，症状是"包名写着旧版号、里面报的却是另一个"。
 
-**发布包的最终形状**（73 个文件 / 解压后约 87 MB / zip 约 32.6 MB）：
+**发布包的最终形状**（约 250 个文件 / 解压后约 412 MB，桌面壳的 Electron 运行时占 324 MB）：
 
 ```
 InteractBot-<版本>-win-x64/
 ├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
-├── 启动机器人.bat           ← 中文名入口（正文纯 ASCII，转调 start.bat）
-├── 创建带图标的快捷方式.bat  ← 双击生成带图标的 QQbot.lnk（.bat 本身无法显示图标）
+├── 启动机器人.bat           ← ★ 用户的入口：有 app\InteractBot.exe 就起桌面程序
+├── 创建带图标的快捷方式.bat  ← 双击生成 QQbot.lnk（指向 .bat）与 InteractBot.lnk（指向 exe）
 ├── 检查配置.bat             ← 给小白：双击 = start.bat --check
 ├── 体检.bat                 ← 给小白：双击 = start.bat --doctor（真连一次 SnowLuma）
-├── start.bat
+├── start.bat                ← 脚本入口（桌面程序不在时的老路子；有它时不再开浏览器）
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
 ├── prices.json  package.json
 ├── AGENT.md  PROJECT.json  README.md  RELEASE.md  setup.mjs
+├── app/                    ← ★ 0.2.4 桌面壳
+│   ├── InteractBot.exe       （200.5 MB，带图标与版本号）
+│   ├── PROVENANCE.txt        这份 exe 是哪份源码/哪个 Electron 打的
+│   ├── *.dll / *.pak / locales/   Electron 运行时（Chromium）
+│   └── resources/app/        壳的源码（main/preload/lib/splash + 图标）—— 明文
 ├── src/                    桥接代码
 ├── mcp/                    QQ 工具服务器
 ├── assets/                 icon.ico 等
@@ -252,7 +295,7 @@ InteractBot-<版本>-win-x64/
 
 **★ 老版本不要删**：`_release/` 里每个版本各留一份目录
 （旧版本与新版本**并存**，文件名前缀一样、只有版本号不同），
-脚本也**不许覆盖同名目录**。zip **不入库**（与同名目录逐字节相同，却要多占约 32 MB）。
+脚本也**不许覆盖同名目录**。zip **不入库**（与同名目录逐字节相同，却要多占一份体积）。
 
 > ⚠️ 这份文档里**只允许出现当前版本号**（`InteractBot-<版本>-win-x64`）——
 > `mocks/verify-manifest.mjs` 有一条断言盯着"文案里的版本号与 `package.json` 一致
@@ -264,22 +307,28 @@ InteractBot-<版本>-win-x64/
 开发者和机器校验）。它必须给出四个下载链接、三步配置、五个常见故障对照，
 以及"密钥非官方登录有账号风险"的提示。改动 README/配置项文案时记得同步它。
 
-★ 两个 `*.bat` 引导入口的正文是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，
+★ 三个 `*.bat` 引导入口的正文是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，
 含中文会吞掉换行），只转调 `start.bat` 的对应开关 —— 开关的语义只有一处实现。
+★ 0.2.4 起 `启动机器人.bat` 多一步**分派**：无参数双击 → `app\InteractBot.exe`；
+带 `--check` / `--doctor` / `--foreground` 这类**只有 `start.bat` 认识**的开关 → 原样转交
+（静默忽略用户敲的开关正是本项目最忌讳的那种失败）。
 
 不带：`vendor/dsh`（用户自装）、`vendor/snowluma`（许可证不允许）、
 `config-ui/{src,node_modules}`（202 MB，属项目开发资产）、
-`logs` `cache` `workspace-qq` `mocks` `config.json.bak*`。
+`desktop/` 与 `.build-desktop/`（桌面壳的构建源与工具链，已打成 `app/`）、
+`scripts/`（构建脚本）、`logs` `cache` `workspace-qq` `mocks` `config.json.bak*`。
 
 ### 打包后必须跑一次验收脚本
 
 ```powershell
-node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.3-win-x64"
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.4-win-x64"
 ```
 
-它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**
-（DSH/SnowLuma/config-ui 源码/日志/密钥缓存）、**内容里有没有明文密钥与机器专属路径**、
-**体积构成**。退出码 0 才发。
+它只读、不改文件，检查五件事：**必需件是否齐全**（含 `app/InteractBot.exe` 与
+`app/resources/app/*.cjs` —— 后者缺了说明壳被打进了 asar）、**不该带的是否混进去**
+（DSH/SnowLuma/config-ui 源码/日志/密钥缓存/桌面壳的构建源）、
+**内容里有没有明文密钥与机器专属路径**、**桌面壳是不是只有一份**（包根不该再出现
+`main.cjs`）、**体积构成**。退出码 0 才发。
 
 ### 出 zip
 

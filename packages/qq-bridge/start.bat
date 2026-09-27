@@ -86,8 +86,18 @@ rem Open the console UI in the default browser once the config API is up.
 rem curl itself does the waiting: retries on connection-refused for ~2 min,
 rem and only on success does the browser open. Skip with: start.bat --no-browser
 rem Note: if you changed ui.apiPort in config.json, change 3410 below too.
+rem
+rem 0.2.4: SKIPPED when app\InteractBot.exe exists. The desktop app opens the
+rem real window itself, so opening a browser too would give you two consoles
+rem for one bot -- and the point of this version is that the browser is no
+rem longer the console. (「启动机器人.bat」 routes double-click to the app;
+rem this branch only matters for start.bat --no-snowluma style invocations.)
 if /i not "%~1"=="--no-browser" (
-  start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/api/status && start http://127.0.0.1:3410/"
+  if exist "%~dp0app\InteractBot.exe" (
+    echo Desktop app found: it will open the console window itself ^(no browser^).
+  ) else (
+    start "" /min cmd /c "curl -s -o nul -m 2 --retry 59 --retry-delay 2 --retry-connrefused http://127.0.0.1:3410/ && start http://127.0.0.1:3410/"
+  )
 )
 
 rem --- QQ bridge ---------------------------------------------------------------
