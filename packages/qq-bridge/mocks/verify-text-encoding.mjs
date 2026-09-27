@@ -72,6 +72,13 @@ const SKIP_DIR = new Set([
   'node_modules', 'vendor', 'dist', 'logs', 'cache', '_release', 'snowluma',
   'workspace-qq', '.git', '.tmp-verify', '.tmp-verify-onebot', '.tmp-verify-doctor',
   '.tmp-live-workspace', '.tmp-live-outside', '.tmp-probe-dsh', 'reference',
+  // ★ 回退到 0.2.3 之后补的一条（0.2.4 加过，回退时被一起撤掉了）：
+  //   `.build-desktop/` 是 0.2.4 的 exe 构建产物，里面整份是 **Electron 运行时**
+  //   （第三方文件，如 `LICENSES.chromium.html`，实测含 137 处 U+FFFD —— 那是 Chromium
+  //   自己放的替换字符）。它不是我们手写的东西，不该由我们的编码守卫评判。
+  //   ⚠️ 0.2.3 本身**不会**产生这个目录；这台机器上留着 0.2.4 的残留，于是守则报了红。
+  //   （0.2.4 里是 `docs/rollback-0.2.4-clean.mjs` 负责清它；清掉后这条也能去掉。）
+  '.build-desktop',
 ])
 
 /**
