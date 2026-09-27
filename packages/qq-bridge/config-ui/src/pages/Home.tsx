@@ -35,13 +35,14 @@ import { cn } from '@/lib/utils'
 /**
  * 配置前缀 → 页签（0.2.2「未保存的改动要看得见」：给改动过的页签加小圆点）。
  * 触发已并入人设、QQ 功能已并入扩展 —— 映射跟着新结构走。
+ * ⚠️ 0.2.3 又改了：`trigger.*`（群聊总开关/私聊/@/关键词）随「唤醒方式」搬进
+ *    扩展页「唤醒策略」卡 → 现在映射到 extensions，不再是 persona。
  */
 function pathToTab(path: string): string | null {
   if (path === 'dsh.workspace') return 'memory' // 工作区目录在记忆页
   const head = path.split('.')[0]
   switch (head) {
     case 'persona':
-    case 'trigger':
       return 'persona'
     case 'humanize':
     case 'send':
@@ -55,6 +56,7 @@ function pathToTab(path: string): string | null {
     case 'skills':
     case 'security':
     case 'wake':
+    case 'trigger':
     case 'delivery':
     case 'corpus':
       return 'extensions'

@@ -104,8 +104,11 @@ node mocks/session-grep.mjs --list        # 只列有哪些会话、多大、什
 # ⑤ 体检（真正检查连接是否可用，强烈建议先跑）
 start.bat --doctor
 
-# 📄 0.2.1 更新汇总（给人看的：这次改了什么、怎么验、刻意不做什么、还差什么）
-#   docs/0.2.1-release-notes.md        ← 先看这一份
+# 📄 更新汇总（给人看的：这次改了什么、怎么验、刻意不做什么、还差什么）
+#   docs/0.2.3-release-notes.md        ← 先看这一份（插件化：二选一 / 唤醒策略 / QQ 工具档位 / 投递 / 语料库）
+#   docs/0.2.3-change-record.md        ← 逐条过程记录（含踩过的坑与两次"我错了"）
+#   docs/plugin-packaging-plan.md      ← 插件化怎么划分（哪些拆开、哪些合并、哪些二选一）
+#   docs/0.2.1-release-notes.md        ← 上一版的对应文档
 #   docs/0.2.1-hermes-borrow-plan.md   ← 逐阶段过程记录（含踩过的坑与被推翻的判断）
 #   docs/0.2.1-runtime-memory-verification.md ← 真机取证（哪些有硬证据、哪些还没有）
 
