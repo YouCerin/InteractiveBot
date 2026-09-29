@@ -34,11 +34,24 @@ param(
   [switch]$KeepClone
 )
 
-$ErrorActionPreference = 'Stop'
+# NOTE: do NOT set $ErrorActionPreference='Stop' here. On Windows PowerShell 5.1 a
+# native command that merely WRITES TO STDERR raises a NativeCommandError, and with
+# 'Stop' that becomes a terminating error -- `git push` writes its progress to stderr,
+# so the script would report failure on a perfectly good push. Instead every native
+# call below is followed by an explicit $LASTEXITCODE check.
+$ErrorActionPreference = 'Continue'
 
 function Fail($msg) { Write-Host "FAIL: $msg" -ForegroundColor Red; exit 1 }
 function Step($msg) { Write-Host ""; Write-Host "== $msg" -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host "  OK  $msg" -ForegroundColor Green }
+function RunGit([string[]]$gitArgs) {
+  # capture both streams; print only on failure so the normal output stays readable
+  $out = & git @gitArgs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { Write-Host $out; Fail "git $($gitArgs -join ' ') failed (exit $LASTEXITCODE)" }
+  return $out
+}
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "git not found on PATH" }
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $repoRoot 'packages\qq-bridge\cache'
@@ -63,8 +76,7 @@ $devHead = (git -C $repoRoot rev-parse HEAD).Trim()
 Step "1/5 rebuild the sanitised clone"
 if (Test-Path $CloneDir) { Remove-Item $CloneDir -Recurse -Force }
 $env:GIT_LFS_SKIP_SMUDGE = '1'
-git clone --local --quiet $repoRoot $CloneDir
-if ($LASTEXITCODE -ne 0) { Fail "git clone failed" }
+RunGit @('clone','--local','--quiet',$repoRoot,$CloneDir) | Out-Null
 Ok "cloned to $CloneDir"
 
 $sh = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'bin\sh.exe'
@@ -77,13 +89,13 @@ if ($LASTEXITCODE -ne 0) { Fail "history rewrite failed (see output above)" }
 Ok "history rewritten (_release removed; identifiers scrubbed)"
 
 Step "2/5 point origin at GitHub (a fresh clone already has origin = the dev repo)"
-git -C $CloneDir remote set-url origin $RepoUrl
+RunGit @('-C',$CloneDir,'remote','set-url','origin',$RepoUrl) | Out-Null
 # Stale remote-tracking refs copied from the dev repo (backup branches) would show
 # up as if they existed on GitHub. Drop them.
 foreach ($r in @('refs/remotes/origin/backup/0.2.4','refs/remotes/origin/backup/0.2.5')) {
-  git -C $CloneDir update-ref -d $r 2>$null | Out-Null
+  & git -C $CloneDir update-ref -d $r 2>$null | Out-Null
 }
-$pushUrl = (git -C $CloneDir remote get-url --push origin).Trim()
+$pushUrl = ((& git -C $CloneDir remote get-url --push origin) | Out-String).Trim()
 if ($pushUrl -ne $RepoUrl) { Fail "origin push URL is '$pushUrl', expected '$RepoUrl'" }
 Ok "origin -> $pushUrl"
 
