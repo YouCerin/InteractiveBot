@@ -181,14 +181,35 @@ config.json.bak*          历史备份，含旧密钥
 
 * 那三个 `.bat` 都只是 `call start.bat <参数>` 的**一行转发** —— 开关直接手敲即可
   （`start.bat --check` / `--doctor` / `--setup` / `--foreground` / `--no-browser`）；
-* 随包的 `QQbot.lnk` 里存的是**绝对路径**（开发机的 `…\packages\qq-bridge\启动机器人.bat`），
-  在别人机器上双击必然失效；而且它与"现场生成的 `QQbot.lnk`"**同名**，会互相覆盖。
+* 随包的那份 `.lnk` 里存的是**绝对路径**（开发机的 `…\packages\qq-bridge\启动机器人.bat`），
+  在别人机器上双击必然失效；而且它与"现场生成的同名 .lnk"会互相覆盖。
 
 **★ 图标：`.bat` 在资源管理器里永远显示默认的"白纸+齿轮"，这是 Windows 的限制**
 （它不给 `.bat` 显示自定义图标）。想要带图标的常用入口，在使用者自己的机器上生成：
 
+**PowerShell 里（推荐，逐行粘贴）：**
+
 ```powershell
-powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'QQbot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory=$PWD; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+$s = New-Object -ComObject WScript.Shell
+$l = $s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk'))
+$l.TargetPath = (Join-Path $PWD 'start.bat')
+$l.WorkingDirectory = "$PWD"
+$l.IconLocation = 'assets\icon.ico,0'
+$l.Save()
+```
+
+**cmd.exe 里（一行）：**
+
+```bat
+powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+```
+
+> ★ 为什么给两种写法（2026-09-30 真机踩过）：那一行 `powershell -NoProfile -Command "…"` **只适合 cmd.exe**。
+> 粘进 PowerShell 时，双引号里的 `$s` / `$l` / `$PWD` 会被**外层先展开成空**，
+> 报错是 `"(”后面应为表达式`（看起来像语法错，其实是变量被吃了）。
+> 另外 `$l.WorkingDirectory` 必须赋**字符串**：写 `$PWD`（不加引号）会报
+> `Cannot convert … "PathInfo" to type "string"`，而**快捷方式照样生成、工作目录却是空的** ——
+> 这种"看着成功、其实少一格"的失败，比直接报错更难发现。
 ```
 
 为什么不直接发一个做好的 `.lnk`：**`.lnk` 里存的是绝对路径**，在作者机器上生成的

@@ -23,8 +23,14 @@ rem    start.bat --no-browser   don't open the console page
 rem    start.bat --no-snowluma  don't touch SnowLuma
 rem  Why a shortcut can't just be shipped: only a .lnk can carry a custom
 rem  icon, and a .lnk stores an ABSOLUTE path -- one built here would point
-rem  at this machine's folder. Build one where it will be used:
-rem    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'QQbot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory=$PWD; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+rem  at this machine's folder. Build one where it will be used (run in cmd):
+rem    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+rem  NOTE: that one-liner is for cmd.exe ONLY. Pasted into PowerShell, the
+rem  outer shell expands $s/$l/$PWD to empty first and you get a confusing
+rem  parse error -- PowerShell users should run the 5-line form in RELEASE.md
+rem  (and must write "$PWD" quoted: bare $PWD is a PathInfo object, the COM
+rem  property conversion fails, and the shortcut silently gets an EMPTY
+rem  working directory).
 rem ============================================================================
 
 setlocal

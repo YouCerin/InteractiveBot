@@ -234,7 +234,7 @@ node src/index.mjs --ui --dist <某个包的 config-ui/dist>   # 查别人给的
 
 # ⑥ 启动
 start.bat                        # 双击；或 node src/index.mjs
-# 也可以双击带图标的快捷方式：QQbot.lnk
+# 也可以双击带图标的快捷方式：InteractiveBot.lnk（自己生成，见 首次使用.txt ②）
 #   （.bat 本身在 Windows 里不能带自定义图标，所以带图标的入口是快捷方式）
 # start.bat 现在会先拉起 SnowLuma，再起桥接。跳过 SnowLuma：start.bat --no-snowluma
 ```

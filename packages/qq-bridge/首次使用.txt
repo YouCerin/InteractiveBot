@@ -53,7 +53,7 @@
 ★ 关于图标：`start.bat` 在 Windows 里**永远显示默认的"白纸+齿轮"图标**，
   这是 Windows 的限制（资源管理器不给 .bat 显示自定义图标），不是文件坏了。
   想要带小鲸鱼图标的入口，就在"出问题了怎么办"那一节里跑那条命令 ——
-  它会在本目录生成一个 `QQbot.lnk`。**不能直接把这个 .lnk 随包发给你**：
+  它会在本目录生成一个 `InteractiveBot.lnk`。**不能直接把这个 .lnk 随包发给你**：
   它里面存的是绝对路径，在别人机器上会失效。
 
 
@@ -121,10 +121,28 @@ SnowLuma 启动后，打开它的控制台：http://127.0.0.1:5099/
 ★ 想双击也行，但**双击默认是"启动机器人"**，不是自检。要看自检结果就按上面
   那样开个命令行窗口跑（双击时窗口会停一下让你看启动信息，但那不是自检）。
 
-② 想要带图标的常用入口（可选）：在上面那个 PowerShell 窗口里跑这一条，
-   它会在本目录生成 `QQbot.lnk`（带小鲸鱼图标，可以拖到桌面）：
+② 想要带图标的常用入口（可选）：在上面那个 PowerShell 窗口里跑下面这几行，
+   它会在本目录生成 `InteractiveBot.lnk`（带小鲸鱼图标，可以拖到桌面）：
 
-    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'QQbot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory=$PWD; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+    $s = New-Object -ComObject WScript.Shell
+    $l = $s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk'))
+    $l.TargetPath = (Join-Path $PWD 'start.bat')
+    $l.WorkingDirectory = "$PWD"
+    $l.IconLocation = 'assets\icon.ico,0'
+    $l.Save()
+
+   ⚠️ 两个真踩过的坑（照着写就不会再遇到）：
+   · **别在 PowerShell 里用 `powershell -NoProfile -Command "…"` 那种一行写法** ——
+     那是给 **cmd.exe** 用的：粘进 PowerShell 时，双引号里的 `$s` / `$l` / `$PWD`
+     会被**外层先展开成空**，报错长这样：`"(”后面应为表达式`。
+     如果你确实在 cmd.exe 窗口里，用这一行（注意 `'%CD%'`，cmd 会先展开它）：
+
+     powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+
+   · **工作目录要写成 `"$PWD"`（带引号）**，别写 `$PWD`：PowerShell 会把 `$PWD` 当成
+     一个"路径对象"而不是字符串，赋给快捷方式时转换失败（报
+     `Cannot convert … "PathInfo" to type "string"`），**快捷方式照样生成、但工作目录是空的** ——
+     这种"看着成功、其实少了一格"的结果最容易骗人。
 
    （为什么不能直接给你一个现成的 .lnk：它里面存的是**绝对路径**，
      在作者机器上生成的那份，到你机器上目标和图标都会失效。）
