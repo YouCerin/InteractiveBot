@@ -8,7 +8,7 @@
   ],
   "package": {
     "name": "qq-bridge",
-    "version": "0.2.3",
+    "version": "0.2.6",
     "purpose": "把 QQ 私聊消息转给一个拥有完整能力的 DSH agent，再把回答发回 QQ。",
     "relationship": "取代 packages/dsh-qq-bot（旧架构：DSH 进程内插件 + 一次性 llm.stream 调用，没有工具循环、沙箱、权限概念）。旧包仅作参考。",
     "runtime": {
