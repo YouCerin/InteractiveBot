@@ -40,8 +40,8 @@ const NAME_RE = /^(?!\.)[^\\/:*?"<>|\u0000-\u001F]{1,24}(?<!\.)$/
 
 /** 默认那两套人设（**也是文件**，只是"出厂时就摆在那儿"）。顺序 = 界面上的顺序。 */
 export const DEFAULT_PERSONA_FILES = [
-  { name: '小鲸鱼（精简）', text: PERSONA_PRESETS['mermaid-lite'] },
-  { name: '小鲸鱼（完整）', text: PERSONA_PRESETS.mermaid },
+  { name: '小鲸鱼（完整带情绪）', text: PERSONA_PRESETS['mermaid-emotional'] },
+  { name: '软糯小鲸鱼（情绪）', text: PERSONA_PRESETS['mermaid-soft'] },
 ]
 
 /** 新建人设时的起手模板（**空模板**：只给名字块和几条提示，不替用户写性格）。 */
