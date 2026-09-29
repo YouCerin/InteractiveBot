@@ -459,6 +459,20 @@ export const api = {
   extensionDiagnose: (id: string) =>
     request<Record<string, unknown>>(`GET`, `/api/extensions/diagnose?id=${encodeURIComponent(id)}`),
 
+  // ── 0.2.4 表情包：重新打标签（CONFIG-UI.md §2.10）────────────────────────
+  /**
+   * 重新打标签的**进度与预检**（同一个 GET）。
+   *
+   * ★ 它为什么是"查询式"而不是一个把活干完的请求：打标签**每张一次模型调用**，
+   *   几十张就是几分钟 —— 浏览器/代理不会挂着等那么久。
+   * ★ `todo`（将要处理多少张）就是**预检结果**：界面必须先拿它做二次确认，
+   *   否则用户点一下就是几十次调用，他既不知道花多少、也不知道有几张会被跳过。
+   */
+  stickerRetag: () => request<StickerRetagStatus>('GET', '/api/extensions/sticker-retag'),
+  /** 发起 / 停止。发起立刻返回 jobId，进度靠反复 GET 上面那个。 */
+  stickerRetagAction: (action: 'start' | 'abort', force?: boolean) =>
+    request<StickerRetagStatus & { error?: string }>('POST', '/api/extensions/sticker-retag', { action, force }),
+
   // ── 0.2.2 联系人昵称（CONFIG-UI.md §2.5「昵称（按人）」）───────────────────
   /** 整表 + 上限 + 认不出来的行（bad 要显示出来，别静默丢）。 */
   contacts: () => request<ContactsResult>('GET', '/api/contacts'),
@@ -642,6 +656,40 @@ export interface ExtensionsResult {
   plugins: PluginInfo[]
   counts: { skills: number; skillsEnabled: number; skillsBroken: number; plugins: number; pluginsOn: number }
   notes: string[]
+}
+
+/**
+ * 表情包「重新打标签」的进度快照（0.2.4）。
+ *
+ * ★ 界面上**必须显示** `total / done / skippedManual / failed`，不能只转一个圈：
+ *   这是本功能唯一会真花钱的操作（每张一次模型调用），用户要看得出跑到哪了。
+ * ★ `skippedManual` 不是失败：那是**人工改过的标签，默认不动它们**（避免模型把人纠正过的错误再犯一遍）。
+ */
+export interface StickerRetagStatus {
+  id: string | null
+  /** idle | running | done | failed | aborted */
+  phase: string
+  running: boolean
+  startedAt: number | null
+  finishedAt: number | null
+  /** 这次要处理多少张（**预检结果**，点之前就要拿到它做二次确认） */
+  total: number
+  /** 库里一共多少张（含人工改过的与待定的） */
+  libraryTotal: number
+  /** ★ 空闲时 = 本次**会处理**多少张（不是"待定的张数"：重新打标签含已打好的）；在跑时 = 本次任务总数 */
+  willProcess: number
+  /** 预检本身失败时的原因（例如没有工作区）—— 界面直接显示，别让按钮点了才报错 */
+  preflightWhy?: string
+  done: number
+  tagged: number
+  retagged: number
+  failed: number
+  skippedManual: number
+  current: string | null
+  lastLabel: string | null
+  percent: number | null
+  reason: string
+  failedList: Array<{ rel: string; why: string }>
 }
 
 export interface ExtensionToggleResult {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -7,6 +7,7 @@ import {
   RefreshCw,
   ShieldAlert,
   Stethoscope,
+  Tag,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -16,6 +17,7 @@ import {
   type ExtensionsResult,
   type PluginInfo,
   type SkillInfo,
+  type StickerRetagStatus,
 } from '@/lib/api'
 import { getBool, getNum, getPath } from '@/lib/config'
 import { Badge } from '@/components/ui/badge'
@@ -268,6 +270,9 @@ function SkillCard({
             </Button>
           )}
           <DiagnoseButton id={s.id} />
+          {/* ★ 表情包专属动作（0.2.4）：重新打标签。它**只出现在这一个技能卡上**，
+              因为它是唯一一个"要花钱的离线动作"（每张图一次模型调用）。 */}
+          {s.id === 'sticker' && <StickerRetagSection askConfirm={askConfirm} />}
         </div>
 
         {open === 'tools' && (
@@ -484,8 +489,189 @@ function DiagnoseButton({ id }: { id: string }) {
   )
 }
 
-/** uiTab → 界面上的页签名（「去细调」按钮给人看的，不是给代码看的）。 */
-const TAB_LABEL: Record<string, string> = {
+/**
+ * 表情包「重新打标签」（0.2.4）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 这个按钮的流程是**刻意的**，每一段都在防一类真实问题
+ * ══════════════════════════════════════════════════════════════════════════
+ *   ① **先预检（免费）**：进卡片就拉一次状态，拿 `total`（会有多少张要打）。
+ *      没有它，用户点一下就是几十次模型调用 —— 而他既不知道要花多少、
+ *      也不知道有几张会被跳过。
+ *   ② **二次确认**：把"N 张图 = N 次模型调用"和"人工改过的标签不会被覆盖"
+ *      写在确认框里。这是本功能唯一会真花钱的地方，不能点一下就悄悄跑。
+ *   ③ **轮询进度**：每 1.5 秒拉一次，显示"第几张 / 当前哪个文件 / 最近打上什么标签"。
+ *      长任务不给进度 = 用户以为卡死了，然后连点（后端虽然有防重入，但体验是坏的）。
+ *   ④ **可停止**：当前那张跑完就停（不中断正在进行的请求），已打上的会照常写回。
+ *   ⑤ 跑完给**结果摘要**：新打多少、重打多少、失败多少、跳过人工多少。
+ */
+function StickerRetagSection({ askConfirm }: { askConfirm: (req: ConfirmRequest) => void }) {
+  const [st, setSt] = useState<StickerRetagStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const timer = useRef<number | null>(null)
+
+  const poll = async () => {
+    try {
+      const s = await api.stickerRetag()
+      setSt(s)
+      return s
+    } catch {
+      // 轮询失败不弹错（重启/断线时是预期行为），界面保留上一份状态
+      return null
+    }
+  }
+
+  useEffect(() => {
+    void poll()
+    return () => {
+      if (timer.current) window.clearInterval(timer.current)
+    }
+  }, [])
+
+  // 只在"正在跑"时轮询（空闲时轮询是白费请求）
+  useEffect(() => {
+    if (timer.current) {
+      window.clearInterval(timer.current)
+      timer.current = null
+    }
+    if (st?.running) {
+      timer.current = window.setInterval(() => void poll(), 1500)
+    }
+    return () => {
+      if (timer.current) window.clearInterval(timer.current)
+    }
+  }, [st?.running])
+
+  const start = () => {
+    setError('')
+    if (st?.running) return
+    if (!st || st.total === 0) {
+      setError(
+        st?.preflightWhy ||
+          '没有可重打的图（库里可能还没有图，或者只剩人工改过的标签）',
+      )
+      return
+    }
+    askConfirm({
+      title: `重新给 ${st.total} 张表情包打标签？`,
+      confirmText: '开始重打',
+      description: (
+        <div className="space-y-2">
+          <p>
+            这将调用模型 <strong>{st.total} 次</strong>（每张图一次，用于"看图分类"）。
+            这一步只在需要时跑，运行期发表情<strong>不会</strong>再调用模型。
+          </p>
+          <p>
+            ★ <strong>人工改过的标签不会被覆盖</strong>
+            {st.skippedManual > 0 ? `（当前有 ${st.skippedManual} 张会被跳过）` : ''}。
+          </p>
+          <p>跑完会自动写回库，下一轮对话就生效（不需要重启）。</p>
+        </div>
+      ),
+      onConfirm: () => void doStart(false),
+    })
+  }
+
+  const doStart = async (force: boolean) => {
+    setBusy(true)
+    setError('')
+    try {
+      const r = await api.stickerRetagAction('start', force)
+      if (r?.error) setError(r.error)
+      else toast.success(`已开始重新打标签：${r.total} 张`)
+      await poll()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const abort = async () => {
+    setBusy(true)
+    try {
+      await api.stickerRetagAction('abort')
+      await poll()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="w-full space-y-2 pt-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={start} disabled={busy || !!st?.running}>
+          <Tag className="mr-1 h-3.5 w-3.5" />
+          {st?.running ? '重新打标签中…' : '重新打标签'}
+        </Button>
+        {st?.running && (
+          <Button type="button" variant="ghost" size="sm" onClick={() => void abort()} disabled={busy}>
+            停止
+          </Button>
+        )}
+        {st && !st.running && st.total > 0 && (
+          <span className="text-xs text-muted-foreground">
+            会处理 {st.total} 张（库里共 {st.libraryTotal} 张
+            {st.skippedManual > 0 ? `，跳过人工改过的 ${st.skippedManual} 张` : ''}）
+          </span>
+        )}
+      </div>
+
+      {error && <InlineNote level="warn">{error}</InlineNote>}
+
+      {st?.running && (
+        <div className="space-y-1 rounded-md border bg-muted/30 p-2">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="font-medium">
+              {st.done}/{st.total}
+            </span>
+            <span className="text-muted-foreground">{st.percent != null ? `（${st.percent}%）` : ''}</span>
+            <span className="truncate text-muted-foreground">{st.current ?? ''}</span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
+            <div
+              className="h-full bg-primary transition-all"
+              style={{ width: `${st.percent ?? 0}%` }}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            新打 {st.tagged}｜重打 {st.retagged}｜失败 {st.failed}
+            {st.lastLabel ? `｜刚打上：${st.lastLabel}` : ''}
+          </p>
+        </div>
+      )}
+
+      {/* 跑完的结果摘要：**不用 toast 一闪而过** —— 用户要能看到"哪几张失败了" */}
+      {st && !st.running && st.phase !== 'idle' && (
+        <div className="space-y-1 rounded-md border bg-muted/30 p-2 text-xs">
+          <p>
+            {st.phase === 'done' ? '✅ 上次重打完成' : st.phase === 'aborted' ? '⏹ 上次被停止' : '❌ 上次失败'}
+            ：新打 {st.tagged}｜重打 {st.retagged}｜失败 {st.failed}
+            {st.skippedManual > 0 ? `｜跳过人工 ${st.skippedManual}` : ''}
+          </p>
+          {st.reason && <p className="text-muted-foreground">{st.reason}</p>}
+          {st.failedList?.length > 0 && (
+            <details>
+              <summary className="cursor-pointer text-muted-foreground">
+                失败清单（前 {st.failedList.length} 条）
+              </summary>
+              <ul className="mt-1 space-y-0.5">
+                {st.failedList.map((f, i) => (
+                  <li key={i} className="truncate text-muted-foreground">
+                    {f.rel}：{f.why}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** uiTab → 界面上的页签名（「去细调」按钮给人看的，不是给代码看的）。 */const TAB_LABEL: Record<string, string> = {
   overview: '概览',
   conversations: '对话',
   persona: '人设',
