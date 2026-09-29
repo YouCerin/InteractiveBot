@@ -59,15 +59,23 @@ async function waitForSent(server, n, timeoutMs = 20_000) {
  *
  * 正确做法：先记下**推入前的水位**，再等"水位涨过它"。
  * 这样无论上一轮被切成几条都不会错。
+ *
+ * ⚠️ 还有第二步（2026-09-30 补）：**等这一轮发完**（`waitForQuiet`）。
+ *    只等"水位涨过它"会在**第一条分片**到达时就返回，而提示词回显有 8~10 条 ——
+ *    返回的切片里只有前 300 字，凡是断言提示词**尾部**（人设段、记忆段、来源标注）
+ *    的用例都会假失败。推入之前也要先等上一轮安静，否则上一轮的尾巴会混进来。
  */
 async function pushAndWaitForReply(server, payload, timeoutMs = 20_000) {
+  await waitForQuiet(server)
   const before = server.sent.length
   server.push(payload)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (server.sent.length > before) return server.sent.slice(before)
+    if (server.sent.length > before) break
     await sleep(50)
   }
+  await waitForQuiet(server)
+  if (server.sent.length > before) return server.sent.slice(before)
   return null
 }
 
@@ -76,6 +84,39 @@ async function expectNoMoreSent(server, fromIndex, windowMs = 2500) {
   const before = server.sent.length
   await sleep(windowMs)
   return server.sent.length === before
+}
+
+/**
+ * 等**这一轮发完**：连续 `quietMs` 毫秒没有新的发出消息就返回。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么必须有它（这是一条**纯时序**造成的假失败的根治办法）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 替身会把**整段提示词回显**成回复，而人味层按 `humanize.chunkChars`（这里 300）
+ * 把它切成 8~10 条**分多次**发送。于是：
+ *
+ *   "收到第一条" ≠ "这一轮发完了"。
+ *
+ * 在收到第一条的那一刻去取 `server.sent` 快照，拿到的是**提示词的前 300 字**，
+ * 而提示词尾部的内容（人设段 `【你是谁】`、记忆段 `【长期记忆】`）**还没发出来** ——
+ * 断言就会说"人设没有被拼进提示词""记忆段缺失"，指向一个**完全错误**的结论。
+ *
+ * ★ 实测证据：2026-09-30 放开沙箱第一次真跑本套件（此前它在受限沙箱里一直**静默跳过**，
+ *   见文件末尾的跳过分支），用例 2/3/5d 共 10 项失败，逐条查下来全是这个时序，
+ *   不是被测代码的问题。所以正确的等待条件是"**发完了**"，而不是"发了"。
+ *
+ * 返回前会再多等一轮，保证跨轮之间不会互相串（上一轮的尾巴混进这一轮的切片里，
+ * 会让"DSH 侧认出这是第 2 轮"这类断言拿着**上一轮**的文本去比对）。
+ */
+async function waitForQuiet(server, { quietMs = 400, timeoutMs = 30_000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  let last = -1
+  while (Date.now() < deadline) {
+    if (server.sent.length === last) return true
+    last = server.sent.length
+    await sleep(quietMs)
+  }
+  return false
 }
 
 function makeBridge({ rpc, onebot, config, attach = true }) {
@@ -198,31 +239,53 @@ async function main() {
   console.log('\n── 用例 2：提示词内容（平台约束 + 身份标注）──────────────')
   // ⚠️ 必须把所有分条拼起来再看。
   // 人味层会把长回复按"真人观感"切成多条发送，只看第一条会误判成"内容不对"。
+  // ★ 而且必须**等到这一轮发完**：只等"收到第一条"时，提示词尾部的段落还没发出来
+  //   （2026-09-30 实测：这里早了 8 条，用例 2 的四条断言全是这么假红的）。
+  await waitForQuiet(mockServer)
   const allOfTurn1 = mockServer.sent.map((s) => s.text).join('\n')
   check(
     '回复里回显了我们发出去的提示词（说明确实经过了提示词构造）',
     allOfTurn1.includes('你好，帮我看下工作区'),
     JSON.stringify(allOfTurn1.slice(0, 80)),
   )
+  // ★★ 但"记忆段/人设段有没有被拼进提示词"**不能**拿用户收到的那条来断言。
+  //
+  // 投递前的终检门（`src/delivery-gate.mjs`）会把**提示词段标题整行删掉**
+  // （`【长期记忆】…` 那一行），而 `<<<MEMORY …>>>` 内部标记早在剥标记那一步就走了。
+  // 这是**刻意的**：内部草稿不该出现在聊天里。于是"用户收到的回复"里**必然**看不到
+  // `【长期记忆】` —— 2026-09-30 实测，正是这一条让"记忆段没被拼进去"这个结论假红。
+  //
+  // 所以：用户侧只断言"内部段标题确实被清洗掉了"（终检门在工作），
+  // 提示词内容改从**交给投递之前**的原始回复里看（替身会把整段提示词回显出来）。
+  check(
+    '★ 用户收到的那条里**看不到**内部段标题（终检门确实在删内部草稿）',
+    !allOfTurn1.includes('【长期记忆】') && !allOfTurn1.includes('<<<MEMORY'),
+    allOfTurn1.includes('【长期记忆】') ? '⚠️ 内部段标题漏给用户了' : '已清洗',
+  )
+  const { bridge: promptProbe } = makeBridge({ rpc, onebot, attach: false, config })
+  const probeRes = await promptProbe.handleEvent(
+    privateMessage({ userId: ADMIN, text: '（提示词探针）', messageId: 199 }),
+  )
+  const rawPrompt = String(probeRes?.result?.text ?? '')
   // ★ 记忆约定必须真的被拼进提示词。
   // 这条断言与"memory.mjs 的单元测试"是两个层次：那边验的是指令文本本身，
   // 这里验的是"桥接真的把它接上了"。少了这条，接线断了也不会有人发现。
   check(
     '★ 跨重启记忆约定真的被拼进了提示词',
-    allOfTurn1.includes('【长期记忆】'),
-    allOfTurn1.includes('【长期记忆】') ? '已注入' : '提示词里没有记忆段',
+    rawPrompt.includes('【长期记忆】'),
+    rawPrompt.includes('【长期记忆】') ? '已注入' : '提示词里没有记忆段',
   )
   // ★ 人设也必须真的被拼进提示词（同一个道理：单测验文本，这里验接线）
   check(
     '★ 人设真的被拼进了提示词',
-    allOfTurn1.includes('【你是谁】') && allOfTurn1.includes('小鲸鱼'),
-    allOfTurn1.includes('【你是谁】') ? '已注入' : '提示词里没有人设段',
+    rawPrompt.includes('【你是谁】') && rawPrompt.includes('小鲸鱼'),
+    rawPrompt.includes('【你是谁】') ? '已注入' : '提示词里没有人设段',
   )
   // ★ 平台约束必须排在前面（硬规矩不能被几千字的语气描述淹没）
   check(
     '★ 平台约束排在人设之前',
-    allOfTurn1.indexOf('你现在通过 QQ 与用户对话') < allOfTurn1.indexOf('【你是谁】'),
-    allOfTurn1.indexOf('你现在通过 QQ 与用户对话') < allOfTurn1.indexOf('【你是谁】')
+    rawPrompt.indexOf('你现在通过 QQ 与用户对话') < rawPrompt.indexOf('【你是谁】'),
+    rawPrompt.indexOf('你现在通过 QQ 与用户对话') < rawPrompt.indexOf('【你是谁】')
       ? '顺序正确'
       : '顺序反了',
   )
@@ -280,6 +343,9 @@ async function main() {
 
   // ── 用例 4：名单外的人 → 拒绝，且不进入 DSH ──
   console.log('\n── 用例 4：名单外的人私聊 → 拒绝 ────────────────────────')
+  // ★ 先等上一轮安静：否则下面等到的"第一条新消息"很可能是**上一轮的分片**，
+  //   断言就会拿一段提示词回显去比对拒绝文案（实测踩过）。
+  await waitForQuiet(mockServer)
   const beforeStranger = mockServer.sent.length
   mockServer.push(privateMessage({ userId: STRANGER, text: '喂', messageId: 103 }))
   const denial = await waitForSent(mockServer, beforeStranger + 1)
@@ -371,9 +437,11 @@ async function main() {
     //   协议端核实到的昵称与群内角色（「甲甲」（群管理…）），中间必然夹着东西。
     //   第一版就是这么写死的，加了身份标注之后它立刻变成假失败。
     //   所以改成**从后面**取权限标签：它必须在来源标注的末尾附近。
+    //   ★ 0.2.7 起末尾还跟着**可引用消息 id**（`#107`）与时间，所以字符类里要带上 `#`
+    //     —— 第一版没带，于是"普通用户被标成普通用户"这条也变成假失败（实测）。
     check(
       '★ 非管理员被如实标成"普通用户，只读"',
-      /（普通用户，只读）\s*[\d\-: ]*\]$/.test(nonAdminOrigin),
+      /（普通用户，只读）\s*[\d\-:# ]*\]$/.test(nonAdminOrigin),
       nonAdminOrigin,
     )
 
@@ -385,7 +453,7 @@ async function main() {
     const adminOrigin = adminText.match(/\[来自 QQ 群[^\]]*\]/)?.[0] ?? ''
     check(
       '★ 管理员仍被标成"管理员"（改这一处不能把真管理员也说成普通用户）',
-      /（管理员）\s*[\d\-: ]*\]$/.test(adminOrigin),
+      /（管理员）\s*[\d\-:# ]*\]$/.test(adminOrigin),
       adminOrigin,
     )
   }

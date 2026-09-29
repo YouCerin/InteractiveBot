@@ -6,6 +6,24 @@
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
 > `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
 
+## 开源说明（**动手前先读这 5 条**）
+
+1. **许可证**：Apache-2.0（见 `LICENSE`、`NOTICE`）。第三方组件与出处见 `THIRD-PARTY.md`
+   —— 里面**如实写了**一处未闭合的再分发合规缺口（发布包内没随附 Node.js 的 `LICENSE`）与补法。
+2. **你要自备什么**：本仓库**不含** DSH 本体（自己去装桌面版）、**不含** QQ 协议端
+   SnowLuma（它的许可证不允许随第三方分发包走）、**不含** ffmpeg（"视频识别"技能用）。
+   详见 `THIRD-PARTY.md` 第三节。
+3. **风险与免责**：本项目的做法（第三方协议端登录**个人 QQ**）**违反《QQ 用户协议》**，
+   账号可能被限制或封禁。请只用自己的小号试、别在重要群刷。作者不承担任何账号后果，
+   项目里那些"拟人延迟 / 频率上限"只是**降低**特征强度，**不是**保证。
+4. **真机标识已换成占位号码**：仓库里所有 QQ 号 / 群号 / 账号 uin 都替换为
+   `100000001`、`200000001`、`700000001` 这类占位号码（映射表不公开）。所以文档里的
+   "真机日志"与你的实际号码**必然不同**，那是**故意**的，不是文档写错。
+5. **发布包不进仓库**：`_release/` 已被 `.gitignore` 忽略，历史里也已清除
+   （它曾把 `.git` 撑到 354.8 MB，其中 85.6 MB 是走 Git LFS 的 `node.exe`，
+   而 clone 到手的只是 133 字节指针 —— 详见两份配置文件的注释）。
+   成品包挂在 GitHub 的 **Releases** 里。
+
 ## 目录结构
 
 ```
@@ -33,6 +51,9 @@ project_InteractBot/
 │   ├── 0.2.2-release-notes.md       # 这一版更新了什么
 │   ├── 0.2.2-console-plan.md        # 控制台改造方案（**待指令，未实施**）
 │   └── 0.2.2-pixiv-skill-migration.md + 0.2.2-pixiv-adaptation.patch
+├── LICENSE / NOTICE / THIRD-PARTY.md   # 许可证、版权声明、第三方出处（开源后才加的）
+├── probe-sdk.mjs + marker-outside.txt  # 阶段 1 的**沙箱边界探针**产物，故意留在根目录
+│                                       # （回归基线，见 docs/implementation-plan.md §8）
 └── README.md
 ```
 
@@ -111,9 +132,32 @@ copy config.example.json config.json    # 模板：密钥与本机路径都是�
 `config.example.json` 是仓库里唯一受跟踪的配置模板，`setup.mjs --release` 会检查它是否干净。
 `vendor/`、`logs/`、`cache/`、`workspace-qq/`、`snowluma/` 也都不进库（理由见 `.gitignore` 的注释）。
 
-## 下一步
+## 怎么跑起来（最短路径，Windows）
 
-1. 实现 `dsh-qq-bot` 的 OneBot 11 WebSocket 连接与鉴权（`packages/dsh-qq-bot/src/index.ts` 内的 TODO）。
-2. 消息接收 → Agent 会话路由；注册 `qq_bot_send_*` 工具。
-3. `pnpm install` + `pnpm build` + `pnpm typecheck`（DSH 包 pre-release，必要时按指南软链类型）。
-4. `dsh plugin --profile web add ...` 安装、`--dump-config` 验证、真实 QQ 联调。
+```bash
+cd packages/qq-bridge
+copy config.example.json config.json      # 然后填 SnowLuma 的 token 与模型 API key
+node src/index.mjs --check                # 自检：DSH 在哪、协议端在不在、配置缺什么
+node src/index.mjs                        # 正式跑
+```
+
+带界面的方式是 `packages/qq-bridge/start.bat`。完整步骤（装 SnowLuma、首次联调、
+控制台各页签的含义）见 `packages/qq-bridge/README.md` 与 `packages/qq-bridge/首次使用.txt`。
+
+## 测试
+
+62 个**离线**校验套件，不需要 QQ 也不需要 DSH：
+
+```bash
+cd packages/qq-bridge
+npm test
+```
+
+其中需要真实 ffmpeg 的那一套（`npm run test:video-frames-real`）在你没装 ffmpeg 时会
+**大声跳过**（打印原因、计数归零），不会假装通过 —— 这个项目里"静默跳过"被当成 bug 对待。
+
+## 遗留：`packages/dsh-qq-bot`（已废弃，不要从这里接着做）
+
+它是最初"DSH 进程内插件"的思路，`packages/dsh-qq-bot/src/index.ts` 里的 TODO 与
+`pnpm install / build / typecheck` 那套流程**都停在半路**。保留它只为对照两种形态的差异；
+当前唯一的维护方向是 `packages/qq-bridge`。

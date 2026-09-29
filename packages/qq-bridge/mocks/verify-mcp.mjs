@@ -22,6 +22,11 @@ import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { canSpawn } from './harness.mjs'
+// ★ 直接 import 被测模块拿**黑名单**（它是纯数据导出，且这个文件只在被当脚本拉起时
+//   才启动主循环 —— 见 mcp-qq-server.mjs 末尾的 import.meta 判断，所以 import 是安全的）。
+//   为什么要它：`qq_api` 走的是**白名单**，压根到不了黑名单；但黑名单是**第二道网**
+//   （具名工具日后被改成危险动作时靠它兜住），所以这两层都要有断言盯着。
+import { BLOCKED_ACTIONS } from '../mcp/mcp-qq-server.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG_ROOT = join(HERE, '..')
@@ -157,6 +162,12 @@ async function main() {
   // ══════════════════════════════════════════════════════════════════════
   section('★ 安全：危险动作必须被拦下')
   // ══════════════════════════════════════════════════════════════════════
+  // ★★ 措辞纪律（2026-09-30 修）：这个服务器有**两道闸**，回绝的话术**不一样**：
+  //     ① `qq_api`（万能口）走**只读白名单**（fail-closed）→ "这个动作不在允许清单里：X。…"
+  //     ② 具名工具命中**黑名单** → "我这边把这个动作禁用了：X（…）。我不会自己绕过这条限制。"
+  //   这两句里只有 ② 带"禁用"二字。这里的断言原来只认"禁用"，于是白名单上线（0.2.2）之后
+  //   本套件 7 项全红 —— 而它一直**静默跳过**（受限沙箱不能起子进程），所以谁也没发现。
+  //   现在两句都认，并且**分别**盯住两道闸（下面每条动作额外断言它仍在黑名单里）。
   const dangerous = [
     ['set_group_kick', { group_id: 1, user_id: 2 }],
     ['set_group_ban', { group_id: 1, user_id: 2, duration: 60 }],
@@ -168,12 +179,21 @@ async function main() {
   for (const [action, params] of dangerous) {
     const res = await callTool('qq_api', { action, params })
     const text = textOf(res)
-    check(`拦截 ${action}`, res.result?.isError === true && /禁用/.test(text), text.split('\n')[0])
+    check(
+      `拦截 ${action}`,
+      res.result?.isError === true && /不在允许清单|禁用了/.test(text),
+      text.split('\n')[0],
+    )
+    check(
+      `★ ${action} 同时在黑名单里（第二道网，具名工具靠它兜底）`,
+      Object.prototype.hasOwnProperty.call(BLOCKED_ACTIONS, action),
+      BLOCKED_ACTIONS[action] ?? '⚠️ 不在黑名单',
+    )
   }
   check('★ 拦截提示说明理由（不是一句冷冰冰的失败）',
-    /会/.test(textOf(await callTool('qq_api', { action: 'set_group_kick', params: {} }))))
-  check('★ 拦截提示不鼓励绕过',
-    /不会自己绕过/.test(textOf(await callTool('qq_api', { action: 'delete_friend', params: {} }))))
+    /只读|投递链|禁用了/.test(textOf(await callTool('qq_api', { action: 'set_group_kick', params: {} }))))
+  check('★ 拦截提示给的是**安全替代**（回复 / qq_send_image），不是绕过办法',
+    /qq_send_image/.test(textOf(await callTool('qq_api', { action: 'delete_friend', params: {} }))))
 
   // ══════════════════════════════════════════════════════════════════════
   section('放行的动作：会真的去调 OneBot（这里故意指向不存在的端点）')
