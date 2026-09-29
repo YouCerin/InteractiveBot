@@ -143,7 +143,10 @@ export function stickerNames(table = {}) {
  * ⚠️ **只在真有东西可教时才教**：没有表情表时**不提** `[sticker:…]` ——
  *    提示词里凡是写了的能力都必须是真的（这正是这一轮在修的毛病）。
  *
- * ★ 0.2.4：`stickerLines` 让**表情包技能**把自己那几行并进**同一个段**。
+ * ★ 0.2.4：`stickerLines` 让**表情包那几行**并进**同一个段**。
+ *   ★ 0.2.7 更正：那几行由**宿主**现算（`bridge.mjs` 的 `#stickerPromptBits()`），
+ *     **不是技能贡献的** —— `skills/sticker/` 的 `prompt.source = "none"`，
+ *     它原来那个读 `context.stickerLines` 的 `promptSections()` 从来没生效过（已删）。
  *   为什么不各写一段：两段都教 `[sticker:…]` 时模型会看到两套说法
  *   （一套说"写名字"、一套说"写标签"），那正是"同一件事两种措辞"的老毛病。
  *   合并之后这个段只有一个来源、一套措辞。
@@ -162,7 +165,7 @@ export function renderMarkerInstructions({ stickers = {}, messageId = null, stic
   }
   const packLines = (Array.isArray(stickerLines) ? stickerLines : []).map((s) => String(s ?? '').trim()).filter(Boolean)
   if (packLines.length > 0) {
-    // 表情包技能贡献的写法（标签词表由它按"库里真有货"现算）
+    // 表情包的写法（标签词表由**宿主**按"库里真有货"现算，见 bridge.mjs 的 #stickerPromptBits）
     lines.push(...packLines)
   } else {
     const names = stickerNames(stickers)

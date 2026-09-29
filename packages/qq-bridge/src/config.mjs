@@ -558,7 +558,7 @@ export function validateConfig(config) {
   if (config.trigger.groupEnabled) {
     warn.push(
       'trigger.groupEnabled = true：**群聊已开启**。群聊只有在【被 @】或【命中关键词】时才回，' +
-        '不会自动搭话。注意账号风控风险 —— 上一个 QQ 号就是因此被处置的。',
+        '不会自动搭话。★ 群聊回复属于**账号风控敏感**行为 —— 开启前请确认你知道这一点。',
     )
     // 关键词是"包含匹配"，在群里直接决定成本与打扰程度，必须再提醒一次
     if (!Array.isArray(config.trigger.keywords) || config.trigger.keywords.length === 0) {
@@ -715,8 +715,8 @@ export function validateConfig(config) {
   // 人味层被关掉要明确警告 —— 它是账号存活相关配置，不是体验开关
   if (config.humanize?.enabled === false) {
     warn.push(
-      'humanize.enabled = false：机器人会秒回。**秒回 + 7×24 在线是行为风控最典型的特征**，' +
-        '上一个 QQ 号被处置的最可能原因即此。除非你在做本地测试，否则建议保持开启。',
+      'humanize.enabled = false：机器人会秒回。**秒回 + 7×24 在线是行为风控最典型的特征**。' +
+        '除非你在做本地测试，否则建议保持开启。',
     )
   } else {
     // 档位自洽性（参数互相打架的写法要抓出来）

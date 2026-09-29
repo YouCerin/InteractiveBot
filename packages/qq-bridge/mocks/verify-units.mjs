@@ -1123,5 +1123,80 @@ section('project-doc.mjs · 项目简介副本（让 agent 需要时能自己读
   rmSync(ROOT, { recursive: true, force: true })
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+section('视频入站（0.2.7 方案 A）：直链带出来了没有 / 提示词有没有门控')
+// ══════════════════════════════════════════════════════════════════════════
+// 这段盯的是"QQ 里发的视频为什么解析不了"那个缺口的修复：
+//   ① `renderSegments` 必须把 `data.url` **带出来**（以前只留一个 `[视频]`，地址原地丢弃）；
+//   ② 提示词只有在**抽帧能力真的可用**时才教模型调工具 —— 否则就是教它调一个不存在的工具。
+{
+  const { renderSegments } = await import('../src/text.mjs')
+  const { buildChannelPrompt } = await import('../src/channel-prompt.mjs')
+
+  // ① 渲染层：直链必须带出来，而且正文渲染**不许变**（老断言与基线都钉着它）
+  const one = renderSegments([
+    { type: 'video', data: { url: 'https://cdn.example.com/v/a.mp4?rkey=1', file: 'a.mp4', file_id: 'fid-9' } },
+    { type: 'text', data: { text: '看看这个' } },
+  ])
+  check('★★ 视频直链被单独带出来（url / file / file_id）',
+    one.videoRefs.length === 1 &&
+      one.videoRefs[0].url === 'https://cdn.example.com/v/a.mp4?rkey=1' &&
+      one.videoRefs[0].file === 'a.mp4' &&
+      one.videoRefs[0].fileId === 'fid-9',
+    JSON.stringify(one.videoRefs))
+  check('★ 正文里仍然只有 `[视频]` 占位符（文本渲染一个字都没改）', one.text === '[视频]看看这个', one.text)
+  check('★ 没有 url 的视频段也照收（后面自然会失败，但不能在渲染层丢掉）',
+    renderSegments([{ type: 'video', data: {} }]).videoRefs.length === 1)
+  check('★ 没有视频段时 videoRefs 是空数组（不是 undefined）',
+    Array.isArray(renderSegments([{ type: 'text', data: { text: 'hi' } }]).videoRefs) &&
+      renderSegments([{ type: 'text', data: { text: 'hi' } }]).videoRefs.length === 0)
+  check('★ 畸形段不炸（缺 data 的视频段按空引用处理）',
+    renderSegments([{ type: 'video' }, null, { type: 'video', data: { url: 123 } }]).videoRefs.length === 2)
+
+  // ② 提示词层：可用 / 不可用两种门控
+  const base = {
+    kind: 'group',
+    peerId: '700000001',
+    senderId: '1',
+    tier: 'user',
+    reason: 'mention',
+    rendered: { text: '看看这个', images: 0 },
+    config: { humanize: {}, persona: {}, image: {} },
+    videos: [{ url: 'https://cdn.example.com/v/a.mp4?rkey=1' }],
+  }
+
+  const usable = await buildChannelPrompt({
+    ...base,
+    videoTool: { usable: true, name: 'mcp__skills__video-frames__frames', why: '' },
+  })
+  check('★★ 可用时：把**真工具名**交给模型', usable.includes('mcp__skills__video-frames__frames'), '')
+  check('★★ 可用时：直链原样给出（模型要拿它当 source）', usable.includes('https://cdn.example.com/v/a.mp4?rkey=1'))
+  check('★ 可用时：说清"抽帧后要用 read_image 读"（不读就看不到画面）', /read_image/.test(usable))
+  check('★ 可用时：如实说"是静止截图、听不到声音、直链有时效"',
+    /静止截图/.test(usable) && /声音/.test(usable) && /时效/.test(usable))
+  check('★ 可用时：明确"视频本身喂不进模型"', /喂不进/.test(usable))
+
+  const unusable = await buildChannelPrompt({
+    ...base,
+    videoTool: { usable: false, name: '', why: '视频识别技能没有启用（控制台 →「扩展」→ 视频识别）' },
+  })
+  check('★★ 不可用时：**绝不**出现工具名（否则模型会去调一个不存在的工具）',
+    !unusable.includes('video-frames'), '')
+  check('★ 不可用时：如实说"有视频但看不到画面" + 给出原因',
+    /含 1 个视频/.test(unusable) && /当前看不到画面/.test(unusable) && /没有启用/.test(unusable))
+  check('★★ 不可用时：明确"不许凭有视频猜内容"（防幻觉）', /不要凭/.test(unusable))
+  check('★ 不可用时也不给直链（省 token，且不给一条走不通的路）',
+    !unusable.includes('https://cdn.example.com/v/a.mp4'))
+
+  const none = await buildChannelPrompt({ ...base, videos: [], videoTool: { usable: true, name: 'x', why: '' } })
+  check('★ 没有视频时：一个字都不提（不留悬空段落）',
+    !/视频/.test(none.replace(/视频抽帧/g, '')) && none.length < usable.length, '')
+
+  // ③ 老基线不受影响：没有视频时提示词与"没有这段代码"时逐字相同
+  const noVideo = await buildChannelPrompt({ ...base, videos: [] })
+  const noFields = await buildChannelPrompt({ ...base, videos: undefined, videoTool: undefined })
+  check('★ 没有视频时两次装配逐字一致（新参数是纯增量，不动既有措辞）', noVideo === noFields)
+}
+
 console.log(`\n${failures === 0 ? '🎉 单元测试全部通过' : `⚠️ ${failures} 项失败`}\n`)
 process.exit(failures === 0 ? 0 : 1)

@@ -370,7 +370,9 @@ export class OneBotClient extends EventTarget {
     if (pic) {
       if (faceId != null && String(faceId) !== '') {
         // 互斥：图片优先，并留一行日志（调用方本该只给一个，这是兜底）
-        this.log?.('[onebot] 同时给了贴纸图与内置表情 id → 只发图片（脸被丢掉）')
+        // 措辞统一成"表情包"：全项目只有这里把它叫"贴纸图"，同一个东西两种叫法
+        // 只会让排障时搜日志搜不全（0.2.7 改）。
+        this.log?.('[onebot] 同时给了表情包图与内置表情 id → 只发图片（脸被丢掉）')
       }
       segments.push({ type: 'image', data: { file: `base64://${pic}` } })
     } else if (faceId != null && String(faceId) !== '') {

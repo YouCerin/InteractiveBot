@@ -98,14 +98,30 @@ if (skill) {
   check('★ 入口文件真能读到（校验函数是按 resolve(dir, entry) 找的）',
     Boolean(skill.entry) && existsSync(skill.entry), String(skill.entry))
   check('★ entry 指向 .js/.mjs（宿主用 ESM 动态 import 加载）', /\.(m?js)$/i.test(String(skill.manifest.entry)))
-  check('★ session 必须是 required（它要知道当前会话才能发对图）',
-    String(skill.manifest.session) === 'required', String(skill.manifest.session))
+  // ★ 0.2.7 修正：这里原来是 `session === 'required'`，理由是"它要知道当前会话才能发对图"。
+  //   那个理由**不成立** —— session 只有两处效果：① 往**工具入参**注入并必填 kind/peerId；
+  //   ② 提示词片段非空时追加一句 kind/peerId 说明。本技能既没有工具、也不贡献片段，
+  //   两处都不成立。群聊/私聊的判定确实存在，但它在**宿主**侧（`#decideSticker` 拿得到 kind）。
+  //   断言跟着改成 none，并留住这条注释 —— 防止有人凭"required 看起来更安全"改回去。
+  check('★ session = none（没有工具也不贡献片段时，required 是一句永远无法生效的承诺）',
+    String(skill.manifest.session) === 'none', String(skill.manifest.session))
 
-  // 入口的三个导出：宿主按契约调用，缺一个就是"装了但不工作"
+  // 入口必须导出：宿主按契约调用，缺一个就是"装了但不工作"
   const entrySrc = readFileSync(skill.entry, 'utf8')
-  for (const fn of ['setup', 'available', 'promptSections']) {
+  for (const fn of ['setup', 'available']) {
     check(`★ 入口导出 ${fn}()`, new RegExp(`export\\s+function\\s+${fn}\\b`).test(entrySrc))
   }
+  // ★★ 0.2.7：prompt.source 必须与入口实现**互相印证**。
+  //   这里选 `none`：那几行（"可以写 [sticker:标签]"）要按当前库现算，技能侧读不到库，
+  //   所以由宿主算（`bridge.mjs` 的 `#stickerPromptBits()`）。
+  check('★ 清单声明 prompt.source = none（本技能不贡献提示词片段）',
+    String(skill.manifest.prompt?.source ?? 'runtime') === 'none',
+    String(skill.manifest.prompt?.source))
+  check('★★ 入口不再导出死代码 promptSections()（宿主调用时不传 ctx，它恒返回 []）',
+    !new RegExp('export\\s+function\\s+promptSections\\b').test(entrySrc),
+    'promptSections 应当已删除；那几行由宿主现算')
+  check('★★ 入口不再依赖 context.stickerLines（那个输入永远不会被传进来）',
+    !/stickerLines/.test(stripComments(entrySrc)), '')
   check('★★ 入口 import 了它就是违反契约（技能不许 import 宿主内部模块）',
     !/from\s+['"][^'"]*src\/[^'"]*['"]/.test(stripComments(entrySrc)),
     '技能目录要能整目录搬走，不能反向依赖宿主源码')

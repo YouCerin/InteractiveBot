@@ -347,14 +347,22 @@ node src/index.mjs --stickers        # 库状态 + 各标签张数 + 最近 12 �
 
 ## 6. 这个技能里为什么没有工具
 
-`skill.json` 的 `tools` 是空的、入口也只导出 `setup/available/promptSections`
-——**没有决策钩子**。这不是漏了，是边界：
+`skill.json` 的 `tools` 是空的、入口只导出 `setup/available`
+——**没有决策钩子，也不贡献提示词片段**（`prompt.source = "none"`）。这不是漏了，是边界：
 
 * 技能契约要求"不 import 宿主内部模块、能整目录拷走"（`docs/插件设计规范.md` §12.3）；
 * 而"发不发"的判定要碰**配额台账、隐私/投递闸门的顺序、拟人延迟、发送失败冷却**
   —— 那些是宿主的状态机，不是外部能力包该碰的东西；
 * 判定还必须是**可离线单测的纯函数**（`src/sticker-decision.mjs` 有 83 项断言），
-  把它塞进技能目录等于让"发错图"这条最贵的失败路径离开宿主的测试覆盖面。
+  把它塞进技能目录等于让"发错图"这条最贵的失败路径离开宿主的测试覆盖面；
+* 连"可以写 `[sticker:标签]`"那几行提示词也不是技能写的：它要按**当前库里哪些标签真有货**现算，
+  而技能侧读不到库、`promptSections()` 又必须是纯函数 —— 所以由宿主算
+  （`src/bridge.mjs` 的 `#stickerPromptBits()` → `src/channel-prompt.mjs` 的标记段）。
+
+> ★ 0.2.7 修正：本技能原来有一个 `promptSections()`，声称"宿主会把现算好的行传进来"。
+> 它**从来没生效过** —— 宿主调 `collectSkillPromptSections()` 时不传 `ctx`，所以那个输入
+> 恒为 `undefined`，函数恒返回 `[]`。现在函数已删、清单写明 `prompt.source = "none"`，
+> 并且有断言盯着（`mocks/verify-sticker-skill.mjs` 第 ② 节）。
 
 所以本项目的答案是：**功能是技能，判定必须在宿主。**
 

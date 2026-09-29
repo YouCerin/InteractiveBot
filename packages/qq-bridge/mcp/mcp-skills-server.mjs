@@ -51,8 +51,10 @@ import {
 } from '../src/extensions.mjs'
 
 const PROTOCOL_VERSION = '2024-11-05'
-// ⚠️ 版本号必须与 package.json 一致（mocks/verify-manifest.mjs 会核对）
-const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.2.6' }
+// ⚠️ 版本号必须与 package.json 一致。★ 0.2.7 更正一句不准确的话：本文件原来写"verify-manifest
+//   会核对" —— 实际上那条断言只读 `mcp-qq-server.mjs` 的 SERVER_INFO（见 verify-manifest 的
+//   「版本号只有一个来源」那一节）。所以这里是**靠自觉**保持一致，不是被断言钉住的。
+const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.2.7' }
 
 /** 服务端配置：`{ skillsDir, configPath, workspace? }`。 */
 let config = null

@@ -107,10 +107,19 @@ export async function buildChannelPrompt({
   sessionState = null,
   consumeGap = () => null,
   skillSections = [],
-  /** 表情包技能贡献的"怎么写 `[sticker:标签]`"那几行（**只列库里真有货的标签**）。 */
+  /** "怎么写 `[sticker:标签]`"那几行（**只列库里真有货的标签**）。
+   *  ★ 0.2.7 更正：它由**宿主**现算（`bridge.mjs` 的 `#stickerPromptBits()`），
+   *    **不是**表情包技能贡献的 —— 那个技能不贡献提示词片段（`prompt.source = "none"`）。 */
   stickerLines = [],
   nickname = '',
   projectDocRel = '',
+  /** 本条消息里的视频（`renderSegments` 带出来的 `videoRefs`：`{url}`）。
+   *  ★ 只带直链、**核心不下载** —— 见下面「视频」那一段与 `docs/0.2.7-qq-video-inbound.md`。 */
+  videos = [],
+  /** 抽帧能力的事实（由桥接现算）：`{usable, name, why}`。
+   *  `usable=true` 时才把工具名交给模型 —— 提示词里提到一个不存在的工具，
+   *  模型就会去调它（本项目最忌讳的静默失效）。 */
+  videoTool = null,
 } = {}) {
   const stamp = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`
 
@@ -288,7 +297,11 @@ export async function buildChannelPrompt({
   // ── 带内标记怎么用（H6）────────────────────────────────────────────────
   // ★ **只在真有东西可教时才教**（没有表情表时就不提 `[sticker:…]`）——
   //   提示词里凡是写了的能力都必须是真的。
-  // ★ 0.2.4：`stickerLines` 是表情包技能贡献的那几行（标签由库里"真有货"的现算）。
+  // ★ 0.2.4：`stickerLines` 是按当前库**现算**的那几行（哪些标签真有货），
+  //   算法在宿主：`bridge.mjs` 的 `#stickerPromptBits()`（readStickerLibrary + labelCoverage）。
+  //   ★ 0.2.7 更正：**不是**"表情包技能贡献"的 —— 那个技能不贡献提示词片段
+  //     （`skills/sticker/skill.json` 的 `prompt.source = "none"`），
+  //     它原来那个读 `context.stickerLines` 的 `promptSections()` 从来没生效过（已删）。
   //   它并进**同一个段**，而不是另起一段 —— 两段都教 `[sticker:…]` 就会出现
   //   一套说"写名字"、另一套说"写标签"的两种措辞（模型的困惑源）。
   const markerHelp = renderMarkerInstructions({
@@ -322,6 +335,40 @@ export async function buildChannelPrompt({
   }
   if (skipped > 0) {
     lines.push(`（另有 ${skipped} 张图片超出本条消息的处理上限，未处理。）`)
+  }
+
+  // ── 视频（0.2.7，方案 A）────────────────────────────────────────────────
+  //   视频**喂不进模型**（本宿主没有视频内容块通道），所以这里只做两件事：
+  //     ① 如实说"这条消息里有视频"；
+  //     ② **只有在抽帧能力真的可用时**，才把直链交出去、并教它调哪个工具 ——
+  //        抽出来的帧落在工作区里，模型再用 `read_image` 去看。
+  //
+  //   ★ 门控是硬要求（不是谨慎）：提示词里提到一个工具，模型就会去调它。
+  //     技能没开 / 缺 ffmpeg / QQ 工具总开关关着时还写"用 xxx 抽帧"，
+  //     就是在教它调一个**不存在或必然失败**的工具 —— 那正是本项目最忌讳的静默失效。
+  //     所以不可用时**如实说看不到画面**，并明确"不许凭'有视频'猜内容"。
+  //   ★ 为什么不在这里下载：真正会去取视频的是 `skills/video-frames/sources.js`，
+  //     它自带 SSRF 守卫、大小上限、超时、临时文件即删、"这不是视频"拒收。
+  //     核心再实现一份等于多一套要维护的下载政策，收益只是"URL 不进提示词"。
+  const vids = (Array.isArray(videos) ? videos : []).filter((v) => v && v.url)
+  if (vids.length > 0) {
+    if (videoTool?.usable && videoTool.name) {
+      lines.push(
+        `（这条消息里含 ${vids.length} 个视频。**视频本身喂不进模型**：要看内容就调 \`${videoTool.name}\`` +
+          '(source = 下面那条直链) 抽帧，再用 read_image 逐张读它返回的图片路径 —— 不读那些图，你看不到任何画面。）',
+      )
+      for (const v of vids) lines.push(`（视频直链：${v.url}）`)
+      lines.push(
+        '（抽出来的是**静止截图**：帧与帧之间的过程看不到；视频里的**声音**也听不到；' +
+          '这类直链**有时效**，要看得趁早调，过期了照实说。）',
+      )
+    } else {
+      const why = String(videoTool?.why ?? '').trim() || '抽帧能力当前不可用'
+      lines.push(
+        `（这条消息里含 ${vids.length} 个视频，但**当前看不到画面**（${why}）。` +
+          '不要凭"有视频"去猜它拍了什么；需要的话照实告诉对方现在看不了。）',
+      )
+    }
   }
   return lines.join('\n')
 }

@@ -80,7 +80,7 @@ export function PaceTab({
         description: (
           <>
             关掉之后机器人会<strong className="text-red-600">秒回</strong>。秒回 + 7×24
-            在线是行为风控最典型的特征，上一个 QQ 号被处置的最可能原因就是这个。确定要关吗？
+            在线是行为风控最典型的特征。确定要关吗？
           </>
         ),
         confirmText: '我了解风险，关闭',
@@ -107,8 +107,8 @@ export function PaceTab({
         title: '选「快速」档？',
         description: (
           <>
-            「快速」档约 1 秒就回复，<strong className="text-red-600">这几乎等于秒回</strong>。
-            上一个 QQ 号被处置的最可能原因就是这个特征。确定要选吗？
+            「快速」档约 1 秒就回复，<strong className="text-red-600">这几乎等于秒回</strong>
+            。确定要选吗？
           </>
         ),
         confirmText: '我了解风险，选快速',

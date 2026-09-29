@@ -1,0 +1,156 @@
+{
+  "id": "video-frames",
+  "name": "视频识别",
+  "_note_name": [
+    "★ 0.2.7 改名：显示名从「视频抽帧」改成「视频识别」。",
+    "为什么改：'抽帧'说的是**手段**（把视频切成一堆图），而使用者与模型要的是**能力**（看懂视频里有什么）。",
+    "  真实反馈：这个名字让人以为它只做'切图'，而且模型曾在群里答出「我不抽帧」这类偏离问题的回答。",
+    "id / 目录名 / 工具裸名**都不改**（仍是 `video-frames` + 工具 id `frames`）：",
+    "  · 改 id 会让 config.skills['video-frames'] 里既有的开关与路径失配（用户设过的东西会看不见）；",
+    "  · 工具全名 `mcp__skills__video-frames__frames` 已经进过提示词与排障记录，保持稳定更好。",
+    "上游那份插件自己的显示名是「视频抽帧」—— 文档里提到上游时仍按上游叫法写。"
+  ],
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "用 ffmpeg 把视频抽成若干张截图存进工作区，让只能看图的模型也能「看」视频。上游 video-frames 插件的 InteractBot 适配版（上游那份是「能力提供者」，本宿主改成模型可调的工具）。",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "category": "media",
+  "icon": "🎬",
+  "session": "none",
+
+  "enabledByDefault": false,
+  "_note_switch": [
+    "开关口径：唯一开关是 config.skills['video-frames'].enabled。",
+    "enabledByDefault:false = 装好后默认关，由管理员在「控制台 → 扩展 → 视频识别」里打开。",
+    "★ 与上游的差别（刻意）：上游默认开（enabledByDefault:true），因为它的宿主在抽帧不可用时会静默退回「只读元信息」。",
+    "  本宿主不会静默退回 —— 技能的工具一旦挂上，模型就会看到它、提示词里也会多一段指引；",
+    "  而多数机器上并没有 ffmpeg，默认开等于默认挂一个「一用就报依赖缺失」的工具，还白占提示词。",
+    "  所以这里默认关；打开之后开关**即时生效**（不需要重启桥接），只有装/卸技能才需要重启。"
+  ],
+
+  "permissions": {
+    "net": [
+      "（不固定域名）模型/使用者给出的任意 http(s) 视频直链；内网、回环、CGNAT、链路本地地址一律拒绝（含域名解析到内网的情况）"
+    ],
+    "write": [
+      "工作区 <workspace>/frames/ —— 抽出的截图（供模型 read_image 读；按 retentionHours 自动清理）",
+      "系统临时目录 —— 下载来的视频副本，抽完帧立刻删除"
+    ],
+    "_说明": "如实声明，界面会显示给装的人。本技能**不开任何本机端口**（listen 为空），也不读工作区以外的文件（模型给的路径必须是工作区内的相对路径）。"
+  },
+
+  "requires": [],
+  "capabilities": ["video.frames", "video.frames.available"],
+  "_note_capabilities": "这两个能力名是**上游宿主的契约**，留着是为了同一份代码在上游宿主里还能跑（那边由 src/video-reader.js 主动取用）。本宿主没有能力/提供者机制，不消费它们。",
+
+  "settings": {
+    "enabled": false,
+    "count": 4,
+    "maxWidth": 768,
+    "quality": 4,
+    "ffmpegPath": "",
+    "maxSourceMB": 200,
+    "downloadTimeoutMs": 60000,
+    "extractTimeoutMs": 30000,
+    "retentionHours": 24
+  },
+
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用视频识别",
+      "description": "打开后模型才会拿到「视频识别」工具。需要本机装了 ffmpeg（没装时打开也不会坏，只是调用时会如实告诉你原因）。"
+    },
+    "count": {
+      "type": "number",
+      "label": "抽帧数量",
+      "min": 1,
+      "max": 12,
+      "step": 1,
+      "description": "1~12 帧。越多越能还原过程，token 成本也越高。默认 4。模型调用时可以另外指定（1~12）。"
+    },
+    "maxWidth": {
+      "type": "number",
+      "label": "帧宽上限（像素）",
+      "min": 64,
+      "max": 4096,
+      "step": 16,
+      "description": "默认 768。调小可以省 token，但太小的图看不清细节。"
+    },
+    "quality": {
+      "type": "number",
+      "label": "JPEG 质量（2~31，越小越清晰）",
+      "min": 2,
+      "max": 31,
+      "step": 1,
+      "description": "默认 4。调大可以减小体积；这是 ffmpeg 的 -q:v（**数字越小画质越好**）。"
+    },
+    "ffmpegPath": {
+      "type": "string",
+      "label": "ffmpeg 路径（留空 = 自动在 PATH 里找）",
+      "placeholder": "D:\\ffmpeg\\bin\\ffmpeg.exe",
+      "description": "本机没把 ffmpeg 加进 PATH 时，把 ffmpeg.exe 的完整路径填这里。填了之后 ffprobe 会优先在**同一个目录**里找（官方 zip 解出来两个 exe 是并排放的）。改完即刻生效，不用重启。"
+    },
+    "maxSourceMB": {
+      "type": "number",
+      "label": "单个视频下载上限（MB）",
+      "min": 1,
+      "max": 4096,
+      "step": 1,
+      "description": "默认 200。只对 **http(s) 直链**来源有效（工作区里的文件不受这个限制）。下载是边下边卡的，超了立刻中止。"
+    },
+    "downloadTimeoutMs": {
+      "type": "number",
+      "label": "下载超时（毫秒）",
+      "min": 5000,
+      "max": 600000,
+      "step": 5000,
+      "description": "默认 60000。网盘/直链首次握手慢的话调大一点。"
+    },
+    "extractTimeoutMs": {
+      "type": "number",
+      "label": "单帧抽帧超时（毫秒）",
+      "min": 5000,
+      "max": 600000,
+      "step": 5000,
+      "description": "默认 30000。这是**每一帧**的上限：4K 长视频取帧可能超，超了就换更靠前的来源或调大它。"
+    },
+    "retentionHours": {
+      "type": "number",
+      "label": "截图保留时长（小时，0 = 不清理）",
+      "min": 0,
+      "max": 8760,
+      "step": 1,
+      "description": "默认 24。截图落在工作区里，由本技能每次抽帧时顺手清理过期的；填 0 = 一直留着（工作区会慢慢变大）。"
+    }
+  },
+
+  "tools": [
+    {
+      "id": "frames",
+      "name": "视频识别",
+      "description": "把视频抽成若干张截图存进工作区，返回相对路径；模型要用 read_image 读那些路径才能看到画面",
+      "category": "media",
+      "icon": "🎬",
+      "permission": "read",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string", "description": "工作区内的相对路径，或 http(s) 视频直链" },
+          "count": { "type": "integer", "description": "抽几帧（1~12），不填用扩展设置" }
+        },
+        "required": ["source"]
+      }
+    }
+  ],
+
+  "prompt": {
+    "source": "runtime",
+    "_说明": "★ InteractBot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关、帧数与宿主工具名变），所以这里不放静态副本 —— 两份都留会让同一段话出现两种措辞（上游宿主就是这样）。"
+  },
+
+  "_note_tools_is_metadata": "tools[] 是**说明性元数据**（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。这里 id 写 'frames'，模型看到的全名由**宿主**拼：mcp__skills__video-frames__frames（DSH 的 MCP 客户端加 mcp__skills__ 前缀），所以 index.js 里的名字由宿主注入、绝不写死。",
+
+  "_note_upstream": "上游原件逐字留档在 reference/video-frames-1.0.0/（plugin.json + index.js + frames.js）；逐处改法与理由见 docs/0.2.7-video-frames-migration.md；使用者视角的差异说明见同目录 README-InteractBot.md。"
+}

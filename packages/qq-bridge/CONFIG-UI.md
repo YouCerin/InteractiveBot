@@ -545,8 +545,7 @@ function computePeriod(peak, now = new Date()) {
 
 **★ `trigger.groupEnabled` 的界面提示：**
 
-> 群聊回复涉及**账号风控风险**。上一个 QQ 号就是因此被处置的。
-> 开启前请确认你了解这一点。
+> 群聊回复涉及**账号风控风险**，开启前请确认你了解这一点。
 >
 > 开启后机器人**只会在被 @ 或说到关键词时**回答，不会自己冒出来说话。
 
@@ -678,8 +677,7 @@ function computePeriod(peak, now = new Date()) {
 
 **选择 `fast` 时弹出二次确认**（与 `danger-full-access` 同样的处理）：
 
-> 「快速」档约 1 秒就回复，**这几乎等于秒回**。
-> 上一个 QQ 号被处置的最可能原因就是这个特征。确定要选吗？
+> 「快速」档约 1 秒就回复，**这几乎等于秒回**。确定要选吗？
 
 **每个档位展开的具体参数**（界面可以用小字提示，或放在"高级"里）：
 
@@ -697,8 +695,7 @@ function computePeriod(peak, now = new Date()) {
 
 `humanize.enabled` 被关闭时，弹出醒目确认：
 
-> 关掉之后机器人会**秒回**。秒回 + 7×24 在线是行为风控最典型的特征，
-> 上一个 QQ 号被处置的最可能原因就是这个。确定要关吗？
+> 关掉之后机器人会**秒回**。秒回 + 7×24 在线是行为风控最典型的特征。确定要关吗？
 
 ### 2.5 记忆页签（★ 新增需求：记忆要能看、能改）
 
@@ -2383,6 +2380,15 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 | **要重启才生效** | 「★ 需要重启机器人」+ **把 `why` 的原因显示出来**（例如"这段代码只在启动时读一次配置"） | 返回 `restartRequired: true` |
 | **不适用**（名单/列表类） | **不渲染 Switch**，改成一个「去维护」按钮跳到对应页签 | `switchKind === 'list'`（`enabled` 为 `null`） |
 | **二选一**（冲突功能） | **不渲染 Switch**，改成一排按钮；**不显示"关掉会怎样"** | `switchKind === 'choice'`（`enabled` 为 `null`，`value` + `options[]` 给出当前值与候选） |
+| **控件在技能卡上**（0.2.7） | **不渲染 Switch**，改成「去技能卡上开」按钮 + 一句指路；**照常显示 `what` / `offEffect`** | `switchKind === 'skill'`（`switchInSkill` 给出技能 id，`enabled` 为 `null`） |
+
+> ★ **`switchInSkill`（0.2.7）解决什么**：有些插件条目的开关**属于某个技能卡**
+> （表情包就是：`skills/sticker/` 是技能，技能卡上有结构性开关）。
+> `src/plugins.mjs` 按职责仍要登记"开关在哪"，但如果插件卡也渲染一个 Switch，
+> 同一个配置键就会在同一页出现**两个控制点**（真机反馈过："不合理"）。
+> 所以：**表里保留登记、界面只留一个控件**，并且 `toggle({type:'plugin', id})`
+> 在接口层也拒绝（与 `list`/`choice` 同一条纪律：一个键只留一条写入口）。
+> 界面的判断依据必须是后端给的 `switchInSkill`，**不许写 `id === 'sticker'` 硬编码**。
 
 人设是**枚举**开关（`switchKind === 'enum'`）：关 = `persona.preset` 取 `none`，
 开 = 回到精简档。**打开时用的是默认档，不是"你上次选的那档"** —— 界面上照实说一句。

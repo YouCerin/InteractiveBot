@@ -1118,18 +1118,6 @@ export function buildStickerSelection({
 }
 
 /**
- * 提示词用的标签覆盖率 + 库对象（一次读盘拿两样，避免每轮读两遍）。
- *
- * @returns {{ library: object, coverage: Record<string, number>, health: object }}
- */
-export function stickerPromptFacts({ workspace, dir = STICKER_DIR } = {}) {
-  const library = readStickerLibrary({ workspace, dir })
-  // ★ 用**生效词表**的 id 列表统计（否则刚在标注台新建的标签在提示词里显示 0 张）
-  const ids = activeLabelIds({ workspace, dir })
-  return { library, coverage: labelCoverage(library, ids), health: libraryHealth(library, { ids }) }
-}
-
-/**
  * 记录一次**真正发成功**的表情（用量台账）。
  *
  * ⚠️ 只在发送成功后调用（与 `SendQueue.markSent` 同一纪律：先记账会让去重窗口

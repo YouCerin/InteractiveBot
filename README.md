@@ -2,7 +2,7 @@
 
 把**可配置的 QQ 对话机器人**接到 DeepSeek Harness（DSH）：QQ 消息 → DSH agent → 回答发回 QQ。
 
-> **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.2）**。它**不是** DSH 插件，
+> **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.7）**。它**不是** DSH 插件，
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
 > `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
 
@@ -13,23 +13,37 @@ project_InteractBot/
 ├── .dsh/skills/                    # 已安装的 DSH 插件开发 skill（10 个）
 ├── reference/                      # 上游参考（只读留档）
 │   ├── dsh-agent-teams/            # skill 源 + 开发文档 + git 历史
-│   └── pixiv-lookup-1.1.0/         # ★ 第三方技能**原件**（适配前的逐字副本）
+│   ├── pixiv-lookup-1.1.0/         # ★ 第三方技能**原件**（适配前的逐字副本）
+│   └── video-frames-1.0.0/         # ★ 同上：上游插件原件（plugin.json + index.js + frames.js）
 ├── packages/
 │   ├── qq-bridge/                  # ★ 在维护的那个：QQ ↔ DSH 桥接（详见它自己的 README/AGENT.md）
 │   │   ├── src/                    # 桥接主体（含扩展内核 extensions.mjs / 插件表 plugins.mjs）
 │   │   ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
-│   │   ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
+│   │   ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup、sticker、video-frames
 │   │   ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
 │   │   └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
 │   └── dsh-qq-bot（废弃）/
 ├── docs/                           # 版本级文档（设计 / 验收 / 适配存档）
 │   ├── 插件设计规范.md              # ★ 扩展体系的契约（技能清单、生命周期、安全、UI、验收）
-│   ├── 0.2.4-release-notes.md       # ★ 这一版：自主发表情包
+│   ├── 0.2.7-release-notes.md       # ★ 这一版：视频识别接线 + 三处静默失效清理
+│   ├── 0.2.7-video-frames-migration.md   # 技能侧适配记录（上游 video-frames 1.0.0）
+│   ├── 0.2.7-qq-video-inbound.md         # 核心侧接线记录（含第一次真机尝试的时间线）
+│   ├── 0.2.7-sticker-cleanup.md          # 表情包链路上的五处修正
+│   ├── 0.2.4-release-notes.md       # 自主发表情包
 │   ├── 0.2.2-release-notes.md       # 这一版更新了什么
 │   ├── 0.2.2-console-plan.md        # 控制台改造方案（**待指令，未实施**）
 │   └── 0.2.2-pixiv-skill-migration.md + 0.2.2-pixiv-adaptation.patch
 └── README.md
 ```
+
+## 0.2.7 这一版加了什么（一句话）
+
+**机器人现在能"看"群里发的视频**：视频直链由桥接交给模型，模型调「**视频识别**」技能抽帧，
+帧落进工作区再用 `read_image` 逐张读。顺带清掉三处"不报错但会误导"的地方
+（缺 ffmpeg 的文案、控制台的自检快照、技能提示词与能力不一致），
+并把表情包那个"技能卡 + 插件卡各一个开关"收敛成**只剩一个**。
+
+详见 `docs/0.2.7-release-notes.md` 与三份改动记录。
 
 ## 0.2.4 这一版加了什么（一句话）
 

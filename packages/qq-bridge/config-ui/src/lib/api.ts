@@ -614,6 +614,13 @@ export interface SkillInfo {
   /** 密文字段「已配置/未配置」（GET 不回值，只回这个） */
   secretSet: Record<string, boolean>
   tools: SkillTool[]
+  /**
+   * 清单 `tools[]` 里**声明**了几个工具（与 `tools` 的"实际注册"分开）。
+   * ★ 别拿 `tools.length === 0` 当成"忘了接线"：像「表情包」这种技能**刻意不要工具**
+   *   （靠提示词约定 + 宿主判定工作）。判据必须是"**声明了却没注册**"，
+   *   否则每次巡检都会打一条假告警 —— 而假告警用久了就没人看了。
+   */
+  declaredToolCount?: number
   promptSections: { preview: string; chars: number }[]
   permissions?: { net?: string[]; listen?: string | string[] | boolean }
 }
@@ -636,8 +643,12 @@ export interface PluginInfo {
   offEffect: string
   enabledPath: string
   /** boolean = 普通开关；enum = 人设（开=默认档，不是"上次那档"）；list = 名单类（不渲染 Switch）；
-   *  choice = 二选一（0.2.3：不渲染 Switch，渲染 N 个并列按钮，没有"关"） */
-  switchKind: 'boolean' | 'enum' | 'list' | 'choice' | string
+   *  choice = 二选一（0.2.3：不渲染 Switch，渲染 N 个并列按钮，没有"关"）；
+   *  skill  = **控件在技能卡上**（0.2.7：不渲染 Switch，渲染"去技能卡上开"+跳转，见 `switchInSkill`） */
+  switchKind: 'boolean' | 'enum' | 'list' | 'choice' | 'skill' | string
+  /** `switchKind === 'skill'` 时给出**技能 id**（界面用它跳到那张技能卡）。
+   *  ⚠️ 不要用 `if (id === 'sticker')` 硬编码 —— 下一个"内置技能"出现时必然被漏掉。 */
+  switchInSkill?: string | null
   enabled: boolean | null
   /** choice 的当前生效值（高亮按钮用；choice 的 enabled 恒为 null，不能靠它判断） */
   value?: unknown

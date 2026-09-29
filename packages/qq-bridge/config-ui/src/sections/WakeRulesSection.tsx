@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils'
  * 而 `唤醒规则` 那张插件卡又只显示其中一个开关 —— 三处各说一半。
  *
  * ★ 三个**必须保留**的东西（都是踩出来的，别简化掉）：
- *   ① 群聊总开关的**风控文案**与二次确认（上一个 QQ 号就是因此被处置的）；
+ *   ① 群聊总开关的**风控文案**与二次确认（群聊回复是账号风控敏感行为）；
  *   ② 关掉总开关时，另外三个开关**一起变灰** —— 否则会让人以为"@ 开关还开着，
  *      @ 它应该会回"；
  *   ③ 关键词的**高频词告警**与**成本提示**（关键词是包含匹配，写个单字几乎等于全响应，
@@ -44,8 +44,8 @@ export function WakeRulesSection({
         title: '开启群聊回复？',
         description: (
           <>
-            群聊回复涉及<strong className="text-red-600">账号风控风险</strong>。
-            上一个 QQ 号就是因此被处置的。开启前请确认你了解这一点。
+            群聊回复涉及<strong className="text-red-600">账号风控风险</strong>
+            。开启前请确认你了解这一点。
           </>
         ),
         confirmText: '我了解风险，开启',
@@ -73,8 +73,8 @@ export function WakeRulesSection({
           <div className="space-y-2">
             <Switch checked={groupEnabled} onCheckedChange={toggleGroup} />
             <InlineNote level="danger">
-              群聊回复涉及<strong>账号风控风险</strong>。上一个 QQ 号就是因此被处置的。
-              开启前请确认你了解这一点。开启后机器人<strong>只会在被 @ 或说到关键词时</strong>回答，
+              群聊回复涉及<strong>账号风控风险</strong>，开启前请确认你了解这一点。
+              开启后机器人<strong>只会在被 @ 或说到关键词时</strong>回答，
               不会自己冒出来说话。
             </InlineNote>
           </div>

@@ -32,6 +32,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import {
   SKILL_API_VERSION,
   SKILLS_SERVER_NAME,
@@ -390,6 +391,48 @@ export function available() { throw new Error('nope') }
 
   check('diagnose() 可选：有就调用', callSkillDiagnose(good, {})?.状态 === 'ok')
   check('diagnose() 抛错也被兜住', callSkillDiagnose({ module: { diagnose: () => { throw new Error('x') } } }, {}) !== null)
+
+  // ── ★★ 0.2.7 回归：自检必须**现调**，不能读装载时的快照 ────────────────────
+  //   真机踩过（控制台截图）：技能是**装载之后**才在控制台打开的，卡片却一直写着
+  //   「开关没打开」+「暂时用不了」，而且再也不会变 —— 使用者看到的是
+  //   "我明明开着，它说我没开"。同一个坑对"后来才装好 ffmpeg / 填好路径"完全一样。
+  const dirLive = makeSkill('avail-live', {
+    manifest: { name: '现调自检演示' },
+    // 自检依赖的是**另一个配置键**（count），这样"现调 vs 快照"才验得干净：
+    // 开关全程都开着，只有 count 变，而结论跟着变 ⇒ 只可能是现调出来的。
+    entry: `export function setup() {}
+export function available(context) {
+  const n = Number(context?.config?.skills?.['avail-live']?.count ?? 0)
+  return n >= 5 ? { ok: true } : { ok: false, reason: '「现调自检演示」计数太小（照真实技能那样依赖 config）' }
+}
+`,
+  })
+  const dLive = discoverSkills({ skillsDir: SKILLS_DIR }).skills.find((s) => s.dir === dirLive)
+  await loadSkill(dLive, { config: { skills: { 'avail-live': { enabled: true, count: 1 } } }, log: () => {} })
+  check('装载时 count=1 → 装载结果里记下"不可用"（这一份是快照，仍然留着）', dLive.available.ok === false)
+
+  const small = { skills: { 'avail-live': { enabled: true, count: 1 } } }
+  const big = { skills: { 'avail-live': { enabled: true, count: 9 } } }
+  const cardSmall = describeSkill(dLive, small)
+  const cardBig = describeSkill(dLive, big)
+  check(
+    '★★ 只改了一个配置键（count）→ 卡片的自检结论**立刻**跟着变（不是装载时的旧快照）',
+    cardSmall.available.ok === false && cardBig.available.ok === true,
+    `count=1 → ${JSON.stringify(cardSmall.available)}／count=9 → ${JSON.stringify(cardBig.available)}`,
+  )
+  check(
+    '★★ 而且不可用时那句原因**跟着出现**、可用时**跟着消失**（真机上误导使用者的就是这一类陈旧文案）',
+    cardSmall.reasons.length === 1 && /计数太小/.test(cardSmall.reasons[0]) && cardBig.reasons.length === 0,
+    JSON.stringify({ small: cardSmall.reasons, big: cardBig.reasons }),
+  )
+  check(
+    '★ skillStatus() 不传自检结果时也是现调（不是沿用快照）',
+    skillStatus(dLive, big).reasons.length === 0 && skillStatus(dLive, small).reasons.length === 1,
+  )
+  check(
+    '★ 自检抛错仍然被兜住（现调不会让列表接口崩）',
+    describeSkill({ ...dLive, module: { available: () => { throw new Error('boom') } } }, {}).available.ok === false,
+  )
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -470,12 +513,44 @@ section('⑧ 内置插件登记表')
   check('记忆是 hot（每轮重读 config.memory.enabled）', pluginById('memory').hot === true)
   check('isPluginOn 对枚举的口径：none = 关', isPluginOn(pluginById('persona'), { persona: { preset: 'none' } }) === false)
 
+  // ── ★★ 0.2.7：`switchInSkill` —— 控件在**技能卡**上的条目（表情包）────────────
+  //
+  //   真机反馈："同一个开关放在 skill 和插件上不合理"。表情包既是技能（技能卡上有
+  //   结构性开关）又被本表登记（因为要如实标注"开关在哪"），于是界面上出现了
+  //   **两个都能点的控制点**。修法：登记照旧、**控件只留一个**。
+  {
+    const st = pluginById('sticker')
+    const kinds = pluginSwitchKind(st)
+    check('★★ 表情包在插件表里带 `switchInSkill`（登记"开关在技能卡上"）', st?.switchInSkill === 'sticker', JSON.stringify(st?.switchInSkill))
+    check('★★ pluginSwitchKind 对它返回 skill（界面据此不渲染 Switch，而不是靠 id 硬编码）', kinds.kind === 'skill' && kinds.skillId === 'sticker', JSON.stringify(kinds))
+    check('★ isPluginOn 对它返回 null（"在这里开关"这个动作不存在）', isPluginOn(st, cfg) === null, String(isPluginOn(st, cfg)))
+    check('★ 登记仍然带出去（插件区照样能看到这一行，信息不丢）', (() => {
+      const row = listPlugins({ config: cfg }).find((p) => p.id === 'sticker')
+      return Boolean(row) && row.switchInSkill === 'sticker' && row.switchKind === 'skill' && String(row.what ?? '').length > 0
+    })())
+    // ★★ 防漂移：`switchInSkill` 指的那个技能，它的 enabled 键必须正好等于这条 enabledPath。
+    //   技能改名/换键时这条会立刻红 —— 否则界面会把人送到一张**没有那个开关**的卡上。
+    //
+    //   ⚠️ 注意取样目录：本套件其余断言用的是**临时夹具技能目录**（`SKILLS_DIR`），
+    //   里面没有 sticker；这一条要查的是"登记表 ↔ 真实技能"的一致性，
+    //   所以必须读**真实**的 `skills/`（`import.meta.url` 相对定位，不写死绝对路径）。
+    const realSkillsDir = fileURLToPath(new URL('../skills/', import.meta.url))
+    const target = discoverSkills({ skillsDir: realSkillsDir }).skills.find((s) => s.id === st?.switchInSkill)
+    check(
+      '★★ `switchInSkill` 指向的技能必须存在，且它的 enabled 键正好等于这条 enabledPath（防漂移）',
+      Boolean(target) && st.enabledPath === `skills.${target.id}.enabled`,
+      `enabledPath=${st?.enabledPath} 目标技能=${target?.id ?? '(不存在)'}（查的是真实 skills/）`,
+    )
+    check('★ 目标技能确实在自己的清单里声明了 enabled（界面上的开关来自它）', 'enabled' in (target?.manifest?.settings ?? {}))
+  }
+
   // ── choice（二选一）：**两个功能冲突时**的插槽 ────────────────────────────
   //
-  // 现在还没有真插件用上它（`wake.policy` 要等语义唤醒落地才能登记 —— 登记前
-  // 必须先有真配置键且运行期真的读它，见 src/plugins.mjs 的三条纪律）。
-  // 所以这里用一份**合成 spec** 把契约先钉住：形状或语义写错了，等真插件登记时
-  // 会立刻被这几条断言挡住，而不是等使用者发现"两个都能开"。
+  // ★ 0.2.7 更正：这段注释原来写"现在还没有真插件用上它（wake.policy 要等语义唤醒落地）"，
+  //   已经过期 —— `wake-policy`（`enabledPath: 'wake.policy'`）就是真的 choice 插件，
+  //   见 src/plugins.mjs。下面这份**合成 spec** 仍然保留：它钉的是 choice 的**契约本身**
+  //   （形状与语义），与"当前有没有真插件在用它"是两件事 —— 契约错了要在登记时就挡住，
+  //   而不是等使用者发现"两个都能开"。
   const synthChoice = {
     id: 'synth-choice',
     enabledPath: 'wake.policy',
@@ -537,6 +612,21 @@ section('⑨ 扩展服务：写盘 + 改活配置（两件事都要做）')
 
   const brokenToggle = await svc.toggle({ type: 'skill', id: 'broken-one', enabled: true })
   check('★ 清单坏的技能开不了，且原因说出来', brokenToggle.status === 422 && /skill\.json/.test(brokenToggle.error))
+
+  // ★★ 0.2.7：控件在技能卡上的条目（表情包）—— **接口层不给第二条写入口**。
+  //   它和上面 list/choice 那两条守卫是同一条纪律；这条断言钉住"只有一个写入口"这件事
+  //   在**接口层**也成立（不只是界面不渲染 Switch 而已）。
+  const stickerPlugin = await svc.toggle({ type: 'plugin', id: 'sticker', enabled: true })
+  check(
+    '★★ toggle(type:plugin, id:sticker) 被拒（400），并把人指向技能卡',
+    stickerPlugin.status === 400 && /技能卡/.test(String(stickerPlugin.error ?? '')),
+    JSON.stringify(stickerPlugin).slice(0, 160),
+  )
+  check(
+    '★★ 而且它**没有**偷偷写盘（拒绝就必须真的什么都没改）',
+    JSON.parse(readFileSync(configPath, 'utf8')).skills?.sticker?.enabled === undefined,
+    JSON.stringify(JSON.parse(readFileSync(configPath, 'utf8')).skills?.sticker ?? null),
+  )
 
   const hotPlugin = await svc.toggle({ type: 'plugin', id: 'memory', enabled: false })
   check('★ hot 插件：如实回 restartRequired=false', hotPlugin.hot === true && hotPlugin.restartRequired === false)

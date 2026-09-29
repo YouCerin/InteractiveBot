@@ -79,7 +79,7 @@ import { buildPersona, mergeWakeKeywords } from './persona.mjs'
 import { resolveActivePersona } from './personas.mjs'
 import { ensureProjectDocCopy } from './project-doc.mjs'
 import { buildChannelPrompt } from './channel-prompt.mjs'
-import { collectSkillPromptSections } from './extensions.mjs'
+import { collectSkillPromptSections, isSkillEnabled, skillToolFullName, callSkillAvailable } from './extensions.mjs'
 import { nicknameFor } from './contacts.mjs'
 import { createImageInbox, collectImages } from './images.mjs'
 // ★ H16：`PLATFORM_RULES` 与整段拼装逻辑已搬到 `src/channel-prompt.mjs`。
@@ -2472,7 +2472,11 @@ export class Bridge extends EventTarget {
     // ── 表情包的两段（0.2.4）────────────────────────────────────────────
     //   · 标记段：教**当前真有货**的标签（库变了就变，所以每轮现算）
     //   · 人设段：说清"能表达什么、什么时候不该发"（**不列标签**，见 sticker-decision）
-    // 两段都由同一个 `stickerPromptFacts` 喂，口径不会漂。
+    // 两段都从下面这一个 `#stickerPromptBits()` 出，口径不会漂。
+    // ★ 0.2.7 更正：这里原来写的是"由同一个 `stickerPromptFacts` 喂"—— 那句话是错的，
+    //   那个函数全仓库**没有任何调用方**（已删）。真正算这两段的是
+    //   `#stickerPromptBits()` 里的 `readStickerLibrary` + `labelCoverage`。
+    //   而且这两段**不是**表情包技能贡献的（它的 `prompt.source = "none"`）。
     const sticker = this.#stickerPromptBits()
     return buildChannelPrompt({
       rendered,
@@ -2481,6 +2485,13 @@ export class Bridge extends EventTarget {
       config: this.config,
       personaText: [this.personaText, sticker.personaNote].filter(Boolean).join('\n\n'),
       stickerLines: sticker.lines,
+      // ── 视频（0.2.7，方案 A）────────────────────────────────────────────
+      // ★ 只把**直链**交出去（`text.mjs` 的 `videoRefs`），核心**不下载视频**：
+      //   真正取视频的是「视频识别」技能，它自带 SSRF 守卫/大小上限/临时文件即删。
+      // ★ `videoTool` 是**门控事实**：抽帧不可用时，channel-prompt 那边会如实说
+      //   "看不到画面"，而不是教模型去调一个不存在或必然失败的工具。
+      videos: Array.isArray(rendered?.videoRefs) ? rendered.videoRefs : [],
+      videoTool: this.#videoToolFacts(),
       // ── 称呼（按人昵称，0.2.2）──────────────────────────────────────────
       // ★ 每轮现读 `memory/contacts.md`：改完**下一轮就生效**（不需要重启）。
       //   只取**当前说话人**那一条（群里也只看发言人，不列全群 —— 那是隐私面）。
@@ -2505,6 +2516,40 @@ export class Bridge extends EventTarget {
         return gap
       },
     })
+  }
+
+  /**
+   * 视频识别能力的事实（给提示词用的**门控**，0.2.7）。
+   *
+   * ── 为什么要单独算一份（不能直接把技能名写进提示词）──────────────────────
+   * 提示词里只要写了"用 xxx 识别视频"，模型就会去调它。所以必须**先问清楚**：
+   *   ① 「视频识别」技能装了没有？开了没有？（`isSkillEnabled`，唯一开关口径）
+   *   ② QQ 工具总开关（`mcp.enabled`）关着吗？——关着时**技能工具根本没挂给模型**
+   *      （与 `collectSkillPromptSections` 里那条总闸同一个判据，两处必须一致）；
+   *   ③ 技能自己的自检过了吗？（缺 ffmpeg 就是在这一步被挡下的）
+   * 三条都过，才把**真工具名**（`mcp__skills__video-frames__frames`，由 `skillToolFullName`
+   * 拼，绝不写死）交给模型。
+   *
+   * ── 自检**现调**（与控制台同一个函数）────────────────────────────────────
+   * `callSkillAvailable()` 每次现调：自检是同步扫 PATH（不 spawn），所以
+   * "装好 ffmpeg / 填好路径"之后**提示词下一轮就跟着变**，不必等重启。
+   * 调用失败一律当"不可用"（fail-closed：宁可少教一个工具，不可教一个调不通的）。
+   *
+   * @returns {{usable: boolean, name: string, why: string}}
+   */
+  #videoToolFacts() {
+    const skill = (this.skills ?? []).find((s) => s.id === 'video-frames')
+    if (!skill) return { usable: false, name: '', why: '「视频识别」技能没装' }
+    if (this.config?.mcp?.enabled === false) {
+      return { usable: false, name: '', why: 'QQ 工具总开关（mcp.enabled）关着，技能工具没有挂给模型' }
+    }
+    if (!isSkillEnabled(skill, this.config)) {
+      return { usable: false, name: '', why: '视频识别技能没有启用（控制台 →「扩展」→ 视频识别）' }
+    }
+    const av = callSkillAvailable(skill, this.config)
+    if (av?.ok === false) return { usable: false, name: '', why: String(av.reason ?? '').trim() || '视频识别自检没过' }
+    const tool = (skill.runtimeTools ?? []).find((t) => t.id === 'frames')
+    return { usable: true, name: tool?.fullName || skillToolFullName(skill.id, 'frames'), why: '' }
   }
 
   /**

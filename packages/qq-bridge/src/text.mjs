@@ -32,6 +32,7 @@ export function asSegments(value) {
  * @returns {{ text: string, mentioned: boolean, ats: Array<{qq:string,name:string}>,
  *             images: number,
  *             imageRefs: Array<{url:string,file:string,fileId:string,summary:string}>,
+ *             videoRefs: Array<{url:string,file:string,fileId:string}>,
  *             replyTo: string|null }}
  */
 export function renderSegments(segments, { selfId = null } = {}) {
@@ -40,6 +41,14 @@ export function renderSegments(segments, { selfId = null } = {}) {
   let images = 0
   /** ★ 图片段的可下载线索。渲染成文本时它会被丢掉，所以要**单独带出来**。 */
   const imageRefs = []
+  /**
+   * ★ 视频段的直链线索（0.2.7）。
+   *
+   * 与 `imageRefs` 同一条理由：渲染成文本只剩一个 `[视频]`，地址会被原地丢掉。
+   * 区别在于**下游怎么用**：图片由宿主**下载成文件**（模型要靠 `read_image` 读本地路径），
+   * 而视频**只把直链交给模型**，由「视频识别」技能自己下载 —— 所以这里只带 `url`。
+   */
+  const videoRefs = []
   /**
    * ★ **@ 了谁**（0.2.3）。
    *
@@ -103,6 +112,23 @@ export function renderSegments(segments, { selfId = null } = {}) {
         parts.push('[语音]')
         break
       case 'video':
+        // ★ 0.2.7：与图片同理，**地址必须带出去**（方案 A 的第一步）。
+        //
+        // 曾经这里只 `parts.push('[视频]')`，等于把 `data.url` 原地丢弃 ——
+        // 后果不是"少了个功能"，而是**整条视频理解链路断在这里**：
+        // 「视频识别」技能明明已经装好、ffmpeg 也配好了，但模型手里
+        // **既没有路径也没有链接**，它唯一能做的就是告诉对方"我看不了视频"。
+        // 注意上游其实**给了**地址（SnowLuma 的视频段是 `{ type:'video', data:{ file, url } }`），
+        // 所以缺的从来不是数据，是这一步没人接 —— 与当初图片的情况一模一样
+        // （见 `src/images.mjs` 顶部那段取证）。
+        // ★ 这里**只带出来、不下载**：由宿主决定怎么交给模型；真正取视频的是
+        //   `skills/video-frames/sources.js`（它自带 SSRF 守卫、大小上限、临时文件即删），
+        //   核心不再实现第二份下载器 —— 见 `docs/0.2.7-qq-video-inbound.md`。
+        videoRefs.push({
+          url: typeof data.url === 'string' ? data.url : '',
+          file: typeof data.file === 'string' ? data.file : '',
+          fileId: typeof data.file_id === 'string' ? data.file_id : '',
+        })
         parts.push('[视频]')
         break
       case 'file':
@@ -134,6 +160,7 @@ export function renderSegments(segments, { selfId = null } = {}) {
     ats,
     images,
     imageRefs,
+    videoRefs,
     replyTo,
   }
 }

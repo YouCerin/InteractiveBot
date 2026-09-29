@@ -28,6 +28,12 @@
  * ③ `enabledPath` 指向**既有配置键**，不是新键。这样：
  *    · 老配置、老文档、老测试全都继续成立；
  *    · 界面上的开关走的是既有的"改配置"通道（含校验、.bak、致命项拒绝）。
+ *
+ * ④ **登记 ≠ 在这里开关**（0.2.7 加）。有些条目的控件**不在插件卡上**：
+ *    · `switchInSkill: '<技能id>'` —— 开关属于那个**技能卡**（表情包就是这样）；
+ *   界面据此渲染成"指路行"，**不渲染 Switch**；接口层 `toggle({type:'plugin'})` 也拒绝。
+ *   理由与 list/choice 完全一样：**一个键只能有一条写入口**，否则同一页会出现
+ *   两个都能点的控制点（真机反馈过这件事）。
  */
 
 /**
@@ -44,6 +50,10 @@
  * @property {{options: PluginChoiceOption[]}} [choice]
  *   二选一 / N 选一：**当两个功能冲突时用**（见下面 pluginSwitchKind 的说明）。
  *   声明了它，`switchKind` 就是 `'choice'`，界面应渲染成 N 个并列按钮而不是开关。
+ * @property {string} [switchInSkill]
+ *   **开关的控件在技能卡上**（值是技能 id，例如 `'sticker'`）。
+ *   声明了它，`switchKind` 就是 `'skill'`：本表只**登记**它在哪，
+ *   界面渲染成指路行、接口层拒绝 `toggle({type:'plugin'})`（见纪律④）。
  */
 
 /**
@@ -103,6 +113,20 @@ export const BUILTIN_PLUGINS = [
     name: '表情包',
     icon: '🧩',
     enabledPath: 'skills.sticker.enabled',
+    // ★★ 0.2.7：`switchInSkill` = **这个开关的控件不在插件卡上，在技能卡上**。
+    //
+    // ── 为什么需要它（真机反馈："同一个开关放在 skill 和插件上不合理"）──────────
+    // 表情包是**内置技能**：`skills/sticker/` 提供清单/设置/自检，所以技能卡上有一个
+    // 结构性的开关；而本表按"如实登记开关在哪"的职责又把它登记了一遍
+    // （`enabledPath: 'skills.sticker.enabled'` —— 这句话本身是对的）。
+    // 问题出在**界面**：插件卡把 `enabledPath` 又渲染成了一个可点的 Switch ⇒
+    // 同一个键在同一页出现两个控制点，使用者还要猜"它到底是技能还是插件"。
+    //
+    // ∴ 现在：**登记照旧保留**（插件区仍然告诉你它存在、开关在哪、关掉会怎样、即时生效），
+    //   但**不再提供第二个开关** —— 界面据 `switchInSkill` 渲染成一行指路，
+    //   接口层的 `toggle({type:'plugin'})` 也拒绝（与 list/choice 同一条纪律：
+    //   **不给同一个键开第二条写入口**）。
+    switchInSkill: 'sticker',
     hot: true,
     why:
       '每条待发回复前重读 this.config.skills.sticker（bridge.mjs 的 #decideSticker / ' +
@@ -278,9 +302,13 @@ export const BUILTIN_PLUGINS = [
  *   · `access.adminUsers` 是**列表**，"关"这个动作没有意义（清单为空是安全状态，不是关闭）。
  * 硬把它们说成布尔开关，界面就会出现一个"点了没反应"的开关 —— 那是最伤信任的一种控件。
  *
- * @returns {{ kind: 'boolean'|'enum'|'list', value?: unknown, offValue?: unknown }}
+ * @returns {{ kind: 'boolean'|'enum'|'list'|'choice'|'skill', value?: unknown, offValue?: unknown }}
  */
 export function pluginSwitchKind(plugin) {
+  // ★ skill（0.2.7）：**这个开关的控件在技能卡上**（见 `switchInSkill` 的注释）。
+  //   放在最前面判：它是最具体的一条 —— 带这个字段的条目，其它类型判定都不适用。
+  //   界面据此渲染成"指路行"而不是 Switch；接口层的 toggle 也会拒绝。
+  if (plugin.switchInSkill) return { kind: 'skill', skillId: String(plugin.switchInSkill) }
   // ★ choice（二选一 / N 选一）：**两个功能冲突时**的做法。
   //
   //   为什么不做成两个独立开关：那会出现两种无意义状态 ——
@@ -322,11 +350,12 @@ export function readPath(obj, path) {
 export function isPluginOn(plugin, config) {
   const value = readPath(config, plugin.enabledPath)
   const kind = pluginSwitchKind(plugin).kind
-  // list（名单）与 choice（二选一）**都没有"关"这个动作**：
+  // list（名单）、choice（二选一）与 skill（控件在技能卡上）**都没有"在这里开关"这个动作**：
   //   · 名单为空是安全状态，不是"关闭"；
-  //   · choice 是"选了哪一个"，没有第三个"都不选"。
-  // 返回 null 让界面据此换成别的控件 —— 硬套一个开关就是"点了没反应"的控件。
-  if (kind === 'list' || kind === 'choice') return null
+  //   · choice 是"选了哪一个"，没有第三个"都不选"；
+  //   · skill 的开关归技能卡管，这里只登记它在哪。
+  // 返回 null 让界面据此换成别的控件 —— 硬套一个开关就是"点了没反应"（或者两个都能点）的控件。
+  if (kind === 'list' || kind === 'choice' || kind === 'skill') return null
   if (kind === 'enum') return Boolean(value) && String(value) !== 'none'
   return value !== false
 }
@@ -349,6 +378,10 @@ export function listPlugins({ config } = {}) {
       switchKind: kind.kind,
       // choice 的选项要带给界面（渲染成 N 个并列按钮，含「实验性」标注）；其余类型为 null
       options: kind.kind === 'choice' ? kind.options : null,
+      // ★ skill 类：开关在技能卡上，把技能 id 带给界面（渲染成指路行）。
+      //   ⚠️ 必须带出去：界面不能靠 `if (id === 'sticker')` 硬编码 —— 那种写法
+      //   在下一个"内置技能"出现时必然被漏掉，而且测试也钉不住。
+      switchInSkill: kind.kind === 'skill' ? kind.skillId : null,
       enabled: isPluginOn(p, config),
       value: readPath(config, p.enabledPath),
       hot: p.hot,

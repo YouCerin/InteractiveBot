@@ -184,12 +184,23 @@ export function ExtensionsTab({
 }
 
 /** 状态徽标：照抄 §2.10 的状态用词表，别自创。
- *  顺序：装不上 > 已关闭（关着就是关着，不算"依赖不满足"）> 暂时用不了 > 没工具 > 已启用。 */
+ *  顺序：装不上 > 已关闭（关着就是关着，不算"依赖不满足"）> 暂时用不了 > 没工具 > 已启用。
+ *
+ *  ★ 0.2.7 修正：最后一档的判据必须是"**声明了工具却没注册**"（`declaredToolCount !== 0`），
+ *    不能只看 `tools.length === 0`。理由：「表情包」这类技能是**刻意不要工具**的
+ *    （靠提示词约定 + 宿主判定工作，见 `docs/插件设计规范.md` §7），
+ *    一开启就会被打上"开着，但没给模型任何工具"这条**假告警** ——
+ *    而假告警用久了没人看，真出问题时（声明了却没注册）就被淹掉了。
+ *    后端 `describeSkill()` 早就算好了 `declaredToolCount`，CLI（`index.mjs`）也早按它判定，
+ *    只有这一处界面漏改 —— 三处口径不一致比三处都错更难查。 */
 function skillStatusBadge(s: SkillInfo) {
   if (s.errors.length > 0) return { text: '装不上', cls: 'border-red-300 text-red-700' }
   if (!s.enabled) return { text: '已关闭', cls: 'text-muted-foreground' }
   if (s.available.ok === false) return { text: '暂时用不了', cls: 'border-amber-300 text-amber-700' }
-  if (s.enabled && s.tools.length === 0) return { text: '开着，但没给模型任何工具', cls: 'border-amber-300 text-amber-700' }
+  // 只判"声明了却没注册"：声明了 0 个工具的技能（表情包）不算问题
+  if (s.enabled && s.tools.length === 0 && (s.declaredToolCount ?? 0) !== 0) {
+    return { text: '开着，但没给模型任何工具', cls: 'border-amber-300 text-amber-700' }
+  }
   if (s.enabled && s.ready) return { text: '已启用', cls: 'border-emerald-300 text-emerald-700' }
   return { text: '已关闭', cls: 'text-muted-foreground' }
 }
@@ -210,7 +221,9 @@ function SkillCard({
   const toggleSection = (id: string) => setOpen(open === id ? '' : id)
 
   return (
-    <Card>
+    // ★ id 是**插件卡的「去技能卡上开」跳转锚点**（`skill-<技能id>`）。
+    //   0.2.7 加：表情包这类"开关在技能卡上"的条目要靠它把使用者送过来。
+    <Card id={`skill-${s.id}`}>
       <CardContent className="space-y-2 py-4">
         <div className="flex items-center gap-2">
           <span className="text-lg">{s.icon ?? '🧩'}</span>
@@ -243,9 +256,11 @@ function SkillCard({
             {e}
           </InlineNote>
         ))}
-        {s.enabled && s.available.ok === false && s.available.reason && (
-          <InlineNote level="warn">{s.available.reason}</InlineNote>
-        )}
+        {/* ★ 0.2.7 删掉了这里原本单独渲染 `s.available.reason` 的那一块：
+            它与下面 `s.reasons` 里的**同一句**完全重复（后端 `skillStatus()` 在
+            `enabled && available.ok===false` 时已经把这句话放进 reasons 了），
+            于是卡片上同一句警告显示两遍 —— 见 0.2.7 的一次真机截图。
+            现在统一由 `s.reasons` 输出一次。 */}
         {s.reasons.length > 0 && s.enabled && (
           <InlineNote level="warn">{s.reasons.join('；')}</InlineNote>
         )}
@@ -701,6 +716,8 @@ function PluginCard({
   const isList = p.switchKind === 'list'
   const isEnum = p.switchKind === 'enum'
   const isChoice = p.switchKind === 'choice'
+  // ★ 0.2.7：控件在技能卡上（见后端 `switchInSkill`）—— 本卡不给第二个开关
+  const isSkillSwitch = p.switchKind === 'skill' && Boolean(p.switchInSkill)
   const isQqTools = p.id === 'qq-tools'
   const isWakePolicy = p.id === 'wake-policy'
   // 二选一（choice，0.2.3）：当前值从**编辑中的 cfg** 读（按钮走的是改配置通道，
@@ -745,12 +762,37 @@ function PluginCard({
               <Button variant="outline" size="sm" onClick={() => onNavigateTab(p.uiTab ?? 'protocol')}>
                 去维护
               </Button>
+            ) : isSkillSwitch ? (
+              // ★ 0.2.7：控件在**技能卡**上的条目（表情包）——不渲染 Switch，改成跳到那张技能卡。
+              //   为什么：同一个配置键已经有技能卡那条写入口，这里再放一个开关就是**两个控制点**
+              //   （真机反馈："同一个开关放在 skill 和插件上不合理"）。
+              //   ★ 判断依据必须是后端给的 `switchInSkill`，**不能写 `p.id === 'sticker'`** ——
+              //     硬编码在下一个内置技能出现时必然被漏掉。
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const el = document.getElementById(`skill-${p.switchInSkill}`)
+                  if (!el) return
+                  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                  el.classList.add('ring-2', 'ring-amber-400')
+                  window.setTimeout(() => el.classList.remove('ring-2', 'ring-amber-400'), 1600)
+                }}
+              >
+                去技能卡上开
+              </Button>
             ) : isChoice ? null : (
               // choice 不渲染 Switch（按钮在下面）
               <Switch checked={p.enabled === true} onCheckedChange={onToggle} />
             )}
           </span>
         </div>
+
+        {isSkillSwitch && (
+          <p className="text-xs text-muted-foreground">
+            开关在「技能」区的**{p.name}**卡上（上面那一区）—— 本表只登记它在哪，不给第二个开关。
+          </p>
+        )}
 
         {p.what && <p className="text-xs text-muted-foreground">{p.what}</p>}
         {/* ★ 关掉会怎样：直接显示原文，不改写。

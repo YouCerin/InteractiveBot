@@ -199,14 +199,21 @@ async function printExtensions({ config, configPath, log = () => {} }) {
     // ★ 0.2.3：`choice`（二选一）不能被塞进"名单类"那一格 —— 它是**另一个种类**：
     //   名单是"去别处维护"，而二选一是"当前选了哪个"，后者**必须把取值打出来**，
     //   否则命令行上根本看不出它现在处于什么状态（`enabled` 恒为 null）。
+    // ★ 0.2.7：`skill`（控件在技能卡上，例如表情包）同样不能被塞进"名单类" ——
+    //   它不是名单，只是开关长在别处。而且**状态要照实打出来**（去找那张技能卡的
+    //   当前开关值），否则命令行上会显示成"没开"，与事实相反。
+    const owner =
+      p.switchKind === 'skill' ? data.skills.find((s) => s.id === p.switchInSkill) : null
     const on =
       p.switchKind === 'choice'
         ? `—（二选一：${p.value ?? '未设置'}）`
-        : p.enabled === null
-          ? '—（名单类）'
-          : p.enabled
-            ? '✅ 开'
-            : '⭕ 关'
+        : p.switchKind === 'skill'
+          ? `—（开关在技能卡上，当前 ${owner ? (owner.enabled ? '✅ 开' : '⭕ 关') : '? 找不到那张技能卡'}）`
+          : p.enabled === null
+            ? '—（名单类）'
+            : p.enabled
+              ? '✅ 开'
+              : '⭕ 关'
     const hot = p.switchKind === 'list' ? '' : p.hot ? '｜即时生效' : '｜★ 需重启'
     console.log(`  ${p.icon} ${p.name}  ${on}${hot}  [${p.enabledPath}]`)
     // 候选与"实验性"标注也要打出来：命令行是排障入口，它不该比界面知道得更少

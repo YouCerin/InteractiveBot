@@ -99,7 +99,7 @@ qq-bridge/
 │   ├── plugins.mjs        内置插件登记表（记忆/看图/QQ工具… 的开关 + 即时还是重启）
 │   └── doctor.mjs         体检
 ├── mcp/              手写的 MCP 服务器：mcp-qq-server.mjs（QQ 工具）+ mcp-skills-server.mjs（技能工具）
-├── skills/           外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup
+├── skills/           外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup、sticker、video-frames
 ├── mocks/            测试替身与验证脚本（不需要真 QQ，不花钱）
 ├── vendor/           包内自带：node 运行时 + ws（由 setup.mjs 生成）
 ├── logs/             运行日志
@@ -1000,6 +1000,7 @@ node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切�
 - **群聊实测**（代码与配置都放行了，但至今没有一条真实群消息跑过）。
 
 **如实标注（没验证过的事）**：群聊未真机验证 · 看图与 `qq_send_image` 的端到端未跑过 · 长时间运行稳定性未测 ·
+视频入站（0.2.7 方案 A：QQ 视频直链 → 提示词 → 技能抽帧）**只做了离线验证，真机发一条视频没试过** ·
 「随时开关」不覆盖**装卸技能**（要重启，这是设计边界不是缺陷）· 技能是第三方代码、**在宿主进程里跑**
 （进程内无法隔离，只有如实声明权限）。完整列表见 `PROJECT.json` 的 `verificationStatus.notVerified`。
 

@@ -612,20 +612,57 @@ export function isSkillEnabled(skill, config) {
 }
 
 /**
+ * **现调**一次技能的自检（`available()`），而不是读装载时的快照。
+ *
+ * ── 为什么必须现调（0.2.7 修的一处真实误伤）──────────────────────────────
+ * `loadSkill` 那一刻会调一次 `available()` 并把结果存进 `skill.available`。
+ * 第一版的控制台**直接读这个快照** —— 于是只要开关是在**装载之后**才打开的
+ * （这是最常见的情形：装好技能 → 重启 → 再去控制台打开），卡片上就会一直写着
+ * 「「视频识别」开关没打开」，配着「暂时用不了」的徽标，而且**再也不会变**。
+ * 使用者看到的是"我明明开着，它说我没开"。
+ * 同一个坑对"后来才装好 ffmpeg / 填好路径"完全一样（那时快照里还写着缺依赖）。
+ *
+ * ⇒ 卡片与 CLI 改读**现调**结果。这不违反"`available()` 必须同步"那条契约：
+ *   它本来就是同步且便宜的（技能侧不许在同步函数里做 IO/网络，见规范 §3.1），
+ *   所以列表每次刷新各调一次没有代价。
+ *
+ * 失败一律**降级不抛**：技能抛错时给出原因（而不是让整个列表接口 500）。
+ *
+ * @param {object} skill `discoverSkills()` / `loadSkill()` 的条目
+ * @param {object} config 活配置
+ * @returns {{ok: boolean, reason: string}}
+ */
+export function callSkillAvailable(skill, config) {
+  const fallback = skill?.available ?? { ok: true, reason: '' }
+  if (typeof skill?.module?.available !== 'function') return fallback
+  try {
+    const r = skill.module.available({ config: config ?? {} })
+    if (r && typeof r === 'object') return { ok: r.ok !== false, reason: String(r.reason ?? '') }
+    return fallback
+  } catch (error) {
+    return { ok: false, reason: `available() 抛错：${error?.message ?? error}` }
+  }
+}
+
+/**
  * 某个技能此刻的"能不能真的用"。
  *
+ * @param {object} skill
+ * @param {object} config
+ * @param {{ok:boolean,reason:string}} [available] 自检结果；**不传就现调一次**
+ *        （卡片/CLI 都该现调 —— 见 `callSkillAvailable` 的注释）
  * @returns {{ enabled: boolean, ready: boolean, reasons: string[] }}
  *   `ready=false` 时 `reasons` 是**给使用者看的**原因（不是给开发者看的堆栈）。
  */
-export function skillStatus(skill, config) {
+export function skillStatus(skill, config, available = callSkillAvailable(skill, config)) {
   const enabled = isSkillEnabled(skill, config)
   const reasons = []
   if (!skill?.ok) reasons.push(`清单有问题：${(skill?.errors ?? []).join('；')}`)
   if (skill?.loadError) reasons.push(`加载失败：${skill.loadError}`)
   if (enabled && !skill?.loaded && !skill?.loadError && skill?.ok) reasons.push('尚未加载（重启桥接后生效）')
   // 依赖自检不过（技能自己说的）：开着也用不了 —— 如实显示它给的原因
-  if (enabled && skill?.available && skill.available.ok === false && skill.available.reason) {
-    reasons.push(skill.available.reason)
+  if (enabled && available && available.ok === false && available.reason) {
+    reasons.push(available.reason)
   }
   // ★ 0.2.2：QQ 工具总开关关着 → 技能工具**根本不会挂给模型**，指引也不会注入。
   //   这一条必须显示出来：否则使用者会以为"我明明开着这个技能，它怎么不用"。
@@ -860,7 +897,10 @@ export function describeSkill(skill, config) {
   const raw = config?.skills?.[skill.id]
   const { settings, warnings: setWarnings } = mergeSkillSettings(skill.manifest, raw)
   const { values, has } = redactSkillSettings(skill.manifest, settings)
-  const status = skillStatus(skill, config)
+  // ★ 0.2.7：自检**现调**（不再读装载时的快照）—— 否则"装载之后才打开开关 / 才装好依赖"
+  //   的技能，卡片会一直写着与事实相反的原因。见 `callSkillAvailable` 的注释。
+  const available = callSkillAvailable(skill, config)
+  const status = skillStatus(skill, config, available)
   const tools = (skill.runtimeTools?.length ? skill.runtimeTools : skill.declaredTools.map((t) => ({
     skillId: skill.id,
     id: String(t?.id ?? ''),
@@ -900,7 +940,7 @@ export function describeSkill(skill, config) {
     enabledSource: raw && typeof raw === 'object' && typeof raw.enabled === 'boolean' ? 'config' : 'manifest',
     ready: status.ready,
     reasons: status.reasons,
-    available: skill.available ?? { ok: true, reason: '' },
+    available,
     errors: skill.errors ?? [],
     warnings: [...(skill.warnings ?? []), ...setWarnings],
     settings: values,

@@ -9,7 +9,7 @@
   "icon": "🖼️",
   "entry": "index.js",
   "enabledByDefault": true,
-  "session": "required",
+  "session": "none",
   "settings": {
     "enabled": true,
     "libraryDir": "stickers",
@@ -68,5 +68,9 @@
       "description": "默认关。开着的时候，被标成 risky（脏话/骂人/擦边/重口/血腥/惊悚/恐怖）的表情才会参与选图；关着时它们压根不进候选（不是进去了但分数低）。这是一条安全闸门：发这类图的后果是账号被处置"
     }
   },
-  "prompt": { "source": "runtime" }
+  "prompt": {
+    "source": "none",
+    "_说明": "★ 0.2.7 修正：本技能**不贡献提示词片段**。理由：'可以写 [sticker:标签]' 那几行必须按当前库现算（哪些标签真有货），而技能侧读不到库、promptSections() 又必须是纯函数 —— 所以那几行由宿主算（bridge.mjs 的 #stickerPromptBits → channel-prompt.mjs 的标记段）。原来这里写 runtime 并配了一个读 context.stickerLines 的 promptSections()，但宿主调用时从不传 ctx，那个函数恒返回 []，是死代码（已删）。"
+  },
+  "_note_session": "session 从 'required' 改成 'none'（0.2.7 修正）。session=required 只有两处效果：① 宿主往**工具入参**里注入并必填 kind/peerId；② 提示词片段非空时追加一句 kind/peerId 说明。本技能既没有工具、也不贡献提示词片段，两处都不成立 —— 写 required 等于一句永远无法生效的承诺。群聊/私聊的判定确实存在，但它在**宿主**侧（bridge.mjs 的 #decideSticker 拿得到 kind），不靠技能声明。"
 }
