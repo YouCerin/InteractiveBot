@@ -1,7 +1,0 @@
-# Bundle patch: a top-level YAML array. `insert` appends this plugin as one
-# row in the host composition tree. `name` MUST equal the package name — the
-# loader and client-modules resolve `<name>/package.json` against it.
-- insert:
-    - id: qq-bot
-      name: dsh-qq-bot
-      config: {}
