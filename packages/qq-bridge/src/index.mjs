@@ -39,6 +39,8 @@ import { createUsageLedger } from './usage.mjs'
 import { createMemoryStore } from './memory-files.mjs'
 import { saveSnapshot, dropSnapshot } from './memory-store.mjs'
 import { createRoster } from './roster.mjs'
+import { resolveDirectTarget } from './model-direct.mjs'
+import { createRetagJob, preflightRetag } from './sticker-tagging.mjs'
 import { resolveModelCredentials } from './credentials.mjs'
 // ★ 不再直接 import `detectSnowluma` —— 所有探测都经 `makeLaunchDetect` 这一个工厂，
 //   目的就是让"两条调用路径传的判据一致"变成结构上必然成立（见该函数的注释）。
@@ -177,7 +179,19 @@ async function printExtensions({ config, configPath, log = () => {} }) {
     if (s.promptSections.length) {
       console.log(`      提示词片段：${s.promptSections.map((p) => `${p.title}(${p.chars}字)`).join('、')}`)
     }
-    if (s.enabled && s.tools.length === 0) console.log('      ⚠️ 已启用但一个工具都没有 —— 检查 setup() 里的 registerTool')
+    // ★ 只有"清单里声明了工具、实际一个都没注册"才是问题。
+    //   ⚠️ 0.2.4 修：原来只看 `tools.length === 0`，于是像「表情包」这种
+    //   **刻意不要工具**的技能（它靠提示词约定 + 宿主判定工作，见
+    //   `docs/插件设计规范.md` §7）每次巡检都会被打一条假的"检查 registerTool"。
+    //   假告警的代价是真实的：用久了就没人再看这一行，真出问题时也看不见。
+    //   ⚠️ 判据取的是卡片上的 `declaredToolCount`（`describeSkill` 给的），
+    //   不是 `s.declaredTools` —— 卡片**没有**那个字段，写成它就会恒为 undefined，
+    //   于是这条判断永远为真、假告警照旧（我第一版正是这么写的，实测才发现）。
+    const declaredToolCount = Number.isFinite(Number(s.declaredToolCount)) ? Number(s.declaredToolCount) : null
+    if (s.enabled && s.tools.length === 0 && declaredToolCount !== 0) {
+      const hint = declaredToolCount == null ? '' : `（清单声明了 ${declaredToolCount} 个）`
+      console.log(`      ⚠️ 已启用但一个工具都没有 ${hint}—— 检查 setup() 里的 registerTool`)
+    }
   }
 
   console.log(`\n── 插件（${data.counts.plugins} 个，开启 ${data.counts.pluginsOn} 个）──`)
@@ -584,6 +598,125 @@ async function main() {
         console.log('')
         console.log(renderOrphans(orphans))
       }
+      console.log('')
+      process.exit(0)
+    })()
+  }
+
+  // ── 表情包：库状态 / 导入 / 清理（0.2.4，全部离线）──────────────────────
+  //
+  // ★ 为什么这个入口是**必需**的（不是顺手加的）：
+  //   表情包的失败形状**天然是静默的** —— 库里没图、标签没打上、被配额挡住，
+  //   表现都只是"它从来不发表情"。所以必须有一个地方能回答：
+  //   "库里有几张能用的图 / 每类各几张 / 最近为什么不发"。
+  //   `decisions.jsonl`（决策流水）也在这里读出来 —— 三档频率与阈值只能靠它调。
+  //
+  // 用法：
+  //   node src/index.mjs --stickers                              # 库状态 + 最近决策
+  //   node src/index.mjs --stickers --import <目录|文件...> [--scope group-123]
+  //   node src/index.mjs --stickers --prune [--apply]            # 清理僵尸条目（默认预演）
+  //   node src/sticker-tag.mjs --apply                           # 打标签（另开一个入口）
+  if (process.argv.includes('--stickers')) {
+    ;(async () => {
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位表情库')
+        process.exit(2)
+      }
+      const dir = config.skills?.sticker?.libraryDir ?? 'stickers'
+      const argOf = (flag) => {
+        const i = process.argv.indexOf(flag)
+        return i >= 0 ? process.argv[i + 1] : undefined
+      }
+
+      if (process.argv.includes('--import')) {
+        const i = process.argv.indexOf('--import')
+        // 取 `--import` 之后到下一个 `--` 选项之前的所有位置参数（支持一次给多个路径）
+        const inputs = []
+        for (let k = i + 1; k < process.argv.length; k += 1) {
+          if (String(process.argv[k]).startsWith('--')) break
+          inputs.push(process.argv[k])
+        }
+        if (!inputs.length) {
+          console.error('❌ 用法：node src/index.mjs --stickers --import <目录|文件...> [--scope group-123456]')
+          process.exit(2)
+        }
+        const { runStickerImport, renderImportResult, renderStickerStatus } = await import('./sticker-import.mjs')
+        // ★ 默认导进**全局库**（所有会话共用）：不写 `--scope` 就是它。
+        //   要按会话分库必须显式给 `--scope group-123456` —— 两者的后果不同
+        //   （全局库新群立刻能用；分会话库只有那个会话能用）。
+        const scope = argOf('--scope') ?? 'global'
+        console.log(renderImportResult(runStickerImport({ workspace, dir, inputs, scope })))
+        console.log(renderStickerStatus({ workspace, dir }))
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--show')) {
+        const { renderStickerEntry } = await import('./sticker-import.mjs')
+        const si = process.argv.indexOf('--show')
+        const keyword = process.argv[si + 1]
+        console.log(renderStickerEntry({ workspace, dir }, keyword))
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--list')) {
+        const { renderStickerList } = await import('./sticker-import.mjs')
+        const onlyPending = process.argv.includes('--pending')
+        const li = process.argv.indexOf('--limit')
+        const limit = li >= 0 ? Number(process.argv[li + 1]) || 200 : 200
+        console.log(renderStickerList({ workspace, dir }, { onlyPending, limit }))
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--export-tags')) {
+        const apply = process.argv.includes('--apply')
+        const link = process.argv.includes('--link')
+        const outDir = argOf('--out') ?? 'stickers-by-tag'
+        const { exportStickersByTag, renderExportResult } = await import('./sticker-import.mjs')
+        console.log(
+          renderExportResult(exportStickersByTag({ workspace, dir }, { outDir, link, apply }), { outDir, workspace, dir }),
+        )
+        process.exit(0)
+      }
+
+      // ── 清理**多余副本**（磁盘上有、索引里没有、内容与已索引文件逐字节相同）──
+      //
+      // ★ 与下面 `--prune` 是**相反方向**的两件事：
+      //   `--prune` 删"索引里有、磁盘上没有"的**僵尸条目**（元数据）；
+      //   `--prune-orphans` 删"磁盘上有、索引里没有"的**多余副本**（真正的文件）。
+      //   后者是导入去重留下的垃圾（实测 157 个 / 460MB，占全库一半），
+      //   而所有界面统计都按索引算，所以**根本看不见它**。默认预演。
+      if (process.argv.includes('--prune-orphans')) {
+        const apply = process.argv.includes('--apply')
+        const { runStickerOrphanPrune, renderOrphanResult } = await import('./sticker-import.mjs')
+        console.log(renderOrphanResult(runStickerOrphanPrune({ workspace, dir, apply }), { apply }))
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--prune')) {
+        const apply = process.argv.includes('--apply')
+        const { runStickerPrune } = await import('./sticker-import.mjs')
+        const r = runStickerPrune({ workspace, dir, apply })
+        if (r.nothing) {
+          console.log('\n✅ 没有僵尸条目（库里的每条都能找到文件）\n')
+        } else {
+          console.log(
+            r.applied
+              ? `\n已清理 ${r.removed.length} 条僵尸条目\n`
+              : `\n预演：有 ${r.removed.length} 条僵尸条目会被清掉（加 --apply 才真删）\n`,
+          )
+        }
+        process.exit(0)
+      }
+
+      const { renderStickerStatus } = await import('./sticker-import.mjs')
+      // `--orphans` 让状态页顺带核对"磁盘上的多余副本"（要读遍全库算哈希，所以按需）
+      console.log(renderStickerStatus({ workspace, dir }, { checkOrphans: process.argv.includes('--orphans') }))
+      console.log(
+        '  提示：--import <目录> 导入；--export-tags [--apply] 按标签整理成一份看得懂的目录；\n' +
+          '        --prune 清理僵尸条目；--prune-orphans [--apply] 清理库里的多余副本；\n' +
+          '        node src/sticker-tag.mjs --apply 打标签。',
+      )
       console.log('')
       process.exit(0)
     })()
@@ -1626,6 +1759,18 @@ async function main() {
       )
     }
   }
+  // ── 表情包：重新打标签的**任务控制器**（0.2.4）────────────────────────────
+  //
+  // ★ 必须在**启动时创建一次**（不能在 HTTP 路由里 new）：任务状态与"正在跑"
+  //   的判定要跨请求存活，否则每次请求都拿到一个空闲的新对象，
+  //   "防重复点击"（两个任务同时写 library.json → 后写的覆盖先写的）就完全失效。
+  const retagJob = createRetagJob({
+    log: (m) => log(m),
+    // 空闲时的预检（纯读库、零调用）：界面据此说出"这次会打多少张"
+    resolvePreflight: () =>
+      preflightRetag({ workspace: config.dsh?.workspace, dir: config.skills?.sticker?.libraryDir ?? 'stickers' }),
+  })
+
   const extensionService = createExtensionService({
     config,
     configPath,
@@ -2119,6 +2264,43 @@ async function main() {
       toggleExtension: (args) => extensionService.toggle(args),
       saveSkillSettings: (args) => extensionService.saveSettings(args),
       diagnoseSkill: (id) => extensionService.diagnose(id),
+      // ── 表情包：重新打标签（0.2.4）────────────────────────────────────────
+      //
+      // ★ 它是一个**长任务**（每张图一次模型调用），所以实现是"发起 + 轮询"：
+      //   见 `src/sticker-tagging.mjs` 的 `createRetagJob`（同一时刻只允许一个任务）。
+      //
+      // ★ 模型通路**在后端解析**（`resolveDirectTarget`，与唤醒判定共用
+      //   `wake.judge.apiKey` 的解析规则）—— 密钥绝不下发到界面。
+      //   没配 key 时返回 422 + 人话原因，而不是让按钮点了没反应。
+      //
+      // ★ `retagJob` 必须**在启动时创建一次**（不能在路由里 new）：
+      //   任务状态与"正在跑"的判定要跨请求存活，否则每次请求都拿到一个空闲的新对象，
+      //   "防重复点击"就完全失效了。
+      stickerRetag: async ({ action = 'status', force = false } = {}) => {
+        if (action === 'status') return retagJob.status()
+        if (action === 'abort') {
+          const r = retagJob.abort()
+          return r.ok ? { ...r, ...retagJob.status() } : { error: r.why, status: 422 }
+        }
+        const target = resolveDirectTarget({ config })
+        if (!target?.ok) {
+          return {
+            error:
+              `没有可用于打标签的模型通路：${target?.why ?? '未知'}。` +
+              '打标签要"看图"，需要一把能直连的 API key（设置里的 wake.judge.apiKey）与一个支持图片输入的模型。',
+            status: 422,
+          }
+        }
+        const r = retagJob.start({
+          workspace: config.dsh?.workspace,
+          dir: config.skills?.sticker?.libraryDir ?? 'stickers',
+          baseUrl: target.baseUrl,
+          apiKey: target.apiKey,
+          model: target.model,
+          force,
+        })
+        return r.ok ? r : { error: r.why, status: 422 }
+      },
       // ── 人设库（0.2.2）────────────────────────────────────────────────────
       // 形状：`personas/<名字>.md` 一个文件一套人设，按需切换（`persona.active`）。
       //

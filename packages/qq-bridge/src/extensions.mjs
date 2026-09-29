@@ -886,6 +886,12 @@ export function describeSkill(skill, config) {
     version: skill.version,
     apiVersion: skill.apiVersion,
     description: skill.description,
+    // ★ 清单里**声明**了几个工具（与上面 `tools` 的"实际注册"分开）。
+    //   为什么要把这个数给出去：像「表情包」这种**刻意不要工具**的技能
+    //   （靠提示词约定 + 宿主判定工作，见 `docs/插件设计规范.md` §7），
+    //   调用方不能拿"工具数 0"当成"忘了接线"——否则每次巡检都会打一条假告警，
+    //   假告警用久了就没人看了。判据必须是"**声明了却没注册**"。
+    declaredToolCount: Array.isArray(skill.declaredTools) ? skill.declaredTools.length : 0,
     category: skill.category,
     icon: skill.icon,
     author: skill.author,

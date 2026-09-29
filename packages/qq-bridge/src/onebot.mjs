@@ -34,6 +34,14 @@ const SLOW_ACTIONS = new Set([
   'get_forward_msg',
   'get_image',
   'get_record',
+  // ★ 0.2.4：**发消息也算慢动作** —— 表情包是以 base64 塞进 body 的，
+  //   一张几百 KB 的图就是近 MB 的请求体，而默认 15 秒对"上传 + 协议端转存 + 回执"
+  //   偏紧。实测教训：155 张图里 115 张 >2MB（base64 后 >2.7MB），
+  //   超时的后果不只是这一张没发出去，还会进 **5 分钟冷却**（连小的也发不了）。
+  //   ★ 真正的第一道防线是"超标的图不进候选"（`sticker-library.mjs` 的
+  //   `DEFAULT_MAX_SEND_BYTES`）；这里是第二道，用于"图不大但网络慢"的情况。
+  'send_private_msg',
+  'send_group_msg',
 ])
 
 const CALL_TIMEOUT_MS = 15_000
@@ -327,14 +335,28 @@ export class OneBotClient extends EventTarget {
    *   · 表情 → `{ type:'face',  data:{ id } }`（排在正文之后）
    * ⚠️ 三段的顺序不能乱：OneBot/QQ 只认"reply 在最前"，放后面就不显示引用气泡。
    *
+   * ── 0.2.4 新增 `stickerBase64`：**真的发一张表情包图片** ────────────────
+   * 表情包与"QQ 内置表情"是**两种东西**：前者是一张图（`type:'image'`），
+   * 后者是一个内置脸（`type:'face'` + id）。自主发表情包必须能发前者，
+   * 而在此之前桥接只能发文本与 face —— 出海口是缺的。
+   *
+   * 为什么用 base64（而不是本机路径/URL）：
+   *   · 本机路径要靠协议端能读我们的磁盘（未验证，pixiv 插件为此外挂了一个本地图片桥）；
+   *   · URL 要把"取图"交给协议端（SSRF 面转移、失败原因回不来）；
+   *   · base64 是 `qq_send_image` 已经在用的形态，SnowLuma 文档明确支持 `base64://`。
+   * 代价是每张图多约 1/3 体积的传输 —— 对本地 ws 上几百 KB 的表情图无所谓。
+   *
+   * ★ `faceId` 与 `stickerBase64` **互斥**：两个都传等于发两个表情。
+   *   这里只保留图片并记一行日志（猜"哪个才是想发的"是更糟的选择）。
+   *
    * @param {'private'|'group'} kind
    * @param {string|number} peerId
    * @param {string} text
-   * @param {{replyTo?: string|number|null, faceId?: string|number|null}} [opts]
+   * @param {{replyTo?: string|number|null, faceId?: string|number|null, stickerBase64?: string|null, stickerMime?: string|null}} [opts]
    *   `replyTo` 必须是**校验过**的消息 id（校验在 bridge 里做，见 markers.mjs）
    * @returns {Promise<object>} 协议端的返回值（含 `message_id`，但我们目前不用它）
    */
-  async send(kind, peerId, text, { replyTo = null, faceId = null } = {}) {
+  async send(kind, peerId, text, { replyTo = null, faceId = null, stickerBase64 = null } = {}) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg'
     const key = kind === 'private' ? 'user_id' : 'group_id'
     const segments = []
@@ -343,7 +365,15 @@ export class OneBotClient extends EventTarget {
     }
     const body = String(text ?? '')
     if (body !== '') segments.push({ type: 'text', data: { text: body } })
-    if (faceId != null && String(faceId) !== '') {
+
+    const pic = String(stickerBase64 ?? '').trim()
+    if (pic) {
+      if (faceId != null && String(faceId) !== '') {
+        // 互斥：图片优先，并留一行日志（调用方本该只给一个，这是兜底）
+        this.log?.('[onebot] 同时给了贴纸图与内置表情 id → 只发图片（脸被丢掉）')
+      }
+      segments.push({ type: 'image', data: { file: `base64://${pic}` } })
+    } else if (faceId != null && String(faceId) !== '') {
       segments.push({ type: 'face', data: { id: String(faceId) } })
     }
     // 全空 = 什么都不发（调用方本该拦住，这里兜一层，免得发一条空消息出去）

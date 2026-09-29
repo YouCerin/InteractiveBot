@@ -143,10 +143,15 @@ export function stickerNames(table = {}) {
  * ⚠️ **只在真有东西可教时才教**：没有表情表时**不提** `[sticker:…]` ——
  *    提示词里凡是写了的能力都必须是真的（这正是这一轮在修的毛病）。
  *
- * @param {{stickers?: Record<string,string|number>, messageId?: string|null}} [opts]
+ * ★ 0.2.4：`stickerLines` 让**表情包技能**把自己那几行并进**同一个段**。
+ *   为什么不各写一段：两段都教 `[sticker:…]` 时模型会看到两套说法
+ *   （一套说"写名字"、一套说"写标签"），那正是"同一件事两种措辞"的老毛病。
+ *   合并之后这个段只有一个来源、一套措辞。
+ *
+ * @param {{stickers?: Record<string,string|number>, messageId?: string|null, stickerLines?: string[]}} [opts]
  * @returns {string} 空串 = 什么都不用教
  */
-export function renderMarkerInstructions({ stickers = {}, messageId = null } = {}) {
+export function renderMarkerInstructions({ stickers = {}, messageId = null, stickerLines = [] } = {}) {
   const lines = []
   if (messageId) {
     lines.push(
@@ -155,12 +160,18 @@ export function renderMarkerInstructions({ stickers = {}, messageId = null } = {
       '⚠️ 只有你在上面**真的看到过**的 id 才有效 —— 系统会校验，编一个不会生效（那一条会被丢掉，正文照发）。',
     )
   }
-  const names = stickerNames(stickers)
-  if (names.length > 0) {
-    lines.push(
-      `想发表情就在回复里写 \`[sticker:名字]\`。可用的名字：${names.join('、')}。` +
-        '（名字不在这张表里的会被丢掉，正文照发。）',
-    )
+  const packLines = (Array.isArray(stickerLines) ? stickerLines : []).map((s) => String(s ?? '').trim()).filter(Boolean)
+  if (packLines.length > 0) {
+    // 表情包技能贡献的写法（标签词表由它按"库里真有货"现算）
+    lines.push(...packLines)
+  } else {
+    const names = stickerNames(stickers)
+    if (names.length > 0) {
+      lines.push(
+        `想发表情就在回复里写 \`[sticker:名字]\`。可用的名字：${names.join('、')}。` +
+          '（名字不在这张表里的会被丢掉，正文照发。）',
+      )
+    }
   }
   if (lines.length === 0) return ''
   // 单独成段，并放在**易变区**（每轮的 id 都不同，绝不能进稳定前缀 —— 那会打断前缀缓存）

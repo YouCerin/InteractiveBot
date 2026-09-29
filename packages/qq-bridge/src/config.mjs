@@ -16,7 +16,7 @@
  * adminUsers 默认为空（= 谁都不能用）、humanize 默认开启。
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DIRS, resolveInPackage, findDshCli } from './local.mjs'
 import { lintKeywords } from './trigger.mjs'
@@ -105,6 +105,49 @@ function normalizeStickerTable(value) {
  * 为什么路径要在这里解析：`config.json` 里写的是相对包根的路径，
  * 必须转成绝对路径才能用；而这一步同时保证了"包搬走路径跟着走"。
  */
+/**
+ * 归一化**表情包技能**的设置（`config.skills.sticker`，0.2.4）。
+ *
+ * ── 为什么宿主自己也要有一份默认值（技能清单里不是有吗）──────────────────
+ * 技能清单里的 `settings` 是给**扩展系统**用的（界面默认值、密文语义、开关）。
+ * 但决定"发不发、发哪张"的代码跑在**桥接主进程**里，它读的是归一化后的 config ——
+ * 如果这里不留默认值，那么"没配过这一块"的部署（绝大多数）读出来是 undefined，
+ * 于是每处都得写一遍 `?? 默认`，迟早漏一处（漏的那处就是静默失效）。
+ * 所以：**默认值只此一处**，清单里的 settings 与它保持一致（`verify-config` 钉着）。
+ */
+function normalizeStickerSkill(value) {
+  const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const str = (v, fallback) => (typeof v === 'string' && v.trim() ? v.trim() : fallback)
+  const num = (v, fallback) => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : fallback
+  }
+  const level = str(src.frequency, 'medium')
+  return {
+    // ★ 默认**开**：它一次模型调用都不加（判定全在本地），关掉只是"不发表情"。
+    enabled: src.enabled !== false,
+    // 工作区内的相对目录（与图片落盘的 inbox/ 同域）
+    libraryDir: str(src.libraryDir, 'stickers'),
+    // 三档：low / medium / high（预设展开见 sticker-quota.mjs）
+    frequency: ['low', 'medium', 'high'].includes(level) ? level : 'medium',
+    // 打分阈值：低于它就不发（**不为发而发**）
+    scoreThreshold: num(src.scoreThreshold, 4),
+    // 正文超过这个长度就不配图（长回复配图很假）
+    maxReplyChars: num(src.maxReplyChars, 120),
+    // ★ 能**发出去**的字节上限（比入库上限更严）：发送是 base64 塞进 JSON body，
+    //   一张 8MB 的 GIF 就是 11MB 的请求，而 send_*_msg 的超时有限 —— 超时的后果
+    //   不只是这张没发出去，还会进 5 分钟冷却（连小的也发不了）。
+    //   所以超标的图**不进候选**（打分自然去挑一张小的）。
+    maxSendBytes: num(src.maxSendBytes, 50 * 1024 * 1024),
+    // ★★ 风险图（标了「慎发」的）允不允许发（**默认不允许**）。
+    //
+    // 为什么默认 false：这类图的后果是**账号被处置**（本项目最不能接受的一类事故），
+    // 而"发一张带脏话/擦边/血腥的图"是这类事故里最便宜的入口。所以默认把它挡在选图之外；
+    // 打开它等于一句显式声明：「我库里确实有这类图，且我愿意让它发出去」。
+    allowRisky: src.allowRisky === true,
+  }
+}
+
 export function normalizeConfig(c) {
   const src = c ?? {}
 
@@ -442,7 +485,13 @@ export function normalizeConfig(c) {
     //   ① 密文字段（pixiv 的 Cookie）要复用同一套"脱敏 + 留空即不修改"语义，
     //      另起一份文件就会多出一套语义，迟早不一致；
     //   ② 保存走同一条通道（校验、.bak、致命项拒绝）才算真的安全。
-    skills: normalizeSkillSettingsMap(src.skills),
+    skills: (() => {
+      const map = normalizeSkillSettingsMap(src.skills)
+      // ★ 0.2.4：内置技能「表情包」的设置要**有确定默认值**（理由见上面那个函数头）。
+      //   它是技能体系里第一个"桥接主进程自己要读设置"的技能，所以由宿主补默认值；
+      //   其余技能（pixiv 等）仍然原样保留、默认值由各自清单给。
+      return { ...map, sticker: normalizeStickerSkill(map.sticker) }
+    })(),
     // 安全相关的开关（**默认全是保守值**）。
     security: {
       // ★ 允许把"内网/本机地址"的图片发出去（默认关）。
@@ -715,14 +764,64 @@ export function validateConfig(config) {
       // 配置里有、磁盘上没有 = 用户删了技能目录但配置还在（或改过 id）。
       // 不报错（配置留着不影响运行），但要说出来，否则"我明明开了它"永远查不清。
       if (!existsSync(join(DIRS.skills, id))) {
+        if (id === 'sticker') {
+          // ★ 0.2.4：内置技能「表情包」的默认值由宿主填（见 normalizeStickerSkill），
+          //   所以**配置里永远有 `skills.sticker`**，哪怕用户从没配过、也不想用。
+          //   这时不许喊"技能可能已被删除" —— 那会把默认值变成一条常驻假告警。
+          //   只在用户**显式开着**、且目录真的不在时提示（那是"以为开了实际没有"）。
+          if (settings?.enabled === true) {
+            warn.push(
+              '技能「表情包」开着，但 skills/sticker/ 目录不存在 —— ' +
+                '自主发表情包仍然可用（判定在桥接里），但提示词不会教模型 `[sticker:标签]`。',
+            )
+          }
+          continue
+        }
         warn.push(
           `config.skills 里有「${id}」，但 skills/${id}/ 目录不存在 —— ` +
             `技能可能已被删除或 id 写错了（这份配置会被忽略）。`,
         )
       }
-      if (settings?.enabled === true) {
+      if (settings?.enabled === true && id !== 'sticker') {
         warn.push(`技能「${id}」是**开启**状态：它会把自己的工具给模型，并按自己的说明联网/落盘。确认是你装的。`)
       }
+    }
+  }
+
+  // ── 表情包：库为空时如实说一句（否则使用者会以为"功能没生效"）─────────────
+  //
+  // 为什么值得单独一条：这个功能的失败形状**天然是静默的** —— 库里没有可用图时
+  // 一次都不会发，而日志里只有一行行"不发"。使用者看到的是"它从来不发表情"。
+  //
+  // ⚠️ `validateConfig` 是**同步**函数（三处调用方都按同步用），所以这里只做
+  //    文件系统层面的判断（库目录里有没有 png/gif），**不去解析 library.json** ——
+  //    那属于 `sticker-library.mjs` 的职责，不是配置校验的。
+  if (config.skills?.sticker?.enabled !== false) {
+    try {
+      const ws = config.dsh?.workspace
+      const dir = config.skills?.sticker?.libraryDir
+      if (ws && dir) {
+        const root = join(ws, dir)
+        const found = existsSync(root)
+          ? readdirSync(root, { withFileTypes: true }).reduce(
+              (acc, e) => {
+                if (e.isDirectory()) {
+                  for (const f of readdirSync(join(root, e.name))) if (/\.(png|jpe?g|webp|gif)$/i.test(f)) acc.files += 1
+                } else if (/\.(png|jpe?g|webp|gif)$/i.test(e.name)) acc.files += 1
+                return acc
+              },
+              { files: 0 },
+            ).files
+          : 0
+        if (found === 0) {
+          warn.push(
+            `表情包：${dir} 里一张图都没有 —— 现在一次表情都不会发（这是**预期行为**，不是故障）。` +
+              '导入与打标签见 skills/sticker/README.md。',
+          )
+        }
+      }
+    } catch {
+      /* 读目录失败不该让配置自检失败 */
     }
   }
 

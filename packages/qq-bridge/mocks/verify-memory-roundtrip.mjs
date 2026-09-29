@@ -428,13 +428,19 @@ async function main() {
       check('★★ 抛异常时**必须留证据**（原来那个空 catch 正是 R2 静默失效的根因）',
         warned.length > 0, warned[0] ?? '（日志里没有"注入失败"）')
       // 0.2.2 起这条接线上有**三段**会碰 workspace：任务段 / 配方段 / 称呼段（按人昵称）。
-      // 每段各报一次：2 轮 × 3 段 = 6 才是"没去重"。
+      // ★ 0.2.4 多一段：**表情包段**（它要读库才能算出"当前真有货的标签"）。
+      // 每段各报一次：2 轮 × 3 段 = 6 才是"没去重"；现在共 4 段。
       const taskWarned = warned.filter((l) => l.includes('任务段'))
       const recipeWarned = warned.filter((l) => l.includes('配方段'))
       const nickWarned = warned.filter((l) => l.includes('称呼段'))
+      const stickerWarned = warned.filter((l) => l.includes('表情包段'))
       check('★ 每段只喊一次（跑了两轮，每段仍然只有一条）',
-        taskWarned.length === 1 && recipeWarned.length === 1 && nickWarned.length === 1 && warned.length === 3,
-        `任务段 ${taskWarned.length} / 配方段 ${recipeWarned.length} / 称呼段 ${nickWarned.length} / 合计 ${warned.length}`)
+        taskWarned.length === 1 &&
+          recipeWarned.length === 1 &&
+          nickWarned.length === 1 &&
+          stickerWarned.length === 1 &&
+          warned.length === 4,
+        `任务段 ${taskWarned.length} / 配方段 ${recipeWarned.length} / 称呼段 ${nickWarned.length} / 表情包段 ${stickerWarned.length} / 合计 ${warned.length}`)
       check('★ 段落名要在日志里（能一眼看出是哪一段没进去）',
         taskWarned[0]?.includes('任务段'), taskWarned[0] ?? '')
     }

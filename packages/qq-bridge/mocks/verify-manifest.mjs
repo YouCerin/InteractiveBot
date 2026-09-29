@@ -575,6 +575,9 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
       toggleExtension: async () => ({ hot: true, restartRequired: false }),
       saveSkillSettings: async () => ({ id: 'probe' }),
       diagnoseSkill: async () => ({ id: 'probe', report: {} }),
+      // 表情包「重新打标签」（0.2.4）也要注入 —— 否则那两条路由在探测里走 notImplemented，
+      // 会被报成"文档谎称已实现"（这条检查就是这么抓漏注入的，已经抓到第三次了）。
+      stickerRetag: async () => ({ phase: 'idle', total: 0, done: 0 }),
       // 人设库接口（0.2.2）同样要注入，否则那两条路由在探测里走 notImplemented
       personasList: () => ({ dir: 'personas', personas: [], active: '', template: '', maxChars: 4000 }),
       personasAction: async () => ({ ok: true, action: 'create', restartRequired: false }),

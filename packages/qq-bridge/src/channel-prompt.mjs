@@ -107,6 +107,8 @@ export async function buildChannelPrompt({
   sessionState = null,
   consumeGap = () => null,
   skillSections = [],
+  /** 表情包技能贡献的"怎么写 `[sticker:标签]`"那几行（**只列库里真有货的标签**）。 */
+  stickerLines = [],
   nickname = '',
   projectDocRel = '',
 } = {}) {
@@ -286,9 +288,13 @@ export async function buildChannelPrompt({
   // ── 带内标记怎么用（H6）────────────────────────────────────────────────
   // ★ **只在真有东西可教时才教**（没有表情表时就不提 `[sticker:…]`）——
   //   提示词里凡是写了的能力都必须是真的。
+  // ★ 0.2.4：`stickerLines` 是表情包技能贡献的那几行（标签由库里"真有货"的现算）。
+  //   它并进**同一个段**，而不是另起一段 —— 两段都教 `[sticker:…]` 就会出现
+  //   一套说"写名字"、另一套说"写标签"的两种措辞（模型的困惑源）。
   const markerHelp = renderMarkerInstructions({
     stickers: config.send?.stickers ?? {},
     messageId,
+    stickerLines,
   })
   // 插在 `origin` 之前：`lines` 末尾此刻是正文/走向段/缺口，它们之后不该再插东西
   if (markerHelp) lines.splice(lines.length - 2, 0, '', markerHelp)

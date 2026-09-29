@@ -15,6 +15,8 @@
  */
 
 import { makeSessionId, defaultInstanceTag } from './session-id.mjs'
+// 只为一件事：把选中的表情包图片读成 base64（桥接自己发图，见 `#decideSticker`）
+import { readFileSync as nodeReadFileSync } from 'node:fs'
 import { decideTrigger, REASON } from './trigger.mjs'
 import { renderSegments, markdownToPlain, splitForQQ } from './text.mjs'
 import { computeReplyDelay, splitIntoMessages } from './humanize.mjs'
@@ -38,7 +40,19 @@ import { createConsolidateScheduler } from './memory-consolidate.mjs'
 import { gateDelivery, LEAK_NOTICE } from './delivery-gate.mjs'
 import { parseOutMarkers, resolveSticker, stickerNames, renderMarkerInstructions } from './markers.mjs'
 import { createCorpus, renderSearchResults } from './corpus.mjs'
-import { deliveryKey, describeGap } from './transport.mjs'
+import { deliveryKey, describeGap, stickerFingerprint } from './transport.mjs'
+import {
+  buildStickerCandidates,
+  buildStickerSelection,
+  labelCoverage,
+  markStickerFailed,
+  markStickerSent,
+  appendStickerDecision,
+  readStickerLibrary,
+} from './sticker-library.mjs'
+import { decideSticker, toDecisionRecord, renderStickerPromptLines, renderStickerPersonaNote } from './sticker-decision.mjs'
+import { readStickerUsage, recordStickerFailure, recordStickerSent } from './sticker-quota.mjs'
+import { activeLabelById, activeLabelIds } from './sticker-vocab.mjs'
 import { createSessionStateStore, renderSessionStateBlock } from './session-state.mjs'
 import { recordInjection } from './memory-usage.mjs'
 import { beginDelivery, orphanedDeliveries, renderOrphans, ownerId } from './delivery-ledger.mjs'
@@ -228,6 +242,23 @@ export class Bridge extends EventTarget {
 
   /** 已经报过"表情名字不在表里"的名字（同一个名字只报一次，防刷屏）。 */
   #stickerWarned = new Set()
+
+  /**
+   * 表情包：每个会话**最近发过的图**（环形，内存即可）。
+   *
+   * 为什么放内存就够：它唯一的用途是"打分时给刚用过的图扣分"，
+   * 而"刚用过"的时间尺度就是几句话 —— 重启桥接后丢了也无所谓
+   * （真正的持久状态是用量台账 `stickers/usage.json`，那个必须落盘）。
+   *
+   * chatKey → string[]（rel 路径，最新的在最后）
+   */
+  #recentStickers = new Map()
+
+  /** 表情包：每个会话处理过多少轮（"每 N 轮最多一次"这条配额要用）。 */
+  #stickerTurns = new Map()
+
+  /** 每个会话记多少条"最近发过的图"。 */
+  static STICKER_RECENT_MAX = 8
 
   /**
    * 每个 QQ 会话的内存镜像：最近若干条往来消息 + 当前状态。
@@ -2222,12 +2253,21 @@ export class Bridge extends EventTarget {
         const r = resolveSticker(outMarkers.sticker, this.config.send?.stickers ?? {})
         if (r) {
           faceId = r.id
+        } else if (activeLabelById(outMarkers.sticker, this.#stickerVocabOpts())) {
+          // ★ 0.2.4：写的是**表情包标签**（`[sticker:笑死]`）—— 这不是"没有对应的表情"，
+          //   它由下面的表情包判定处理（按标签从库里选一张图）。
+          //   ⚠️ 这里**不能**记 warning：否则每次用标签都会留一行"没有对应的表情"的
+          //   假告警，把真问题淹掉（本项目最恨的一类噪声）。
+          //   ★ 认标签用**生效词表**（`activeLabelById` 同时认 id 与中文名）——
+          //   静态的 `normalizeLabelId` 只认内置表，用户在标注台新加的标签会被误判成
+          //   "不认识"，于是模型写的 `[sticker:点赞]` 被当成乱写而丢掉。
         } else if (!this.#stickerWarned.has(outMarkers.sticker)) {
           this.#stickerWarned.add(outMarkers.sticker)
           const names = stickerNames(this.config.send?.stickers ?? {})
           this.log(
-            `[bridge] [sticker:${outMarkers.sticker}] 没有对应的表情（可用：${names.length ? names.join('、') : '（还没配置表情表）'}）→ ` +
-              '只剥掉标记，不发表情（不许猜 id，猜错就是发错表情）',
+            `[bridge] [sticker:${outMarkers.sticker}] 没有对应的表情：既不是表情表里的名字、也不是表情包标签` +
+              `（可用的名字：${names.length ? names.join('、') : '（还没配置表情表）'}）→ ` +
+              '只剥掉标记，不发表情（不许猜，猜错就是发错表情）',
           )
         }
       }
@@ -2235,11 +2275,17 @@ export class Bridge extends EventTarget {
       if (!answer && !faceId) {
         // 规则是"必须回答"。如果模型什么都没说（比如只调了工具就结束），
         // 不能让用户对着空气等 —— 给一个明确的兜底。
-        answer =
-          result.toolCalls.length > 0
-            ? '（我执行了操作但没有输出文字，请再问一次或换个说法。）'
-            : '（这次没有产生回复内容，请再试一次。）'
-        this.log(`[bridge] 回合结束但无文本输出；事件序列：${result.eventTypes.join(' → ')}`)
+        //
+        // ⚠️ 但"只写了表情包标签"是一个**明确要发东西**的回合，不能兜底成一句话 ——
+        //   那会让用户收到"（这次没有产生回复内容）"而表情反而不发（荒谬）。
+        const wantsPackSticker = Boolean(outMarkers.sticker && activeLabelById(outMarkers.sticker, this.#stickerVocabOpts()))
+        if (!wantsPackSticker) {
+          answer =
+            result.toolCalls.length > 0
+              ? '（我执行了操作但没有输出文字，请再问一次或换个说法。）'
+              : '（这次没有产生回复内容，请再试一次。）'
+          this.log(`[bridge] 回合结束但无文本输出；事件序列：${result.eventTypes.join(' → ')}`)
+        }
       }
 
       // ── 投递前终检门（H5）：内部东西绝不能出现在聊天里 ────────────────────
@@ -2303,8 +2349,36 @@ export class Bridge extends EventTarget {
         answer = BLOCKED_OUTPUT_NOTICE
       }
 
+      // ── 表情包（0.2.4）：模型没要就自主判一次 ───────────────────────────
+      //
+      // ★ 位置纪律：必须在**标记剥完、兜底话术与投递闸门之后**、`#deliver` 之前。
+      //   · 在标记之前 → 拿着带 `[sticker:…]` 的原文去抽态度，等于把协议当语料；
+      //   · 在投递闸门之前 → 可能给一条"被拦下的回复"配图（那是错的）；
+      //   · 在 `#deliver` 之后 → 没有"最后一条"可以挂。
+      //
+      // ★ 两条触发的关系：模型主动写的标签优先（`requestedLabel` 已经过词表校验）；
+      //   模型没写才让桥接自主补。**同一轮最多一张**（配额里还有 maxPerTurn 兜底）。
+      let sticker = null
+      if (!faceId && this.config?.skills?.sticker?.enabled !== false) {
+        const picked = this.#decideSticker({
+          chatKey,
+          answer,
+          requestedLabel: outMarkers.sticker,
+          // ★★ 把**对方这条消息**也传进去（0.2.4 第十三轮）。
+          //
+          // 为什么必须传：自主那条路有两组线索，`ownCues` 匹配 bot 自己的正文，
+          // `otherCues` 匹配**对方说的话**。少了这一句，"对方说累/委屈/可爱"
+          // 这类语境就永远够不着 —— 因为一个助手不会在回复里说"我好累"。
+          // 实测：`tired`（9 张图）在传之前是**结构性死代码**。
+          userText: rendered?.text ?? '',
+        })
+        sticker = picked.sticker
+      } else if (faceId) {
+        this.log('[sticker] 这一轮用的是 QQ 内置表情（face id）→ 不再补表情包（两种表情不发两条）')
+      }
+
       // 登记进 in-flight：收尾时要等它发完，否则延迟中的回复会被掐死
-      const delivering = this.#deliver(kind, peerId, answer, result, { replyTo, faceId })
+      const delivering = this.#deliver(kind, peerId, answer, result, { replyTo, faceId, sticker })
       this.#inFlight.add(delivering)
       try {
         await delivering
@@ -2395,12 +2469,18 @@ export class Bridge extends EventTarget {
    *   ⚠️ 搬动的验收标准是逐字基线（同文件第⑱节），不是"看着像"。
    */
   async #buildPrompt(rendered, reason, opts = {}) {
+    // ── 表情包的两段（0.2.4）────────────────────────────────────────────
+    //   · 标记段：教**当前真有货**的标签（库变了就变，所以每轮现算）
+    //   · 人设段：说清"能表达什么、什么时候不该发"（**不列标签**，见 sticker-decision）
+    // 两段都由同一个 `stickerPromptFacts` 喂，口径不会漂。
+    const sticker = this.#stickerPromptBits()
     return buildChannelPrompt({
       rendered,
       reason,
       ...opts,
       config: this.config,
-      personaText: this.personaText,
+      personaText: [this.personaText, sticker.personaNote].filter(Boolean).join('\n\n'),
+      stickerLines: sticker.lines,
       // ── 称呼（按人昵称，0.2.2）──────────────────────────────────────────
       // ★ 每轮现读 `memory/contacts.md`：改完**下一轮就生效**（不需要重启）。
       //   只取**当前说话人**那一条（群里也只看发言人，不列全群 —— 那是隐私面）。
@@ -2425,6 +2505,34 @@ export class Bridge extends EventTarget {
         return gap
       },
     })
+  }
+
+  /**
+   * 表情包：给提示词用的两段内容（标记段 + 人设补充段）。
+   *
+   * ★ 每轮现算（读一次库），所以"导入几张图 / 改了标签"**下一轮就生效**，
+   *   不需要重启 —— 与技能提示词片段的"即时生效"同一条语义。
+   * ★ 库读不到 / 没有可用标签 → 两段都是空（提示词里一个字都不出现），
+   *   而不是给一段"你可以发表情"的空承诺（`persona.mjs` 第 28 条的硬规矩）。
+   */
+  #stickerPromptBits() {
+    const empty = { lines: [], personaNote: '' }
+    try {
+      const cfg = this.config?.skills?.sticker ?? {}
+      if (cfg.enabled === false) return empty
+      const vocabOpts = this.#stickerVocabOpts()
+      if (!vocabOpts) return empty
+      const library = readStickerLibrary(vocabOpts)
+      // ★ 用**生效词表**的 id 列表统计覆盖（新建的标签要立刻出现在提示词里，不能显示 0 张）
+      const coverage = labelCoverage(library, activeLabelIds(vocabOpts))
+      return {
+        lines: renderStickerPromptLines({ coverage, vocabOpts }),
+        personaNote: renderStickerPersonaNote({ coverage, vocabOpts }),
+      }
+    } catch (error) {
+      this.#warnInjectOnce('表情包段', error)
+      return empty
+    }
   }
 
   /**
@@ -2640,7 +2748,190 @@ export class Bridge extends EventTarget {
     }
   }
 
-  async #deliver(kind, peerId, answer, result, { replyTo = null, faceId = null } = {}) {
+  /**
+   * 表情包的判定与准备（0.2.4）。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 它做四件事，顺序不能换
+   * ══════════════════════════════════════════════════════════════════════════
+   * ① 记轮次（"每 N 轮最多一次"这条配额要用；`#recentStickers`/`#stickerTurns` 都在内存）
+   * ② 问 `decideSticker` 发不发、发哪张（**纯本地判定，零 token**）
+   * ③ 无论发不发都落一行**决策流水**（这是三档频率与阈值唯一能调的依据）
+   * ④ 要发就把图读成 base64（`send()` 走 `base64://` 段）
+   *
+   * ── 为什么"读文件"也在这里 ─────────────────────────────────────────────
+   * 库与磁盘可能不同步（人工删过图）。`decideSticker` 只能验"文件在不在"，
+   * 读失败（权限/占用/损坏）只有在真读的时候才知道 —— 那时**也只记失败、不发**，
+   * 绝不让它影响到正文。
+   *
+   * @returns {{ sticker: null|{rel:string,label:string,source:string,base64:string,mime:string,fp:string}, reason: string }}
+   */
+  /**
+   * 词表坐标（`{workspace, dir}`）—— 表情包相关的每一次"读词表/校验标签"都要它。
+   *
+   * ★ 为什么单独抽一个方法：词表是**数据文件**（`stickers/labels.json`），
+   *   用户在标注台新建一个标签后，桥接**每轮现读**就该认它（不用重启）。
+   *   散落各处手写 `{workspace, dir: cfg.libraryDir}` 很容易漏掉一处，
+   *   而漏掉的表现是"某个地方不认新标签"——那种 bug 极难查。
+   */
+  #stickerVocabOpts() {
+    const cfg = this.config?.skills?.sticker ?? {}
+    const workspace = this.config?.dsh?.workspace
+    return workspace ? { workspace, dir: cfg.libraryDir } : null
+  }
+
+  #decideSticker({ chatKey, answer, requestedLabel = null, userText = '' }) {
+    const cfg = this.config?.skills?.sticker ?? {}
+    const workspace = this.config?.dsh?.workspace
+    const chatId = String(chatKey ?? '')
+    const turns = (this.#stickerTurns.get(chatId) ?? 0) + 1
+    this.#stickerTurns.set(chatId, turns)
+    const recent = this.#recentStickers.get(chatId) ?? []
+    const recentLabels = []
+
+    const skip = (reason) => {
+      // ★ 日志与流水**都要留**：日志给人看当下，流水给控制台回溯"为什么这几天没发"。
+      this.log(`[sticker] 不发：${reason}`)
+      try {
+        appendStickerDecision(
+          { workspace, dir: cfg.libraryDir },
+          toDecisionRecord(
+            { action: 'skip', source: null, label: null, rel: null, score: 0, reasons: [], reason },
+            { scope: chatId, replyText: answer, vocabOpts: this.#stickerVocabOpts() },
+          ),
+        )
+      } catch {
+        /* 流水写不上不影响回复 */
+      }
+      return { sticker: null, reason }
+    }
+
+    try {
+      if (cfg.enabled === false) return skip('技能已关闭')
+      if (!workspace) return skip('没有工作区，表情库无处可读')
+
+      const selection = buildStickerSelection({
+        workspace,
+        dir: cfg.libraryDir,
+        scope: chatId,
+        maxSendBytes: cfg.maxSendBytes,
+        allowRisky: cfg.allowRisky === true,
+      })
+      const candidates = selection.candidates
+      // ★ 风险图拦下多少张也要说一次（与"超标图"同一个理由：静默过滤 =
+      //   "库里明明有图却挑不中"变成查不出来的谜）。
+      if (selection.skippedRisky > 0 && !this.#stickerWarned.has('risky')) {
+        this.#stickerWarned.add('risky')
+        this.log(
+          `[sticker] ${selection.skippedRisky} 张标了「慎发」（脏话/擦边/血腥之类）**不参与选图**` +
+            '—— 这是默认行为（`skills.sticker.allowRisky` 打开才允许发）。' +
+            '想放行就去控制台把它打开，或把那些图从库里删掉',
+        )
+      }
+      // ★ 如实报出"有多少张因为太大而不能发" —— 否则"库里 155 张却挑不中"
+      //   会变成一个查不出来的谜（实测：用户的库里 115/155 张 >2MB）。
+      if (selection.skippedOversize > 0 && !this.#stickerWarned.has('oversize')) {
+        this.#stickerWarned.add('oversize')
+        this.log(
+          `[sticker] ${selection.skippedOversize}/${selection.total} 张因超过发送上限（${Math.round(selection.cap / 1024 / 1024)}MB）而不参与选图：` +
+            `${selection.oversizeExamples.join('、')}… —— 大图发出去要几十秒且会进失败冷却；` +
+            '想放宽改 skills.sticker.maxSendBytes，或把它们压小（GIF 压缩/抽帧）',
+        )
+      }
+      const decision = decideSticker({
+        config: cfg,
+        replyText: answer,
+        // ★ 对方这条消息：`otherCues` 匹配它（见 `#decideSticker` 的签名说明）
+        userText,
+        requestedLabel,
+        candidates,
+        usage: readStickerUsage({ workspace, dir: cfg.libraryDir }),
+        vocabOpts: this.#stickerVocabOpts(), // ★ 词表是数据文件（可在标注台实时加标签）
+        scope: chatId,
+        turnCount: turns,
+        recentRels: recent,
+        recentLabels,
+      })
+
+      try {
+        appendStickerDecision(
+          { workspace, dir: cfg.libraryDir },
+          toDecisionRecord(decision, { scope: chatId, replyText: answer, vocabOpts: this.#stickerVocabOpts() }),
+        )
+      } catch {
+        /* 同上 */
+      }
+
+      if (decision.action !== 'send') {
+        // ★★ 这里必须走 `skip()` 而不是"只 append 流水就 return"。
+        //
+        // 这是实测抓到的一处**承诺没兑现**：本函数的注释写着"日志与流水都要留"，
+        // 但第一版只有异常路径调了 `skip()`，正常判定为"不发"时**只写了流水**——
+        // 于是使用者盯着 `logs/bridge.log` 只会看到"它从来不发表情"，
+        // 而原因（配额？阈值？抽不出态度？）只在不那么显眼的 decisions.jsonl 里。
+        // 两条通道各有用途（日志看当下、流水可回溯），所以两条都写。
+        // ⚠️ `skip()` 内部也会 append 一条，这里**不要**再 append（会双写）。
+        return skip(decision.reason ?? '判定为不发')
+      }
+      // 命中记录里的 label 供"最近发过的标签"扣分（下一轮用）
+      recentLabels.push(decision.label)
+
+      let bytes
+      try {
+        bytes = nodeReadFileSync(decision.absPath)
+      } catch (error) {
+        return skip(`选中了 ${decision.rel} 但读不出来：${error?.message ?? error}`)
+      }
+      const base64 = bytes.toString('base64')
+      return {
+        sticker: {
+          rel: decision.rel,
+          label: decision.label,
+          source: decision.source,
+          base64,
+          mime: String(decision.absPath).toLowerCase().endsWith('.gif') ? 'image/gif' : 'image/png',
+          fp: stickerFingerprint(base64),
+        },
+        reason: decision.reason,
+      }
+    } catch (error) {
+      // ★ 表情包是**附加**能力：它出任何错都不该影响正文回复
+      return skip(`判定过程出错：${error?.message ?? error}`)
+    }
+  }
+
+  /** 发出去之后记账（**只有真发成功才调**；与 SendQueue.markSent 同一纪律）。 */
+  #noteStickerSent({ chatKey, sticker }) {
+    if (!sticker) return
+    const cfg = this.config?.skills?.sticker ?? {}
+    const workspace = this.config?.dsh?.workspace
+    const chatId = String(chatKey ?? '')
+    const list = [...(this.#recentStickers.get(chatId) ?? []), sticker.rel]
+    this.#recentStickers.set(chatId, list.slice(-Bridge.STICKER_RECENT_MAX))
+    try {
+      markStickerSent({ workspace, dir: cfg.libraryDir }, { rel: sticker.rel, scope: chatId })
+      recordStickerSent({ workspace, dir: cfg.libraryDir, scope: chatId, rel: sticker.rel })
+    } catch (error) {
+      this.log(`⚠️ [sticker] 记账失败（图已经发出去了，只是计数不准）：${error?.message ?? error}`)
+    }
+  }
+
+  /** 发失败：进冷却，并且**照样算消耗一次配额**（宁可少发，不要因失败多试）。 */
+  #noteStickerFailed({ chatKey, sticker, why }) {
+    if (!sticker) return
+    const cfg = this.config?.skills?.sticker ?? {}
+    const workspace = this.config?.dsh?.workspace
+    const chatId = String(chatKey ?? '')
+    this.log(`⚠️ [sticker] 表情包没能发出去（${why}）→ 进 5 分钟冷却；**不重试**（重试会让对端看到两张一样的图）`)
+    try {
+      markStickerFailed({ workspace, dir: cfg.libraryDir }, { rel: sticker.rel })
+      recordStickerFailure({ workspace, dir: cfg.libraryDir, scope: chatId, rel: sticker.rel })
+    } catch {
+      /* 记账失败不影响主流程 */
+    }
+  }
+
+  async #deliver(kind, peerId, answer, result, { replyTo = null, faceId = null, sticker = null } = {}) {
     // 先按"观感"分条（真人不会把 800 字糊在一条里），再按单条上限兜底切分。
     const humanChunks = splitIntoMessages(answer, {
       maxChars: this.config.humanize?.chunkChars ?? 300,
@@ -2696,9 +2987,35 @@ export class Bridge extends EventTarget {
       }
     }
 
+    // ── 表情包（0.2.4）：只有表情、没有正文时的独立一条 ──────────────────
+    //
+    // 与上面那条 face 分支同一个道理（那正是表情的典型用法），区别只是发的是
+    // 一张**图**而不是内置脸。★ 它单独 try/catch：**失败只记账并发冷却，
+    // 不抛出去** —— 抛出去会让整个回合被计成"发送失败"，然后对端会再收到一条
+    // "我这边没能把回复发出去"，可它明明什么都没丢（这条本来就只有表情）。
+    if (chunks.length === 0 && sticker) {
+      const key = deliveryKey({ chatKey: `${kind}:${peerId}`, text: '', sticker: sticker.fp })
+      const verdict = this.sendQueue.check(`[sticker:${sticker.fp}]`, key)
+      if (verdict.ok) {
+        if (verdict.waitMs > 0) await this.#sleepUnlessClosing(verdict.waitMs)
+        try {
+          await this.onebot.send(kind, peerId, '', { replyTo, stickerBase64: sticker.base64 })
+          this.sendQueue.markSent(`[sticker:${sticker.fp}]`, key)
+          this.#noteStickerSent({ chatKey: `${kind}:${peerId}`, sticker })
+          this.#mirror(`${kind}:${peerId}`, 'bot', `[表情包 ${sticker.label}]`, { createIfMissing: false })
+          this.log(`[sticker] 已发（只有表情、无正文）：${sticker.rel}（${sticker.source}）`)
+        } catch (error) {
+          this.#noteStickerFailed({ chatKey: `${kind}:${peerId}`, sticker, why: error?.message ?? error })
+        }
+      } else {
+        this.log(`[bridge] 跳过发送表情包：${verdict.reason}`)
+      }
+    }
+
     for (const [i, chunk] of chunks.entries()) {
       const isFirst = i === 0
       const isLast = i === chunks.length - 1
+      const withSticker = Boolean(isLast && sticker)
       // ★ H9：去重键带上**会话**（以及引用/表情）。用裸文本当键时，
       //   「同一句话在 8 秒内发给两个不同的会话」会被误判成重复而丢掉第二个 ——
       //   而 SendQueue 是**整个桥接共用一个**的。
@@ -2707,6 +3024,7 @@ export class Bridge extends EventTarget {
         text: chunk,
         replyTo: isFirst ? replyTo : null,
         faceId: isLast ? faceId : null,
+        sticker: withSticker ? sticker.fp : null,
       })
       const verdict = this.sendQueue.check(chunk, key)
       if (!verdict.ok) {
@@ -2722,11 +3040,23 @@ export class Bridge extends EventTarget {
         continue
       }
 
+      let stickerOk = false
       try {
-        await this.onebot.send(kind, peerId, chunk, {
-          replyTo: isFirst ? replyTo : null,
-          faceId: isLast ? faceId : null,
-        })
+        if (withSticker) {
+          // ★★ 正文与表情包**分开发**（不是把两样塞进一个请求）：
+          //   为什么：表情包是附加物，它失败绝不能连累正文（见下面 catch）。
+          //   代价：多一次消息 —— 正好也是 QQ 里"说完一句，再补个表情"的真实形态。
+          await this.onebot.send(kind, peerId, chunk, {
+            replyTo: isFirst ? replyTo : null,
+            faceId: null,
+          })
+          stickerOk = true
+        } else {
+          await this.onebot.send(kind, peerId, chunk, {
+            replyTo: isFirst ? replyTo : null,
+            faceId: isLast ? faceId : null,
+          })
+        }
         this.sendQueue.markSent(chunk, key)
         // ★ H15：这一片确认发出去了 —— 账本上标掉（崩溃时留下的 pending 就是没标上的那些）
         ticket?.markSent(i)
@@ -2742,6 +3072,24 @@ export class Bridge extends EventTarget {
         ticket?.fail(error.message)
         throw error
       }
+
+      // ── 表情包：**正文已经发成功了**，现在补那张图 ──────────────────────
+      //
+      // ★★ 为什么放在正文的 try/catch **之外**（这是这段最容易写错的地方）：
+      //   表情包是附加物。把两步放在同一个 try 里时，"正文成功 + 图失败"
+      //   会走 catch → 抛出 → 整轮被计成发送失败 → 还会再给对端发一条
+      //   "我这边没能把回复发出去"。可对方明明收到了正文，只有图没到。
+      //   那是**假警报**，比图没到更糟（它会让使用者去查一个不存在的问题）。
+      if (withSticker && stickerOk) {
+        try {
+          await this.onebot.send(kind, peerId, '', { stickerBase64: sticker.base64 })
+          this.#noteStickerSent({ chatKey: `${kind}:${peerId}`, sticker })
+          this.#mirror(`${kind}:${peerId}`, 'bot', `[表情包 ${sticker.label}]`, { createIfMissing: false })
+          this.log(`[sticker] 已发：${sticker.rel}（${sticker.source}）`)
+        } catch (error) {
+          this.#noteStickerFailed({ chatKey: `${kind}:${peerId}`, sticker, why: error?.message ?? error })
+        }
+      }
     }
 
     ticket?.finish()
@@ -2749,7 +3097,8 @@ export class Bridge extends EventTarget {
     this.log(
       `[bridge] 已回复 ${kind}:${peerId}（${answer.length} 字，${chunks.length} 条，` +
         `思考+工具 ${result.durationMs}ms，工具 ${result.toolCalls.length} 次，拟人延迟 ${Math.round(delayMs / 1000)}s` +
-        `${replyTo ? `，引用 #${replyTo}` : ''}${faceId ? `，表情 ${faceId}` : ''}）`,
+        `${replyTo ? `，引用 #${replyTo}` : ''}${faceId ? `，表情 ${faceId}` : ''}` +
+        `${sticker ? `，表情包 ${sticker.label}` : ''}）`,
     )
   }
 

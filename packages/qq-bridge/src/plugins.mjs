@@ -99,6 +99,27 @@ export const BUILTIN_PLUGINS = [
     uiTab: 'extensions:qq-tools',
   },
   {
+    id: 'sticker',
+    name: '表情包',
+    icon: '🧩',
+    enabledPath: 'skills.sticker.enabled',
+    hot: true,
+    why:
+      '每条待发回复前重读 this.config.skills.sticker（bridge.mjs 的 #decideSticker / ' +
+      '#stickerPromptBits）—— 提示词段与判定都是**每轮现读**，所以开关下一轮就生效',
+    what: '从导入的表情库里按场景挑一张发出去（判定全在本地，运行期零模型调用）。',
+    offEffect:
+      '关掉后：一次表情包都不会发，提示词里也不再出现 `[sticker:标签]`（模型想发也发不出来）。' +
+      '★ 注意它与「QQ 原生功能（MCP）」**不是**同一件事：聊天里的 `[sticker:名字]`（QQ 内置表情，' +
+      '`config.send.stickers` 那张表）仍然照旧可用。',
+    // ★ `uiTab: null` 而不是 `'extensions:sticker'`：
+    //   界面把 `extensions:` 前缀当成"详细设置就在本卡展开"（`ExtensionsTab.tsx:524`），
+    //   但本卡**没有**展开区（那张卡上的设置表单属于**技能卡**，由技能清单的
+    //   `configSchema` 渲染）。写成前缀会多出一个点了没反应的「详细设置」，
+    //   那正是本项目最忌讳的一类控件。设成 null = 只有开关，如实。
+    uiTab: null,
+  },
+  {
     id: 'humanize',
     name: '人味层（拟人节奏）',
     icon: '⏱️',

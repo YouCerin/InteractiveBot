@@ -24,11 +24,27 @@ project_InteractBot/
 │   └── dsh-qq-bot（废弃）/
 ├── docs/                           # 版本级文档（设计 / 验收 / 适配存档）
 │   ├── 插件设计规范.md              # ★ 扩展体系的契约（技能清单、生命周期、安全、UI、验收）
+│   ├── 0.2.4-release-notes.md       # ★ 这一版：自主发表情包
 │   ├── 0.2.2-release-notes.md       # 这一版更新了什么
 │   ├── 0.2.2-console-plan.md        # 控制台改造方案（**待指令，未实施**）
 │   └── 0.2.2-pixiv-skill-migration.md + 0.2.2-pixiv-adaptation.patch
 └── README.md
 ```
+
+## 0.2.4 这一版加了什么（一句话）
+
+**自主发表情包**：从你导入的表情库里按场景挑一张发出去，判定全在本地
+（运行期**零模型调用**），发不发/发哪张都留了可回溯的理由。
+三步用起来：
+
+```bash
+cd packages/qq-bridge
+node src/index.mjs --stickers --import "C:\我的表情包"   # ① 导入（离线、零成本）
+node src/sticker-tag.mjs --apply                        # ② 打标签（离线、一次性）
+node src/index.mjs --stickers                           # ③ 看状态：几张能用、为什么没发
+```
+
+详见 `docs/0.2.4-release-notes.md`、技能自己的 `packages/qq-bridge/skills/sticker/README.md`。
 
 ## 0.2.2 这一版加了什么（一句话）
 

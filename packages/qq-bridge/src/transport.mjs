@@ -161,7 +161,7 @@ export function shouldRetry(descriptor) {
 }
 
 /**
- * 投递幂等键：`sha256(chatKey|replyTo|faceId|text)[:32]`。
+ * 投递幂等键：`sha256(chatKey|replyTo|faceId|sticker|text)[:32]`。
  *
  * ── 为什么需要（现在的去重键**是裸文本**，有一个真实缺陷）────────────────
  * `SendQueue` 用**纯文本**当去重键，而队列是**整个桥接共用一个**的 ——
@@ -171,11 +171,35 @@ export function shouldRetry(descriptor) {
  * ⚠️ 键里**包含文本**，所以它是"同一会话 + 同一内容 + 同一引用"的指纹；
  *    不包含时间，所以"隔一会儿又说同一句话"仍会被判重复（这是刻意的：
  *    那条 8 秒窗口就是为"模型抽风重复说同一句"准备的）。
+ *
+ * ★ 0.2.4 加了 `sticker`（表情包图片的指纹）：不带它的话，
+ *   "同一句话 + 两张不同的图"会被判成同一条 —— 第二张会被静默丢掉。
+ *   注意这里只**引用**指纹，不把整张 base64 塞进哈希输入（那会白算几百 KB）。
  */
-export function deliveryKey({ chatKey = '', text = '', replyTo = null, faceId = null } = {}) {
-  const parts = [String(chatKey), replyTo == null ? '' : String(replyTo), faceId == null ? '' : String(faceId), String(text ?? '')]
+export function deliveryKey({ chatKey = '', text = '', replyTo = null, faceId = null, sticker = null } = {}) {
+  const parts = [
+    String(chatKey),
+    replyTo == null ? '' : String(replyTo),
+    faceId == null ? '' : String(faceId),
+    sticker == null ? '' : String(sticker),
+    String(text ?? ''),
+  ]
   const { createHash } = nodeRequire('node:crypto')
   return createHash('sha256').update(parts.join('\u0001')).digest('hex').slice(0, 32)
+}
+
+/**
+ * 表情包图片的**短指纹**（给投递去重键与日志用）。
+ *
+ * 为什么不用整段 base64 当键：那等于每次发送都哈希几百 KB，
+ * 而这里只需要"是不是同一张图"。取 base64 的 sha256 前 16 位足够区分。
+ * ⚠️ 输入为空返回空串（调用方据此判断"没有图"）。
+ */
+export function stickerFingerprint(base64) {
+  const raw = String(base64 ?? '')
+  if (!raw) return ''
+  const { createHash } = nodeRequire('node:crypto')
+  return createHash('sha256').update(raw).digest('hex').slice(0, 16)
 }
 
 /**

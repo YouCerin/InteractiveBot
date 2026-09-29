@@ -15,7 +15,7 @@
  * 用法：node mocks/verify-transport.mjs
  */
 
-import { classifyTransport, shouldRetry, deliveryKey, describeGap, LAYER } from '../src/transport.mjs'
+import { classifyTransport, shouldRetry, deliveryKey, describeGap, stickerFingerprint, LAYER } from '../src/transport.mjs'
 import { SendQueue } from '../src/onebot.mjs'
 
 let passed = 0
@@ -94,6 +94,20 @@ section('② ★★ 投递去重键：带会话，跨会话不误伤')
   check('空参不抛', typeof deliveryKey({}) === 'string' && typeof deliveryKey() === 'string')
   check('字段之间不会串（分隔符的作用）',
     deliveryKey({ chatKey: 'a', text: 'bc' }) !== deliveryKey({ chatKey: 'ab', text: 'c' }))
+
+  // ── ★ 0.2.4：表情包图片也要进去重键 ──────────────────────────────────
+  //   不带它的话，"同一句话 + 两张不同的图"会被判成同一条，第二张静默丢掉。
+  check('★ 表情包图片不同 → 键不同（否则第二张会被静默丢掉）',
+    deliveryKey({ chatKey: 'c', text: '哈哈', sticker: 'aaaa' }) !==
+      deliveryKey({ chatKey: 'c', text: '哈哈', sticker: 'bbbb' }))
+  check('贴纸图与内置表情 id 不会互相串',
+    deliveryKey({ chatKey: 'c', text: 'x', faceId: 'a1' }) !==
+      deliveryKey({ chatKey: 'c', text: 'x', sticker: 'a1' }))
+  check('没有图时键不受影响（老口径不变）',
+    deliveryKey({ chatKey: 'c', text: 'x' }) === deliveryKey({ chatKey: 'c', text: 'x', sticker: null }))
+  check('stickerFingerprint 稳定且短', stickerFingerprint('AAA') === stickerFingerprint('AAA') && stickerFingerprint('AAA').length === 16)
+  check('不同的图指纹不同', stickerFingerprint('AAA') !== stickerFingerprint('AAB'))
+  check('★ 空图 → 空串（调用方据此判断"没有图"）', stickerFingerprint('') === '' && stickerFingerprint(null) === '')
 }
 
 // ══════════════════════════════════════════════════════════════════════════

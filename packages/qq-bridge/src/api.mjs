@@ -282,6 +282,11 @@ export function createApiHandler(deps) {
     toggleExtension, // POST /api/extensions/toggle     开/关（即时生效）
     saveSkillSettings, // POST /api/extensions/settings   改某个技能的设置（密文留空=不改）
     diagnoseSkill, // GET  /api/extensions/diagnose   技能自诊断（可选导出）
+    // ── 0.2.4 表情包：重新打标签（可选；不传就回 501）──────────────────────
+    //   ★ 它**不像**其余扩展接口那样"改配置"：它真的会调模型（每张一次）。
+    //     所以形状是"预检 → 发起 → 轮询 → 可停止"，理由写在下面那三个路由的注释里。
+    //     模型通路由实现侧解析（与唤醒判定共用 `wake.judge.apiKey` 的解析规则）。
+    stickerRetag, // GET/POST /api/extensions/sticker-retag  {action:'status'|'start'|'abort'}
     // ── 0.2.2 人设库（多文件 + 命名 + 切换）───────────────────────────────
     // personasList   GET  /api/personas：人设栏要的全部事实（列表/当前生效/回落/模板）
     // personasAction POST /api/personas：{action:'create'|'save'|'rename'|'delete'|'activate'|'restore-defaults'}
@@ -393,6 +398,39 @@ export function createApiHandler(deps) {
         if (typeof diagnoseSkill !== 'function') return notImplemented('技能诊断')
         const r = await diagnoseSkill(id)
         if (!r) return fail(404, `没有这个技能，或者它没有提供 diagnose：${id}`)
+        return ok(r)
+      }
+
+      // ── 表情包：重新打标签（0.2.4）────────────────────────────────────
+      //
+      // ★ 为什么这三个路由是"查询式"而不是让一个请求把活干完：
+      //   打标签**每张图一次模型调用**，几十张就是几分钟到十几分钟 ——
+      //   任何浏览器/代理都不会挂着等那么久。所以：
+      //     ① GET  预检（**不花任何调用**）：会处理多少张、跳过多少张人工标签
+      //     ② POST 发起：立刻返回 jobId，任务在后台跑
+      //     ③ GET  轮询进度：done/total/当前文件/最近一个标签/失败清单
+      //     ④ POST 停止：当前那张跑完就停（不中断正在进行的 HTTP 请求）
+      //
+      // ★ 预检之所以是**必需**的（不是锦上添花）：这是本功能**唯一会真花钱**的操作，
+      //   界面必须先拿到"要打多少张"才能做二次确认；否则用户点一下就是几十次调用，
+      //   而他既不知道要花多少、也不知道有几张会被跳过。
+      if (method === 'GET' && path === '/api/extensions/sticker-retag') {
+        if (typeof stickerRetag !== 'function') return notImplemented('表情包重打标签')
+        const r = await stickerRetag({ action: 'status' })
+        return ok(r)
+      }
+
+      if (method === 'POST' && path === '/api/extensions/sticker-retag') {
+        if (typeof stickerRetag !== 'function') return notImplemented('表情包重打标签')
+        const action = String(body?.action ?? 'start')
+        if (action === 'abort') {
+          const r = await stickerRetag({ action: 'abort' })
+          if (r?.error) return fail(r.status ?? 422, r.error)
+          return ok(r)
+        }
+        if (action !== 'start') return fail(400, 'action 只能是 start 或 abort')
+        const r = await stickerRetag({ action: 'start', force: body?.force === true })
+        if (r?.error) return fail(r.status ?? 422, r.error)
         return ok(r)
       }
 

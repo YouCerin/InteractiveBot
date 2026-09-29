@@ -176,6 +176,7 @@ export async function chatOnce({
   apiKey,
   model,
   prompt,
+  images = [],
   timeoutMs = DIRECT_DEFAULTS.timeoutMs,
   maxTokens = DIRECT_DEFAULTS.maxTokens,
   temperature = DIRECT_DEFAULTS.temperature,
@@ -196,6 +197,28 @@ export async function chatOnce({
     return { ok: false, why: '这个 Node 运行时没有 fetch（需要 >= 18，本项目要求 >= 22）', ms: ms() }
   }
 
+  /**
+   * 内容块：默认纯文本；给了图就是多模态数组。
+   *
+   * ★ 0.2.4 加 `images` 的**唯一**用途是表情包的**离线打标签**（`scripts/sticker-tag.mjs`）。
+   *   为什么值得加：打标签必须"看图"，而在此之前直连只能发文本 —— 于是那个脚本
+   *   只能起一次性 DSH 进程（带上整套系统提示词与工具表，为一次分类调用付一个
+   *   agent 的价格）。这里加一条 `image_url` 通道，成本就回到"一次小 completion"。
+   *
+   * ⚠️ **必须用支持图片输入的模型**（`dsh.model` 默认的 `deepseek-flash` 支持）。
+   *    不支持时接口会报错，脚本要把它翻成人话（不要抛原始 JSON）。
+   */
+  const content =
+    Array.isArray(images) && images.length > 0
+      ? [
+          { type: 'text', text: String(prompt ?? '') },
+          ...images.map((img) => ({
+            type: 'image_url',
+            image_url: { url: String(img?.dataUrl ?? img?.url ?? '') },
+          })),
+        ]
+      : String(prompt ?? '')
+
   // 超时与外部取消合并成一个信号：两者任一触发都立刻中止请求
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const anySignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
@@ -211,7 +234,7 @@ export async function chatOnce({
       },
       body: JSON.stringify({
         model,
-        messages: [{ role: 'user', content: String(prompt ?? '') }],
+        messages: [{ role: 'user', content }],
         // 关掉思考：判定要的是**快和稳定**，而且 max_tokens 给得小，
         // 开着思考会先把额度花在 reasoning 上、正文被截断（看起来像"没按格式答"）
         thinking: { type: 'disabled' },
