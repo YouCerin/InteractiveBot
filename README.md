@@ -16,7 +16,7 @@
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
 > `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
 
-## 开源说明（**动手前先读这 5 条**）
+## 开源说明（**动手前先读这 6 条**）
 
 1. **许可证**：Apache-2.0（见 `LICENSE`、`NOTICE`）。第三方组件与出处见 `THIRD-PARTY.md`
    —— 里面**如实写了**一处未闭合的再分发合规缺口（发布包内没随附 Node.js 的 `LICENSE`）与补法。
@@ -33,6 +33,12 @@
    （它曾把 `.git` 撑到 354.8 MB，其中 85.6 MB 是走 Git LFS 的 `node.exe`，
    而 clone 到手的只是 133 字节指针 —— 详见两份配置文件的注释）。
    成品包挂在 GitHub 的 **Releases** 里。
+6. ⚠️ **本项目非官方，且入口图标是别人的品牌标志**：本项目与 DeepSeek / DeepSeek Harness（DSH）
+   及其权利人**没有任何隶属、赞助或背书关系**。入口图标取自
+   [LobeHub Icons](https://github.com/lobehub/lobe-icons) 的 **`deepseek` 品牌图标**
+   （文件是 MIT，Copyright © 2023 LobeHub），而**商标权不在开源许可证里** ——
+   它只用于指代"本项目连的是哪个生态"。要不要换成不含他人商标的图标、怎么换，
+   写在 `THIRD-PARTY.md` 第一节（含一条命令）。
 
 ## 目录结构
 

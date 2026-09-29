@@ -12,6 +12,25 @@
 |---|---|---|---|---|
 | **Node.js 运行时** | v24.9.0 | MIT（并含其内置库各自的许可证：V8/ICU/zlib/c-ares/simdjson 等） | `vendor/node/node.exe` | ⚠️ **缺口，见下** |
 | **ws**（WebSocket） | 8.x | MIT | `vendor/node_modules/ws/` | ✅ 已随附 `vendor/node_modules/ws/LICENSE` |
+| **入口图标**（黑鲸鱼） | 取自 LobeHub Icons 的 `deepseek` 品牌图标（0.2.8 起） | 文件：MIT（© 2023 LobeHub）；**商标：不属于本项目，见下** | `assets/icon.ico` + `assets/icon.png` | 见下方专节 |
+
+### ★ 入口图标的出处与商标说明（**请读这一节，别只看"MIT"两个字**）
+
+- **文件出处**：[LobeHub Icons](https://github.com/lobehub/lobe-icons)（包 `@lobehub/icons`，
+  [MIT LICENSE](https://cdn.jsdelivr.net/npm/@lobehub/icons@5.10.0/LICENSE)，Copyright © 2023 LobeHub），
+  图标页：<https://lobehub.com/zh/icons/deepseek>。本项目用的是它的 **`deepseek` 品牌图标**（黑鲸鱼）。
+- ⚠️ **MIT 授的是"这份文件"，不含品牌商标权。** 它是 DeepSeek 的**品牌标志**，
+  商标权归其权利人 —— 开源许可证**不可能**授予商标许可。这一点在"免费图标库"里最容易被误解：
+  **文件能自由再分发 ≠ 可以把它当自己产品的 logo 用。**
+- **本项目的用法与立场**：这个图标只用于**指代本项目所连接的生态**（一个跑在 DSH 上的 QQ 机器人），
+  **不是**在声称官方或有背书关系。仓库里相应位置都写了"**非官方**"：
+  `README.md` 的开源说明、`NOTICE`、以及 `docs/0.2.8-release-notes.md`。
+- **本项目非官方**：与 DeepSeek、DeepSeek Harness（DSH）及其权利人**没有任何隶属、赞助或背书关系**；
+  `DeepSeek`、`DeepSeek Harness`、该鲸鱼标志是其各自权利人的商标。
+- **想彻底零风险的话**：换成一张**不含他人商标**的图标（自己画的鲸鱼，或中性符号）。
+  母版是 `assets/icon.png`，重生成 7 帧只需跑
+  `cache/make-icon-frames.ps1` + `cache/build-ico.mjs`（原因与踩坑写在 `PROJECT.json` 的
+  `files["assets/icon.ico"]` 里）。**这是本项目当前"已知但已声明"的一项，不是未发现的问题。**
 
 ### ⚠️ 已知合规缺口：包里没有随附 Node.js 的 LICENSE
 

@@ -411,7 +411,7 @@ qq-bridge/
 ├── setup.mjs              一次性准备（幂等）
 ├── config.json            全部配置
 ├── prices.json            ★ 价目表 + 峰谷时段规则（改它不需要重启）
-├── assets/icon.ico        入口图标（蓝色小鲸鱼，7 个尺寸帧）
+├── assets/icon.ico        入口图标（黑鲸鱼剪影，7 个尺寸帧；母版是 assets/icon.png）
 ├── src/
 │   ├── index.mjs          装配与启动顺序（含 --snowluma / --open-console 开关）
 │   ├── local.mjs          ★ 路径解析（可搬迁性全靠它）+ SnowLuma 就近发现
