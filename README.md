@@ -135,11 +135,18 @@ copy config.example.json config.json    # 模板：密钥与本机路径都是�
 ## 怎么跑起来（最短路径，Windows）
 
 ```bash
-cd packages/qq-bridge
+git clone <仓库地址> && cd project_InteractBot/packages/qq-bridge
+npm install                               # 装 ws + undici（纯 JS，无需编译）
+node setup.mjs                            # 把纯 JS 依赖收进 vendor/（幂等，可重复跑）
 copy config.example.json config.json      # 然后填 SnowLuma 的 token 与模型 API key
 node src/index.mjs --check                # 自检：DSH 在哪、协议端在不在、配置缺什么
 node src/index.mjs                        # 正式跑
 ```
+
+> ⚠️ **从源码跑必须先 `npm install`**：`vendor/`（包内自带的依赖副本）**不进 git**
+> —— 只有发布包里才有。少了这一步，症状是启动时报 `缺少依赖「ws」`，
+> `node setup.mjs` 会告诉你去哪儿找（它按 `vendor/` → 本包 `node_modules/` → 工作区 `node_modules/` 的顺序找源）。
+> 网络不便时用 `npm install ws --no-save` 也够（`undici` 只有走代理的技能需要）。
 
 带界面的方式是 `packages/qq-bridge/start.bat`。完整步骤（装 SnowLuma、首次联调、
 控制台各页签的含义）见 `packages/qq-bridge/README.md` 与 `packages/qq-bridge/首次使用.txt`。

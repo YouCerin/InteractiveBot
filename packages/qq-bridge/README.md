@@ -42,6 +42,11 @@ QQ ──OneBot11──> qq-bridge ──stdio JSON-RPC──> dsh --profile sdk
 ## 快速开始
 
 ```bash
+# ⓪ 从**源码**跑（不是用发布包）时先装依赖：
+#    vendor/ 不进 git（只有发布包里才有），setup.mjs 会从 node_modules/ 里把 ws 复制进去。
+#    网络不便时 `npm install ws --no-save` 也够（undici 只有走代理的技能才需要）。
+npm install
+
 # ① 一次性准备：把 Node 运行时和纯 JS 依赖收进包内（幂等，可重复跑）
 node setup.mjs
 
