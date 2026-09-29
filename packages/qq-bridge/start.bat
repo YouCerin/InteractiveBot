@@ -9,6 +9,22 @@ rem
 rem  NOTE: this file must stay **pure ASCII**. cmd parses .bat files using
 rem  the system codepage (GBK on Chinese Windows); UTF-8 Chinese comments
 rem  can swallow line breaks and corrupt parsing (learned the hard way).
+rem
+rem  0.2.6: this is now the ONLY launcher. The four wrapper .bat files
+rem  (Chinese-named entry, config check, doctor, create-shortcut) and the
+rem  shipped QQbot.lnk were removed by request -- they were one-line
+rem  forwarders plus a shortcut carrying an absolute path that could never
+rem  work on another machine. Flags still work when typed by hand:
+rem    start.bat --check        config only (no network, no cost)
+rem    start.bat --doctor       really dials SnowLuma
+rem    start.bat --setup        prepare dependencies
+rem    start.bat --foreground   keep it in this window, Ctrl+C stops it
+rem    start.bat --no-browser   don't open the console page
+rem    start.bat --no-snowluma  don't touch SnowLuma
+rem  Why a shortcut can't just be shipped: only a .lnk can carry a custom
+rem  icon, and a .lnk stores an ABSOLUTE path -- one built here would point
+rem  at this machine's folder. Build one where it will be used:
+rem    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'QQbot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory=$PWD; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
 rem ============================================================================
 
 setlocal
@@ -117,6 +133,19 @@ if not "%EXITCODE%"=="0" (
   echo [!] Could not start (exit %EXITCODE%) -- see the message above.
   echo.
   pause
+) else (
+  rem On success, wait a moment too. When this file is double-clicked the window
+  rem closes as soon as the script returns, and the startup-time facts (did
+  rem SnowLuma come up, which URL is the console) only ever appear here.
+  rem Use ping, NOT timeout: timeout fails with "input redirection is not
+  rem supported" when stdin is not an interactive console, and exits non-zero --
+  rem a caller may be reading only the exit code.
+  echo.
+  echo Bridge started in the background. You can close this window.
+  echo Console:   http://127.0.0.1:3410/
+  echo SnowLuma:  http://127.0.0.1:5099/
+  echo Logs:      logs\bridge.log
+  ping -n 3 127.0.0.1 >nul
 )
 
 rem exit /b on ONE line: %EXITCODE% must expand BEFORE endlocal clears it.

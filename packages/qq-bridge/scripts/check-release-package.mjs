@@ -35,13 +35,12 @@ const files = walk(root)
 const rel = (p) => relative(root, p).replace(/\\/g, '/')
 
 // ── ① 结构：该有的必须都在 ─────────────────────────────────────────────
+// ★ 0.2.6：原来这里还列着四个中文名壳 bat 与随包的 `QQbot.lnk`，它们已按用户要求删除。
+//   现在**唯一入口是 `start.bat`** —— 这个清单就是"用户拿到包能双击什么"的断言，
+//   所以它必须跟着一起收窄（否则验收会报"缺少必需文件"）。
 const MUST_EXIST = [
-  '启动机器人.bat',
-  '先读我-首次使用.txt',
-  '检查配置.bat',
-  '体检.bat',
-  '创建带图标的快捷方式.bat',
   'start.bat',
+  '首次使用.txt',
   'config.json',
   'config.example.json',
   'prices.json',

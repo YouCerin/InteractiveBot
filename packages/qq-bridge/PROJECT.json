@@ -43,8 +43,7 @@
     "launch": {
       "file": "start.bat",
       "also": "node src/index.mjs",
-      "shortcut": "QQbot.lnk（开发机用；发布包改由 `创建带图标的快捷方式.bat` 在用户机器上生成）",
-      "note": "★ start.bat 现在会先拉起 SnowLuma（--snowluma）再起桥接。开关：--no-snowluma 跳过、--open-console 只开 SnowLuma 网页端、--no-browser 跳过开浏览器。⚠️ .bat 在 Windows 里**无法带自定义图标**（不是 PE 文件，没有图标资源槽），所以带图标的入口只能是快捷方式；而 .lnk 里存绝对路径、随包发到别人机器上必然失效，因此发布包用 `创建带图标的快捷方式.bat` 现场生成。发布包另有三个引导入口：检查配置.bat（--check）、体检.bat（--doctor）、启动机器人.bat"
+      "note": "★ start.bat 现在是**唯一入口**：不带参数 = 启动（先把 SnowLuma 拉起来再起桥接）；带开关 = 自检/工具：--check（只校验配置）、--doctor（真连一次协议端）、--setup、--foreground（留在本窗口，Ctrl+C 停）、--no-browser、--no-snowluma。⚠️ .bat 在 Windows 里**无法带自定义图标**（不是 PE 文件，没有图标资源槽），而 .lnk 里存的是绝对路径、随包发到别人机器上必然失效 —— 所以带图标的入口要由使用者在自己机器上生成（命令见 `首次使用.txt` 与 `RELEASE.md` §4）。   0.2.6：原四个中文名壳（启动机器人 / 检查配置 / 体检 / 创建带图标的快捷方式 .bat）与随包的 QQbot.lnk 已按用户要求删除 —— 那三个 .bat 只是 call start.bat 的一行转发。⚠️ 删它们时必须同步改 `scripts/assemble-release.mjs` 的 COPY_FILES 与 `scripts/check-release-package.mjs` 的 MUST_EXIST（两处都有\"输入必须都存在\"的门）。"
     },
     "check": {
       "file": "src/index.mjs",
@@ -77,7 +76,7 @@
     },
     {
       "cmd": "node scripts/assemble-release.mjs --zip",
-      "purpose": "★ 组装发布包（staging 目录 + 可选 zip）。**用脚本，不要手敲 robocopy** —— 上一次手敲时把 `启动机器人.bat` / `检查配置.bat` / `体检.bat` 漏了，于是它们只存在于发布包里、仓库里没有源（文档的『最终形状』列了它们，拷贝清单一条都没有）。脚本六步：① 按**类别**判 `setup.mjs --release` 的 ❌（真 config.json 的明文**不算阻断** —— 组装根本不拷它）；② 拒绝覆盖已存在的同名版本目录（老版本要留着对照，`--force` 才会先删干净再建）；③ 清点源文件，缺一个都不组装；④ 组装后**自校验包里的 config.json 确实是空白**；⑤ 跑 `check-release-package.mjs` 并看**退出码**（不挑输出文案判通过）；⑥ 可选 `tar -a` 压缩。版本号**只从 package.json 读**。",
+      "purpose": "★ 组装发布包（staging 目录 + 可选 zip）。**用脚本，不要手敲 robocopy** —— 上一次手敲时把 `start.bat（原中文名壳「启动机器人.bat」已删）` / `start.bat --check` / `start.bat --doctor` 漏了，于是它们只存在于发布包里、仓库里没有源（文档的『最终形状』列了它们，拷贝清单一条都没有）。脚本六步：① 按**类别**判 `setup.mjs --release` 的 ❌（真 config.json 的明文**不算阻断** —— 组装根本不拷它）；② 拒绝覆盖已存在的同名版本目录（老版本要留着对照，`--force` 才会先删干净再建）；③ 清点源文件，缺一个都不组装；④ 组装后**自校验包里的 config.json 确实是空白**；⑤ 跑 `check-release-package.mjs` 并看**退出码**（不挑输出文案判通过）；⑥ 可选 `tar -a` 压缩。版本号**只从 package.json 读**。",
       "network": "local-only",
       "costs": "none"
     },
@@ -590,9 +589,7 @@
     "src/doctor.mjs": "体检：包内依赖 / DSH / 配置自洽 / 真实连接探测。",
     "config.json": "全部运行配置。",
     "assets/icon.ico": "入口图标（蓝色小鲸鱼，7 个尺寸帧：16/24/32/48/64/128/256，全部 PNG 编码）。被快捷方式引用（图标写成**相对路径** assets/icon.ico，所以整包搬走图标依然有效）。",
-    "start.bat": "★ **双击入口**（`QQbot.lnk` 指向它，或经由 `启动机器人.bat` 再 `call` 它；一个文件必须纯 ASCII —— cmd 按系统代码页 GBK 解析 .bat，UTF-8 中文注释会吃掉换行）。顺序：`--check/--doctor/--setup/--snowluma/--open-console` 这些一次性参数先处理 → 拉起 SnowLuma → **等就绪再开网页端** → 用 curl 等桥接的 3410 起来再开控制台 → 起桥接本体。参数：`--no-snowluma` 跳过协议端、`--no-browser` 不自动开浏览器。★ 为什么 `%*` **不**转发给 `index.mjs`：那条命令会真的启动桥接，而 `--snowluma/--open-console` 在 index.mjs 里的语义是「做完就退出」，转发会把桥接**静默跳过**。",
-    "QQbot.lnk": "★ **带图标的启动入口**（0.2.2 起统一成这一个名字：开发机、发布包、文档三处不再各叫一个）。指向 `启动机器人.bat`（没有它则 `start.bat`），图标写成**相对路径** `assets/icon.ico`（整包搬走图标依然有效 —— 绝对路径图标一换机器就退化成白纸）。★ 它仍是**生成物**：`.lnk` 里存绝对路径，随包发到别人机器上必然失效，所以发布包靠 `创建带图标的快捷方式.bat` 现场生成。",
-    "创建带图标的快捷方式.bat": "★ 在**用户机器上**现场生成快捷方式（`QQbot.lnk`，目标 `启动机器人.bat`，图标用相对路径）。存在的理由有两条：① Windows 的 .bat **不能带自定义图标**（不是 PE 文件，没有图标资源槽），只有 .lnk 能显示；② .lnk 里存的是绝对路径，随包发一份在别人机器上必然失效。★ 该文件正文与内嵌 PowerShell **必须纯 ASCII**：cmd 按系统代码页（GBK）解析 .bat，而 Windows PowerShell 5.1 把无 BOM 的 UTF-8 .ps1 当 GBK 读 —— 一条中文注释就会吃掉紧随其后的代码（实际报错是「快捷方式路径名称需以 .lnk 或 .url 结尾」）。所以 `启动机器人.bat` 这个中文文件名用字符码拼，而快捷方式本身用 ASCII 名 `QQbot.lnk`（少一处代码页陷阱，也和文档/开发机同名）。",
+    "start.bat": "★ **双击入口**（`QQbot.lnk（开发机上那份；**不进发布包**）` 指向它，或经由 `start.bat（原中文名壳「启动机器人.bat」已删）` 再 `call` 它；一个文件必须纯 ASCII —— cmd 按系统代码页 GBK 解析 .bat，UTF-8 中文注释会吃掉换行）。顺序：`--check/--doctor/--setup/--snowluma/--open-console` 这些一次性参数先处理 → 拉起 SnowLuma → **等就绪再开网页端** → 用 curl 等桥接的 3410 起来再开控制台 → 起桥接本体。参数：`--no-snowluma` 跳过协议端、`--no-browser` 不自动开浏览器。★ 为什么 `%*` **不**转发给 `index.mjs`：那条命令会真的启动桥接，而 `--snowluma/--open-console` 在 index.mjs 里的语义是「做完就退出」，转发会把桥接**静默跳过**。",
     "prices.json": "★ 价目表（元/百万 tokens）+ 峰谷时段规则。**故意独立于 config.json**：价格会变，而改它不该触发「改配置要重启」。DSH 本身不提供人民币价格，所以成本只能按这份文件估算。",
     "PROJECT.json": "本文件：包契约。",
     "AGENT.md": "给 agent 的操作说明（五分钟上手 + 陷阱清单）。",

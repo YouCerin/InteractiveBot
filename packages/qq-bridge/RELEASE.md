@@ -1,6 +1,6 @@
 # RELEASE.md — 打发布包（zip）
 
-> 目标产物：一个 **zip**，解压后双击 `启动机器人.bat` 即可用。
+> 目标产物：一个 **zip**，解压后双击 `start.bat` 即可用。
 > 用户的外置依赖只有两样：**QQ 桌面版** 和 **DSH**（外加自己的模型 API key 与 SnowLuma）。
 >
 > 本文只讲"怎么打",不讲设计理由 —— 设计理由见 `README.md` / `AGENT.md` / `PROJECT.json`。
@@ -106,8 +106,8 @@ npm test
 **要的：**
 
 ```
-启动机器人.bat            （可选，见 §4）
-start.bat
+首次使用.txt              ★ 给非技术用户的上手说明
+start.bat                 ★ 唯一入口（双击 = 启动；带开关时当自检/工具用）
 config.json               ★ 已清空密钥的模板
 prices.json
 src/                      （全部 .mjs）
@@ -174,24 +174,31 @@ config.json.bak*          历史备份，含旧密钥
 
 ## 4. 入口与快捷方式
 
-发布包给的是 `启动机器人.bat`（中文名，方便双击）+ `start.bat`（真正干活的）。
+**0.2.6 起包里只有一个入口：`start.bat`。**
+
+原来还有四个中文名壳（`启动机器人.bat` / `检查配置.bat` / `体检.bat` /
+`创建带图标的快捷方式.bat`）与一份随包的 `QQbot.lnk`，按用户要求全部删除：
+
+* 那三个 `.bat` 都只是 `call start.bat <参数>` 的**一行转发** —— 开关直接手敲即可
+  （`start.bat --check` / `--doctor` / `--setup` / `--foreground` / `--no-browser`）；
+* 随包的 `QQbot.lnk` 里存的是**绝对路径**（开发机的 `…\packages\qq-bridge\启动机器人.bat`），
+  在别人机器上双击必然失效；而且它与"现场生成的 `QQbot.lnk`"**同名**，会互相覆盖。
 
 **★ 图标：`.bat` 在资源管理器里永远显示默认的"白纸+齿轮"，这是 Windows 的限制**
-（它不给 `.bat` 显示自定义图标）。所以包内给了一个
-`创建带图标的快捷方式.bat`：双击它就在同目录生成 `QQbot.lnk`，图标指向
-`assets\icon.ico`。
+（它不给 `.bat` 显示自定义图标）。想要带图标的常用入口，在使用者自己的机器上生成：
+
+```powershell
+powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'QQbot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory=$PWD; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+```
 
 为什么不直接发一个做好的 `.lnk`：**`.lnk` 里存的是绝对路径**，在作者机器上生成的
 那份指向作者的目录，换台机器目标与图标一起失效（图标退化成白纸）。现场生成就不会错。
+（`首次使用.txt` 里也给了这条命令，面向用户的那一份写得更白话。）
 
-生成脚本里两个坑（都真实踩过，别再犯）：
+**★ 双击 `start.bat` 的行为**：它把 SnowLuma 与桥接都起成**后台**进程，然后打印
+控制台/SnowLuma 地址与日志路径，停两秒就结束 —— 所以窗口会关，但机器人**不会**跟着关。
+启动失败时它**不关窗口**（打印错误并 `pause`），否则"双击一下什么都没发生"没法排查。
 
-1. **`.bat` 正文必须纯 ASCII**：cmd 按系统代码页（中文 Windows 是 GBK）解析 `.bat`，
-   UTF-8 文件里的中文会吞掉换行、把解析搞坏。
-2. **脚本里那段 PowerShell 也必须纯 ASCII（连注释也是）**：Windows PowerShell 5.1 会把
-   **无 BOM 的 UTF-8** `.ps1` 当 GBK 读；一条中文注释就能"吃掉"紧随其后的代码 ——
-   实际表现是报"快捷方式路径名称需以 .lnk 或 .url 结尾"。
-   所以中文文件名一律用字符码拼：`[char]0x673A + [char]0x5668 + [char]0x4EBA` = 机器人。
 
 ---
 
@@ -206,8 +213,9 @@ node scripts/assemble-release.mjs --zip       # 组装 + 压缩
 node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会先删干净再建）
 ```
 
-**★ 为什么必须有脚本**：上一次组装是手敲的，结果 `启动机器人.bat` /
-`检查配置.bat` / `体检.bat` **只存在于发布包里、仓库里没有源** ——
+**★ 为什么必须有脚本**：上一次组装是手敲的，结果 `start.bat` 的中文名壳
+（`启动机器人.bat`）/ `检查配置.bat` / `体检.bat` / `首次使用.txt`
+（当时叫「先读我-首次使用.txt」）**只存在于发布包里、仓库里没有源** ——
 文档的"最终形状"列了它们，而拷贝清单一条都没有，说明当时是手工补进去的，
 然后没人记得。手敲清单必然漏项，而**漏项不会报错**。
 
@@ -231,12 +239,8 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 
 ```
 InteractBot-<版本>-win-x64/
-├── 先读我-首次使用.txt      ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
-├── 启动机器人.bat           ← 中文名入口（正文纯 ASCII，转调 start.bat）
-├── 创建带图标的快捷方式.bat  ← 双击生成带图标的 QQbot.lnk（.bat 本身无法显示图标）
-├── 检查配置.bat             ← 给小白：双击 = start.bat --check
-├── 体检.bat                 ← 给小白：双击 = start.bat --doctor（真连一次 SnowLuma）
-├── start.bat
+├── 首次使用.txt             ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
+├── start.bat               ← ★ 唯一入口：双击启动；`start.bat --check/--doctor` 自检
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
 ├── config.example.json     ← 同一份，保留作参照（用户改坏 config.json 时可对照）
 ├── prices.json  package.json
@@ -259,13 +263,14 @@ InteractBot-<版本>-win-x64/
 > **且只有一种**"。要举例说明"旧版本并存"时用文字描述，不要写出具体的旧版本号，
 > 否则那条断言会红（它没法区分"举例"和"漏改"）。
 
-★ **小白文档不是装饰**：`先读我-首次使用.txt` 是包内唯一一份写给非技术使用者的文档
+★ **小白文档不是装饰**：`首次使用.txt` 是包内唯一一份写给非技术使用者的文档
 （其余 `AGENT.md` / `README.md` / `RELEASE.md` / `PROJECT.json` 分别面向 AI agent、
-开发者和机器校验）。它必须给出四个下载链接、三步配置、五个常见故障对照，
+开发者和机器校验）。它必须给出四个下载链接、三步配置、常见故障对照，
 以及"密钥非官方登录有账号风险"的提示。改动 README/配置项文案时记得同步它。
 
-★ 两个 `*.bat` 引导入口的正文是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，
-含中文会吞掉换行），只转调 `start.bat` 的对应开关 —— 开关的语义只有一处实现。
+★ `start.bat` 的正文是**纯 ASCII**（.bat 由 cmd 按系统代码页解析，含中文会吞掉换行）。
+它现在是**唯一**入口：不带参数 = 启动；带开关 = 自检/工具。开关的语义只有一处实现
+（`src/index.mjs` 的分派），启动壳不复刻任何逻辑。
 
 不带：`vendor/dsh`（用户自装）、`vendor/snowluma`（许可证不允许）、
 `config-ui/{src,node_modules}`（202 MB，属项目开发资产）、
@@ -297,7 +302,8 @@ Compress-Archive -Path $out -DestinationPath "$out.zip"
 ## 6. 验收清单（必须在一台干净机器 / 另一个盘符上跑）
 
 1. 解压到**另一个盘符**（例如 `D:\test`）而非原路径。
-2. 双击 `启动机器人.bat` → 应能自建 `logs/`、`cache/`、`workspace-qq/`。
+2. 双击 `start.bat` → 应能自建 `logs/`、`cache/`、`workspace-qq/`，并在窗口里
+   打印控制台地址后自行结束（机器人是后台进程，关窗口不等于关机器人）。
 3. `start.bat --check` → 应显示 DSH 的解析结果与来源；**没装 DSH 时必须列出所有候选位置**，而不是一句"找不到"。
 4. 故意把 `dsh.cliPath` 填错 → 报错必须说明"这个路径是配置指定的但它不存在"。
 5. 不填 `apiKey`、机器上也没有 `%APPDATA%\dsh-desktop\harness\.credentials.yaml` → 启动日志必须明确报出凭据缺失

@@ -214,6 +214,36 @@ section('① 全仓库文本文件：不许 UTF-16 / U+FFFD / 误加的 BOM / �
   if (precautionary.length) console.log(`   ℹ️  豁免·预防性（暂时没命中，但这类文件故意引用样本）：${precautionary.join(', ')}`)
   if (batBom.length) console.log(`   ℹ️  .bat 带 UTF-8 BOM（历史用法，豁免不判红）：${batBom.join(', ')}`)
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★ 0.2.6 补的一条：**.bat 正文必须纯 ASCII**
+  //
+  // ★ 为什么原来没有这条会出事（实测抓到，就在这一轮）：`.bat` 由 cmd 按**系统代码页**
+  //   （中文 Windows 是 GBK）解析。文件若是 UTF-8，里面的中文注释会被 GBK 解释成别的字节
+  //   ——轻则乱码，重则**吞掉换行**，把紧随其后的命令拼进注释里。
+  //   这一轮我在 `start.bat` 里顺手写了两行中文注释，**全量测试仍然全绿**：
+  //   因为上面三条判据对 `.bat` 只看 BOM 与"成片乱码"，而短段中文注释两条都不触发。
+  //   （BOM 那条还刻意豁免了 `.bat` —— 历史用法。）
+  //   ∴ 不能只看"像不像乱码"，要看**字节本身**：`.bat` 里出现任何 >0x7F 的字节就是隐患。
+  //
+  // ★ 为什么这条可以要求"纯 ASCII"而不是"允许 UTF-8 但别有乱码"：
+  //   本项目的 `.bat` 一律走"正文纯 ASCII + `chcp 65001` 让输出可读"，
+  //   连中文**文件名**都是用字符码拼出来的（见 sticker-label 那两个入口）。
+  //   所以这条是既成纪律的机器化，不是新增约束。
+  const nonAsciiBat = []
+  for (const abs of files) {
+    const rel = relative(REPO_ROOT, abs).split('\\').join('/')
+    if (!/\.bat$/i.test(rel)) continue
+    const bytes = readFileSync(abs)
+    const bad = []
+    for (let i = 0; i < bytes.length; i++) if (bytes[i] > 0x7f) bad.push(bytes[i])
+    if (bad.length) nonAsciiBat.push(`${rel}(${bad.length} 个，首个 0x${bad[0].toString(16)})`)
+  }
+  check(
+    '★★★ 所有 .bat 都是**纯 ASCII**（cmd 按系统代码页解析，非 ASCII 会吞换行）',
+    nonAsciiBat.length === 0,
+    nonAsciiBat.length ? nonAsciiBat.join('；') : '（0 个）',
+  )
+
   // 豁免清单本身也要有纪律：条目必须存在、必须写理由。
   check(
     '★ 乱码豁免清单里的文件都真实存在且写了理由',
@@ -277,6 +307,20 @@ section('② ★★ 负对照：这套判据真的抓得住那次事故的四种
     check(`正对照：${name}`, r.moji.bad === false && r.fffd === 0 && r.bom === false, `特征字 ${r.moji.sig}/${r.moji.cjk}`)
   }
   console.log(`   ℹ️  乱码样本长度 ${MOJIBAKE_SAMPLE.length} 字（优先取自 cache 里的真实现场）`)
+
+  // ★★ 0.2.6 补：**.bat 纯 ASCII** 那条判据的负对照与正对照。
+  //   判据就是"有没有 >0x7F 的字节"，所以负对照直接构造一个含中文注释的 .bat 内容；
+  //   正对照用一个正常 ASCII 的 .bat 内容 —— 防的是"判据写成恒真/恒假"。
+  const batBytes = (buf) => {
+    const bad = []
+    for (let i = 0; i < buf.length; i++) if (buf[i] > 0x7f) bad.push(buf[i])
+    return bad
+  }
+  check('★ 抓得住：.bat 里的中文注释（这一轮真的漏过一次）',
+    batBytes(Buffer.from('@echo off\nrem 成功时也停一下\n', 'utf8')).length > 0,
+    `坏字节 ${batBytes(Buffer.from('@echo off\nrem 成功时也停一下\n', 'utf8')).length} 个`)
+  check('正对照：纯 ASCII 的 .bat 不误报',
+    batBytes(Buffer.from('@echo off\r\nrem wait a moment\r\necho done\r\n', 'utf8')).length === 0)
 }
 
 section('③ 事故现场的文件：按最严口径单独盯一遍')
