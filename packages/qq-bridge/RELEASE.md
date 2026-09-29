@@ -194,14 +194,14 @@ $s = New-Object -ComObject WScript.Shell
 $l = $s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk'))
 $l.TargetPath = (Join-Path $PWD 'start.bat')
 $l.WorkingDirectory = "$PWD"
-$l.IconLocation = 'assets\icon.ico,0'
+$l.IconLocation = (Join-Path $PWD 'assets\icon.ico') + ',0'
 $l.Save()
 ```
 
 **cmd.exe 里（一行）：**
 
 ```bat
-powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='%CD%\assets\icon.ico,0'; $l.Save()"
 ```
 
 > ★ 为什么给两种写法（2026-09-30 真机踩过）：那一行 `powershell -NoProfile -Command "…"` **只适合 cmd.exe**。
@@ -210,6 +210,20 @@ powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.Cr
 > 另外 `$l.WorkingDirectory` 必须赋**字符串**：写 `$PWD`（不加引号）会报
 > `Cannot convert … "PathInfo" to type "string"`，而**快捷方式照样生成、工作目录却是空的** ——
 > 这种"看着成功、其实少一格"的失败，比直接报错更难发现。
+
+> ★★ **图标必须写绝对路径**（2026-09-30 实测，三组对照用 shell 自己的取图标 API
+> `SHGetFileInfo` 抓图对比）：
+>
+> | `.lnk` 的 `IconLocation` | 资源管理器实际显示 |
+> |---|---|
+> | `C:\…\assets\icon.ico,0`（绝对） | **小鲸鱼** ✅ |
+> | `assets\icon.ico,0`（相对） | 白纸 + 快捷方式箭头 ❌ |
+> | 留空 | `.bat` 的默认"白纸+齿轮" ❌ |
+>
+> 所以**0.2.2 起沿用的"图标改成相对路径，整包搬走依然有效"是错的**：
+> 资源管理器**不解析**相对图标路径，症状正是"快捷方式建出来了却没有图标"。
+> 而"可搬走"本身就是假的 —— `.lnk` 的目标路径永远是绝对路径（这也是它不能随包发的原因）。
+> 这一条已回填到 `PROJECT.json` 的 `files["assets/icon.ico"]`。
 ```
 
 为什么不直接发一个做好的 `.lnk`：**`.lnk` 里存的是绝对路径**，在作者机器上生成的

@@ -24,13 +24,18 @@ rem    start.bat --no-snowluma  don't touch SnowLuma
 rem  Why a shortcut can't just be shipped: only a .lnk can carry a custom
 rem  icon, and a .lnk stores an ABSOLUTE path -- one built here would point
 rem  at this machine's folder. Build one where it will be used (run in cmd):
-rem    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
-rem  NOTE: that one-liner is for cmd.exe ONLY. Pasted into PowerShell, the
+rem    powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='%CD%\assets\icon.ico,0'; $l.Save()"
+rem  NOTE 1: that one-liner is for cmd.exe ONLY. Pasted into PowerShell, the
 rem  outer shell expands $s/$l/$PWD to empty first and you get a confusing
-rem  parse error -- PowerShell users should run the 5-line form in RELEASE.md
-rem  (and must write "$PWD" quoted: bare $PWD is a PathInfo object, the COM
-rem  property conversion fails, and the shortcut silently gets an EMPTY
-rem  working directory).
+rem  parse error -- PowerShell users should run the 5-line form in RELEASE.md.
+rem  NOTE 2: $l.WorkingDirectory must be a STRING. Bare $PWD is a PathInfo
+rem  object, the COM property conversion fails, and the shortcut silently
+rem  gets an EMPTY working directory.
+rem  NOTE 3: the icon path must be ABSOLUTE. A relative IconLocation
+rem  ('assets\icon.ico,0') is NOT resolved by Explorer -- the shortcut gets
+rem  created with NO icon (a blank page). Measured 2026-09-30 with
+rem  SHGetFileInfo: absolute -> whale, relative -> blank page, empty -> the
+rem  default .bat gear icon. That is why '%CD%\assets\icon.ico,0' is used.
 rem ============================================================================
 
 setlocal

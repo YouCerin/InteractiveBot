@@ -128,21 +128,28 @@ SnowLuma 启动后，打开它的控制台：http://127.0.0.1:5099/
     $l = $s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk'))
     $l.TargetPath = (Join-Path $PWD 'start.bat')
     $l.WorkingDirectory = "$PWD"
-    $l.IconLocation = 'assets\icon.ico,0'
+    $l.IconLocation = (Join-Path $PWD 'assets\icon.ico') + ',0'
     $l.Save()
 
-   ⚠️ 两个真踩过的坑（照着写就不会再遇到）：
+   ⚠️ 三个真踩过的坑（照着写就不会再遇到）：
    · **别在 PowerShell 里用 `powershell -NoProfile -Command "…"` 那种一行写法** ——
      那是给 **cmd.exe** 用的：粘进 PowerShell 时，双引号里的 `$s` / `$l` / `$PWD`
      会被**外层先展开成空**，报错长这样：`"(”后面应为表达式`。
      如果你确实在 cmd.exe 窗口里，用这一行（注意 `'%CD%'`，cmd 会先展开它）：
 
-     powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='assets\icon.ico,0'; $l.Save()"
+     powershell -NoProfile -Command "$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $PWD 'InteractiveBot.lnk')); $l.TargetPath=(Join-Path $PWD 'start.bat'); $l.WorkingDirectory='%CD%'; $l.IconLocation='%CD%\assets\icon.ico,0'; $l.Save()"
 
    · **工作目录要写成 `"$PWD"`（带引号）**，别写 `$PWD`：PowerShell 会把 `$PWD` 当成
      一个"路径对象"而不是字符串，赋给快捷方式时转换失败（报
      `Cannot convert … "PathInfo" to type "string"`），**快捷方式照样生成、但工作目录是空的** ——
      这种"看着成功、其实少了一格"的结果最容易骗人。
+
+   · ★ **图标必须写绝对路径**（`(Join-Path $PWD 'assets\icon.ico') + ',0'`）。
+     写成相对路径 `'assets\icon.ico,0'` 时，**资源管理器不会去解析它**，结果就是
+     "快捷方式建出来了、却没有图标"（显示成一张白纸 + 快捷方式箭头）。
+     这一点是实测出来的（三组对照，用 shell 自己的取图标 API 抓图对比）：
+     绝对路径 → 显示小鲸鱼；相对路径 → 白纸；留空 → .bat 的默认齿轮图标。
+     相对路径换来的"整包搬走图标依然有效"也是**假的** —— `.lnk` 的目标路径本来就是绝对的。
 
    （为什么不能直接给你一个现成的 .lnk：它里面存的是**绝对路径**，
      在作者机器上生成的那份，到你机器上目标和图标都会失效。）
