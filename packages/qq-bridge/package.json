@@ -1,9 +1,9 @@
 {
   "name": "qq-bridge",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "type": "module",
-  "description": "QQ <-> DSH bridge: relays triggering QQ messages into a `dsh --profile sdk` agent session and sends the answer back. Replaces the in-process llm.stream design of packages/dsh-qq-bot.",
+  "description": "InteractiveRobot（「小鲸鱼」QQ 交互式机器人）的桥接模块：把 QQ 消息转给一个 `dsh --profile sdk` agent 会话，再把回答发回 QQ。模块名 qq-bridge 保持不变（描述的是「桥接」这个模块）；项目英文名 InteractiveRobot（0.2.8 从 InteractBot 改名）。",
   "main": "src/index.mjs",
   "scripts": {
     "setup": "node setup.mjs",

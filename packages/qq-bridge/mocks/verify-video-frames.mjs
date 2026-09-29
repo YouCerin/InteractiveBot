@@ -1,5 +1,5 @@
 /**
- * 技能「视频抽帧」（`skills/video-frames`，上游 video-frames 1.0.0 的 InteractBot 适配版）的守卫套件。
+ * 技能「视频抽帧」（`skills/video-frames`，上游 video-frames 1.0.0 的 InteractiveRobot 适配版）的守卫套件。
  *
  * ══════════════════════════════════════════════════════════════════════════
  * 为什么需要这组断言（它挡的是哪几类"看着都在、其实用不了"）
@@ -103,7 +103,7 @@ writeFileSync(join(pathWith, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmp
    ══════════════════════════════════════════════════════════════════════════ */
 section('① 目录实体：技能必须是一份真实存在、非空的最小集')
 
-const ENTRIES = ['skill.json', 'index.js', 'frames.js', 'workspace.js', 'sources.js', 'README-InteractBot.md']
+const ENTRIES = ['skill.json', 'index.js', 'frames.js', 'workspace.js', 'sources.js', 'README-InteractiveRobot.md']
 check('技能目录存在', existsSync(SKILL_DIR), SKILL_DIR)
 const files = existsSync(SKILL_DIR)
   ? readdirSync(SKILL_DIR, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).sort()

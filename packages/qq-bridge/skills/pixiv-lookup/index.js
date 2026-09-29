@@ -51,14 +51,14 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SKILL_ID = 'pixiv-lookup'
-// ★ InteractBot 适配①：这三个名字**由宿主注入**（见 setup 里的 hostName）。
-//   上游宿主把工具名拼成 `pixiv-lookup__search`；而 InteractBot 里模型看到的是
+// ★ InteractiveRobot 适配①：这三个名字**由宿主注入**（见 setup 里的 hostName）。
+//   上游宿主把工具名拼成 `pixiv-lookup__search`；而 InteractiveRobot 里模型看到的是
 //   `mcp__skills__pixiv-lookup__search`（DSH 的 MCP 客户端会按服务器名加前缀）。
 //   提示词里写死旧名字 ⇒ 模型会去调一个**不存在**的工具，而且失败得很安静（它只会说"查不到"）。
 let TOOL_SEARCH = `${SKILL_ID}__search`
 let TOOL_ARTWORK = `${SKILL_ID}__artwork`
 let TOOL_RANKING = `${SKILL_ID}__ranking`
-// 发图工具同样由宿主提供（InteractBot 那份是 `mcp__qq__qq_send_image`）。
+// 发图工具同样由宿主提供（InteractiveRobot 那份是 `mcp__qq__qq_send_image`）。
 // ★ 它**必须显式带 kind/peerId**：那个 MCP 进程不知道"当前会话"是谁（见下面各处的调用文案）。
 let TOOL_SEND_IMAGE = 'send_image'
 
@@ -71,7 +71,7 @@ let cfgOf = () => ({})
 let apiWarn = () => {}
 
 const DEFAULTS = {
-  // ★ InteractBot 适配②：默认**关**。
+  // ★ InteractiveRobot 适配②：默认**关**。
   //   清单里写的是 settings.enabled=false 且 enabledByDefault=false，而这里原本是 true ——
   //   两处不一致时，"只拿到显式配置"的宿主会把技能当成已开启（上游也踩过这条）。
   enabled: false,
@@ -1271,9 +1271,9 @@ export async function setup(api) {
   }
   apiWarn = (...a) => { try { api.warn && api.warn(...a) } catch { /* 日志失败不影响功能 */ } }
 
-  // ★ InteractBot 适配③：把**模型实际看到的工具名**从宿主那里拿过来。
+  // ★ InteractiveRobot 适配③：把**模型实际看到的工具名**从宿主那里拿过来。
   //   `api.toolName(id)` 是本宿主对上游契约的扩展；拿不到（跑在别的宿主里）就退回上游命名 ——
-  //   所以同一份代码在两个宿主里都能跑，而不是"改成只认 InteractBot"。
+  //   所以同一份代码在两个宿主里都能跑，而不是"改成只认 InteractiveRobot"。
   const hostName = (id, fallback) => {
     try { return (api.toolName && api.toolName(id)) || fallback } catch { return fallback }
   }

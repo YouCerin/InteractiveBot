@@ -9,7 +9,7 @@
  * 结果是一个很具体的坏现象：使用者问"你能不能删我电脑上的文件 / 你能做什么"，
  * 模型只能凭提示词里那一小段权限说明**猜**，而猜错的代价是随口的承诺或随口的自我否定。
  *
- * 所以桥接启动时把这份文档**复制进工作区**（`store/interactbot-intro.md`），
+ * 所以桥接启动时把这份文档**复制进工作区**（`store/project-intro.md`），
  * 并在提示词里留**一行**指针（`projectDocLine()`）告诉它：被问到这类问题时先读那个文件。
  *
  * ── 四条设计取舍（改这里之前先读）────────────────────────────────────────
@@ -26,12 +26,28 @@
  *    降级时提示词里那一行也**不会出现**（没有悬空指针）。
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { PKG_ROOT } from './local.mjs'
 
-/** 副本落在工作区的哪个位置（工作区相对路径）。 */
-export const PROJECT_DOC_REL = 'store/interactbot-intro.md'
+/**
+ * 副本落在工作区的哪个位置（工作区相对路径）。
+ *
+ * ★ 0.2.8 改名时**刻意换成品牌中立的名字**（原来是 `store/interactbot-intro.md`）：
+ *   这一格以后无论项目叫什么都成立，改名不用再动它。
+ */
+export const PROJECT_DOC_REL = 'store/project-intro.md'
+
+/**
+ * **旧名字**的副本位置（0.2.8：InteractBot → InteractiveRobot）。
+ *
+ * 为什么要主动删：桥接每次启动都会写新名字的副本，而**老工作区里还留着一份旧名字的**。
+ * 它不会报错，只会造成两种误导 ——
+ *   ① 模型可能读到**过期的**旧副本（旧版本内容 + 旧名字）；
+ *   ② 使用者看到两个几乎同名的文件，不知道哪个是活的。
+ * 删它是安全的：这个文件**由桥接自己生成**（见文件头 ③「每次启动重写」），不是用户内容。
+ */
+export const LEGACY_PROJECT_DOC_RELS = ['store/interactbot-intro.md']
 
 /**
  * 源文档的候选位置（按顺序找，相对包根）。
@@ -62,9 +78,9 @@ export function findProjectDocSource({ pkgRoot = PKG_ROOT } = {}) {
  */
 export function renderProjectDocCopy({ text, sourcePath, version = '', generatedAt = '' } = {}) {
   const head = [
-    '# InteractBot 项目简介（启动时自动生成的副本）',
+    '# InteractiveRobot 项目简介（启动时自动生成的副本）',
     '',
-    `> 来源：\`${sourcePath}\`${version ? `（InteractBot ${version}）` : ''}`,
+    `> 来源：\`${sourcePath}\`${version ? `（InteractiveRobot ${version}）` : ''}`,
     `> 生成时间：${generatedAt || '（未知）'}`,
     '> ⚠️ **别改这份文件**：桥接每次启动都会用它覆盖你。要改就改源文件（上面那个路径）。',
     '> 用途：回答"你能做什么 / 你能改我的文件吗 / 这个项目是怎么实现的"这类问题时**先读它**，不要凭印象答。',
@@ -102,7 +118,24 @@ export function ensureProjectDocCopy({ workspace, pkgRoot = PKG_ROOT, version = 
     })
     mkdirSync(dirname(abs), { recursive: true })
     writeFileSync(abs, body, 'utf8')
-    return { ok: true, rel: PROJECT_DOC_REL, chars: body.length, source: found.rel }
+    // 顺手清掉**旧名字**的副本（见 LEGACY_PROJECT_DOC_RELS）。删不掉不是错误：
+    // 它只是"老工作区里的遗留物"，下一次启动还会再试一次。
+    const removedLegacy = []
+    for (const rel of LEGACY_PROJECT_DOC_RELS) {
+      const legacy = join(ws, rel)
+      try {
+        if (existsSync(legacy)) {
+          rmSync(legacy)
+          removedLegacy.push(rel)
+        }
+      } catch {
+        /* 留着就留着，不打断启动 */
+      }
+    }
+    if (removedLegacy.length) {
+      log(`ℹ️  已清掉旧名字的项目简介副本：${removedLegacy.join('、')}（0.2.8 改名前的遗留物，桥接自己生成的）`)
+    }
+    return { ok: true, rel: PROJECT_DOC_REL, chars: body.length, source: found.rel, removedLegacy }
   } catch (error) {
     // 写不进去不影响收发消息（增强路径纪律），但必须说出来。
     log(`⚠️  项目简介副本写入失败（不影响收发消息）：${error?.message ?? error}`)

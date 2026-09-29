@@ -1,8 +1,18 @@
-# project_InteractBot
+# InteractiveRobot（「小鲸鱼」QQ 交互式机器人）
 
 把**可配置的 QQ 对话机器人**接到 DeepSeek Harness（DSH）：QQ 消息 → DSH agent → 回答发回 QQ。
 
-> **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.7）**。它**不是** DSH 插件，
+> **三个名字，各管一件事**（0.2.8 改名时定的）：
+> · **项目名**：中文「小鲸鱼」QQ 交互式机器人 / 英文 `InteractiveRobot`
+> · **机器人名**：`小鲸鱼`（提示词里的人设名，代码与配置里都用它，别改）
+> · **模块名**：`packages/qq-bridge` 与 `package.json` 的 `qq-bridge`（**刻意不改** ——
+>   它是"桥接"这个模块的名字，改它要动几十条路径与文档，收益只有观感）
+>
+> ⚠️ **曾用名 `InteractBot`**：0.2.7 及更早的代码、文档、发布包都用这个名字。
+> `docs/0.2.x-*.md` 这类**历史取证文档一字未动**（改它们等于篡改证据），
+> 所以你在里面会看到旧名与旧发布包名，那是**故意**的。
+
+> **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.8）**。它**不是** DSH 插件，
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
 > `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
 
@@ -27,7 +37,7 @@
 ## 目录结构
 
 ```
-project_InteractBot/
+InteractiveRobot/
 ├── .dsh/skills/                    # 已安装的 DSH 插件开发 skill（10 个）
 ├── reference/                      # 上游参考（只读留档）
 │   ├── dsh-agent-teams/            # skill 源 + 开发文档 + git 历史
@@ -56,6 +66,16 @@ project_InteractBot/
 │                                       # （回归基线，见 docs/implementation-plan.md §8）
 └── README.md
 ```
+
+## 0.2.8 这一版加了什么（一句话）
+
+**改名 + 发布前把两处真问题修掉**：项目名从 `InteractBot` 换成 **`InteractiveRobot`（「小鲸鱼」QQ 交互式机器人）**
+（英文名 `qq-bridge` 在同一生态里已被另一个项目占用）；发布包前缀随之改为 `InteractiveRobot-<版本>-win-x64`，
+工作区里那份自动生成的简介副本改成品牌中立的 `store/project-intro.md`（老副本会自动清掉）。
+同时修掉：**隐私闸把"提到指纹"当成"泄露隐私"、整条回复被吞**（真机上"指纹锁坏了"这类正常回答也会被吞），
+以及两套**在受限沙箱里一直静默跳过**的全链路套件（第一次真跑抓到 16 项陈旧断言）。
+
+详见 `docs/0.2.8-release-notes.md`；那 17 项红的完整交代在 `docs/0.2.7-release-notes.md` §5。
 
 ## 0.2.7 这一版加了什么（一句话）
 
@@ -135,7 +155,7 @@ copy config.example.json config.json    # 模板：密钥与本机路径都是�
 ## 怎么跑起来（最短路径，Windows）
 
 ```bash
-git clone <仓库地址> && cd project_InteractBot/packages/qq-bridge
+git clone <仓库地址> && cd InteractiveRobot/packages/qq-bridge
 npm install                               # 装 ws + undici（纯 JS，无需编译）
 node setup.mjs                            # 把纯 JS 依赖收进 vendor/（幂等，可重复跑）
 copy config.example.json config.json      # 然后填 SnowLuma 的 token 与模型 API key

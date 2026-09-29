@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "apiVersion": 1,
   "description": "从导入的表情库里按场景挑一张发出去（判定全在本地，运行期零模型调用）",
-  "author": "InteractBot",
+  "author": "InteractiveRobot",
   "category": "media",
   "icon": "🖼️",
   "entry": "index.js",

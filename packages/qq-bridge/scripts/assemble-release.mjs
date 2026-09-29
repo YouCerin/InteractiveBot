@@ -20,7 +20,7 @@
  * 版本号**只从 `package.json` 读**（单一来源）—— 脚本里再写一遍就会分叉。
  *
  * 用法：
- *   node scripts/assemble-release.mjs                     # 组装到 ../../_release/InteractBot-<版本>-win-x64
+ *   node scripts/assemble-release.mjs                     # 组装到 ../../_release/InteractiveRobot-<版本>-win-x64
  *   node scripts/assemble-release.mjs --out <目录>         # 指定输出目录
  *   node scripts/assemble-release.mjs --dry-run           # 只报告要做什么，不写盘
  *   node scripts/assemble-release.mjs --zip               # 组装后压缩（已存在同名 zip 则拒绝）
@@ -51,7 +51,7 @@ const WANT_ZIP = flag('--zip')
 
 const pkg = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
 const VERSION = pkg.version
-const DEFAULT_OUT = join(REPO_ROOT, '_release', `InteractBot-${VERSION}-win-x64`)
+const DEFAULT_OUT = join(REPO_ROOT, '_release', `InteractiveRobot-${VERSION}-win-x64`)
 const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 
 /** 要整目录拷贝的（相对包根）。 */
@@ -94,7 +94,7 @@ const bad = (m) => {
 }
 
 log('')
-log(`组装发布包  InteractBot-${VERSION}-win-x64`)
+log(`组装发布包  InteractiveRobot-${VERSION}-win-x64`)
 log(`  源  ：${PKG_ROOT}`)
 log(`  目标：${OUT}`)
 if (DRY) log('  ⚠️ --dry-run：只报告，不写盘')
@@ -166,7 +166,12 @@ if (existsSync(OUT)) {
   log('   ✅ 目标目录不存在，可以新建')
 }
 const existing = existsSync(join(REPO_ROOT, '_release'))
-  ? readdirSync(join(REPO_ROOT, '_release')).filter((n) => n.startsWith('InteractBot-'))
+  ? readdirSync(join(REPO_ROOT, '_release')).filter(
+      // ★ 两个前缀都认：0.2.8 改名（InteractBot → InteractiveRobot），但 `_release/` 里
+      //   还躺着改名前打的那几个包 —— 只认新前缀的话这一行会"看不见"它们，
+      //   而它正是"老版本留着对照"给人看的清单（少列 = 误导）。
+      (n) => n.startsWith('InteractiveRobot-') || n.startsWith('InteractBot-'),
+    )
   : []
 if (existing.length) log(`   （_release 里已有：${existing.join('、')}）`)
 

@@ -54,7 +54,7 @@ export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000
 /** 重定向最多跟几跳。 */
 export const DEFAULT_MAX_REDIRECTS = 3
 /** 下载时自报的身份。 */
-export const USER_AGENT = 'interactbot-video-frames/1.0 (+skill)'
+export const USER_AGENT = 'interactiverobot-video-frames/1.0 (+skill)'
 
 /* ────────────────────────────────────────────────────────────────────────
  * 地址判定（与 src/images.mjs 同一套阈值）

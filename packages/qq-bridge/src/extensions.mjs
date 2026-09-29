@@ -706,7 +706,7 @@ export async function loadSkill(skill, { config, log = () => {}, registerTool } 
     return skill
   }
   if (typeof mod.setup !== 'function') {
-    skill.loadError = '入口模块没有导出 setup(api) —— 这不是一份 InteractBot 技能'
+    skill.loadError = '入口模块没有导出 setup(api) —— 这不是一份 InteractiveRobot 技能'
     return skill
   }
 

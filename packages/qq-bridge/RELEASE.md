@@ -238,7 +238,7 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 **发布包的最终形状**（73 个文件 / 解压后约 87 MB / zip 约 32.6 MB）：
 
 ```
-InteractBot-<版本>-win-x64/
+InteractiveRobot-<版本>-win-x64/
 ├── 首次使用.txt             ← ★ 给**非技术用户**的完整上手说明（含官方下载链接）
 ├── start.bat               ← ★ 唯一入口：双击启动；`start.bat --check/--doctor` 自检
 ├── config.json             ← ★ 空白模板（密钥与本机路径全空）
@@ -258,7 +258,7 @@ InteractBot-<版本>-win-x64/
 （旧版本与新版本**并存**，文件名前缀一样、只有版本号不同），
 脚本也**不许覆盖同名目录**。zip **不入库**（与同名目录逐字节相同，却要多占约 32 MB）。
 
-> ⚠️ 这份文档里**只允许出现当前版本号**（`InteractBot-<版本>-win-x64`）——
+> ⚠️ 这份文档里**只允许出现当前版本号**（`InteractiveRobot-<版本>-win-x64`）——
 > `mocks/verify-manifest.mjs` 有一条断言盯着"文案里的版本号与 `package.json` 一致
 > **且只有一种**"。要举例说明"旧版本并存"时用文字描述，不要写出具体的旧版本号，
 > 否则那条断言会红（它没法区分"举例"和"漏改"）。
@@ -279,7 +279,7 @@ InteractBot-<版本>-win-x64/
 ### 打包后必须跑一次验收脚本
 
 ```powershell
-node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractBot-0.2.7-win-x64"
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractiveRobot-0.2.8-win-x64"
 ```
 
 它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**

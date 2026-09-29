@@ -1,4 +1,4 @@
-# 视频识别（video-frames）— InteractBot 版
+# 视频识别（video-frames）— InteractiveRobot 版
 
 > ★ **0.2.7 改名**：显示名从「视频抽帧」改成「视频识别」。理由是"抽帧"说的是**手段**
 > （把视频切成一堆图），而你要的是**能力**（看懂视频里有什么）；旧名字还容易让人以为它只做切图。
@@ -214,7 +214,7 @@ node mocks/verify-video-frames.mjs                       # 本技能的守卫套
 
 ## 与上游那份插件的差别（摘要）
 
-| | 上游（QQ Agent） | 这里（InteractBot） |
+| | 上游（QQ Agent） | 这里（InteractiveRobot） |
 |---|---|---|
 | 形态 | **能力提供者**（`providers['video.frames']`），模型看不见 | **工具**（`mcp__skills__video-frames__frames`），模型主动调 |
 | 产物 | base64 data URL，宿主直接拼进消息 | JPEG 落在工作区，返回相对路径 + 让模型 `read_image` |
@@ -225,4 +225,4 @@ node mocks/verify-video-frames.mjs                       # 本技能的守卫套
 | 帧目录/清理 | 临时文件，用完即删 | 工作区 `frames/`，默认 24 小时清理 |
 
 **上游那条能力导出仍然保留**（`providers['video.frames']` 与 `video.frames.available`），
-所以同一份代码在上游宿主里照样能跑 —— 适配的目标是"两个宿主都能跑"，不是"只认 InteractBot"。
+所以同一份代码在上游宿主里照样能跑 —— 适配的目标是"两个宿主都能跑"，不是"只认 InteractiveRobot"。

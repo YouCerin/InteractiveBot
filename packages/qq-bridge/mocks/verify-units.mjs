@@ -1109,7 +1109,7 @@ section('project-doc.mjs · 项目简介副本（让 agent 需要时能自己读
   check('★ 并且告诉模型"什么时候用它"（被问到权限/能力时）', /你能做什么|能改我的文件/.test(withDoc))
   const withoutDoc = await buildChannelPrompt({ ...base, projectDocRel: '' })
   check('★★ 没有副本 → 提示词里**一个字都不提**（不留悬空指针）',
-    !withoutDoc.includes(PROJECT_DOC_REL) && !/interactbot-intro/.test(withoutDoc))
+    !withoutDoc.includes(PROJECT_DOC_REL) && !/project-intro/.test(withoutDoc))
   check('两种情况下其余提示词内容一致（只差那一行）',
     withoutDoc.length < withDoc.length && withDoc.replace(`\n\n${projectDocLine()}`, '') === withoutDoc,
     `${withoutDoc.length} vs ${withDoc.length}`)

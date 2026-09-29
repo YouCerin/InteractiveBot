@@ -6,7 +6,7 @@
 
 ---
 
-## 一、随**发布包**（`_release/InteractBot-*-win-x64.zip`）分发的
+## 一、随**发布包**（`_release/InteractiveRobot-*-win-x64.zip`）分发的
 
 | 组件 | 版本 | 许可证 | 在包里的位置 | 许可证文本 |
 |---|---|---|---|---|
