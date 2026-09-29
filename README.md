@@ -14,7 +14,6 @@
 
 > **当前状态：`packages/qq-bridge` 是唯一在维护的实现（0.2.8）**。它**不是** DSH 插件，
 > 而是"外部进程 + `dsh --profile sdk`"的桥接。
-> `packages/dsh-qq-bot（废弃）` 是第一版的"DSH 进程内插件"思路，仅作参考，不再改动。
 
 ## 开源说明（**动手前先读这 6 条**）
 
@@ -50,13 +49,12 @@ InteractiveBot/
 │   ├── pixiv-lookup-1.1.0/         # ★ 第三方技能**原件**（适配前的逐字副本）
 │   └── video-frames-1.0.0/         # ★ 同上：上游插件原件（plugin.json + index.js + frames.js）
 ├── packages/
-│   ├── qq-bridge/                  # ★ 在维护的那个：QQ ↔ DSH 桥接（详见它自己的 README/AGENT.md）
-│   │   ├── src/                    # 桥接主体（含扩展内核 extensions.mjs / 插件表 plugins.mjs）
-│   │   ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
-│   │   ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup、sticker、video-frames
-│   │   ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
-│   │   └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
-│   └── dsh-qq-bot（废弃）/
+│   └── qq-bridge/                  # ★ 唯一在维护的实现：QQ ↔ DSH 桥接（详见它自己的 README/AGENT.md）
+│       ├── src/                    # 桥接主体（含扩展内核 extensions.mjs / 插件表 plugins.mjs）
+│       ├── mcp/                    # 手写 MCP 服务器：QQ 工具 + 技能工具
+│       ├── skills/                 # ★ 外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup、sticker、video-frames
+│       ├── config-ui/              # 控制台界面（React + Vite；改了 src 必须 npm run build）
+│       └── docs/、CONFIG-UI.md、AGENT.md、PROJECT.json …
 ├── docs/                           # 版本级文档（设计 / 验收 / 适配存档）
 │   ├── 插件设计规范.md              # ★ 扩展体系的契约（技能清单、生命周期、安全、UI、验收）
 │   ├── 0.2.7-release-notes.md       # ★ 这一版：视频识别接线 + 三处静默失效清理
@@ -189,8 +187,3 @@ npm test
 其中需要真实 ffmpeg 的那一套（`npm run test:video-frames-real`）在你没装 ffmpeg 时会
 **大声跳过**（打印原因、计数归零），不会假装通过 —— 这个项目里"静默跳过"被当成 bug 对待。
 
-## 遗留：`packages/dsh-qq-bot`（已废弃，不要从这里接着做）
-
-它是最初"DSH 进程内插件"的思路，`packages/dsh-qq-bot/src/index.ts` 里的 TODO 与
-`pnpm install / build / typecheck` 那套流程**都停在半路**。保留它只为对照两种形态的差异；
-当前唯一的维护方向是 `packages/qq-bridge`。
