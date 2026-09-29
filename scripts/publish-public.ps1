@@ -92,7 +92,7 @@ $tree = (git -C $CloneDir rev-parse 'HEAD^{tree}').Trim()
 if ($tree -ne $devTree) { Fail "HEAD tree differs: clone $tree vs dev $devTree -- the rewrite changed content it should not have" }
 Ok "HEAD tree identical to the dev repo: $tree"
 
-$keys = @(& node (Join-Path $tools 'scrub-ids.mjs') --keys) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+$keys = @(@(& node (Join-Path $tools 'scrub-ids.mjs') --keys) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($keys.Count -eq 0) { Fail "could not read the private identifier list from scrub-ids.mjs --keys" }
 $bad = @()
 foreach ($k in $keys) {
@@ -111,7 +111,11 @@ if (@(git -C $CloneDir log --all --oneline -- _release).Count -ne 0) { Fail "_re
 if (@(git -C $CloneDir ls-files | Where-Object { $_ -match '\.lnk$' }).Count -ne 0) { Fail ".lnk files are tracked (they carry absolute paths incl. the user's home dir)" }
 Ok "_release: 0 commits; tracked .lnk: 0"
 
-$authors = @(git -C $CloneDir log --format='%ae') | ForEach-Object { $_.Trim() } | Sort-Object -Unique
+# NOTE: wrap the WHOLE pipeline in @(...). Writing `@(git ...) | ForEach-Object ...`
+# makes PowerShell unwrap a single-element result into a scalar, so `$authors[0]`
+# becomes the first CHARACTER of the string ('1') and the check reports a mismatch
+# while printing the very value it expected (hit for real on the first run).
+$authors = @(@(git -C $CloneDir log --format='%ae') | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
 if ($authors.Count -ne 1 -or $authors[0] -ne $CommitEmail) { Fail "unexpected author email(s): $($authors -join ', ')" }
 Ok "author email: $($authors[0])"
 
