@@ -1,9 +1,9 @@
-# pixiv 查图插件（InteractiveRobot 版）— 与上游说明的差异
+# pixiv 查图插件（InteractiveBot 版）— 与上游说明的差异
 
 > 这份文件**只讲差异**。插件的完整介绍、Pixiv 接口细节、Cookie 怎么拿，
 > 都在同目录的 `README.md` 与 `安装与使用说明.md` 里 —— 那两份是**为上游宿主（QQ Agent）写的**，
 > 我们刻意没有逐句改写（改动清单与理由见 `docs/0.2.2-pixiv-skill-migration.md`）。
-> 凡是那两份里提到"技能设置 / 设置 → 安全"的地方，在 InteractiveRobot 里都对应本文的路径。
+> 凡是那两份里提到"技能设置 / 设置 → 安全"的地方，在 InteractiveBot 里都对应本文的路径。
 
 ## 怎么打开它
 
@@ -21,7 +21,7 @@ mcp__skills__pixiv-lookup__ranking    日榜/周榜…
 ```
 
 （上游那份说明里写的是 `pixiv-lookup__search` 等 —— 那是上游宿主的命名，
-在 InteractiveRobot 里前面会多一段 `mcp__skills__`。这是 DSH 的 MCP 客户端加的，改不了，
+在 InteractiveBot 里前面会多一段 `mcp__skills__`。这是 DSH 的 MCP 客户端加的，改不了，
 所以插件的提示词由宿主注入真实工具名。）
 
 ## 设置在哪

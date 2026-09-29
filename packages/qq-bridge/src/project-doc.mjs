@@ -39,7 +39,7 @@ import { PKG_ROOT } from './local.mjs'
 export const PROJECT_DOC_REL = 'store/project-intro.md'
 
 /**
- * **旧名字**的副本位置（0.2.8：InteractBot → InteractiveRobot）。
+ * **旧名字**的副本位置（0.2.8：InteractBot → InteractiveBot）。
  *
  * 为什么要主动删：桥接每次启动都会写新名字的副本，而**老工作区里还留着一份旧名字的**。
  * 它不会报错，只会造成两种误导 ——
@@ -78,9 +78,9 @@ export function findProjectDocSource({ pkgRoot = PKG_ROOT } = {}) {
  */
 export function renderProjectDocCopy({ text, sourcePath, version = '', generatedAt = '' } = {}) {
   const head = [
-    '# InteractiveRobot 项目简介（启动时自动生成的副本）',
+    '# InteractiveBot 项目简介（启动时自动生成的副本）',
     '',
-    `> 来源：\`${sourcePath}\`${version ? `（InteractiveRobot ${version}）` : ''}`,
+    `> 来源：\`${sourcePath}\`${version ? `（InteractiveBot ${version}）` : ''}`,
     `> 生成时间：${generatedAt || '（未知）'}`,
     '> ⚠️ **别改这份文件**：桥接每次启动都会用它覆盖你。要改就改源文件（上面那个路径）。',
     '> 用途：回答"你能做什么 / 你能改我的文件吗 / 这个项目是怎么实现的"这类问题时**先读它**，不要凭印象答。',

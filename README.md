@@ -1,9 +1,9 @@
-# InteractiveRobot（「小鲸鱼」QQ 交互式机器人）
+# InteractiveBot（「小鲸鱼」QQ 交互式机器人）
 
 把**可配置的 QQ 对话机器人**接到 DeepSeek Harness（DSH）：QQ 消息 → DSH agent → 回答发回 QQ。
 
 > **三个名字，各管一件事**（0.2.8 改名时定的）：
-> · **项目名**：中文「小鲸鱼」QQ 交互式机器人 / 英文 `InteractiveRobot`
+> · **项目名**：中文「小鲸鱼」QQ 交互式机器人 / 英文 `InteractiveBot`
 > · **机器人名**：`小鲸鱼`（提示词里的人设名，代码与配置里都用它，别改）
 > · **模块名**：`packages/qq-bridge` 与 `package.json` 的 `qq-bridge`（**刻意不改** ——
 >   它是"桥接"这个模块的名字，改它要动几十条路径与文档，收益只有观感）
@@ -37,7 +37,7 @@
 ## 目录结构
 
 ```
-InteractiveRobot/
+InteractiveBot/
 ├── .dsh/skills/                    # 已安装的 DSH 插件开发 skill（10 个）
 ├── reference/                      # 上游参考（只读留档）
 │   ├── dsh-agent-teams/            # skill 源 + 开发文档 + git 历史
@@ -69,8 +69,8 @@ InteractiveRobot/
 
 ## 0.2.8 这一版加了什么（一句话）
 
-**改名 + 发布前把两处真问题修掉**：项目名从 `InteractBot` 换成 **`InteractiveRobot`（「小鲸鱼」QQ 交互式机器人）**
-（英文名 `qq-bridge` 在同一生态里已被另一个项目占用）；发布包前缀随之改为 `InteractiveRobot-<版本>-win-x64`，
+**改名 + 发布前把两处真问题修掉**：项目名从 `InteractBot` 换成 **`InteractiveBot`（「小鲸鱼」QQ 交互式机器人）**
+（英文名 `qq-bridge` 在同一生态里已被另一个项目占用）；发布包前缀随之改为 `InteractiveBot-<版本>-win-x64`，
 工作区里那份自动生成的简介副本改成品牌中立的 `store/project-intro.md`（老副本会自动清掉）。
 同时修掉：**隐私闸把"提到指纹"当成"泄露隐私"、整条回复被吞**（真机上"指纹锁坏了"这类正常回答也会被吞），
 以及两套**在受限沙箱里一直静默跳过**的全链路套件（第一次真跑抓到 16 项陈旧断言）。
@@ -155,7 +155,7 @@ copy config.example.json config.json    # 模板：密钥与本机路径都是�
 ## 怎么跑起来（最短路径，Windows）
 
 ```bash
-git clone <仓库地址> && cd InteractiveRobot/packages/qq-bridge
+git clone <仓库地址> && cd InteractiveBot/packages/qq-bridge
 npm install                               # 装 ws + undici（纯 JS，无需编译）
 node setup.mjs                            # 把纯 JS 依赖收进 vendor/（幂等，可重复跑）
 copy config.example.json config.json      # 然后填 SnowLuma 的 token 与模型 API key

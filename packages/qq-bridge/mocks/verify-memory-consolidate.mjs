@@ -165,8 +165,8 @@ try {
     JSON.stringify(dupRes.droppedDuplicates))
 
   const simDoc = [
-    '- 他在给 InteractiveRobot 加表情包功能',
-    '- 他在给 InteractiveRobot 加表情包功能，卡在省 token',
+    '- 他在给 InteractiveBot 加表情包功能',
+    '- 他在给 InteractiveBot 加表情包功能，卡在省 token',
   ].join('\n')
   const simRes = consolidate(simDoc, { threshold: 0.6 })
   check('★ 高相似的两条被合并成一条', simRes.after === 1, `after=${simRes.after}`)

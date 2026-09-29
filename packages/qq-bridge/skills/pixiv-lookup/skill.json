@@ -22,7 +22,7 @@
     "开关口径：唯一开关是 config.skills['pixiv-lookup'].enabled。",
     "enabledByDefault:false = 装好后默认关，由管理员在「控制台 → 扩展 → pixiv 查图插件」里打开，避免刚装就联网。",
     "注意：enabledByDefault:false 时上游 isEnabled() 会在 available() 之前短路 —— 这是预期行为。",
-    "★ InteractiveRobot 适配：开关**即时生效**（不需要重启桥接）；只有装/卸技能本身才需要重启。"
+    "★ InteractiveBot 适配：开关**即时生效**（不需要重启桥接）；只有装/卸技能本身才需要重启。"
   ],
   "settings": {
     "enabled": false,
@@ -156,7 +156,7 @@
 
   "prompt": {
     "source": "runtime",
-    "_说明": "★ InteractiveRobot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关与设置变），所以这里的静态副本已删除。上游宿主两份都读，会出现同一段话两种措辞。"
+    "_说明": "★ InteractiveBot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关与设置变），所以这里的静态副本已删除。上游宿主两份都读，会出现同一段话两种措辞。"
   },
 
   "tools": [
@@ -212,5 +212,5 @@
     }
   ],
 
-  "_note_tools_is_metadata": "tools[] 是**说明性元数据**（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。id 写 'search'，工具全名由**宿主**拼：上游是 pixiv-lookup__search，InteractiveRobot 是 mcp__skills__pixiv-lookup__search（MCP 客户端按服务器名加前缀）—— 所以 index.js 里的工具名常量改成了由宿主注入。改法与逐处原因见同目录的 README-InteractiveRobot.md，以及仓库根的 docs/0.2.2-pixiv-skill-migration.md（含可直接复算的 diff：docs/0.2.2-pixiv-adaptation.patch）。清单里的 id 与注册的对不上时，宿主会警告「清单声明了却没 registerTool」。"
+  "_note_tools_is_metadata": "tools[] 是**说明性元数据**（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。id 写 'search'，工具全名由**宿主**拼：上游是 pixiv-lookup__search，InteractiveBot 是 mcp__skills__pixiv-lookup__search（MCP 客户端按服务器名加前缀）—— 所以 index.js 里的工具名常量改成了由宿主注入。改法与逐处原因见同目录的 README-InteractiveBot.md，以及仓库根的 docs/0.2.2-pixiv-skill-migration.md（含可直接复算的 diff：docs/0.2.2-pixiv-adaptation.patch）。清单里的 id 与注册的对不上时，宿主会警告「清单声明了却没 registerTool」。"
 }

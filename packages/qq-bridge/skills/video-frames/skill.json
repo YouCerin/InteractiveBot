@@ -12,7 +12,7 @@
   ],
   "version": "1.0.0",
   "apiVersion": 1,
-  "description": "用 ffmpeg 把视频抽成若干张截图存进工作区，让只能看图的模型也能「看」视频。上游 video-frames 插件的 InteractiveRobot 适配版（上游那份是「能力提供者」，本宿主改成模型可调的工具）。",
+  "description": "用 ffmpeg 把视频抽成若干张截图存进工作区，让只能看图的模型也能「看」视频。上游 video-frames 插件的 InteractiveBot 适配版（上游那份是「能力提供者」，本宿主改成模型可调的工具）。",
   "author": "QQ Agent",
   "entry": "index.js",
   "category": "media",
@@ -147,10 +147,10 @@
 
   "prompt": {
     "source": "runtime",
-    "_说明": "★ InteractiveRobot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关、帧数与宿主工具名变），所以这里不放静态副本 —— 两份都留会让同一段话出现两种措辞（上游宿主就是这样）。"
+    "_说明": "★ InteractiveBot 适配：提示词片段以入口模块导出的 promptSections() 为**唯一来源**（它会跟着开关、帧数与宿主工具名变），所以这里不放静态副本 —— 两份都留会让同一段话出现两种措辞（上游宿主就是这样）。"
   },
 
   "_note_tools_is_metadata": "tools[] 是**说明性元数据**（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。这里 id 写 'frames'，模型看到的全名由**宿主**拼：mcp__skills__video-frames__frames（DSH 的 MCP 客户端加 mcp__skills__ 前缀），所以 index.js 里的名字由宿主注入、绝不写死。",
 
-  "_note_upstream": "上游原件逐字留档在 reference/video-frames-1.0.0/（plugin.json + index.js + frames.js）；逐处改法与理由见 docs/0.2.7-video-frames-migration.md；使用者视角的差异说明见同目录 README-InteractiveRobot.md。"
+  "_note_upstream": "上游原件逐字留档在 reference/video-frames-1.0.0/（plugin.json + index.js + frames.js）；逐处改法与理由见 docs/0.2.7-video-frames-migration.md；使用者视角的差异说明见同目录 README-InteractiveBot.md。"
 }

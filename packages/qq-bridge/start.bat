@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================================
-rem  InteractiveRobot launcher  (product name; the module is packages/qq-bridge)
+rem  InteractiveBot launcher  (product name; the module is packages/qq-bridge)
 rem
 rem  Why this file exists: double-click to run, with **no dependency on a
 rem  system-installed Node**. It prefers the bundled vendor\node\node.exe

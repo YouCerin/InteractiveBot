@@ -1267,7 +1267,7 @@ const cmdRaw = useAuto ? locate.cmd : launchCmd   // ← 填了就一定用你�
 ```
 
 **这个坑真实发生过**：本项目的 `config.json` 里 `launchCmd` 曾被填成
-`…/InteractiveRobot/snowluma/launcher.bat`，于是"优先 `index.mjs` + 包内 node"
+`…/InteractiveBot/snowluma/launcher.bat`，于是"优先 `index.mjs` + 包内 node"
 这个决定**从来没有生效过** —— 实测进程命令行是 `node ./index.mjs`（系统 node），
 父进程是 `cmd /c "…\snowluma\launcher.bat"`。而该字段当时的说明还写反了
 （写成「留空 = 用 `launcher.bat`」），照它做正好得到相反的结果。

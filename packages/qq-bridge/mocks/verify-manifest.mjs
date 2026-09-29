@@ -384,11 +384,11 @@ section('版本号只有一个来源（四处必须一致）')
   check('★ MCP server info 的 version 与 package.json 一致', mcpV === v, `${mcpV} vs ${v}`)
 
   const relMd = readFileSync(join(PKG_ROOT, 'RELEASE.md'), 'utf8')
-  const names = [...new Set([...relMd.matchAll(/InteractiveRobot-([0-9][^-\s]*)-win-x64/g)].map((m) => m[1]))]
+  const names = [...new Set([...relMd.matchAll(/InteractiveBot-([0-9][^-\s]*)-win-x64/g)].map((m) => m[1]))]
   check(
     '★ RELEASE.md 里的发布包名与 package.json 一致（且只有一种版本）',
     names.length === 1 && names[0] === v,
-    names.join('、') || '（没找到 InteractiveRobot-*-win-x64）',
+    names.join('、') || '（没找到 InteractiveBot-*-win-x64）',
   )
 }
 

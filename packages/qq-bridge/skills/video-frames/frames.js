@@ -1,7 +1,7 @@
 // 抽帧实现层：只跟 ffmpeg 打交道，**不碰配置、不碰网络、不碰宿主**。
 //
 // 这一份是上游 `plugins/video-frames/frames.js`（逐字留档
-// `reference/video-frames-1.0.0/frames.js`）的 InteractiveRobot 适配版。上游那两条
+// `reference/video-frames-1.0.0/frames.js`）的 InteractiveBot 适配版。上游那两条
 // 关键设计说明**原样保留**（它们都是踩过的坑，不是文风）：
 //
 // ── 为什么 `-ss` 要放在 `-i` 前面 ──────────────────────────────────────
@@ -20,7 +20,7 @@
 // 代价是下载整个视频；换来的是不能被当跳板。
 //
 // ══════════════════════════════════════════════════════════════════════════
-// 适配加了两件上游没有的东西（为什么必须加，见 skills/video-frames/README-InteractiveRobot.md）
+// 适配加了两件上游没有的东西（为什么必须加，见 skills/video-frames/README-InteractiveBot.md）
 // ══════════════════════════════════════════════════════════════════════════
 //  ① `extractFramesToDir()`：把帧**留在盘上**并返回路径。
 //     上游只产出 base64 data URL（它的宿主把图直接塞进消息），而本宿主的技能工具
