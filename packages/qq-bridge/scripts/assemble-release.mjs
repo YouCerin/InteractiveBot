@@ -56,7 +56,11 @@ const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 // ★ `personas` 必须在清单里（0.2.2）：它是**出厂默认那两套人设**的文件。
 //   漏了它的后果是「发布包里一套人设都没有」—— 界面人设栏空着，而且**不会报错**
 //   （启动时的 `ensureDefaultPersonas` 只在人员没动过手时补默认，用户自己建过就什么都不补）。
-const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
+// ★ `sticker-label` 必须在清单里（0.2.4）：它是**独立的表情包人工标注台**
+//   （零依赖、只监听 127.0.0.1）。漏了它的后果是"用户拿到包以后没法标注" ——
+//   而它**不属于控制台**（用户明确要求分开），所以不会被 config-ui/dist 顺带带上。
+//   有断言盯着这一项：`mocks/verify-sticker-skill.mjs` 第 ⑦ 节。
+const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', 'sticker-label', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
 /** 要单文件拷贝的（相对包根）。★ `启动机器人.bat` 等三个入口**必须**在这里 —— 上次就是漏了它们。 */
 const COPY_FILES = [
   'package.json',
@@ -67,7 +71,11 @@ const COPY_FILES = [
   '检查配置.bat',
   '体检.bat',
   '创建带图标的快捷方式.bat',
-  'QQ机器人.lnk',
+  // ★ 名字必须与仓库里那份一致：`.lnk` 刻意用 **ASCII 名 `QQbot.lnk`**
+  //   （少一处代码页陷阱，也和文档/开发机同名 —— 见 PROJECT.json 里 `QQbot.lnk` 那条）。
+  //   ⚠️ 实测踩到：这里曾写成 `QQ机器人.lnk`，而仓库里只有 `QQbot.lnk`，于是本脚本的
+  //   "输入必须都存在"前置门**在组装之前就失败**（exit 非零），打包根本走不到拷贝那一步。
+  'QQbot.lnk',
   '先读我-首次使用.txt',
   'setup.mjs',
   'prices.json',

@@ -1,0 +1,72 @@
+{
+  "id": "sticker",
+  "name": "表情包",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "从导入的表情库里按场景挑一张发出去（判定全在本地，运行期零模型调用）",
+  "author": "InteractBot",
+  "category": "media",
+  "icon": "🖼️",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "session": "required",
+  "settings": {
+    "enabled": true,
+    "libraryDir": "stickers",
+    "frequency": "medium",
+    "scoreThreshold": 4,
+    "maxReplyChars": 120,
+    "maxSendBytes": 52428800,
+    "allowRisky": false
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用",
+      "description": "关掉后一次表情都不会发（提示词里也不再提这件事）"
+    },
+    "libraryDir": {
+      "type": "string",
+      "label": "表情库目录",
+      "description": "工作区内的相对目录；库按会话分目录（group-<群号>/、private-<QQ号>/）+ global/ 兜底",
+      "placeholder": "stickers"
+    },
+    "frequency": {
+      "type": "enum",
+      "label": "频率档位",
+      "values": ["low", "medium", "high"],
+      "description": "low=每 3 轮 1 次/间隔 2 分钟；medium=每 2 轮 1 次/30 秒；high=每轮/10 秒"
+    },
+    "scoreThreshold": {
+      "type": "number",
+      "label": "选图阈值",
+      "min": 0,
+      "max": 20,
+      "step": 0.5,
+      "description": "打分低于它就不发（宁可不发，也不发一张不对的）"
+    },
+    "maxReplyChars": {
+      "type": "integer",
+      "label": "正文长度上限",
+      "min": 20,
+      "max": 1000,
+      "step": 10,
+      "description": "正文超过这个字数就不配图（长回复再贴个表情很假）"
+    },
+    "maxSendBytes": {
+      "type": "integer",
+      "label": "单张发送上限（字节）",
+      "min": 102400,
+      "max": 209715200,
+      "step": 102400,
+      "description": "**兜底**用的上限：超过它的图不参与选图（默认 50MB ≈ 不拦）。实测协议端不看体积（5MB 的 GIF base64 后 6.76MB、453ms 传完），所以别调小 —— 第一版设成 2MB 把 155 张里的 115 张滤掉了"
+    },
+    "allowRisky": {
+      "type": "boolean",
+      "label": "允许发「慎发」类表情",
+      "default": false,
+      "description": "默认关。开着的时候，被标成 risky（脏话/骂人/擦边/重口/血腥/惊悚/恐怖）的表情才会参与选图；关着时它们压根不进候选（不是进去了但分数低）。这是一条安全闸门：发这类图的后果是账号被处置"
+    }
+  },
+  "prompt": { "source": "runtime" }
+}

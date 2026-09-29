@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>表情包人工标注台</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>表情包人工标注台</h1>
+      <nav class="tabs">
+        <button id="tab-pass" class="tab active">逐张标注</button>
+        <button id="tab-browse" class="tab">按标签看图<span class="badge" id="tab-badge"></span></button>
+      </nav>
+      <div class="stats" id="stats">加载中…</div>
+      <div class="head-right">
+        <button id="btn-undo" class="ghost" title="Ctrl+Z">↶ 撤销</button>
+        <button id="btn-reload" class="ghost">↻ 重载</button>
+        <!-- ★ 进程控制（用户明确要求）：这个工具是独立进程 + 固定端口，
+             端口被占时新进程连启动都失败，而页面上没有任何提示 ——
+             只能去任务管理器翻 node.exe。进程自己最清楚自己是谁，
+             所以"关掉自己"放在这里是最可靠的。 -->
+        <button id="btn-restart" class="ghost" title="关掉本进程并重新拉起（约 1 秒）">重启服务</button>
+        <button id="btn-quit" class="ghost danger" title="关闭标注台并释放端口">✕ 退出</button>
+        <!-- ★ 构建标记：让"浏览器到底在跑哪一版"变成一眼能看见的事。
+             排查"改了还是老样子"时，这一行能直接排除/确认缓存问题。 -->
+        <span class="build" id="build-stamp" title="页面构建时间">—</span>
+      </div>
+    </header>
+
+    <!-- ══════════════ 页签一：逐张标注 ══════════════ -->
+    <main id="page-pass">
+      <!-- 左：图 + 当前记录 -->
+      <section class="viewer">
+        <div class="stage">
+          <img id="img" alt="" />
+          <div class="missing" id="missing" hidden>这张图的文件不在磁盘上（跑 --stickers --prune 核对）</div>
+        </div>
+        <div class="meta">
+          <div class="meta-name" id="meta-name">—</div>
+          <div class="meta-sub" id="meta-sub"></div>
+          <div class="nav">
+            <button id="btn-prev">← 上一张</button>
+            <span id="pos">0 / 0</span>
+            <button id="btn-next">下一张 →</button>
+            <button id="btn-skip" class="ghost">跳过（空格）</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 右：标签按钮 -->
+      <aside class="labels">
+        <div class="hint">
+          点一下即写回（<strong>不用保存</strong>，标成 manual，重打标签会跳过它）。
+          数字键 1-9 是前九个「常用」标签。
+        </div>
+        <!-- ★★ 「管理标签」入口（原来只在「按标签看图」里，用户在逐张页找不到 —— 实测反馈）。
+             点一下跳到那一页并打开标签编辑表单：改名 / 改轴 / 改典型语境 / **删除**。 -->
+        <div class="manage-bar">
+          <button id="btn-manage-labels" class="ghost">✎ 管理标签（改名 / 删除）</button>
+        </div>
+        <div class="quick" id="quick"></div>
+        <div class="all" id="all"></div>
+        <div class="foot">
+          <div class="filter-title">看哪些：</div>
+          <label><input type="checkbox" id="only-disputed" /> <strong>只看「识图与文件名冲突」的</strong>（最可能是识图错）</label>
+          <label><input type="checkbox" id="only-todo" checked /> 待办（没标签 + 模型不确定的）</label>
+          <label><input type="checkbox" id="only-low" /> 只看模型不确定的（置信度 &lt; 0.6）</label>
+          <label><input type="checkbox" id="only-manual" /> 只看我标过的</label>
+          <label><input type="checkbox" id="see-all" /> <strong>看全部</strong>（逐张复核时勾它）</label>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ══════════════ 页签二：按标签看图 ══════════════ -->
+    <main id="page-browse" hidden>
+      <!-- 左：标签清单（实时张数） -->
+      <aside class="side">
+        <div class="side-head">
+          <input id="label-filter" type="search" placeholder="筛标签名 / id…" />
+          <button id="btn-new-label" class="primary">＋ 新建标签</button>
+        </div>
+        <!-- ★ 自动分类未标注的图（0.2.4）：只打没标签的那些，已标的一张都不动。
+             要调模型（每张一次），所以做成"预检 → 发起 → 进度 → 可停止"。 -->
+        <div class="auto-bar">
+          <button id="btn-auto-tag" class="ghost">✨ 自动分类未标注的图</button>
+          <div class="auto-status" id="auto-status"></div>
+        </div>
+        <div class="legend" id="browse-hint">点标签看这批图长什么样；要改名 / 删除就点「✎ 改这个标签」</div>
+        <div class="label-list" id="label-list"></div>
+      </aside>
+
+      <!-- 右：图墙 + 标签编辑 -->
+      <section class="board">
+        <div class="board-head">
+          <div class="board-title">
+            <span id="board-title">未打标签</span>
+            <span class="n" id="board-count"></span>
+          </div>
+          <div class="board-tools">
+            <label class="mini"><input type="checkbox" id="grid-manual-only" /> 只看人工标过的</label>
+            <button id="btn-edit-label" class="ghost">✎ 改这个标签</button>
+          </div>
+        </div>
+        <div id="board-desc" class="board-desc"></div>
+
+        <!-- 标签编辑面板（点「改这个标签」或「新建标签」才出来） -->
+        <form id="label-form" class="label-form" hidden>
+          <div class="lf-title" id="lf-title">新建标签</div>
+          <div class="lf-row">
+            <label>名字（≤8 字）<input id="lf-name" maxlength="8" required /></label>
+            <label>轴
+              <select id="lf-axis"></select>
+            </label>
+          </div>
+          <!-- ★★ 两组线索分开填（0.2.4 第十三轮）。这是"什么时候会发这个标签"的**唯一依据**，
+               而它们的触发源根本不同，混在一格里必然写错：
+                 · 我自己会说 → 匹配 bot 要发的正文
+                 · 对方会说   → 匹配对方那条消息（这是本轮新加的能力）
+               实测教训：`累了` 原来只填了「好累/困/熬夜」（都是**对方**的话），
+               挂在 bot 正文上永远命中不了 —— 那个语境等于没有。 -->
+          <div class="lf-row">
+            <label class="grow">① 我自己会说（命中 bot 的回复 → "我这样回应"）
+              <input id="lf-cues" placeholder="抱抱, 没事的, emmm" />
+            </label>
+          </div>
+          <div class="lf-row">
+            <label class="grow">② 对方会说（命中对方的消息 → "对方处于这个状态"）
+              <input id="lf-other" placeholder="好累, 加班到, 好难过, awsl" />
+            </label>
+          </div>
+          <div class="lf-row">
+            <span class="lf-auto" id="lf-auto"></span>
+          </div>
+          <div class="lf-actions">
+            <button type="submit" class="primary" id="lf-submit">保存</button>
+            <button type="button" class="ghost" id="lf-cancel">取消</button>
+            <button type="button" class="danger" id="lf-delete">删除这个标签</button>
+          </div>
+          <div class="lf-note" id="lf-note"></div>
+        </form>
+
+        <div class="grid" id="grid"></div>
+        <div class="empty" id="grid-empty" hidden>这个标签下还没有图</div>
+        <div class="grid-foot" id="grid-foot" hidden>
+          <button id="btn-more" class="ghost">显示更多</button>
+          <span id="grid-note"></span>
+        </div>
+      </section>
+    </main>
+
+    <!-- 点图放大的浮层：复核时直接在浮层里改标签，不用切回逐张页 -->
+    <div id="ov" class="overlay" hidden>
+      <div class="ov-box">
+        <div class="ov-stage">
+          <!-- ★ 两层图：先给**缩略图**（立刻可见、布局就位），原图按需叠上去。
+               为什么不直接上原图：实测这里会出现 8.6MB 的动图，浏览器要解码
+               全部帧再铺满全屏 —— 大文件因此默认**不自动播放**（点一下才放）。 -->
+          <img id="ov-thumb" class="ov-thumb" alt="" />
+          <img id="ov-img" class="ov-full" alt="" hidden />
+          <div class="ov-hint" id="ov-hint" hidden></div>
+        </div>
+        <div class="ov-side">
+          <div class="ov-name" id="ov-name"></div>
+          <div class="ov-sub" id="ov-sub"></div>
+          <div class="ov-title">改成：</div>
+          <div class="ov-labels" id="ov-labels"></div>
+          <div class="ov-actions">
+            <button id="ov-skip" class="ghost">标成「无合适标签」</button>
+            <!-- ★ 两个逃生口都用**内联 onclick**（不依赖脚本成功绑上事件）：
+                 · 「重载页面」是最后的出路 —— 万一整页真卡了，重载最可靠；
+                 · 「关闭」也行，而且 app.js 里还加了**捕获阶段**的"按任意键关浮层"。 -->
+            <button id="ov-reload" class="ghost" onclick="location.reload()">↻ 重载页面</button>
+            <button id="ov-close" class="ghost" onclick="closeOverlay()">关闭（按任意键）</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+    <!-- 兜底提示：脚本一旦出意外就在这里说明，不让人对着"点了没反应"猜 -->
+    <div id="page-error" class="page-error" hidden></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
