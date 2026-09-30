@@ -226,6 +226,62 @@ export interface MemoryConflict {
   currentContent?: string
 }
 
+// ── 0.2.9「整理记忆」（原名"立刻建档"）的类型（字段与后端一一对应，见 CONFIG-UI.md §2.5.2 / §5）──
+
+export interface BuildMemoryArgs {
+  kind: 'group' | 'private'
+  peerId: string
+  /** 可选：只建档某个人在某个群里的发言（独立游标） */
+  userId?: string | null
+  /** 默认 true = 预演（不调模型、不写盘）；显式 false 才真跑 */
+  dryRun?: boolean
+  limit?: number
+}
+
+export interface BuildMemoryApplied {
+  scope: string
+  /** 写进了哪一份（工作区相对路径） */
+  rel?: string
+  /** person 档：记在谁名下 */
+  userId?: string
+  text?: string
+  [key: string]: unknown
+}
+
+export interface BuildMemoryIgnored {
+  scope?: string
+  who?: string
+  entry?: string
+  /** 被拒的原因（身份权限 / 像在下指令 / 对不在场的人的负面评价 / 隐私 / 发言人对不上号） */
+  why?: string
+  [key: string]: unknown
+}
+
+export interface BuildMemoryResult {
+  ok: boolean
+  chatKey: string
+  userId?: string | null
+  cursorBefore?: string | number | null
+  cursorAfter?: string | number | null
+  /** 这次处理几条；超过一次上限（60 条）的进 skipped */
+  considered: number
+  skipped: number
+  /** ok:false 的原因（业务失败不是 5xx）；个人档"没有新消息"时 ok:true 也带 why */
+  why?: string
+  /** 预演响应带：会原样发给模型的提示词（含对话原文） */
+  prompt?: string
+  speakers?: { index: number; userId: string; name?: string }[]
+  note?: string
+  /** 采纳的条目（每条有 scope / rel / userId） */
+  applied: BuildMemoryApplied[]
+  /** 被内容闸门拒的（带 why）——必须显示，不许美化掉失败 */
+  ignored: BuildMemoryIgnored[]
+  wroteFiles?: string[]
+  /** 失败时的原文片段（排查用） */
+  raw?: string | null
+  ms?: number | null
+}
+
 // ── SnowLuma 进程（CONFIG-UI.md §2.7.1 / §5.1，待实现，按 501 容错）────────
 
 export type SnowlumaStatus =
@@ -377,11 +433,23 @@ export const api = {
   memoryTree: () => request<MemoryTree>('GET', '/api/memory/tree'),
   memoryRead: (path: string) => request<MemoryFile>('GET', `/api/memory/file?path=${encodeURIComponent(path)}`),
   memoryWrite: (args: { path: string; content: string; expectedSha256?: string }) =>
-    request<{ saved: boolean; sha256: string; mtime?: string; restartRequired: boolean; overwroteWithoutCheck?: boolean }>(
-      'POST',
-      '/api/memory/file',
-      args,
-    ),
+    request<{
+      saved: boolean
+      sha256: string
+      mtime?: string
+      restartRequired: boolean
+      overwroteWithoutCheck?: boolean
+      /** 0.2.9：覆盖已有文件时，被覆盖的那一版备份到哪（新建没有）；由后端给，前端不写死 */
+      backup?: string
+      /** 备份失败不阻断写入，但要如实说（§5.2.1） */
+      backupError?: string
+    }>('POST', '/api/memory/file', args),
+  /**
+   * 0.2.9「整理记忆」（§2.5.2）：把游标之后还没计入记忆的消息交给抽取模型整理成条目。
+   * ★ dryRun 默认 true（只回"会发给模型的提示词 + 涉及几条"，不调模型、不写盘）；
+   *   只有显式 false 才真跑。业务失败回 200 + ok:false + why（游标不前进）。
+   */
+  memoryBuild: (args: BuildMemoryArgs) => request<BuildMemoryResult>('POST', '/api/memory/build', args),
   snowlumaDetect: () => request<SnowlumaDetect>('GET', '/api/snowluma/detect'),
   // ⚠️ 0.2.2 前的旧人设接口（GET /api/persona、POST /api/persona/names）已换代：
   // 后端回 410 Gone。新人设库走下面的 api.personas / api.personaAction。

@@ -18,6 +18,16 @@ import { MemorySearchCard } from '@/sections/MemorySearchCard'
 import { MemoryStatsCard } from '@/sections/MemoryStatsCard'
 import { PrivacyCard } from '@/sections/PrivacyCard'
 import { ContactsCard } from '@/sections/ContactsCard'
+import { BuildMemoryDialog, type BuildTarget } from '@/sections/BuildMemoryDialog'
+
+/** 从记忆文件路径反推建档目标（§2.5.2）：groups/群号.md → 群；people/QQ.md → 那个人的私聊。 */
+function buildTargetOf(path: string): BuildTarget | null {
+  let m = /^memory\/groups\/(\d+)\.md$/.exec(path)
+  if (m) return { kind: 'group', peerId: m[1], label: `群 ${m[1]}` }
+  m = /^memory\/people\/(\d+)\.md$/.exec(path)
+  if (m) return { kind: 'private', peerId: m[1], label: `私聊 ${m[1]}` }
+  return null
+}
 import { api, ApiError, isNotImplemented, type InboxState, type MemoryEntry, type MemoryTree } from '@/lib/api'
 import { getBool, getNum, getStr, isDangerousWorkspace } from '@/lib/config'
 import { toast } from 'sonner'
@@ -133,6 +143,10 @@ export function MemoryTab({
 }) {
   const workspace = getStr(cfg, 'dsh.workspace', 'workspace-qq')
   const memoryEnabled = getBool(cfg, 'memory.enabled', true)
+  // 0.2.9 §2.5.1「未唤醒的倾诉」三档（off/shadow/judge，默认 off = 升级前的行为）
+  const prewake = getStr(cfg, 'memory.affect.prewake', 'off')
+  // 0.2.9 §2.5.2「整理记忆」：当前要整理哪个会话/人的记忆（null = 对话框关着）
+  const [buildTarget, setBuildTarget] = useState<BuildTarget | null>(null)
 
   // ── 看图（§2.5.1）──
   const imageEnabled = getBool(cfg, 'image.enabled', true)
@@ -277,6 +291,14 @@ export function MemoryTab({
         setConflict(null)
         // restartRequired 恒 false：记忆是模型运行时读的普通文件，改完立刻生效
         toast.success('已保存，立即生效（不需要重启）。')
+        // 0.2.9 §5.2.1：覆盖已有文件时后端会留一份逐字备份 —— 有就告诉用户"改坏了去哪找"，
+        // 没有（新建）就不提；备份失败要明说，不许渲染成成功。
+        if (r.backup) toast.info(`上一版已备份到 ${r.backup}`)
+        if (r.backupError) {
+          toast.warning(`这次没留下备份（${r.backupError}）。写入成功了，但改坏了就没有后路可回。`, {
+            duration: 10_000,
+          })
+        }
         if (r.overwroteWithoutCheck) {
           toast.warning('这次保存没有做版本核对（缺少版本标识），请留意是否覆盖了机器人的写入。')
         }
@@ -371,21 +393,32 @@ export function MemoryTab({
 
   return (
     <div className="space-y-4">
-      {/* 记忆按人分开（§2.5）：归属说明 + 如实说明隔离强度 */}
+      {/* 三层记忆（§2.5）：归属说明 + 如实说明隔离强度 */}
       <InlineNote level="info">
         <Users className="mr-1 inline h-3.5 w-3.5" />
-        记忆分<strong>两层</strong>：
-        <strong>全局记忆</strong>（<code className="rounded bg-white/50 px-1">MEMORY.md</code>）
-        —— <strong>对所有聊天生效</strong>（每个人的私聊 + 每个群）；
-        以及<strong>本会话专属记忆</strong>（
-        <code className="rounded bg-white/50 px-1">memory/private-QQ号.md</code>、
-        <code className="rounded bg-white/50 px-1">memory/group-群号.md</code>）。
+        记忆分<strong>三层</strong>，按「这条事<strong>在哪儿成立</strong>」分：
+        <strong>全局</strong>（<code className="rounded bg-white/50 px-1">MEMORY.md</code>）——
+        对<strong>所有聊天</strong>生效（每个人的私聊 + 每个群）；
+        <strong>群聊</strong>（<code className="rounded bg-white/50 px-1">memory/groups/群号.md</code>）——
+        只在<strong>那个群</strong>；
+        <strong>个人</strong>（<code className="rounded bg-white/50 px-1">memory/people/QQ号.md</code>）——
+        <strong>跟人走</strong>：他的私聊、以及他在<strong>任何群</strong>发言时都读得到（别人读不到）。
         全局是共享的，所以<strong>别把某人的私事写进去</strong>。
       </InlineNote>
       <InlineNote level="warn">
-        隔离是靠<strong>提示词告诉模型只读自己那份</strong>实现的，不是文件系统层面的强制——
-        模型有工作区里所有文件的读写权限（那是它干活的必要条件）。
+        <strong>「群聊」那层严格隔离，「个人」那层刻意跟人走</strong> —— 这是两个相反的方向，别弄混：
+        群聊层只留在一个群里（A 群的事不进 B 群）；个人层跟着人走（他在哪儿说话都认得出他）。
+        注入时<strong>读哪些文件由桥接按会话决定</strong>（代码层），不是靠模型自觉；
+        但模型有工作区里所有文件的读写权限（那是它干活的必要条件）。
         所以这是<strong>防误伤</strong>（避免它顺手混用），不是防恶意，别把它当成安全边界。
+        <strong>推论</strong>：只有本群才知道的事，别让它记进「个人」层 —— 那等于替当事人把它带到别的群去。
+      </InlineNote>
+      <InlineNote level="info">
+        <strong>它还会数数</strong>：每个人跟它说过多少次话、最近一次是什么时候、常在哪个时段出现 ——
+        这是确定性的<strong>行为统计</strong>（存在工作区的{' '}
+        <code className="rounded bg-white/50 px-1">memory/.people.json</code>，隐藏文件，所以不出现在上面的树里），
+        用来判断「这个人我熟不熟」。<strong>只记数字：不记内容、不记话题、不记词频</strong>；
+        次数太少时它一个字都不会提（数据不足就别装熟）。
       </InlineNote>
       <InlineNote level="info">
         <strong>写入权已经收回到桥接</strong>：模型只能在回复里"提议"记什么
@@ -405,7 +438,7 @@ export function MemoryTab({
           </li>
           <li>
             <strong>行为指令另有单独一份</strong>：管理员在<strong>私聊</strong>里说的"以后遇到 X 就这样做"
-            写进 <code className="rounded bg-white/50 px-1">memory/.directives.md</code>，跨群生效，
+            写进 <code className="rounded bg-white/50 px-1">memory/directives.md</code>，跨群生效，
             且只有管理员能写。
           </li>
           <li>
@@ -442,6 +475,47 @@ export function MemoryTab({
           >
             <Switch checked={memoryEnabled} onCheckedChange={(v) => patch('memory.enabled', v)} />
           </FieldRow>
+          {/* 0.2.9 §2.5.1「未唤醒的倾诉」三档：off（默认=升级前行为）/ shadow（只记账）/ judge（真记）。
+              ★ 三选一而不是两个开关：三个档位互斥，是同一个问题的三个答案（与 wake.policy 同一条理由）。 */}
+          <FieldRow
+            label="未唤醒的倾诉"
+            hint="群里没 @ 它、也没叫它名字的消息，如果有人是对着它倾诉，要不要记。默认关 = 升级前的行为。"
+          >
+            <div className="flex flex-wrap gap-2">
+              {[
+                { v: 'off', label: '不记（默认）', desc: '一个字都不问、不记。' },
+                { v: 'shadow', label: '先观察（影子）', desc: '判定照跑，结论只写日志，不落盘。' },
+                { v: 'judge', label: '真记', desc: '判定通过就写进那个人的个人档。' },
+              ].map((o) => {
+                const active = prewake === o.v
+                return (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => patch('memory.affect.prewake', o.v)}
+                    className={cn(
+                      'rounded-md border px-3 py-1.5 text-left text-xs transition-colors',
+                      active ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
+                    )}
+                  >
+                    <span className="font-medium">{o.label}</span>
+                    <span className="ml-1 text-muted-foreground">{o.desc}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </FieldRow>
+          {/* ★ 选 shadow / judge 时**就地写明代价**：这是"花一点钱 + 一点隐私面"换覆盖率，
+              必须让人在打开之前看见。不要承诺"能识别所有倾诉" —— 它只覆盖本地情绪线索命中的那些。 */}
+          {prewake !== 'off' && (
+            <InlineNote level="warn">
+              打开后，命中情绪线索的<strong>未唤醒消息</strong>会<strong>送给模型 API</strong>做一次判定
+              （实测约每 280 条消息 1 次、上限 120 次/小时）；判定通过的会记进
+              <strong>那个人</strong>的个人档 —— 个人档<strong>跟人走</strong>：他在<strong>别的群</strong>说过的话也会被算上。
+              它只覆盖"本地情绪线索命中"的那些，<strong>不是"能识别所有倾诉"</strong>。
+              {prewake === 'shadow' && ' 现在是影子模式：只写日志，一个字都不落盘。'}
+            </InlineNote>
+          )}
           <FieldRow label="工作区目录" hint="记忆文件就存在这里。写相对路径则相对桥接包根目录。">
             <div className="space-y-2">
               <Input
@@ -709,10 +783,24 @@ export function MemoryTab({
                             <span className="min-w-0 flex-1 truncate font-mono text-xs">
                               {entry.path.split('/').pop()}
                             </span>
-                            {/* 归属徽标：一眼看出这份记忆是谁的（§2.5 按人分开） */}
+                            {/* 归属徽标：一眼看出这份记忆属于**哪一层**（§2.5 三层：全局/群聊/个人）
+                                ★ 判据必须看**路径前缀**，不能只看文件名：三层布局把文件放进了
+                                  子目录（memory/groups/、memory/people/），照着名字判会全部认不出来。 */}
                             {(() => {
-                              const name = entry.path.split('/').pop() ?? ''
-                              const kind = name === 'MEMORY.md' ? '全局' : name.startsWith('private-') ? '私聊' : name.startsWith('group-') ? '群' : null
+                              const full = entry.path
+                              const base = full.split('/').pop() ?? ''
+                              const kind =
+                                full === 'MEMORY.md'
+                                  ? '全局'
+                                  : full.startsWith('memory/people/')
+                                    ? '个人'
+                                    : full.startsWith('memory/groups/')
+                                      ? '群聊'
+                                      : base.startsWith('private-')
+                                        ? '私聊·旧'
+                                        : base.startsWith('group-')
+                                          ? '群·旧'
+                                          : null
                               if (!kind) return null
                               return (
                                 <Badge
@@ -720,8 +808,10 @@ export function MemoryTab({
                                   className={cn(
                                     'shrink-0 px-1 py-0 text-[10px] font-normal',
                                     kind === '全局' && 'border-amber-300 text-amber-700',
-                                    kind === '私聊' && 'border-sky-300 text-sky-600',
-                                    kind === '群' && 'border-violet-300 text-violet-600',
+                                    kind === '个人' && 'border-sky-300 text-sky-600',
+                                    kind === '群聊' && 'border-violet-300 text-violet-600',
+                                    (kind === '私聊·旧' || kind === '群·旧') &&
+                                      'border-muted-foreground/30 text-muted-foreground',
                                   )}
                                 >
                                   {kind}
@@ -731,6 +821,26 @@ export function MemoryTab({
                             <span className="shrink-0 text-[10px] text-muted-foreground">
                               {fmtBytes(entry.size)} {fmtMtime(entry.mtime)}
                             </span>
+                            {/* 0.2.9 §2.5.2「整理记忆」（原名"立刻建档"）：群聊档 / 个人档各带一个按钮
+                                （从路径反推 kind/peerId；旧布局与 slang 档不带）。演示模式不出现。 */}
+                            {!demo &&
+                              (() => {
+                                const t = buildTargetOf(entry.path)
+                                if (!t) return null
+                                return (
+                                  <button
+                                    type="button"
+                                    className="shrink-0 rounded border px-1.5 py-0 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                                    title="把还没计入记忆的消息立刻整理成条目（先预演要花什么，确认后才真跑、会调模型）"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setBuildTarget(t)
+                                    }}
+                                  >
+                                    整理记忆
+                                  </button>
+                                )
+                              })()}
                           </button>
                         </li>
                       ),
@@ -861,7 +971,11 @@ export function MemoryTab({
           <DialogHeader>
             <DialogTitle>新建记忆文件</DialogTitle>
             <DialogDescription>
-              相对工作区的路径，只允许 .md。模型将来可能按人分文件（如 memory/private-QQ号.md），你也可以自己加。
+              相对工作区的路径，只允许 .md。三层各自的路径是{' '}
+              <code className="rounded bg-muted px-1">MEMORY.md</code>（全局）、
+              <code className="rounded bg-muted px-1">memory/groups/群号.md</code>（群聊）、
+              <code className="rounded bg-muted px-1">memory/people/QQ号.md</code>（个人）；
+              你也可以自己加别的文件 —— 但<strong>不在注入清单里的文件不会被读到</strong>。
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -941,6 +1055,7 @@ export function MemoryTab({
 
       <ConfirmDialog req={deleteReq} onClose={() => setDeleteReq(null)} />
       <ConfirmDialog req={modeConfirm} onClose={() => setModeConfirm(null)} />
+      <BuildMemoryDialog target={buildTarget} onClose={() => setBuildTarget(null)} />
     </div>
   )
 }

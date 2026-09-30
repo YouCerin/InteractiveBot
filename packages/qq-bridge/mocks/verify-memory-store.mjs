@@ -152,7 +152,7 @@ function main() {
     check('群聊写事实 → 采纳（普通群友贡献黑话/事实是自动记忆的主要来源）',
       r.applied.length === 1, JSON.stringify(r.ignored))
     check('落点是本群文件，不是全局',
-      r.applied[0].rel === `memory/group-${GROUP}.md` && read('MEMORY.md').includes('这个群周末有活动') === false,
+      r.applied[0].rel === `memory/groups/${GROUP}.md` && read('MEMORY.md').includes('这个群周末有活动') === false,
       r.applied[0].rel)
     const seen = readMemoryForPrompt({ workspace: WORK, kind: 'group', peerId: '999999' })
     check('★ 别的群看不到这个群的记忆', !seen.text.includes('这个群周末有活动'), seen.text.slice(0, 60))
@@ -203,7 +203,7 @@ function main() {
 
   section('⑤ 去重与上限')
   {
-    const before = read(`memory/group-${GROUP}.md`)
+    const before = read(`memory/groups/${GROUP}.md`)
     const again = applyMemoryItems({
       workspace: WORK,
       kind: 'group',
@@ -214,7 +214,7 @@ function main() {
     })
     check('同一条再写一次 → 去重，不重复落盘', again.applied[0]?.deduped === true,
       JSON.stringify(again.applied))
-    check('文件内容没有增长', read(`memory/group-${GROUP}.md`) === before)
+    check('文件内容没有增长', read(`memory/groups/${GROUP}.md`) === before)
   }
 
   section('⑥ 回执：被拒的条目必须让模型知道（不许静默丢弃）')
@@ -338,7 +338,7 @@ function main() {
     check('★ 超过条数上限后整条拒绝（不是截断句子）',
       lastIgnored !== null && /上限/.test(lastIgnored.why), JSON.stringify(lastIgnored))
     check('已写入的条目没有被破坏（仍然是完整的一行）',
-      read('memory/group-123456.md').includes('- 第 0 条记录'))
+      read('memory/groups/123456.md').includes('- 第 0 条记录'))
   }
 
   section('⑨ 篡改检测：绕过桥接改记忆必须被回滚（提示词不是保证，这里才是）')
@@ -352,7 +352,7 @@ function main() {
       tier: 'user',
       items: [{ scope: SCOPE.FACT, text: '这个群有人喜欢猫' }],
     })
-    const rel = 'memory/group-777777.md'
+    const rel = 'memory/groups/777777.md'
     const good = read(rel)
     check('前提：桥接写入成功且内容正确', good.includes('有人喜欢猫'), good.trim())
 
@@ -379,7 +379,7 @@ function main() {
       workspace: WORK,
       conversations: [{ kind: 'group', peerId: '777777' }],
     })
-    check('★ 体检列出了记忆文件', insp.files.some((f) => f.rel === 'memory/group-777777.md'),
+    check('★ 体检列出了记忆文件', insp.files.some((f) => f.rel === 'memory/groups/777777.md'),
       JSON.stringify(insp.files.map((f) => f.rel)))
     check('★ 体检算出了注入内容（非空）',
       (insp.injections[0]?.text ?? '').length > 0)

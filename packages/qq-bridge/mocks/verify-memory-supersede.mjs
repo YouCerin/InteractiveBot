@@ -190,7 +190,7 @@ try {
 
     apply('他的主机是 B650M')
     apply('他的主机是 B650M 主板')  // 不含更正信号 → 不应标注上一条
-    const file = String(readIf(WS, 'memory/private-10001.md') ?? '')
+    const file = String(readIf(WS, 'memory/people/10001.md') ?? '')
     check('★★ 不带信号 → 不标注（纯陈述式的两条共存）',
       !/B650M.*已被更正/.test(file), file.split('\n').filter((l) => l.includes('B650M')).join('｜'))
 
@@ -198,7 +198,7 @@ try {
     check('★ 通道二：自指式措辞 → 旧条目被标注',
       Boolean(viaCue.applied[0]?.superseded), JSON.stringify(viaCue.applied[0]?.superseded ?? null))
 
-    const file2 = String(readIf(WS, 'memory/private-10001.md') ?? '')
+    const file2 = String(readIf(WS, 'memory/people/10001.md') ?? '')
     check('★★ 旧条目**还在**（没被删）', file2.includes('Forge 端'))
     check('★★ 旧条目带上了标注', /Forge 端.*已被更正.*Paper/.test(file2), file2)
     check('★ 新条目也写进去了', file2.includes('Paper 端'))
@@ -220,7 +220,7 @@ try {
   // ══════════════════════════════════════════════════════════════════════════
   {
     const recall = readMemoryForPrompt({ workspace: join(ROOT, 'ws1'), kind: 'private', peerId: '10001' })
-    const block = recall.blocks.find((b) => b.rel === 'memory/private-10001.md')
+    const block = recall.blocks.find((b) => b.rel === 'memory/people/10001.md')
     const text = String(block?.text ?? '')
     check('★ 注入文本里**没有**被推翻的结论（Forge）', !text.includes('Forge 端'), text.slice(0, 140))
     check('★ 但**有**新结论（Paper）', text.includes('Paper 端'))
@@ -252,8 +252,10 @@ try {
   // ══════════════════════════════════════════════════════════════════════════
   {
     const WS = join(ROOT, 'ws2')
-    mkdirSync(join(WS, 'memory'), { recursive: true })
-    writeFileSync(join(WS, 'memory/private-20002.md'), '# 记忆（桥接维护，勿手改）\n\n- 他的服务器是 Forge 端\n', 'utf8')
+    // ★ 三层布局：个人档在子目录里，直接写文件前必须自己建目录
+    //   （正常写入走 `appendEntry`，它会 mkdir；这里绕过了它）
+    mkdirSync(join(WS, 'memory', 'people'), { recursive: true })
+    writeFileSync(join(WS, 'memory/people/20002.md'), '# 记忆（桥接维护，勿手改）\n\n- 他的服务器是 Forge 端\n', 'utf8')
     applyMemoryItems({
       workspace: WS,
       kind: 'private',
@@ -267,20 +269,20 @@ try {
       verifyAndRestoreMemory({ workspace: WS }).tampered.length === 0,
       JSON.stringify(verifyAndRestoreMemory({ workspace: WS })))
 
-    const file = String(readIf(WS, 'memory/private-20002.md') ?? '')
+    const file = String(readIf(WS, 'memory/people/20002.md') ?? '')
     check('前提：文件里确实有标注', isSuperseded(file.split('\n')[2] ?? ''), file)
-    const r = consolidateFile({ workspace: WS, rel: 'memory/private-20002.md', apply: true, saveSnapshot })
+    const r = consolidateFile({ workspace: WS, rel: 'memory/people/20002.md', apply: true, saveSnapshot })
     check('整理照常返回（与快照配合不报错）', r.ok === true, JSON.stringify({ ok: r.ok, why: r.why }))
     check('★★ 整理之后**仍然**不会被回滚', verifyAndRestoreMemory({ workspace: WS }).tampered.length === 0)
     check('★ 标注在整理后仍在文件里', (() => {
-      const after = String(readIf(WS, 'memory/private-20002.md') ?? '')
+      const after = String(readIf(WS, 'memory/people/20002.md') ?? '')
       // ⚠️ 断言要盯**那一行**，不能对整份文件调 isSuperseded ——
       //    它要求标注在**文件末尾**，而文件末尾是那条有效的新条目。
       //    （第一版就是这么写错的，而且详情是多行，被日志筛选一过滤只看到第一行，
       //      看上去像"文件被清空了"，其实只是断言写歪了。）
       const marked = after.split('\n').find((l) => l.includes('已被更正'))
       return Boolean(marked) && isSuperseded(marked)
-    })(), String(readIf(WS, 'memory/private-20002.md') ?? '').replace(/\n/g, '⏎'))
+    })(), String(readIf(WS, 'memory/people/20002.md') ?? '').replace(/\n/g, '⏎'))
   }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })

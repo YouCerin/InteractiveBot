@@ -197,6 +197,39 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('⑤-b ★ `recent({latest})`：要"最近 N 条"，不是"最早 N 条"')
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    // 用途：`bridge.mjs` 的「你被叫到之前群里刚说了什么」。语义与 `afterId` 那套**不同** ——
+    // 靠 afterId 得先知道最大 id，而那正是调用方不掌握的东西。
+    // ⚠️ 用**自己的一份临时工作区**：往上面那个库里多塞八条会污染后面几节的中文检索。
+    const WS2 = join(ROOT, 'ws-latest')
+    const c = createCorpus({ workspace: WS2, log: () => {} })
+    const put = (t) => c.record({ kind: 'group', peerId: '999', userId: '1', senderName: '甲', text: t })
+    for (const t of ['一', '二', '三', '四', '五', '六', '七', '八']) put(t)
+
+    const last3 = c.recent({ chatKey: 'group:999', limit: 3, latest: true })
+    check('★★ latest 取到的是**最后 3 条**（而不是前 3 条）',
+      last3.ok === true && last3.rows.map((r) => r.text).join('') === '六七八',
+      last3.rows.map((r) => r.text).join('/'))
+    check('★ 返回顺序仍是**由旧到新**（调用方不必猜）',
+      last3.rows.map((r) => r.id).every((id, i, a) => i === 0 || a[i - 1] < id),
+      JSON.stringify(last3.rows.map((r) => r.id)))
+    check('★ 不传 latest 时行为一个字都没变（老的 afterId 语义）',
+      c.recent({ chatKey: 'group:999', limit: 3 }).rows.map((r) => r.text).join('') === '一二三')
+    check('★ 条数上限照样生效', c.recent({ chatKey: 'group:999', limit: 999, latest: true }).rows.length === 8)
+    check('★ 单条截断与 `truncated` 标记照旧',
+      (() => {
+        c.record({ kind: 'group', peerId: '999', userId: '1', text: '九'.repeat(300) })
+        const r = c.recent({ chatKey: 'group:999', limit: 1, maxChars: 80, latest: true }).rows[0]
+        return r.truncated === true && r.text.length < 120 && r.text.endsWith('（本条被截断）')
+      })())
+    check('★ 只认本会话（latest 也不能跨群）',
+      c.recent({ chatKey: 'group:1000', limit: 5, latest: true }).rows.length === 0)
+    c.close()
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('⑥ 失败路径：不许抛、不许静默（AGENT.md 第 9 条）')
   // ══════════════════════════════════════════════════════════════════════════
   {

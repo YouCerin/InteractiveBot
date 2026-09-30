@@ -35,7 +35,7 @@
  * 往固定前缀里塞多变内容等于把最便宜的那部分token变成最贵的。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveMemoryPath } from './memory-files.mjs'
 import { screenForStore, logPrivacyBlock } from './privacy.mjs'
@@ -43,15 +43,29 @@ import { screenForStore, logPrivacyBlock } from './privacy.mjs'
 import { pickSupersedeTarget, markSupersededLine, isSuperseded } from './memory-supersede.mjs'
 import { similarity } from './text-similarity.mjs'
 import { readUsage, applyRecencyOrder, recordWrite } from './memory-usage.mjs'
+// ★ 个人层的**行为统计**（0.2.9 决定：纳入）。只读侧车、只渲染一行 ——
+//   累加发生在 `bridge.mjs`（每条"他来找机器人说话"时 +1），注入侧只负责展示。
+import { readPersonStats, renderPersonStatsLine } from './people-stats.mjs'
 
-/** 三档作用域。 */
+/** 各档作用域。 */
 export const SCOPE = {
-  /** 这个人 / 这个群的专属记忆（群聊写本群、私聊写本人）。 */
+  /**
+   * 本会话层：群聊写**本群**；私聊写**这个人**（私聊里会话即本人，与 `PERSON` 同落点）。
+   */
   FACT: 'fact',
   /** 群内黑话（只写本群）。 */
   SLANG: 'slang',
   /** ★ 全局记忆：对所有聊天生效（私聊 + 每个群）。 */
   GLOBAL: 'global',
+  /**
+   * ★★ 个人层：**关于某个人本身**的事，**跟人走** ——
+   *   在该人的私聊里注入，也在他于任何群发言时注入（只给他自己那一份）。
+   *
+   * ⚠️ 归属**由代码裁定**：模型不能指定是谁（它拿不到 QQ 号）。落点永远是
+   *   **本轮真实核实过的发言人**。要写"关于第三方"的条目必须先把发言人列入
+   *   编号清单（`#1`/`#2`），那是二期的设计（见 docs/0.2.9-per-person-memory-plan.md §3.3）。
+   */
+  PERSON: 'person',
   /** 行为指令：管理员私聊下达，跨群生效。 */
   DIRECTIVE: 'directive',
 }
@@ -69,6 +83,8 @@ const SCOPE_WORDS = {
   slang: SCOPE.SLANG,
   global: SCOPE.GLOBAL,
   directive: SCOPE.DIRECTIVE,
+  // ★ L3 个人层：关于**正在跟你说话的这个人**的事（跟人走）。见 `SCOPE.PERSON` 的注释。
+  person: SCOPE.PERSON,
   // ★ H4：`fix` = "这条是在**更正**上面记错的某一条"。
   //
   // 为什么需要它：实测证明**规则认不出纯陈述式的覆盖**（"服务器是 Forge" → "服务器是 Paper"
@@ -93,11 +109,82 @@ const FORBIDDEN_PATTERNS = [
   { re: /忽略(之前|上面|系统)|忘记(你的)?(规则|约束|设定)|绕过/, why: '试图绕过既有约束' },
 ]
 
+/**
+ * 对**不在场的第三方**的负面定性（D27，用户决定：**默认不记**）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么单独一条（它和身份/权限那条不同，防的不是越权，是"社交武器"）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 群里任何人都能对机器人说「某某就是个小丑」。那句话一旦落盘：
+ *   ① 它是**关于一个不在场的人**的**定性**，那个人没有任何机会辩解；
+ *   ② 它会**每一轮**被注入 —— 机器人在别的场合会带着这个评价说话；
+ *   ③ 而且它会**跟人走**（个人层），被带到别的群去。
+ * 所以这一条不是"内容不雅"，是"**别让机器人替人背一句对人的坏话**"。
+ *
+ * ── 判据为什么是"两段式"（第三方指称 + 负面定性词，就近匹配）─────────────
+ * 单看负面词会把**他本人的状态**误杀（「他情绪低落的时候想有人听着」是
+ * 情绪通道写下的条目，必须放过）；单看第三方指称会误杀一切提到别人的事实
+ * （「据他说，他领导要求周末加班」是事实，不是定性）。
+ * 两者**同时出现且相邻**才判为定性。
+ *
+ * ⚠️ 刻意**不含**光杆的「他 / 她」：个人层里的"他"就是**当事人自己**
+ *    （条目都是"关于这个人"的），把它当第三方会把正常条目全部误杀。
+ *    真正的第三方必须是被**明确引入**的（我朋友 / 某人 / 前任 …）。
+ */
+const THIRD_PARTY_REF_RE =
+  /(我(?:的)?(?:朋友|同学|同事|室友|哥|姐|弟|妹|对象|男朋友|女朋友|前男友|前女友|前任|老婆|老公|领导|老板|亲戚)|(?:他|她|他们|她们)(?:的)?(?:朋友|同学|同事|室友|对象|前男友|前女友|前任|老婆|老公|领导|老板|亲戚)|前女友|前男友|前任|某人|某某|那个人|另一个人|别人|有人|他们|她们)/
+
+/** 负面**定性**词（评价一个人，而不是描述一件事）。刻意保守：宁可漏，不可误杀。 */
+const NEGATIVE_LABEL_RE =
+  /(小丑|恶心|讨厌|垃圾|傻|蠢|有病|心机|绿茶|渣|虚伪|自私|烦人|可笑|活该|神经病|骗子|废物|戾气|贱|坏透了|人品差)/
+
+/**
+ * 分句边界。**同一条定性必须落在同一个分句里**才算数。
+ *
+ * ★ 为什么需要它（实测反例）：「我朋友帮了我，那天我真蠢」——
+ *   指称（我朋友）与负面词（蠢）确实相邻，但**中间隔了一个逗号**，
+ *   后半句说的是他自己。按"窗口内出现"判会误杀这类句子，按"同分句"判就不会。
+ */
+const CLAUSE_BREAK_RE = /[，。！？；、,.!?;]/
+
+/**
+ * 这条内容是不是"对不在场第三方的负面定性"。
+ *
+ * 判据：**指称之后、同一个分句之内**出现负面定性词。
+ * ⚠️ 只看指称**之后**（"那个小丑就是我朋友"这种倒装不认）—— 如实记下这条边界：
+ *    宁可不记，也不要把"他朋友帮了他"这种正常条目误杀。
+ *
+ * @returns {{hit: boolean, why?: string, who?: string, label?: string}}
+ */
+export function thirdPartyNegative(text) {
+  const s = String(text ?? '')
+  const ref = THIRD_PARTY_REF_RE.exec(s)
+  if (!ref) return { hit: false }
+  const after = s.slice(ref.index + ref[0].length)
+  const stop = after.search(CLAUSE_BREAK_RE)
+  const sameClause = stop >= 0 ? after.slice(0, stop) : after
+  const label = NEGATIVE_LABEL_RE.exec(sameClause)
+  if (!label) return { hit: false }
+  return { hit: true, who: ref[0], label: label[0], why: `对不在场第三方的负面定性（「${ref[0]}…${label[0]}…」）` }
+}
+
 /** 单个记忆文件的条数上限（**只限条数，不限字数** —— 见下）。 */
 const MAX_ENTRIES = 60
 
 /** 注入提示词时的条数上限（超出只报"还有几条"，不截断句子）。 */
 const INJECT_ENTRIES = 25
+
+/**
+ * **个人层**的注入上限（比通用的 25 紧得多）。
+ *
+ * ★ 为什么单独一个数：个人档是**跟着人走、每轮都注入**的（他在哪个群说话都带上一份），
+ *   而"关于一个人"的条目会随着熟悉程度一直长。25 条 × 每条约 40 字 ≈ 1000 字/轮，
+ *   在群会话本就吃紧的上下文里（实测某一轮已到 114k token）是不划算的。
+ *   8 条足够表达"我认得这个人"，超出的照旧如实报"另有 N 条未展开"。
+ *
+ * ⚠️ 这是**注入上限**，不是删除：条目仍在文件里（可查、可被整治），只是这一轮不展开。
+ */
+export const INJECT_ENTRIES_PERSON = 8
 
 /** 给诊断工具用的同一个数字（`mocks/probe-memory-injection.mjs` 要报"超上限几条"）。 */
 export const INJECT_LIMIT_HINT = INJECT_ENTRIES
@@ -113,19 +200,48 @@ export const MEMORY_FILE_HEADER = '# 记忆（桥接维护，勿手改）'
 /** 纯排版分隔线（注入时跳过）。 */
 const SEPARATOR_RE = /^(?:-{3,}|\*{3,}|_{3,}|={3,})$/
 
-/** 目录与文件名约定。 */
+/**
+ * 目录与文件名约定 —— **三层：全局 / 群聊 / 个人**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么是这三层（分层的判据是"这条事实**在哪儿成立**"）
+ * ══════════════════════════════════════════════════════════════════════════
+ *   L1 全局  `MEMORY.md`                   对**谁、在哪儿**都成立 → 所有聊天都注入
+ *   L2 群聊  `memory/groups/<群号>.md`      只在**某一个群**成立   → 只在该群注入
+ *   L3 个人  `memory/people/<QQ>.md`        关于**某个人**成立     → **跟人走**：
+ *           该人的私聊里注入；他在群里发言时，只给他自己那一份注入
+ *
+ * ★ 这三层取代了原来的 `memory/private-<QQ>.md` + `memory/group-<群号>.md`：
+ *   旧布局把"关于这个人"的事关在**私聊这一个会话**里 —— 同一个人在群里说话时，
+ *   机器人对他一无所知（而那正是最需要认识他的场合）。现在"关于这个人"是
+ *   一等公民：**跟人走，不跟会话走**。
+ *
+ * ★ 三层的**写入语义**（提示词里教给模型的也是这三句）：
+ *   · 在哪儿、对谁都成立 → 全局
+ *   · 只跟某个群有关（群规、群内梗、群里发生的事）→ 群聊层
+ *   · 关于某个人本身（偏好、习惯、在做的事、怎么对待他）→ 个人层
+ *   ⚠️ 这条分工不是排版洁癖：**个人层会跟着人走进别的群**。所以"只有本群才知道的
+ *   事"必须留在群聊层，写进个人层就等于把它带到别的群去（串场）。
+ *
+ * ⚠️ 私聊里**没有**独立的会话层：私聊这个会话就是这个人，
+ *   所以 `fact` 与 `person` 在私聊里落到**同一份**个人档（少一层、不重复注入）。
+ */
 const FILE = {
   /**
-   * ★ 全局记忆：**对所有聊天生效**（私聊 + 每个群）。
+   * ★ L1 全局记忆：**对所有聊天生效**（私聊 + 每个群）。
    *
    * ⚠️ 这里踩过一次设计错位：有一版把 `MEMORY.md` 当成"管理员指令档"占用了，
    *   于是"全局记忆"跑到 `facts-global.md` 上，而 `MEMORY.md` 只在管理员私聊里注入。
    *   用户明确的目标结构是**全局 + 每会话**两层，而 `MEMORY.md` 是它原本的全局记忆文件
    *   （界面上的记忆页签也一直显示它）。所以现在：
    *     `MEMORY.md`            = 全局记忆（人人可读、任何人可提议写入）
-   *     `memory/.directives.md`= 行为指令（管理员私聊专属写入，跨群生效）—— 单一职责
+   *     `memory/directives.md` = 行为指令（管理员私聊专属写入，跨群生效）—— 单一职责
    */
   global: 'MEMORY.md',
+  /** L2 群聊层目录：一个群一份（含 `-slang.md`）。 */
+  groupsDir: 'memory/groups',
+  /** L3 个人层目录：一个人一份。 */
+  peopleDir: 'memory/people',
   /**
    * 行为指令（跨群生效，只有管理员私聊能写）。单独一个文件，避免和全局记忆混在一起。
    *
@@ -141,51 +257,161 @@ const FILE = {
   receiptsDir: 'memory/.receipts',
   /** 快照目录：桥接写入后的"已知良好"副本，用来检测并回滚绕过桥接的改动。 */
   snapshotsDir: 'memory/.snapshots',
+  /**
+   * 迁移归档目录（隐藏 ⇒ 不再被注入、也不再被篡改检测扫）。
+   *
+   * 旧布局的文件迁进这里而不是删掉：**记忆只有一份，删了就真没了**。
+   * 隐藏目录是刻意的 —— 归档是"留个后路"，不是"还要继续读"。
+   */
+  migratedDir: 'memory/.migrated',
 }
 
-/** 当前会话对应的记忆文件（facts / slang 的落点）。 */
-function filesFor({ kind, peerId }) {
-  const id = String(peerId ?? '').trim()
+/** 号码校验：会话标识与个人标识必须是号码（防文件名里混进奇怪东西）。 */
+const ID_RE = /^\d{5,15}$/
+
+/** L2 群聊层：某个群的记忆文件。号码不合法 → null（不猜、不拼路径）。 */
+export function groupMemoryRel(groupId) {
+  const id = String(groupId ?? '').trim()
+  return ID_RE.test(id) ? `${FILE.groupsDir}/${id}.md` : null
+}
+
+/** L2 群聊层：某个群的黑话文件。 */
+export function groupSlangRel(groupId) {
+  const id = String(groupId ?? '').trim()
+  return ID_RE.test(id) ? `${FILE.groupsDir}/${id}-slang.md` : null
+}
+
+/** L3 个人层：某个人的记忆文件（**跟人走**）。 */
+export function personMemoryRel(userId) {
+  const id = String(userId ?? '').trim()
+  return ID_RE.test(id) ? `${FILE.peopleDir}/${id}.md` : null
+}
+
+/** 三层各自的相对路径前缀（给界面/体检用，保证"哪一层"只有一处口径）。 */
+export function memoryLayerOf(rel) {
+  const p = String(rel ?? '').replace(/\\/g, '/')
+  if (p === FILE.global) return 'global'
+  if (p.startsWith(`${FILE.peopleDir}/`)) return 'person'
+  if (p.startsWith(`${FILE.groupsDir}/`)) return 'group'
+  if (p === FILE.directives) return 'directive'
+  return 'other'
+}
+
+/**
+ * 某次对话的**读写落点**（三层布局的**唯一口径**）。
+ *
+ * ★ 为什么"读哪些"与"写哪里"必须同一个函数产出：它们分头写迟早分叉，
+ *   而分叉的表现是**最坏的那种** —— 写进去了、下一轮却不注入（等于没记）。
+ *
+ * @param {{kind: 'private'|'group', peerId: string, speakerId?: string|null}} opts
+ *   `peerId` = 消息发往哪里（群=群号、私聊=对方号）；
+ *   `speakerId` = **这一轮是谁在说话**（群里才有区别）。
+ */
+export function layoutFor({ kind, peerId, speakerId = null }) {
+  const peer = String(peerId ?? '').trim()
+  // 群里没有发言人信息时**不给个人层**（宁可不注入，也不猜是谁）
+  const speaker = String(speakerId ?? peer ?? '').trim()
   if (kind === 'group') {
-    if (!id) return { facts: null, slang: null }
-    return { facts: `memory/group-${id}.md`, slang: `memory/group-${id}-slang.md` }
+    return {
+      session: groupMemoryRel(peer),
+      slang: groupSlangRel(peer),
+      person: personMemoryRel(speaker),
+      /** 写入落点 */
+      factTarget: groupMemoryRel(peer),
+      personTarget: personMemoryRel(speaker),
+    }
   }
-  if (!id) return { facts: null, slang: null }
-  return { facts: `memory/private-${id}.md`, slang: null }
+  // 私聊：会话层与个人层是**同一份**（少一层，也不会重复注入）
+  return {
+    session: null,
+    slang: null,
+    person: personMemoryRel(peer),
+    factTarget: personMemoryRel(peer),
+    personTarget: personMemoryRel(peer),
+  }
+}
+
+/**
+ * 三层路径 → **旧布局**路径（迁移的逆向映射），只在回退读时用。
+ *
+ * ★ 为什么要有它：迁移是"一次性动作"，而**注入每一轮都在跑**。
+ *   万一迁移没跑成（目录列不出来、权限、进程被中断），回退读能保证
+ *   旧记忆**仍然进上下文** —— 否则表现是"升级后记忆突然全没了"，且不报错。
+ *   回退读到的路径会如实出现在体检的"注入了哪些文件"里，所以这种情况下
+ *   使用者看到的是一份**带旧路径的清单**，一眼就知道迁移没生效。
+ */
+function legacyPathOf(rel) {
+  const p = String(rel ?? '').replace(/\\/g, '/')
+  let m = new RegExp(`^${FILE.peopleDir}/(\\d{5,15})\\.md$`).exec(p)
+  if (m) return `memory/private-${m[1]}.md`
+  m = new RegExp(`^${FILE.groupsDir}/(\\d{5,15})\\.md$`).exec(p)
+  if (m) return `memory/group-${m[1]}.md`
+  m = new RegExp(`^${FILE.groupsDir}/(\\d{5,15})-slang\\.md$`).exec(p)
+  if (m) return `memory/group-${m[1]}-slang.md`
+  return null
 }
 
 /**
  * 读出注入用的记忆文本。
  *
- * ⚠️ 只读**当前会话该看的**那些文件：群聊拿不到全局（`memory.mjs` 里
- * 刻意不让群里看到别处积累的笔记）。指令档对所有会话都可见 —— 它本来就是
- * 跨群生效的东西，且只能由管理员写入。
+ * ⚠️ 只读**当前会话该看的**那些文件：
+ *   · **L1 全局记忆（`MEMORY.md`）对两种会话都注入** —— 它是共享层，本来就要对每个群生效。
+ *     代价是它**绝不能含任何人的私事**。
+ *     ⚠️ 这里曾经写着"群聊拿不到全局"（沿用旧 `memory.mjs` 的说法），而代码**一直**是
+ *     两种会话都注入 —— 文档与实现相反，界面据此写出过"群里看不到"这种错话。
+ *     2026-09-30 核对代码与真机提示词后按实现改正（详见 `CONFIG-UI.md`「记忆分三层」）。
+ *   · **L2 群聊层**按 `groupId` 选，所以群与群之间不串。
+ *   · **L3 个人层跟人走**：只注入**当前发言人**那一份 —— 群里别人看不到它，
+ *     他在别的群说话时看得到（这正是"个人记忆跟人走"的含义）。
+ *   · 指令档对所有会话都可见 —— 它本来就是跨群生效的东西，且只能由管理员写入。
  *
  * @returns {{ text: string, files: string[], counts: Record<string, number> }}
  */
-export function readMemoryForPrompt({ workspace, kind, peerId, log = () => {} }) {
+export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null, log = () => {} }) {
   const root = String(workspace ?? '')
-  const f = filesFor({ kind, peerId })
+  const L = layoutFor({ kind, peerId, speakerId })
   // ★ H3：读一次使用侧车，用来**决定显示顺序**（不改内容、不降权、不删 — 见 memory-usage.mjs）
   const usage = readUsage({ workspace: root, log })
   const wanted = [
-    // ① 全局记忆：**对所有人都生效**，所以两种会话都注入。
-    //    它不含任何人的私事（私事一律写 private-<QQ>.md，那是按人隔离的）。
-    ['全局记忆（对所有聊天都生效，不含私事）', FILE.global],
-    // ② 本会话专属记忆：群聊是本群、私聊是本人。
-    ['本会话记忆', f.facts],
-    ['群内黑话', f.slang],
-    // ③ 管理员指令（跨群生效，只有管理员私聊能写）。
-    ['管理员指令（跨群生效）', FILE.directives],
-    // ④ 兼容早期版本：全局知识曾写在 facts-global.md。只读注入，避免升级即失忆。
-    ['通用知识（早期文件，关于我自己）', FILE.legacyGlobalFacts],
+    // ① L1 全局层：**对所有人都生效**，所以两种会话都注入。
+    //    第三项是"层"，只用来做**一件特殊的事**：给个人层补一行行为统计（见下）。
+    ['全局记忆（对所有聊天都生效）', FILE.global, 'global'],
+    // ② L2 群聊层：**只在这个群**。
+    ['本群记忆（只在这个群）', L.session, 'group'],
+    ['群内黑话（只在这个群）', L.slang, 'group'],
+    // ③ L3 个人层：**跟人走**。私聊里就是他本人那份；群里只给当前发言人那份。
+    ['关于正在跟你说话的这个人（跟人走，别人看不到）', L.person, 'person'],
+    // ④ 管理员指令（跨群生效，只有管理员私聊能写）。
+    ['管理员指令（跨群生效）', FILE.directives, 'directive'],
+    // ⑤ 兼容早期版本：全局知识曾写在 facts-global.md。只读注入，避免升级即失忆。
+    ['通用知识（早期文件，关于我自己）', FILE.legacyGlobalFacts, 'other'],
   ].filter(([, p]) => Boolean(p))
+
+  // ★ 旧布局回退（**兜底，正常路径走不到**）：迁移没生效时旧文件仍要读得到。
+  //   为什么不能省：迁移是"一次性动作"，而注入每轮都在跑 —— 迁移没跑成而这里
+  //   又只认新路径，表现就是"升级后记忆突然全没了"，**且不报错**（最坏的一种）。
+  //   回退时标签会多一个「·旧布局」，体检里一眼看得出来该去修迁移。
+  const resolved = wanted.map(([label, rel, layer]) => {
+    const legacy = legacyPathOf(rel)
+    if (legacy && !existsSync(join(root, rel)) && existsSync(join(root, legacy))) {
+      return [`${label}·旧布局`, legacy, layer]
+    }
+    return [label, rel, layer]
+  })
+
+  // ★ 个人层的**行为统计**（0.2.9 决定：纳入）。只算一次，两个用处：
+  //   ① 追加到个人层那一行（"他常来（… 常在 20-23 点出现）"）；
+  //   ② 让"还没有任何条目、但确实常来"的人**也能被认出来** ——
+  //      否则一个聊了很多次却什么都没记下的人，在模型眼里完全不存在。
+  //   ⚠️ 计数是**确定性累加**的（`people-stats.mjs`），与模型无关，所以它不会被编。
+  const statsSpeaker = String(speakerId ?? peerId ?? '').trim()
+  const statsLine = L.person && statsSpeaker ? renderPersonStatsLine(readPersonStats({ workspace: root, userId: statsSpeaker, log })) : ''
 
   const blocks = []
   const usedFiles = []
   const counts = {}
   const detail = []
-  for (const [label, rel] of wanted) {
+  for (const [label, rel, layer] of resolved) {
     const abs = join(root, rel)
     // ★★ 注入的是"记忆行"，不是"带短横线的行"：非 `- ` 开头的普通句子同样注入
     //   （原实现只认 `- `，于是模型/人写的散文永远进不了上下文，且静默 —— 见 `memoryLinesFromRaw`）。
@@ -200,18 +426,23 @@ export function readMemoryForPrompt({ workspace, kind, peerId, log = () => {} })
     //    ⚠️ 前缀缓存：同一轮里所有注入条目的时间戳相同 → 相对次序不变 → 渲染文本不变；
     //       只有两条的新旧真的翻转时文本才变。
     const entries = applyRecencyOrder({ entries: live, usage })
-    if (entries.length === 0) continue
-    const shown = entries.slice(0, INJECT_ENTRIES)
+    // ★ 个人层：条目为空但统计有话说时**照样出这一段**（"认识，但还什么都不了解"）。
+    const extra = layer === 'person' ? statsLine : ''
+    if (entries.length === 0 && !extra) continue
+    // ★ 个人层用更紧的上限（见 `INJECT_ENTRIES_PERSON` 的理由）
+    const limit = layer === 'person' ? INJECT_ENTRIES_PERSON : INJECT_ENTRIES
+    const shown = entries.slice(0, limit)
     const more = entries.length - shown.length
     const text =
       shown.join(' ') +
       (more > 0 ? ` （另有 ${more} 条未展开）` : '') +
-      (supersededCount > 0 ? ` （另有 ${supersededCount} 条已被更正，不再作为事实使用）` : '')
+      (supersededCount > 0 ? ` （另有 ${supersededCount} 条已被更正，不再作为事实使用）` : '') +
+      (extra ? ` ${extra}` : '')
     blocks.push(`〔${label}〕${text}`)
     // ★ 结构化副本（给"记忆体检"用）。为什么不在调用方解析那段文本：
     //   解析文本是二次实现，迟早与这里的格式分叉 —— 而分叉的表现是
     //   "体检说注入了、实际没注入"这种最难查的假信息。
-    detail.push({ label, rel, entries: entries.length, shown: shown.length, more, text, shownEntries: shown })
+    detail.push({ label, rel, entries: entries.length, shown: shown.length, more, text, shownEntries: shown, stats: extra || null })
     usedFiles.push(rel)
     counts[rel] = entries.length
   }
@@ -276,6 +507,16 @@ export function screenEntry(scope, entry) {
       // 指令档本身就是"行为指令"，不该被那条"像行为指令"的规则挡住自己
       if (scope === SCOPE.DIRECTIVE && rule.why === '像行为指令，应走指令档') continue
       return { ok: false, why: rule.why }
+    }
+  }
+  // ── D27：对**不在场第三方**的负面定性（用户决定：默认不记）──────────────
+  // 位置在隐私之前：它不是"这条不该存"（那类更硬），而是"这条不该由机器人替人记着"。
+  // 回执会把这个 `why` 带回给模型，所以措辞要能让人看懂"为什么没记上"。
+  const third = thirdPartyNegative(text)
+  if (third.hit) {
+    return {
+      ok: false,
+      why: `${third.why} —— 涉及不在场的人，机器人不替任何人记这种评价（如果那件事本身值得记，请只记事实）`,
     }
   }
   // ── 隐私：**双侧硬闸的写入侧**（详见 src/privacy.mjs）────────────────────
@@ -493,7 +734,10 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false }) {
  * @returns {{applied: object[], ignored: object[], wroteFiles: string[]}}
  */
 export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, items, log = () => {} }) {
-  const f = filesFor({ kind, peerId })
+  // ★ 三层的读写落点由 `layoutFor` 一处产出（读/写分头写迟早分叉，
+  //   而分叉的表现是"写进去了、下一轮却不注入" —— 等于没记）。
+  //   `senderId` 就是**这一轮真实核实过的发言人**，个人层的落点由它决定（D20：代码裁定归属）。
+  const L = layoutFor({ kind, peerId, speakerId: senderId })
   const applied = []
   const ignored = []
   const wroteFiles = []
@@ -560,8 +804,29 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
       continue
     }
 
+    // ── L3 个人层：**跟人走**（落点 = 本轮发言人，且只可能是他）─────────────
+    //
+    // ★★ 归属由**代码**裁定，模型一个字节都插不上手：它拿不到 QQ 号，
+    //   也**没有**任何参数能指定"记给谁"。写第三方的条目要先把发言人列进
+    //   编号清单（`#1`/`#2`）再由桥接映射，那是二期的设计。
+    //   ⚠️ 这里的判据不是"提示词要求了"，而是**只有这一条落点可选**。
+    if (scope === SCOPE.PERSON) {
+      const rel = L.personTarget
+      if (!rel) {
+        ignored.push({ scope, entry, source, why: '拿不到这一轮发言人的号码，写不了个人档' })
+        continue
+      }
+      const r = appendEntry({ workspace, rel, entry, log, forceSupersede: item.force === true })
+      if (r.ok) {
+        applied.push({ scope, entry, source, rel, deduped: r.deduped, superseded: r.superseded ?? null })
+        if (!r.deduped) wroteFiles.push(rel)
+      } else ignored.push({ scope, entry, source, why: r.why })
+      continue
+    }
+
     // fact / slang：任何人可写，但只写"当前会话该写的那份"
-    const rel = scope === SCOPE.SLANG ? f.slang : f.facts
+    // （私聊里 `factTarget` 就是**这个人的个人档** —— 私聊的会话即本人，不再单开一层）
+    const rel = scope === SCOPE.SLANG ? L.slang : L.factTarget
     if (!rel) {
       ignored.push({ scope, entry, source, why: '这个会话没有对应的记忆文件（缺少会话标识）' })
       continue
@@ -666,7 +931,12 @@ export function verifyAndRestoreMemory({ workspace, log = () => {} }) {
   const root = String(workspace ?? '')
   const tampered = []
   const restored = []
-  const dirs = ['', 'memory']
+  // ★★ 三层都要扫。**子目录漏掉过一次**：0.2.1 的体检只扫根与 `memory/`，
+  //    于是根文件与任何子目录"既不会被回滚、也不会被告警" —— 表现是
+  //    "记忆像是没生效"，而排查时什么都看不到（第 9 条：不许安静地失败）。
+  //    现在 L2/L3 两个目录显式列进来；`snapshotNameOf` 把 `/` 换成 `__`，
+  //    所以子目录文件的快照名与 `saveSnapshot` 天然一致。
+  const dirs = ['', 'memory', FILE.groupsDir, FILE.peopleDir]
   for (const dir of dirs) {
     const abs = join(root, dir)
     let names = []
@@ -801,9 +1071,10 @@ export function saveSnapshot({ workspace, rel, content }) {
 export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   const lines = [
     '【长期记忆】**写入权不在你手上**：你只能"提议"，由系统校验后落盘。',
-    '提议的写法（整行独占，自己单独一行）：',
-    '  <<<MEMORY global 对所有聊天都成立的事>>>  ← 全局记忆（跨私聊与所有群）',
-    '  <<<MEMORY fact 这个人/这个群的事>>>      ← 本会话专属（群聊只写本群；私聊写本人）',
+    '记忆分**三层**，按"这条事**在哪儿成立**"选档（整行独占，自己单独一行）：',
+    '  <<<MEMORY global 对谁、在哪儿都成立的事>>>  ← 全局层：所有私聊与所有群都看得到',
+    '  <<<MEMORY fact 只跟这个会话有关的事>>>      ← 会话层：群聊=只写本群；私聊=只写这个人',
+    '  <<<MEMORY person 关于对面这个人本身的事>>>  ← 个人层：**跟他走** —— 他的私聊、他在别的群说话时都看得到',
   ]
   if (kind === 'group') lines.push('  <<<MEMORY slang 词 = 意思>>>            ← 群内黑话（只写本群）')
   if (kind === 'private') lines.push('  <<<MEMORY directive 以后遇到 X 就这样做>>>  ← 行为指令（仅管理员，跨群生效）')
@@ -816,9 +1087,14 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   )
   lines.push(
     '',
-    '**global 与 fact 的区别（写错会串场）**：global 谁都看得到（每个群、每个私聊），',
-    '所以只放"普遍成立、且不含任何人私事"的内容（约定、叫法、通用偏好）；',
-    '涉及某个人或某个群的事一律走 fact —— **别把私事写进 global**。',
+    '**三层怎么选（选错会串场，这一节最重要）**：',
+    '· `global` —— 对谁都成立、且**不含任何人的私事**（通用约定、叫法、普遍偏好）。它每个群都看得到。',
+    '· `fact` —— **只跟眼前这个会话有关**：群规、群内梗、这个群里发生的事。它**只留在本群**。',
+    '· `person` —— **关于对面这个人本身**：他的偏好、习惯、在做的事、怎么对待他。',
+    '  它**跟他走**：他自己在别的群说话时也看得到（别人看不到）。',
+    '  ⚠️ 所以**只有本群才知道的事绝不要写进 `person`** —— 那等于替他把它带到别的群去。',
+    '  ⚠️ `person` 的落点由系统按**这一轮真实核实过的发言人**决定，你**不用也不能**写号码；',
+    '  想记的是另外一个人时，别用 `person`（系统会把它记到正在跟你说话的人名下，那就错了）。',
     '**不要用文件工具去写记忆**（写不进去，也不会被采纳）；标记行不会发给对方，系统会剥掉。',
     '系统只接受这几种档位；**涉及"谁是管理员/有什么权限"的内容一律会被拒** —— 身份只由系统判定。',
     '**发现之前记错了就用 `fix` 档重写一遍**（不要试图编辑文件）：旧条目会留着但标注"已被更正"，',
@@ -887,22 +1163,139 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
 }
 
 /**
- * 记忆文件清单（`MEMORY.md` + `memory/*.md`），给体检/配置界面用。
+ * 把**旧布局**的记忆搬进三层布局（升级不失忆）。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * ⚠️ 这里踩过一个**静默漏报**的坑，改之前务必读完
+ * 为什么必须做（不做会怎样）
  * ══════════════════════════════════════════════════════════════════════════
- * 第一版只 `readdirSync('memory')` —— 而 `MEMORY.md` 在**工作区根目录**，
- * 于是它**永远不进这份清单**。后果是"记忆体检"的①④两段完全看不到全局记忆：
- * 实测该工作区 `MEMORY.md` 有 30 条 / 7605 字节，体检却一条都不显示，
- * 也不报"因注入上限还有 5 条不会进上下文"。
+ * 旧布局是 `memory/private-<QQ>.md` + `memory/group-<群号>.md`，新布局是
+ * `memory/people/<QQ>.md` + `memory/groups/<群号>.md`。**改了路径而不搬内容，
+ * 等于升级即失忆** —— 文件还在磁盘上，但再也不会被注入，而且**没有任何地方会报错**。
+ * 那正是本项目最防的失败模式（第 6/9 条）。
  *
- * 这类"工具说没有、其实有"比没有工具更糟：使用者会据此以为全局记忆是空的。
- * 所以根文件必须显式补进来。
+ * ── 四条纪律 ──────────────────────────────────────────────────────────────
+ * ① **只搬不删**：旧文件迁进 `memory/.migrated/`（隐藏目录 ⇒ 不再被注入、
+ *    也不再被篡改检测扫）。它是后路，不是垃圾。
+ * ② **合并而不是覆盖**：新旧都在时，把旧文件里**还不存在**的行追加过去；
+ *    一条都不丢，也不重复。
+ * ③ **改过的文件立刻刷快照** —— 否则下一次读记忆会被 `verifyAndRestoreMemory`
+ *    把刚搬进来的内容**整段回滚**（表现成"迁移完它又自己变回去了"）。
+ * ④ **幂等**：跑第二次什么都不做（旧文件已经不在了）。
  *
- * ⚠️ 顺序与去重：根在前（它是全局层，最该被先看到），`memory/` 内的按名字排序。
+ * ⚠️ 它**不抛错**：迁移失败只记一行日志，绝不能让桥接起不来 ——
+ *   而且旧文件仍在原处，注入侧还有一层"旧路径回退读"兜着（见 `legacyPathOf`）。
  *
- * @returns {string[]} 相对工作区的路径，如 `['MEMORY.md', 'memory/group-1.md']`
+ * @returns {{moved: string[], merged: string[], kept: string[], why: string[]}}
+ */
+export function migrateMemoryLayout({ workspace, log = () => {} }) {
+  const root = String(workspace ?? '')
+  const moved = []
+  const merged = []
+  const kept = []
+  const why = []
+  const memDir = join(root, 'memory')
+  if (!existsSync(memDir)) return { moved, merged, kept, why }
+
+  let names = []
+  try {
+    names = readdirSync(memDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.md'))
+      .map((e) => e.name)
+  } catch (error) {
+    // 列不出来也要留证据（静默跳过 = 迁移静默失效）
+    why.push(`memory/ 列不出来：${error?.message ?? error}`)
+    log(`⚠️ [memory] 旧布局迁移：memory/ 目录列不出来（迁移跳过）：${error?.message ?? error}`)
+    return { moved, merged, kept, why }
+  }
+
+  for (const name of names) {
+    const oldRel = `memory/${name}`
+    let target = null
+    let m = /^private-(\d{5,15})\.md$/.exec(name)
+    if (m) target = personMemoryRel(m[1])
+    if (!target) {
+      m = /^group-(\d{5,15})\.md$/.exec(name)
+      if (m) target = groupMemoryRel(m[1])
+    }
+    if (!target) {
+      m = /^group-(\d{5,15})-slang\.md$/.exec(name)
+      if (m) target = groupSlangRel(m[1])
+    }
+    if (!target) continue // 不认识的文件名一律不碰（宁可留着，也不猜）
+
+    try {
+      const oldAbs = join(root, oldRel)
+      const newAbs = join(root, target)
+      const oldText = readFileSync(oldAbs, 'utf8')
+      const oldLines = oldText.split('\n')
+      let action = 'moved'
+      if (existsSync(newAbs)) {
+        // ② 合并：只追加旧文件里**新文件没有的**行（去重按 trim 比较）
+        const newText = readFileSync(newAbs, 'utf8')
+        const have = new Set(newText.split('\n').map((l) => l.trim()))
+        const add = oldLines.filter((l) => l.trim() && !have.has(l.trim()))
+        if (add.length > 0) {
+          writeFileSync(newAbs, `${newText.replace(/\n*$/, '\n')}${add.join('\n')}\n`, 'utf8')
+          merged.push(`${oldRel} → ${target}（补 ${add.length} 行）`)
+        } else {
+          kept.push(`${oldRel}（${target} 已包含全部内容）`)
+        }
+        action = 'merged'
+      } else {
+        mkdirSync(join(newAbs, '..'), { recursive: true })
+        writeFileSync(newAbs, oldText, 'utf8')
+        moved.push(`${oldRel} → ${target}`)
+      }
+      // ③ 刷快照：不刷的话下一次读记忆会把刚搬进来的内容回滚掉
+      saveSnapshot({ workspace: root, rel: target })
+      // ① 归档旧文件（不删）
+      const archDir = join(root, FILE.migratedDir)
+      mkdirSync(archDir, { recursive: true })
+      let archAbs = join(archDir, name)
+      let n = 1
+      while (existsSync(archAbs)) {
+        archAbs = join(archDir, `${name}.${n}`)
+        n += 1
+      }
+      renameSync(oldAbs, archAbs)
+      // ★ 旧快照一起清掉：文件已经搬走，那份快照**永远不会再被比对**。
+      //   不清理不是错误，但会留下"看起来还在管一份已经不存在的记忆"的假象 ——
+      //   而 `.snapshots/` 是给人看"哪些记忆有基准"的地方，里面躺着孤儿会误导排查。
+      //   ⚠️ 必须在**归档成功之后**再删：归档失败时旧文件还在原处，它的快照仍然是有效的基准。
+      dropSnapshot({ workspace: root, rel: oldRel })
+      log(
+        action === 'moved'
+          ? `[memory] 旧布局迁移：${oldRel} → ${target}（原件归档到 ${FILE.migratedDir}/）`
+          : `[memory] 旧布局合并：${oldRel} → ${target}（原件归档到 ${FILE.migratedDir}/）`,
+      )
+    } catch (error) {
+      why.push(`${oldRel}：${error?.message ?? error}`)
+      log(`⚠️ [memory] 旧布局迁移失败（原件仍在原处，未丢）：${oldRel} —— ${error?.message ?? error}`)
+    }
+  }
+  return { moved, merged, kept, why }
+}
+
+/**
+ * 记忆文件清单（三层：`MEMORY.md` + `memory/*.md` + `memory/groups/*.md` + `memory/people/*.md`），
+ * 给体检/配置界面/搜索用。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ⚠️ 这里踩过**两次**静默漏报的坑，改之前务必读完
+ * ══════════════════════════════════════════════════════════════════════════
+ * ① 第一版只 `readdirSync('memory')` —— 而 `MEMORY.md` 在**工作区根目录**，
+ *    于是它**永远不进这份清单**。后果是"记忆体检"的①④两段完全看不到全局记忆：
+ *    实测该工作区 `MEMORY.md` 有 30 条 / 7605 字节，体检却一条都不显示。
+ * ② 加了三层布局之后，L2/L3 在**子目录**里（`memory/groups/`、`memory/people/`）——
+ *    只扫 `memory/` 一层会让**个人档案整体隐形**：写进去了、体检说没有、
+ *    控制台也看不到。所以那两个目录必须显式列进来（与 `verifyAndRestoreMemory`
+ *    的目录清单保持同一份口径）。
+ *
+ * 这类"工具说没有、其实有"比没有工具更糟：使用者会据此以为记忆是空的。
+ *
+ * ⚠️ 顺序与去重：全局在前（最该被先看到），其余按"层 → 名字"排序。
+ *
+ * @returns {string[]} 相对工作区的路径，如 `['MEMORY.md', 'memory/people/10001.md']`
  */
 export function listMemoryFiles(workspace) {
   const root = String(workspace ?? '')
@@ -913,18 +1306,19 @@ export function listMemoryFiles(workspace) {
   } catch {
     /* 读不到就当没有 */
   }
-  // ② memory/ 下的明细文件。
-  try {
-    const dir = join(root, 'memory')
-    if (existsSync(dir)) {
+  // ② `memory/` 本层 + ③ L2/L3 两个子目录。
+  for (const rel of ['memory', FILE.groupsDir, FILE.peopleDir]) {
+    try {
+      const dir = join(root, rel)
+      if (!existsSync(dir)) continue
       const names = readdirSync(dir, { withFileTypes: true })
         .filter((e) => e.isFile() && e.name.endsWith('.md'))
-        .map((e) => `memory/${e.name}`)
+        .map((e) => `${rel}/${e.name}`)
         .sort()
-      for (const rel of names) if (!out.includes(rel)) out.push(rel)
+      for (const name of names) if (!out.includes(name)) out.push(name)
+    } catch {
+      /* 目录不存在或列不出来 = 这一层没有文件（不要因此让整个清单失败） */
     }
-  } catch {
-    /* 目录不存在 = 没有明细文件 */
   }
   return out
 }

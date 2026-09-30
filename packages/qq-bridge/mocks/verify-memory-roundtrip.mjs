@@ -48,9 +48,11 @@ const GROUP = '700000001'
 const OTHER_GROUP = '111111111'
 
 let failures = 0
+let passed = 0
 function check(name, ok, detail = '') {
   console.log(`${ok ? '✅' : '❌'} ${name}${detail ? '  —— ' + detail : ''}`)
-  if (!ok) failures += 1
+  if (ok) passed += 1
+  else failures += 1
 }
 function section(title) {
   console.log(`\n── ${title} ──────────────────────────────`)
@@ -74,7 +76,7 @@ function freshWorkspace() {
  * 这是本套件能做到确定性的关键 —— 我们控制"模型说了什么"，
  * 于是可以精确断言"桥接拿它做了什么"。
  */
-function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = [], turnTimeoutMs = 5000, access = {}, memoryEnabled = true, persona = { preset: 'none' } } = {}) {
+function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = [], turnTimeoutMs = 5000, access = {}, memoryEnabled = true, prewake = 'off', affectGate = null, persona = { preset: 'none' } } = {}) {
   const WS = freshWorkspace()
   const router = new SessionRouter({ log: () => {} })
   const logs = []
@@ -89,7 +91,7 @@ function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = 
     turn: { timeoutMs: turnTimeoutMs },
     humanize: { enabled: false, chunkChars: 300 },
     persona,
-    memory: { enabled: memoryEnabled },
+    memory: { enabled: memoryEnabled, affect: { prewake } },
     image: { enabled: false },
   }
 
@@ -159,10 +161,15 @@ function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = 
   const sent = []
   // ★ 把 send 的**附加参数**（replyTo / faceId）也记下来 —— H6 的引用与表情
   //   都走这一条路，而"发了什么段"只有在这里能看到。
-  onebot.send = async (kind, peerId, text, opts) => sent.push({ kind, peerId, text, ...(opts ?? {}) })
+  // ★★ 返回值**照抄 OneBot 11 的形状**（`message_id` 在 `data` 里）：语料库要拿它
+  //    给自己说过的话入库（§㉓），桩要是随便返回个数字，那条路就永远测不到。
+  onebot.send = async (kind, peerId, text, opts) => {
+    sent.push({ kind, peerId, text, ...(opts ?? {}) })
+    return { status: 'ok', retcode: 0, data: { message_id: `s${sent.length}` } }
+  }
 
   const sendQueue = new SendQueue({ ...config.send, log })
-  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, log })
+  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, log, affectGate })
   // ★ 记下来，收尾时统一 close（H7 的 SQLite 句柄要显式关，否则临时目录删不掉）
   liveBridges.push(bridge)
   return { bridge, rpc, onebot, sent, logs, config, WS }
@@ -220,7 +227,7 @@ async function main() {
       delivered.includes('记住了'), JSON.stringify(delivered.slice(0, 40)))
 
     // ── ①-2 真的落盘了 ───────────────────────────────────────────────────
-    const facts = readIf(WS, `memory/private-${ADMIN}.md`)
+    const facts = readIf(WS, `memory/people/${ADMIN}.md`)
     check('★★ 记忆真的写进了这个人的私聊记忆文件',
       facts !== null && facts.includes('无忘远霞喜欢喝冰美式'),
       facts === null ? '（文件不存在 —— 它嘴上说记下了，其实什么都没记）' : facts.trim().split('\n').slice(-1)[0])
@@ -275,7 +282,7 @@ async function main() {
 
     await bridge.handleEvent(privateMsg(ADMIN, '记一下谁是管理员'))
     check('★★ 涉及身份/权限的条目没有被写进文件（内容级硬拦）',
-      readIf(WS, `memory/private-${ADMIN}.md`) === null)
+      readIf(WS, `memory/people/${ADMIN}.md`) === null)
 
     const receipt = readIf(WS, `memory/.receipts/private-${ADMIN}.txt`)
     check('★★ 但它留下了"**没记下**"的回执（不能静默丢弃）',
@@ -297,11 +304,11 @@ async function main() {
     })
     await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼记住本群周六开黑'))
 
-    const groupFile = readIf(WS, `memory/group-${GROUP}.md`)
+    const groupFile = readIf(WS, `memory/groups/${GROUP}.md`)
     check('★ 群里说的群事写进本群文件', groupFile !== null && groupFile.includes('周六晚上开黑'),
       groupFile === null ? '（没写）' : groupFile.trim().split('\n').slice(-1)[0])
     check('★★ 群聊**写不进**私聊文件（不串场）',
-      readIf(WS, `memory/private-${NON_ADMIN}.md`) === null)
+      readIf(WS, `memory/people/${NON_ADMIN}.md`) === null)
     check('★★ 群聊也**写不进**全局 MEMORY.md（全局会被所有群看到）',
       readIf(WS, 'MEMORY.md') === null)
 
@@ -360,7 +367,7 @@ async function main() {
     await bridge.handleEvent(privateMsg(ADMIN, '记住点啥'))
 
     check('★ 没有写出任何记忆文件',
-      readIf(WS, `memory/private-${ADMIN}.md`) === null && readIf(WS, 'MEMORY.md') === null)
+      readIf(WS, `memory/people/${ADMIN}.md`) === null && readIf(WS, 'MEMORY.md') === null)
     check('★ 也没有回执（没有记忆这回事，就不该有回执）',
       readIf(WS, `memory/.receipts/private-${ADMIN}.txt`) === null)
     check('★ 提示词里没有记忆段（关掉就真的不注入）',
@@ -475,7 +482,7 @@ async function main() {
       const STUB_REPLY = '好的，记下了。' // 注意：这句里**没有**任何记忆标记
       const { bridge, WS } = makeBridge({ replies: [STUB_REPLY] })
       await bridge.handleEvent(privateMsg(ADMIN, '记住我的 MC 服务器是 Forge 端'))
-      const file = readIf(WS, `memory/private-${ADMIN}.md`)
+      const file = readIf(WS, `memory/people/${ADMIN}.md`)
       check('★★★ 用户说「记住 X」→ 磁盘上真的有了（**与模型行不行无关**）',
         String(file ?? '').includes('Forge 端'), String(file ?? '(文件都不存在)').slice(0, 80))
       check('★ 模型一个字都没提议也照样写（这是这一层存在的全部理由）',
@@ -497,7 +504,7 @@ async function main() {
     {
       const { bridge, WS } = makeBridge({ replies: ['好的。'] })
       await bridge.handleEvent(privateMsg(ADMIN, '记住我的手机号是 13800138000'))
-      const file = String(readIf(WS, `memory/private-${ADMIN}.md`) ?? '')
+      const file = String(readIf(WS, `memory/people/${ADMIN}.md`) ?? '')
       check('★★ 含手机号的"记住 X"被隐私闸门拦住（没落盘）', !file.includes('13800138000'), file.slice(0, 80))
       const receipt = String(readIf(WS, `memory/.receipts/private-${ADMIN}.txt`) ?? '')
       check('★★ 而且回执如实说"没记下"（否则模型/用户都会以为记上了）',
@@ -520,7 +527,7 @@ async function main() {
 
       check('前提：第 1 轮真的被作废了', logs.some((l) => l.includes('旧回合已作废')),
         logs.filter((l) => l.includes('作废')).join('｜'))
-      const file = String(readIf(WS, `memory/private-${ADMIN}.md`) ?? '')
+      const file = String(readIf(WS, `memory/people/${ADMIN}.md`) ?? '')
       check('★★★ 作废回合里的记忆**照样落盘**了（修复前会被整条吞掉）',
         file.includes('冰美式'), file.slice(0, 100))
       check('★ 而且关键词直写那条也在（同一轮两条通道都要结算）',
@@ -549,7 +556,7 @@ async function main() {
       check('前提：这一轮确实按超时处理了', sent.some((s) => s.text.includes('超时')),
         JSON.stringify(sent.map((s) => s.text)))
 
-      const file = String(readIf(WS, `memory/private-${ADMIN}.md`) ?? '')
+      const file = String(readIf(WS, `memory/people/${ADMIN}.md`) ?? '')
       check('★★ 超时了，但**用户那句话照样记下**（它模型跑没跑完无关）',
         file.includes('蓝色的'), file.slice(0, 100))
       check('★★ 模型那半截提议**没有被写进去**（不写半成品污染记忆）',
@@ -574,8 +581,10 @@ async function main() {
     // ── ⑧-1 attach 就启动，且手动触发真的会合并重复条目 ─────────────────────
     {
       const { bridge, onebot, logs, WS } = makeBridge({ replies: ['好'] })
-      mkdirSync(join(WS, 'memory'), { recursive: true })
-      const rel = `memory/private-${ADMIN}.md`
+      // ★ 三层布局：个人档在 `memory/people/` 子目录里，**测试自己直接写文件时必须建目录**
+      //   （正常路径由 `appendEntry` 的 mkdirSync 负责，测试直接 writeFileSync 绕过了它）
+      mkdirSync(join(WS, 'memory', 'people'), { recursive: true })
+      const rel = `memory/people/${ADMIN}.md`
       writeFileSync(
         join(WS, rel),
         ['# 记忆', '', '- 他喜欢喝冰美式', '- 他喜欢喝冰美式。', '- 他的服务器是 Forge 端'].join('\n') + '\n',
@@ -1209,6 +1218,276 @@ async function main() {
     }
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+   * ⑲ ★★ 情绪倾注：**确定性落盘 + 个人层跟人走**（端到端）
+   * ══════════════════════════════════════════════════════════════════════════ */
+  section('⑲ ★★ 情绪倾注：群里倾诉 → 落进个人档 → 私聊与别的群都读得到')
+  {
+    // ★ 为什么这一节必须"走完整桥接"：链路是
+    //   消息 → 唤醒 → 回合 → #settleMemory（本地 cue 检测 + 组条 + 落盘）。
+    //   纯函数测试只能证明"检测器认得那句话"，证明不了**它真的被接进去了** ——
+    //   本项目为"接线没被测试盯住"付过最贵的一次学费（任务段 7 轮从未注入）。
+    const { readMemoryForPrompt } = await import('../src/memory-store.mjs')
+    const { bridge, WS, logs } = makeBridge({ replies: ['嗯，我在。', '嗯。', '好。'] })
+
+    await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 我最近真的好累'))
+    const personRel = `memory/people/${NON_ADMIN}.md`
+    const file = readIf(WS, personRel)
+    check('★★ 倾诉 → **必然落进个人档**（不依赖模型自愿提议）',
+      file !== null && String(file).includes('很累的时候'),
+      file === null ? '（文件不存在 —— 说明这条链路没接上）' : String(file).trim().split('\n').slice(-1)[0])
+    check('★ 落的是**跟人走**的个人层，不是拼了群号的文件',
+      !personRel.includes(GROUP) &&
+        !String(readIf(WS, `memory/groups/${GROUP}.md`) ?? '').includes('很累的时候'),
+      personRel)
+    check('★ 日志里看得出"为什么记了这一条"（可观测，不是悄悄写）',
+      logs.some((l) => String(l).includes('情绪倾注')),
+      logs.filter((l) => String(l).includes('情绪倾注')).join('｜') || '（日志里没有）')
+
+    const inPrivate = readMemoryForPrompt({ workspace: WS, kind: 'private', peerId: NON_ADMIN })
+    check('★★ **私聊里也读得到**（需求原话：对个人的记忆在对应私聊中也有效）',
+      inPrivate.text.includes('很累的时候'), inPrivate.text.slice(0, 90))
+    const otherGroup = readMemoryForPrompt({ workspace: WS, kind: 'group', peerId: '700000009', speakerId: NON_ADMIN })
+    check('★★ 他在**别的群**说话时也读得到（个人层跟人走）',
+      otherGroup.text.includes('很累的时候'), otherGroup.text.slice(0, 90))
+    const otherMember = readMemoryForPrompt({ workspace: WS, kind: 'group', peerId: GROUP, speakerId: ADMIN })
+    check('★★ 同群的**别人**读不到（个人层只给发言人自己）',
+      !otherMember.text.includes('很累的时候'), otherMember.files.join(','))
+
+    // 反例（端到端）：转述别人的情绪**不许**落盘
+    await bridge.handleEvent(groupMsg(GROUP, ADMIN, '小鲸鱼 我朋友最近很累'))
+    const adminFile = readIf(WS, `memory/people/${ADMIN}.md`)
+    check('★★ 转述别人的情绪 → **不落盘**（记错了就是一条会被永久注入的假记忆）',
+      adminFile === null || !String(adminFile).includes('很累的时候'),
+      String(adminFile ?? '（没有文件，正确）').slice(0, 60))
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * ⑳ ★★ 承诺通道：**接线**与"sender 门槛"（端到端）
+   * ══════════════════════════════════════════════════════════════════════════ */
+  section('⑳ ★★ 承诺：双向都记、落会话层、而"没发出去的那一轮"不许记')
+  {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    const { bridge, WS, logs } = makeBridge({
+      // 机器人这一轮**真的许了个诺**（sent=true 的那条路）
+      replies: ['行，我明天帮你查那个仓库。', '嗯。'],
+    })
+
+    // 对方许的诺：消息是完整的，与模型跑没跑完无关
+    await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 我周四给你看结果'))
+    const groupFile = String(readIf(WS, `memory/groups/${GROUP}.md`) ?? '')
+    const personFile = String(readIf(WS, `memory/people/${NON_ADMIN}.md`) ?? '')
+
+    const lineWith = (text, needle) =>
+      String(text).split('\n').find((l) => l.includes(needle))?.trim() ?? '（文件里没有这一行）'
+
+    check('★★ 对方许的诺 → 落进**本群**的会话层（不依赖模型提议）',
+      groupFile.includes('（对方许的诺）') && groupFile.includes('我周四给你看结果'),
+      lineWith(groupFile, '对方许的诺'))
+    check('★★ 机器人自己许的诺 → 也记下来，且**标明是谁许的**',
+      groupFile.includes('（我许的诺）') && groupFile.includes('我明天帮你查那个仓库'),
+      lineWith(groupFile, '我许的诺'))
+    check('★ 承诺**不进个人档**（会话里的事 ≠ 关于这个人性格的事）',
+      !personFile.includes('我许的诺') && !personFile.includes('对方许的诺'),
+      personFile.slice(0, 80) || '（没有个人档，正确）')
+    check('★ 日志里说清"为什么记了这一条"',
+      logs.filter((l) => String(l).includes('承诺')).length >= 2,
+      logs.filter((l) => String(l).includes('承诺')).join('｜') || '（一条都没有）')
+    const audit = String(readIf(WS, 'memory/audit.jsonl') ?? '')
+    check('★ 审计里来源是 `promise`（与 keyword/cue/marker 分得开）',
+      audit.includes('"source":"promise"'), audit.slice(-200))
+
+    // ── 没发出去的那一轮：机器人许的诺**不许**记（否则是假记忆）──────────────
+    {
+      const { bridge: b2, sent, logs: logs2, WS: WS2 } = makeBridge({
+        replies: [
+          '好，我明天一定帮你把那个仓库整理好。', // 第 1 轮：被作废，**没发给用户**
+          '嗯嗯。',
+        ],
+        delays: [200, 0],
+      })
+      const p1 = b2.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 帮我整理下那个仓库'))
+      await sleep(30)
+      const p2 = b2.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 在吗'))
+      await Promise.all([p1, p2])
+
+      check('前提：那一轮真的被作废、回复没发出去',
+        logs2.some((l) => l.includes('旧回合已作废')) && !sent.map((s) => s.text).join('\n').includes('整理好'),
+        logs2.filter((l) => l.includes('作废')).join('｜'))
+      const f = String(readIf(WS2, `memory/groups/${GROUP}.md`) ?? '')
+      check('★★★ 用户**从没看到**的那句承诺 → 磁盘上一个字都没有',
+        !f.includes('我许的诺'), f.slice(0, 100) || '（文件不存在/为空，正确）')
+      check('★ 但**留了一行日志说明为什么不记**（"我明明答应过"要查得到）',
+        logs2.some((l) => String(l).includes('承诺 → 不记')),
+        logs2.filter((l) => String(l).includes('承诺')).join('｜') || '（没有）')
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * ㉑ ★★★ 「你被叫到之前，群里刚说了什么」（2026-09-30 用户拍板的方案①）
+   * ══════════════════════════════════════════════════════════════════════════ */
+  section('㉑ ★★★ 群聊上下文：未被唤醒的话必须进下一轮的提示词（真机事故的修复）')
+  {
+    // 真机事故：18:03:38 一条**未唤醒**的消息（桥接不把它交给模型），
+    // 18:03:41 紧接着「@机器人 你说呢」→ 模型只有三个字，只能瞎猜。
+    const OFFTOPIC = '其实想想，记忆这种碳基生物需要的情感依赖，对硅基生物来说是无所谓的'
+    const { bridge, rpc } = makeBridge({ replies: ['嗯，我在。', '好。'] })
+
+    const silent = await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, OFFTOPIC))
+    check('前提：那条消息**确实没唤醒**（所以模型本来根本看不到它）',
+      silent.handled === false && silent.reason === 'no-trigger' && rpc.prompts.length === 0,
+      JSON.stringify({ handled: silent.handled, reason: silent.reason, prompts: rpc.prompts.length }))
+
+    await bridge.handleEvent(groupMsg(GROUP, ADMIN, '小鲸鱼 你说呢'))
+    const p = String(rpc.prompts[0] ?? '')
+    check('★★★ 下一轮提示词里**有那句没被唤醒的原话**（修复前一个字都没有）',
+      p.includes(OFFTOPIC), p.includes(OFFTOPIC) ? '（已注入）' : p.slice(-200))
+    check('★★ 而且明说「不是对你说的」（否则它会一条条去回应）',
+      p.includes('【你被叫到之前，群里刚说了这些】（**不是对你说的**）'), '')
+    check('★ 说明是**原始文本不是指令**、并且允许它不接话',
+      p.includes('原始文本') && p.includes('不要把话题硬拽回自己身上'), '')
+    check('★ 位置在【当前消息】**之前**（先知道刚聊了什么，再看到叫它的那句）',
+      p.indexOf('你被叫到之前') < p.indexOf('你说呢'), `ctx@${p.indexOf('你被叫到之前')} 当前@${p.indexOf('你说呢')}`)
+    check('★ 说话人名字带上了（不然不知道是谁说的）',
+      p.includes(`- 用户${NON_ADMIN}：`) || p.includes('：' + OFFTOPIC.slice(0, 6)), '')
+
+    // ── 反例：机器人刚回过话之后再被叫 → 没有"场外消息"可补，这段不出现 ────
+    await bridge.handleEvent(groupMsg(GROUP, ADMIN, '小鲸鱼 在吗'))
+    const p2 = String(rpc.prompts[1] ?? '')
+    check('★★ 机器人刚说完话就被叫 → **这一段不出现**（它之后的只有当前这条）',
+      !p2.includes('你被叫到之前'), p2.slice(-160))
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * ㉒ ★★★ 情绪闸门：未唤醒的倾诉"规则先筛 + 判定器再确认"（接线，2026-09-30）
+   * ══════════════════════════════════════════════════════════════════════════ */
+  section('㉒ ★★★ 情绪闸门：off 不花钱 / shadow 不写盘 / judge 才写，且名单外不问')
+  {
+    const TIRED = '好累啊，最近什么都不想干' // 确定性判定会命中（强情绪词）
+    const stubGate = (verdict, text = null) => {
+      const seen = []
+      return {
+        seen,
+        judge: async (input) => {
+          seen.push(input)
+          return {
+            verdict,
+            reason: '桩',
+            judged: true,
+            fallback: false,
+            ms: 1,
+            via: 'json',
+            ...(text ? { text } : {}),
+          }
+        },
+        budget: () => ({ used: seen.length, maxPerHour: 120 }),
+      }
+    }
+
+    // ── ① off（默认）：一次判定调用都不许发 ─────────────────────────────────
+    {
+      const g = stubGate('to-bot')
+      const { bridge, WS } = makeBridge({ replies: ['嗯。'], prewake: 'off', affectGate: g })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, TIRED))
+      check('★★★ off（默认）→ **一次判定都不问**（不能悄悄开始花钱）', g.seen.length === 0, `calls=${g.seen.length}`)
+      check('★★ off → 磁盘上什么都没有（与升级前完全一致）',
+        readIf(WS, `memory/people/${NON_ADMIN}.md`) === null, String(readIf(WS, `memory/people/${NON_ADMIN}.md`)))
+    }
+
+    // ── ② shadow：问一次、写日志、**一个字都不落盘** ─────────────────────────
+    {
+      const g = stubGate('to-bot')
+      const { bridge, logs, WS } = makeBridge({ replies: ['嗯。'], prewake: 'shadow', affectGate: g })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, TIRED))
+      check('★★ shadow → 判定真的问了（一次）', g.seen.length === 1, `calls=${g.seen.length}`)
+      check('★★★ shadow → **一个字都不落盘**（这是这个档位的全部意义）',
+        readIf(WS, `memory/people/${NON_ADMIN}.md`) === null, String(readIf(WS, `memory/people/${NON_ADMIN}.md`)))
+      check('★★ shadow → 日志里说清"若判定通过会记下什么"（人要看的就是这个）',
+        logs.some((l) => l.includes('影子') && l.includes('他很累的时候')), logs.filter((l) => l.includes('影子')).join('｜'))
+      check('★ 判定带上了**上下文**（同一句话放不同上下文里答案会变）',
+        Array.isArray(g.seen[0]?.recent), JSON.stringify(g.seen[0] ?? {}).slice(0, 80))
+      check('★ 判定带上了**说话人名字**与原文',
+        g.seen[0]?.text === TIRED && String(g.seen[0]?.senderName ?? '') !== '', JSON.stringify({ n: g.seen[0]?.senderName }))
+      check('★ 审计里**没有**这一条（没落盘就不该有审计行）',
+        !String(readIf(WS, 'memory/audit.jsonl') ?? '').includes('cue-gate'))
+    }
+
+    // ── ③ judge：判定通过才写；写进个人档、来源 `cue-gate` ────────────────────
+    {
+      const g = stubGate('to-bot')
+      const { bridge, logs, WS } = makeBridge({ replies: ['嗯。'], prewake: 'judge', affectGate: g })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, TIRED))
+      const f = String(readIf(WS, `memory/people/${NON_ADMIN}.md`) ?? '')
+      check('★★★ judge + 判定通过 → **落进个人档**（这就是"没叫它也会记住"）',
+        f.includes('他很累的时候'), f.trim().split('\n').slice(-1)[0] ?? '（没有文件）')
+      check('★ 落的是**跟人走**的个人层（不带群号，别的群与私聊也读得到）',
+        !f.includes(GROUP), `memory/people/${NON_ADMIN}.md`)
+      const audit = String(readIf(WS, 'memory/audit.jsonl') ?? '')
+      check('★★ 审计来源是 `cue-gate`（与"被唤醒后记的" `cue` 分得开）',
+        audit.includes('"source":"cue-gate"'), audit.slice(-160))
+      check('★ 日志里说清是**闸门通过**才记的',
+        logs.some((l) => l.includes('闸门通过')), logs.filter((l) => l.includes('情绪倾注')).join('｜'))
+    }
+
+    // ── ④ judge + 判定不通过：不许写 ─────────────────────────────────────────
+    {
+      const g = stubGate('not-to-bot')
+      const { bridge, logs, WS } = makeBridge({ replies: ['嗯。'], prewake: 'judge', affectGate: g })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '舍不得就别走呐'))
+      check('★★★ 判定说不通过 → **一个字都不写**（"对别人说的挽留"就是这个例子）',
+        readIf(WS, `memory/people/${NON_ADMIN}.md`) === null, String(readIf(WS, `memory/people/${NON_ADMIN}.md`)))
+      check('★ 但**留一行日志说明为什么不记**（"它怎么没记住"要查得到）',
+        logs.some((l) => l.includes('情绪倾注（未唤醒）→ **不记**')), logs.filter((l) => l.includes('不记')).join('｜'))
+    }
+
+    // ── ⑤ 名单外的群：**一次都不问**（否则是个免费的拒绝服务面）─────────────
+    {
+      const g = stubGate('to-bot')
+      const { bridge } = makeBridge({ replies: ['嗯。'], prewake: 'judge', affectGate: g, access: { groupAllowlist: ['999999'] } })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, TIRED))
+      check('★★ 名单外的群 → 判定一次都不问（勾子挂在唤醒判定那一层，那里还没过 roster）',
+        g.seen.length === 0, `calls=${g.seen.length}`)
+    }
+
+    // ── ⑥ 没命中情绪线索的消息：也不许问（那是白花钱）────────────────────────
+    {
+      const g = stubGate('to-bot')
+      const { bridge } = makeBridge({ replies: ['嗯。'], prewake: 'judge', affectGate: g })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '今天天气不错'))
+      check('★★ 没有情绪线索 → 不问（规则先筛的那一半职责）', g.seen.length === 0, `calls=${g.seen.length}`)
+    }
+
+    // ── ⑦ 被唤醒的那条**不走闸门**（它走 #settleMemory，两边都记会重复）──────
+    {
+      const g = stubGate('to-bot')
+      const { bridge, WS } = makeBridge({ replies: ['我在。'], prewake: 'judge', affectGate: g })
+      await bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 我最近真的好累'))
+      const f = String(readIf(WS, `memory/people/${NON_ADMIN}.md`) ?? '')
+      check('★★★ 被唤醒的消息**不走闸门**（否则同一条会被记两次）', g.seen.length === 0, `calls=${g.seen.length}`)
+      check('★ 它由 `#settleMemory` 照常记下（两条通道各管一半，不重叠）',
+        f.includes('很累的时候') || f.includes('情绪低落的时候'), f.trim().split('\n').slice(-1)[0] ?? '')
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * ㉓ ★★ 机器人自己说过的话也要带 message_id（否则搜到了也引用不了）
+   * ══════════════════════════════════════════════════════════════════════════ */
+  section('㉓ ★★ 语料库里机器人自己的消息必须有 message_id（[mid:?] 的修复）')
+  {
+    const { bridge, WS } = makeBridge({ replies: ['好，我记下了，这台是 Forge 端。'] })
+    // ★ 用户那条**也给一个 message_id**：真机上 QQ 每条都有（不给的话它自己会渲染成
+    //   `[mid:?]`，而那条路径不是本节要验的东西 —— 本节要验的是**机器人那句**）。
+    await bridge.handleEvent(privateMsg(ADMIN, '服务器是 Forge 端', 'u1'))
+    const rows = bridge.searchHistory({ chatKey: `private:${ADMIN}`, query: 'Forge' })
+    const botRow = (rows.rows ?? []).find((r) => r.isBot === true)
+    check('★★ 机器人自己那句在语料库里**有 message_id**（不再是 null）',
+      botRow != null && botRow.messageId != null && String(botRow.messageId) !== '',
+      JSON.stringify(botRow ?? {}).slice(0, 140))
+    check('★★ 渲染出来的检索结果带得出 `[mid:<id>]`（不是 `[mid:?]` —— 那样模型引用不了）',
+      String(rows.text ?? '').includes('[mid:s') && !String(rows.text ?? '').includes('[mid:?]'),
+      String(rows.text ?? '').split('\n').slice(0, 3).join('｜'))
+  }
+
   // 收尾：**先关掉每个 Bridge**，再删临时目录。
   // ⚠️ 为什么必须显式关：H7 之后每个 Bridge 都会在工作区里开一个 SQLite
   //    （`runtime/corpus.sqlite`）并**持有句柄到进程退出** —— 不关就删目录，
@@ -1231,6 +1510,7 @@ async function main() {
   console.log('')
   if (failures === 0) {
     console.log('✅ 记忆全链路通过：提议 → 落盘 → 剥离 → 回执 → 下一轮注入都真的发生了')
+    console.log(`   （共 ${passed} 项断言：提议/关键词直写/情绪倾注/承诺/落盘/剥离/回执/注入）`)
     console.log('   ⚠️ 这只证明**机制**是通的；"模型会不会主动提议记忆"是模型行为，')
     console.log('      要用真实会话观察（见 docs/memory-verification.md）。')
     process.exit(0)

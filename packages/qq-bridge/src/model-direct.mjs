@@ -148,6 +148,73 @@ function briefBody(text, max = 160) {
 }
 
 /**
+ * 抽取（回合后提炼配方）走直连时的参数。**与判定那套刻意不同**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么不能直接复用 `DIRECT_DEFAULTS`
+ * ══════════════════════════════════════════════════════════════════════════
+ * `DIRECT_DEFAULTS.maxTokens = 300` 是按**判定器**调的 —— 它只要一个小 JSON
+ * （`{answer:true,reason:"…"}`）。而抽取要输出一整份配方
+ * （`title` + `keywords` ×3 + `steps` ×3 + `pitfalls` + `verify`），**10 倍以上**。
+ * 用 300 的直接后果是**正文被截断**，而截断的表现是"解析不出 JSON"——
+ * 看起来像模型的格式问题，实际是我们给的额度不够。这类"我们的锅看起来像它的锅"
+ * 是最费时间的一种排查，所以这里单独一组默认值，并写明数字的来源。
+ *
+ * ⚠️ 温度仍用 0.1：抽取要的是**稳定可复现**，不是创意（与判定同一条理由）。
+ * ⚠️ 超时比判定长：判定要求 0~6 秒内给结论（它挡在回复前面），
+ *    而抽取是后台跑的（`--maybeExtractRecipe` 不 await），宽松一点没有代价。
+ */
+export const EXTRACT_DIRECT_DEFAULTS = {
+  /** 一份配方的 JSON 实测约 300~800 token；给 1600 留足余量（思考关掉时更宽裕）。 */
+  maxTokens: 1600,
+  temperature: 0.1,
+  timeoutMs: 30_000,
+}
+
+/**
+ * 抽取走直连时的目标（端点 / 模型 / key）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 与 `resolveDirectTarget`（判定用）的唯一区别：**key 从哪来**
+ * ══════════════════════════════════════════════════════════════════════════
+ * 判定器有一把**专用 key**（`wake.judge.apiKey`），理由写在那个函数里：
+ * 「要花就花在一把专门给它的 key 上，于是计费与限流能分开看」。
+ * 而抽取**不是另一件事**：它就是"用主对话那套模型再做一次小调用"，
+ * 所以用**主模型那把 key**（控制台填的 `dsh.apiKey`，或 `DSH_HOME/.credentials.yaml`
+ * 里那份 —— 由调用方解析后传进来）。这样账是合在主线上的，也符合直觉。
+ *
+ * @param {object} opts
+ * @param {object} opts.config    归一化后的配置
+ * @param {string} [opts.apiKey]  已解析好的主模型 key（凭据文件那条路的产物）
+ * @returns {{ok: boolean, baseUrl?: string, model?: string, apiKey?: string, keySource?: string, why?: string}}
+ */
+export function resolveExtractTarget({ config, apiKey = '' } = {}) {
+  // 端点固定用默认那个：`dsh` 段里没有 baseUrl 这个键（provider 由 DSH 自己解析），
+  // 所以这里不引入新配置项 —— 新增配置键会牵动界面与文档一整套（AGENT.md 第 7 条）。
+  const ep = checkEndpoint(DIRECT_DEFAULTS.baseUrl)
+  if (!ep.ok) return { ok: false, why: ep.why }
+
+  const fromConfig = String(config?.dsh?.apiKey ?? '').trim()
+  const key = String(apiKey ?? '').trim() || fromConfig
+  if (!key) {
+    return {
+      ok: false,
+      why: '拿不到主模型 key（`dsh.apiKey` 与 `DSH_HOME/.credentials.yaml` 都没有）—— 抽取退回一次性 DSH 进程',
+    }
+  }
+  const model = String(config?.dsh?.model ?? '').trim()
+  if (!model) return { ok: false, why: '`dsh.model` 是空的，不知道该调哪个模型' }
+
+  return {
+    ok: true,
+    baseUrl: ep.url,
+    model,
+    apiKey: key,
+    keySource: String(apiKey ?? '').trim() ? 'DSH_HOME/.credentials.yaml' : 'config.dsh.apiKey',
+  }
+}
+
+/**
  * 一次直连调用。
  *
  * 纪律（与 `runHeadless` 一致，都是"增强路径"）：

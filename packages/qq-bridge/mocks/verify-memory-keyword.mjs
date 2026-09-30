@@ -119,7 +119,7 @@ try {
     check('★ 拒绝原因里说明了是隐私（回执会照实告诉对方"没记上"）',
       /隐私|隐私类/.test(outcome.ignored[0]?.why ?? ''), outcome.ignored[0]?.why)
     check('★ 磁盘上确实没有这条（不是"报了但写了"）',
-      !String(readIf('memory/private-10001.md') ?? '').includes('13800138000'))
+      !String(readIf('memory/people/10001.md') ?? '').includes('13800138000'))
     check('★ 审计只记类别与长度、**不记原文**（否则审计成了第二个泄露面）',
       !String(readIf('memory/privacy-audit.jsonl') ?? '').includes('13800138000'))
 
@@ -135,7 +135,7 @@ try {
     })
     check('对照：正常内容能落盘，且带上了 source（审计要用来区分通道）',
       ok.applied.length === 1 && ok.applied[0].source === 'keyword', JSON.stringify(ok.applied))
-    check('落盘的确实是那条事实', String(readIf('memory/private-10001.md') ?? '').includes('Forge 端'))
+    check('落盘的确实是那条事实', String(readIf('memory/people/10001.md') ?? '').includes('Forge 端'))
   }
 
   // ══════════════════════════════════════════════════════════════════════════

@@ -29,7 +29,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { readMemoryForPrompt, listMemoryFiles, snapshotNameOf } from './memory-store.mjs'
+import { readMemoryForPrompt, listMemoryFiles, memoryLayerOf, snapshotNameOf } from './memory-store.mjs'
 
 /** 递归列出目录下的文件（相对路径），用于快照目录、回执目录。 */
 function listFilesRel(root, sub) {
@@ -119,17 +119,20 @@ export function inspectMemory({ workspace, conversations = [] } = {}) {
     return { rel, text }
   })
   const snapshots = checkSnapshots(root)
-  const injections = conversations.map(({ kind, peerId, label }) => {
+  const injections = conversations.map(({ kind, peerId, speakerId = null, label }) => {
     let r = { text: '', files: [], blocks: [] }
     try {
       // 与桥接**同一份逻辑**算注入内容（不另写一套估算）——
       // `blocks` 是 `readMemoryForPrompt` 直接给的结构化副本，不是这里解析文本得来的。
-      const got = readMemoryForPrompt({ workspace: root, kind, peerId })
+      // ★ `speakerId`：群里的**个人层**只注入当前发言人那一份，所以预览群时需要它
+      //   （`--inject group:<群号>:<QQ>`）。不传就没有个人层 —— 如实显示为"无"，
+      //   而不是假装算过了。
+      const got = readMemoryForPrompt({ workspace: root, kind, peerId, speakerId })
       r = { text: got.text ?? '', files: got.files ?? [], blocks: got.blocks ?? [] }
     } catch {
       /* 计算失败就当空，下面会显示"无" */
     }
-    return { kind, peerId, label, ...r }
+    return { kind, peerId, speakerId, label, ...r }
   })
   return { workspace: root, files, receipts, snapshots, injections }
 }
@@ -161,16 +164,38 @@ export function formatMemoryReport(report, { full = false } = {}) {
   //   实测就有：`memory/self-unknowns.md` 有 14 条，但它不在注入清单里，
   //   所以下一轮模型根本读不到它。使用者会以为"它知道"，其实它不知道。
   //   这里必须主动报出来，而不是等人去比对文件名和注入清单。
+  //
+  // ⚠️ **个人档要单独对待**：`memory/people/<QQ>.md` 只在**那个人发言时**注入，
+  //   而体检默认不指定发言人 —— 直接按"没在注入清单里"判，会给每一份个人档
+  //   发一个**假警报**（"模型读不到它"，其实他发言时就读得到）。
+  //   所以这里把个人档排除在这个判据之外，并在下面如实说明原因。
   const injectedFiles = new Set(report.injections.flatMap((i) => i.files ?? []))
-  const neverInjected = report.files.filter((f) => !injectedFiles.has(f.rel))
+  const neverInjected = report.files.filter(
+    (f) => !injectedFiles.has(f.rel) && memoryLayerOf(f.rel) !== 'person',
+  )
+  const personFiles = report.files.filter((f) => memoryLayerOf(f.rel) === 'person')
+  if (personFiles.length > 0) {
+    const previewedSpeakers = report.injections.filter((i) => i.speakerId).length
+    lines.push('')
+    lines.push(`   · 个人档 ${personFiles.length} 份（memory/people/）**跟他走**：只在该人发言时注入。`)
+    lines.push(
+      previewedSpeakers > 0
+        ? '     已指定发言人的会话按实际算过了；其它未指定的不作判断。'
+        : '     体检默认不指定发言人，所以这里不判断它们"会不会被注入" —— 想看就加发言人：',
+    )
+    if (previewedSpeakers === 0) lines.push('       --inject group:<群号>:<QQ>（私聊可省，发言人就是对方）')
+  }
   if (neverInjected.length > 0 && report.injections.length > 0) {
     lines.push('')
     lines.push('   ⚠️ **存在但不会被注入**的记忆文件（模型下一轮读不到它）：')
     for (const f of neverInjected) {
       lines.push(`      ${f.rel}（${f.entries} 条）`)
     }
-    lines.push('      注入清单只有：MEMORY.md、memory/private-<QQ>.md、memory/group-<群号>.md、')
-    lines.push('                    memory/group-<群号>-slang.md、memory/directives.md、memory/facts-global.md')
+    lines.push('      注入清单只有三层：')
+    lines.push('        · 全局 MEMORY.md（所有聊天）')
+    lines.push('        · 群聊 memory/groups/<群号>.md、memory/groups/<群号>-slang.md（只在该群）')
+    lines.push('        · 个人 memory/people/<QQ>.md（**跟人走**：他的私聊 + 他在群里发言时）')
+    lines.push('      另有 memory/directives.md（管理员指令）与 memory/facts-global.md（早期兼容）。')
     lines.push('      要让别的文件生效，得把它并进上面某一档（或改代码的注入清单）。')
   }
 
@@ -179,9 +204,12 @@ export function formatMemoryReport(report, { full = false } = {}) {
   if (report.injections.length === 0) {
     lines.push('   （没指定会话）加 --inject 可指定，例如：')
     lines.push('     --inject private:100000001 --inject group:700000001')
+    lines.push('     想在群里看到**个人档**，加上发言人：--inject group:700000001:100000001')
   }
   for (const inj of report.injections) {
-    const head = `${inj.kind}:${inj.peerId}${inj.label ? `（${inj.label}）` : ''}`
+    // 群里带上发言人 —— 否则看的人不知道"个人层那一段是谁的"
+    const speaker = inj.kind === 'group' && inj.speakerId ? `:${inj.speakerId}` : ''
+    const head = `${inj.kind}:${inj.peerId}${speaker}${inj.label ? `（${inj.label}）` : ''}`
     if (!inj.text.trim()) {
       lines.push(`   ${head} →   无（这个会话下一轮读不到任何记忆）`)
       continue

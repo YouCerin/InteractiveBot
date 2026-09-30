@@ -273,6 +273,14 @@ export function createApiHandler(deps) {
     memoryStats, // 记忆写入统计 + 零写入告警（阈值在后端 STATS_DEFAULTS，不是配置项）
     privacyAudit, // 隐私拦截审计（只回时间/侧/类别/字数 —— 审计里本来就没有原文）
     scanMemoryPrivacy, // 扫描盘上记忆里的隐私条目（只回文件+行号+类别，不回原文）
+    // ── 0.2.9 按需建档（"立刻把还没计入记忆的消息整理成记忆"）───────────────
+    //   `buildMemory({kind, peerId, userId, dryRun, limit})`：
+    //     · dryRun=true → **只把"会交给模型的那段提示词"原样返回**，不调模型、不落盘；
+    //     · 否则跑一次抽取 → 过内容闸门 → 落盘 → 推进游标，并返回一份如实报告。
+    //   ⚠️ **它会花钱**（一次模型调用），所以界面必须先预演再让使用者确认 ——
+    //      这条要求写在 CONFIG-UI.md 的规格里，不是这里能强制的。
+    buildMemory,
+    memoryBuildCursor, // 读游标：每个会话/每个人"已经考虑到哪一条了"（只读）
     logStream, // 日志流（SSE）
     // ── 0.2.2 扩展（技能 / 插件）：全部可选，不传就回 501 ──────────────────
     //   ★ 这四条与其余路由的**根本差别**：它们是"即时生效"的通道 ——
@@ -542,10 +550,11 @@ export function createApiHandler(deps) {
 
       // ── 会话同步（给"同步 QQ 对话界面"用）────────────────────────────
       // 数据来自桥接的**内存镜像**：最近若干条往来消息 + 每会话当前状态。
-      // 它是滚动视图，不是归档 —— 长期记忆是**两层**的（见 memory.mjs）：
-      // 私聊 = MEMORY.md + memory/private-<QQ>.md，群聊 = memory/group-<群号>.md。
-      // 这句 note 会原样显示给使用者，所以**不能**再写成"长期记忆就是 MEMORY.md"：
-      // 群聊根本没有那份文件，这么说会让使用者以为记忆丢了一半。
+      // 它是滚动视图，不是归档 —— 长期记忆是**三层**的（见 memory-store.mjs）：
+      // 全局 MEMORY.md（所有聊天）、群聊 memory/groups/<群号>.md（只在该群）、
+      // 个人 memory/people/<QQ>.md（**跟人走**：他的私聊 + 他在群里发言时）。
+      // 这句 note 会原样显示给使用者，所以**不能**写成"长期记忆就是 MEMORY.md"，
+      // 也不能漏掉个人层 —— 说错会让使用者以为记忆丢了一半。
       if (method === 'GET' && path === '/api/conversations') {
         if (typeof getConversations !== 'function') return ok({ conversations: [], count: 0 })
         const list = getConversations() ?? []
@@ -553,9 +562,10 @@ export function createApiHandler(deps) {
           conversations: list,
           count: list.length,
           note:
-            '内存镜像，每会话只保留最近若干条；重启桥接后清空。长期记忆在工作区，分两层：' +
-            '私聊 = MEMORY.md（跨人的约定）+ memory/private-<QQ号>.md（这个人的），' +
-            '群聊 = memory/group-<群号>.md（群专属，读不到上面两份）。',
+            '内存镜像，每会话只保留最近若干条；重启桥接后清空。长期记忆在工作区，分三层：' +
+            '全局 MEMORY.md（跨会话的约定，所有聊天都读得到）+ ' +
+            '群聊 memory/groups/<群号>.md（只在这个群）+ ' +
+            '个人 memory/people/<QQ号>.md（**跟人走**：他的私聊与他在群里发言时都读得到）。',
         })
       }
 
@@ -663,6 +673,43 @@ export function createApiHandler(deps) {
         if (!memoryStore) return notImplemented('读取记忆文件')
         const r = memoryStore.read(queryParam(req, 'path'))
         return r.ok ? ok(r.data) : fail(r.status ?? 400, r.error)
+      }
+
+      // ── 按需建档（0.2.9）：把"还没计入记忆的消息"整理成条目 ────────────────
+      //
+      // ★ 为什么是 POST 而不是 GET：`dryRun:false` 会**花钱**（一次模型调用）并写盘。
+      //   预演（`dryRun:true`）也走同一个 POST —— 形状一致，界面不必记两套。
+      // ★ 校验放在路由层（与其它路由同一风格）：缺 kind/peerId 一律 400，
+      //   不去猜"你想给谁建档"。
+      if (method === 'GET' && path === '/api/memory/build') {
+        // 只读：看游标（每个会话/每个人已经考虑到哪一条了）
+        if (typeof memoryBuildCursor !== 'function') return notImplemented('读取建档游标')
+        const kind = queryParam(req, 'kind')
+        const peerId = queryParam(req, 'peerId')
+        if (!kind || !peerId) return fail(400, '必须带 kind 与 peerId')
+        return ok(memoryBuildCursor({ kind, peerId, userId: queryParam(req, 'userId') }))
+      }
+
+      if (method === 'POST' && path === '/api/memory/build') {
+        if (typeof buildMemory !== 'function') return notImplemented('按需建档')
+        const kind = String(body?.kind ?? '')
+        const peerId = String(body?.peerId ?? '')
+        if (kind !== 'group' && kind !== 'private') return fail(400, 'kind 只能是 group 或 private')
+        if (!/^\d{5,15}$/.test(peerId)) return fail(400, 'peerId 必须是号码（群号或 QQ 号）')
+        const userId = body?.userId ? String(body.userId) : null
+        if (userId && !/^\d{5,15}$/.test(userId)) return fail(400, 'userId 必须是号码')
+        const r = await buildMemory({
+          kind,
+          peerId,
+          userId,
+          // ★ 默认**预演**：只有显式 `dryRun: false` 才会真的调模型并写盘。
+          //   理由与 `--memory --compact` 一致：记忆是长期资产，一次误写比多点一次按钮贵得多。
+          dryRun: body?.dryRun !== false,
+          limit: Number(body?.limit) || undefined,
+        })
+        // 业务失败（模型不可用/解析失败）用 200 + ok:false 回，让界面能显示原因；
+        // 只有"请求本身不合法"才 4xx。
+        return ok(r)
       }
 
       if (method === 'POST' && path === '/api/memory/file') {

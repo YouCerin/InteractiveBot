@@ -39,7 +39,11 @@ import { createUsageLedger } from './usage.mjs'
 import { createMemoryStore } from './memory-files.mjs'
 import { saveSnapshot, dropSnapshot } from './memory-store.mjs'
 import { createRoster } from './roster.mjs'
-import { resolveDirectTarget } from './model-direct.mjs'
+import { resolveDirectTarget, resolveExtractTarget } from './model-direct.mjs'
+// ★ 按需建档（0.2.9）：把"还没计入记忆的消息"交给抽取模型整理成条目。
+//   通路与"回合后抽取"共用同一套（直连优先、headless 兜底），并在下面注明降级原因。
+import { BUILD_LIMITS, buildMemoryFromMessages, readCursor as readBuildCursor, resolveChatLabel } from './memory-build.mjs'
+import { runDirect, runHeadless } from './extract.mjs'
 import { createRetagJob, preflightRetag } from './sticker-tagging.mjs'
 import { resolveModelCredentials } from './credentials.mjs'
 // ★ 不再直接 import `detectSnowluma` —— 所有探测都经 `makeLaunchDetect` 这一个工厂，
@@ -816,8 +820,10 @@ async function main() {
               ...(config.access?.groupAllowlist ?? []).map((id) => `group:${id}`),
             ]
       const conversations = [...new Set(targets)].map((key) => {
-        const [kind, peerId] = String(key).split(':')
-        return { kind, peerId }
+        // ★ 支持 `group:<群号>:<QQ>` —— 群里的**个人层**只注入当前发言人那一份，
+        //   所以预览群时要能指定"谁在说话"（不指定就没有个人层，如实显示）。
+        const [kind, peerId, speakerId = null] = String(key).split(':')
+        return { kind, peerId, speakerId: speakerId || null }
       })
       const report = inspectMemory({ workspace, conversations })
       if (process.argv.includes('--privacy')) {
@@ -2104,10 +2110,15 @@ async function main() {
   // ★ H13：自检结果**留一份给启动前置条件门控**（`/api/preflight`）——
   //   界面要能回答"为什么它不说话"，而判据只能有一份。
   let credentialInfo = null
+  // ★ 0.2.9：把解析好的主模型 key **单独留一份**，给桥接的"回合后抽取走直连"用。
+  //   为什么不放进 `config`：`/api/config` 会脱敏 `dsh.apiKey`，而随手挂上去的字段
+  //   没有那层保护 —— 等于把明文 key 交给界面。所以只传给 Bridge 的构造函数。
+  let modelApiKey = ''
   {
     const dshHome = process.env.DSH_HOME ?? resolveDshHome({ cliPath: config.dsh.cliPath })?.home
     const cred = resolveModelCredentials({ dshHome, env: process.env, apiKey: config.dsh.apiKey })
     credentialInfo = { ok: Boolean(cred.env.DEEPSEEK_API_KEY), source: cred.source, warning: cred.warning ?? '' }
+    modelApiKey = String(cred.env.DEEPSEEK_API_KEY ?? '')
     if (cred.env.DEEPSEEK_API_KEY) {
       log(`🔑 模型凭据：已就绪（来源：${cred.source}）`)
     } else {
@@ -2142,7 +2153,7 @@ async function main() {
   const onebot = new OneBotClient({ ...config.onebot, log })
   const sendQueue = new SendQueue({ ...config.send, log })
   const router = new SessionRouter({ log })
-  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills })
+  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey })
   bridge.attach(onebot)
 
   // 记下登录信息，供配置接口的 /api/status 使用
@@ -2466,6 +2477,82 @@ async function main() {
           // 判定依据里可能含文件名（账号号属于公开标识），但**不含 token**
           matchedByConfig: /matched-config/.test(pickedFile),
         }
+      },
+
+      // ── 按需建档（0.2.9）─────────────────────────────────────────────────
+      //   ★ 这两条**不改配置**、也不常驻：一次请求读一次语料、跑一次抽取、写一次游标。
+      //   ★ 界面的用法（预演 → 确认 → 执行）写在 CONFIG-UI.md 的规格里 ——
+      //     后端这里只保证"默认预演"：不显式 `dryRun:false` 就绝不调模型、绝不写盘。
+      memoryBuildCursor: ({ kind, peerId, userId }) => {
+        const chatKey = `${kind}:${peerId}`
+        const r = readBuildCursor({ workspace: config.dsh.workspace, chatKey, userId: userId || null, log: () => {} })
+        return {
+          chatKey,
+          userId: userId || null,
+          lastId: r.lastId,
+          lastAt: r.rec?.at ?? null,
+          considered: r.rec?.considered ?? 0,
+          entries: r.rec?.entries ?? 0,
+        }
+      },
+
+      buildMemory: async ({ kind, peerId, userId, dryRun = true, limit }) => {
+        const workspace = config.dsh.workspace
+        const chatKey = `${kind}:${peerId}`
+        const cur = readBuildCursor({ workspace, chatKey, userId: userId || null, log: () => {} })
+
+        // ① 取"还没计入"的消息（**全文**，与检索那条路的截断预览不同）
+        let rows = []
+        {
+          const c = createCorpus({ workspace, readOnly: true, log: () => {} })
+          try {
+            const q = c.recent({
+              chatKey,
+              userId: userId || null,
+              afterId: cur.lastId,
+              limit: Math.min(Number(limit) || BUILD_LIMITS.messages, BUILD_LIMITS.messages),
+              maxChars: BUILD_LIMITS.perMessage,
+            })
+            if (!q.ok) return { ok: false, why: `读语料库失败：${q.why}` }
+            rows = q.rows ?? []
+          } finally {
+            c.close()
+          }
+        }
+
+        // ② 会话名：能给就给（**不编**）。实现在 `resolveChatLabel` 里 —— 抽出去是为了
+        //   能用桩测"接线有没有接上"（这一段以前只对私聊查称呼表，群里永远是空）。
+        const chatLabel = await resolveChatLabel({
+          kind,
+          peerId,
+          workspace,
+          groupNameOf: bridge?.roster?.groupNameOf ?? null,
+          call: (action, params, timeoutMs) => onebot.call(action, params, timeoutMs),
+        })
+
+        // ③ 通路：与"回合后抽取"同一套（直连优先；没有 key 就 headless 兜底）
+        const target = resolveExtractTarget({ config, apiKey: modelApiKey })
+        const cliPath = config.dsh?.cliPath
+        const runner = target.ok
+          ? (opts) => runDirect({ baseUrl: target.baseUrl, apiKey: target.apiKey, model: target.model, ...opts })
+          : cliPath
+            ? (opts) => runHeadless({ cliPath, cwd: workspace, log: () => {}, label: '按需建档', ...opts })
+            : null
+        if (!dryRun && !runner) {
+          return { ok: false, why: `没有可用的模型通路：${target.why}，且 dsh.cliPath 也是空的` }
+        }
+
+        return buildMemoryFromMessages({
+          workspace,
+          kind,
+          peerId,
+          userId: userId || null,
+          chatLabel,
+          messages: rows,
+          runner,
+          apply: !dryRun,
+          log,
+        })
       },
 
       // ③ 本地语料检索（fail-closed 已经在路由里做了；这里只负责真的去搜）

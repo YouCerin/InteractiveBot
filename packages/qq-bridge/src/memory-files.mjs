@@ -277,6 +277,10 @@ export function createMemoryStore({ workspace, enabled = true, log = () => {} } 
 
     const hasCheck = typeof expectedSha256 === 'string' && expectedSha256.length > 0
     let overwroteWithoutCheck = false
+    /** 覆盖前的备份路径（给调用方记审计/回执用）。 */
+    let backupRel = null
+    /** 备份失败的原因（**不许静默**：写成功了，但"没留后路"这件事必须让调用方知道）。 */
+    let backupError = null
 
     if (info.exists) {
       const current = readFileSync(r.abs, 'utf8')
@@ -294,6 +298,29 @@ export function createMemoryStore({ workspace, enabled = true, log = () => {} } 
         }
       }
       if (!hasCheck) overwroteWithoutCheck = true
+
+      // ── ★★ 覆盖前先留一份备份（2026-09-30 真机事故）─────────────────────
+      //
+      // 事故经过：控制台保存走的就是这条路 —— 它**直接写盘**（没有任何备份），
+      // 而 `api.mjs` 在写成功后会**刷新快照基准**。于是"快照"这个**已知良好副本**
+      // 被这次写入一起覆盖掉了 ⇒ 一次误存（例如编辑器里存成空）就**不可恢复**，
+      // 而且不留审计。实测发生过：一份群记忆被清成只剩文件头，没有任何地方能还原它。
+      //
+      // 现在：**只要覆盖的是已存在的文件，就先按 `consolidateFile` 的同一套命名
+      // 备份到 `memory/.backups/`**（那份备份与被覆盖的内容逐字一致）。
+      // ⚠️ 备份失败**不阻断写入**（写入是主路径），但要如实告诉调用方（`backupError`），
+      //    由它决定怎么提示 —— 不许静默。
+      try {
+        const backupDir = join(root, 'memory', '.backups')
+        mkdirSync(backupDir, { recursive: true })
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        const name = `${r.rel.replace(/[\\/]/g, '__')}.${stamp}.bak`
+        writeFileSync(join(backupDir, name), current, 'utf8')
+        backupRel = `memory/.backups/${name}`
+      } catch (error) {
+        backupRel = null
+        backupError = error?.message ?? String(error)
+      }
     } else if (!hasCheck) {
       // 新文件无所谓冲突，但界面对"没做版本核对"应有一致的提示
       overwroteWithoutCheck = true
@@ -317,6 +344,10 @@ export function createMemoryStore({ workspace, enabled = true, log = () => {} } 
         //   界面**不要**弹"需要重启" —— 那是配置类改动的提示。
         restartRequired: false,
         ...(overwroteWithoutCheck ? { overwroteWithoutCheck: true } : {}),
+        // ★ 覆盖前的备份（调用方据此写审计/提示"改坏了能从哪恢复"）
+        ...(backupRel ? { backup: backupRel } : {}),
+        // ⚠️ 备份失败时**明说** —— 写是成功的，但这次改动没有后路
+        ...(backupError ? { backupError } : {}),
       },
     }
   }

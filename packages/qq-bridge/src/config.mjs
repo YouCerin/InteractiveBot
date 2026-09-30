@@ -22,6 +22,9 @@ import { DIRS, resolveInPackage, findDshCli } from './local.mjs'
 import { lintKeywords } from './trigger.mjs'
 import { lintPersona } from './persona.mjs'
 import { buildSpeedPreset, DEFAULT_SPEED_PRESET, lintHumanize, detectSpeedPreset, SPEED_PRESETS } from './speed.mjs'
+// ★ 档位的**唯一口径**在 `affect-gate.mjs`（`normalizePrewakeMode` / `isPrewakeMode`）：
+//   这里只负责"在启动时把写错的值喊出来"，判定逻辑一行都不抄 —— 抄了必然与那边漂。
+import { isPrewakeMode, normalizePrewakeMode } from './affect-gate.mjs'
 
 /**
  * 把一个"路径列表"配置项解析成绝对路径数组。
@@ -400,7 +403,22 @@ export function normalizeConfig(c) {
     },
     // 跨重启记忆：不给 agent 加存储层，而是给它一个"记笔记"的约定
     // （工作区是持久的，它本来就有读写文件的工具）。详见 src/memory.mjs。
-    memory: { enabled: src.memory?.enabled !== false },
+    memory: {
+      enabled: src.memory?.enabled !== false,
+      // ── 情绪闸门（2026-09-30）：未唤醒的情绪要不要记 ─────────────────────
+      //
+      // ★ 默认 `off` = 升级前的行为（一个字都不问、不记）。
+      //   为什么默认不开：把它打开意味着"**机器人没参与的对话也会被记进某人的档案**"，
+      //   而实测那份真机语料里，未唤醒消息命中的 5 条**有 4 条是错的**
+      //   （对别人说的挽留、玩笑、说的是别人）—— 那是使用者该自己拍板的取舍，
+      //   不该由升级替他决定。详见 `src/affect-gate.mjs` 的模块头。
+      // ★ `shadow` 是给"想先看看它会记什么"的人准备的中间档：判定照跑、只写日志。
+      affect: {
+        // ★ 非法值**原样保留**（与 image.mode 同一条纪律：静默改写会让"我明明设了"无从查起），
+        //   真正用的时候由 `normalizePrewakeMode()` 一律按 `off` 处理并在这里告警。
+        prewake: src.memory?.affect?.prewake ?? 'off',
+      },
+    },
     // 看图：QQ 图片 → 工作区落盘 → 模型（详见 src/images.mjs）。
     //
     // ★ 默认 `on-demand` 而**不是** `auto`，这是刻意的成本取舍：
@@ -648,10 +666,42 @@ export function validateConfig(config) {
     }
   }
 
-  // ── 看图 ────────────────────────────────────────────────────────────────
+  // ── 情绪闸门（2026-09-30）：未唤醒的倾诉要不要记 ──────────────────────────
   //
-  // 这里的告警都围绕一件事：**图片是有成本的**（vision token + 磁盘），
-  // 所以任何"会让它悄悄变贵"的写法都要说出来。
+  // 三条都要说出来：① 写错了值（否则使用者以为开了、其实是 off）；
+  // ② 开了但通路不可用（= 一次都判不成，等于没开）；③ 开着时到底会多花什么。
+  {
+    const raw = config.memory?.affect?.prewake
+    if (raw != null && String(raw).trim() !== '' && !isPrewakeMode(raw)) {
+      warn.push(
+        `memory.affect.prewake「${raw}」不是有效值（可选 off / shadow / judge），已按 off 处理。` +
+          `注意它**不会**"写别的值就当开着" —— 认不出的一律不记（宁可不记，也不要记错）。`,
+      )
+    }
+    const mode = normalizePrewakeMode(raw)
+    if (mode !== 'off') {
+      const j = config.wake?.judge ?? {}
+      const viaHttp = Boolean(String(j.apiKey ?? '').trim())
+      warn.push(
+        `memory.affect.prewake = ${mode}：**机器人没参与的群聊也会被记进某人的档案** —— ` +
+          `判据是"规则先筛（本地情绪线索）+ 再问一次模型『这句话是不是在跟机器人说』"。` +
+          (mode === 'shadow'
+            ? '★ 现在是 **shadow**：判定照跑、结论只写日志，**一个字都不落盘**（这是你自己选的观察模式）。'
+            : '★ 现在是 **judge**：判定通过就会落进那个人的个人档（个人档**跟人走**，他在别的群也会被算上）。') +
+          (viaHttp
+            ? `★ 通路：复用 wake.judge.apiKey ⇒ **直连** ${j.baseUrl}（约 1 秒）。`
+            : '★ 通路：没配 wake.judge.apiKey ⇒ 起**一次性 DSH 进程**（约 3~5 秒）。') +
+          `★ 只在"未唤醒 + 命中情绪线索"时才问（实测约每 280 条消息 1 次），上限 120 次/小时，超了一律**不记**。`,
+      )
+      if (!viaHttp && !config.dsh?.cliPath) {
+        warn.push(
+          'memory.affect.prewake 开着，但既没配 wake.judge.apiKey（所以走一次性 DSH 进程）、' +
+            'dsh.cliPath 也是空的：闸门无法工作，未唤醒的情绪会**一条都记不上**（每条都按"不记"处理）。',
+        )
+      }
+    }
+  }
+
   const img = config.image ?? {}
   if (img.enabled !== false) {
     if (img.mode !== 'auto' && img.mode !== 'on-demand') {

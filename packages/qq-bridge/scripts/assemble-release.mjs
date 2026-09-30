@@ -349,7 +349,16 @@ if (WANT_ZIP) {
 log('')
 if (failures === 0) {
   log(`🎉 组装完成：${OUT}`)
-  log('   下一步（可选）：node scripts/assemble-release.mjs --zip   —— 或用上面的 tar 命令')
+  // ★ 这句必须**按实际做了什么**来说（2026-09-30 修）：
+  //   原来无论有没有跑 `--zip`，都固定打印"下一步（可选）：… --zip" ——
+  //   于是刚用 `--zip` 打完包的那次运行，最后一行却在提示你"下一步去打包"。
+  //   本项目对"说了做不到 / 说错了"这一类是当 bug 的（哪怕只是一行提示）。
+  const zipPath = `${OUT}.zip`
+  if (WANT_ZIP && existsSync(zipPath)) {
+    log(`   zip：${relative(REPO_ROOT, zipPath)}（已生成）`)
+  } else {
+    log('   下一步（可选）：node scripts/assemble-release.mjs --zip   —— 只组装、还没压缩')
+  }
   process.exit(0)
 }
 log(`⚠️ 有 ${failures} 项问题 —— 先解决再发`)

@@ -54,6 +54,11 @@
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 
+// ★ 直连通路复用**那唯一一条** HTTP 客户端（`model-direct.mjs`）：
+//   新写一条意味着 key 读取、超时、重试、失败兜底、计费口径各长一套，
+//   而其中每一样都出过错。判定器当初也是这么接的。
+import { chatOnce, EXTRACT_DIRECT_DEFAULTS } from './model-direct.mjs'
+
 /** 默认抽取节奏（每几个回合一次）。 */
 export const DEFAULT_EVERY_N = 5
 
@@ -549,6 +554,70 @@ export async function extractRecipe({ cliPath, task, ops, kind, timeoutMs, cwd, 
     return { ok: true, recipe: parsed, raw: r.text, ms: r.ms }
   } catch (error) {
     return { ok: false, why: `抽取异常：${error?.message ?? error}` }
+  }
+}
+
+/**
+ * 抽取走**直连**（一次 `/chat/completions`，约 1 秒）—— 0.2.9 起这是默认路径。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么换掉 `runHeadless`（用户决定，2026-09-30）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 实测 headless 一次抽取要 **2.8~4.4 秒**（起 node 进程 + 完整初始化 harness），
+ * 而直连约 **1 秒**。抽取每 5 轮跑一次，省下的是常态成本；而且它是**后台**跑的，
+ * 唯一要小心的只是"别把失败变成静默"。
+ *
+ * ── 三条与 `runHeadless` **逐字对齐**的纪律（同一份调用契约）──────────────
+ *   ① 返回形状相同：`{ok, text?, why?, ms, aborted?}`；
+ *   ② **绝不抛**（增强路径：坏了绝不能让聊天陪葬）；
+ *   ③ 认 `AbortSignal` / `timeoutMs` / `label`（报错文案不能写死"抽取"）。
+ *
+ * ── 与 headless 的一处**真实差异**（如实记下来，别当成等价替换）──────────
+ *   headless 那条路由 **DSH 自己处理网络与凭据**，所以"要走代理才能访问模型端点"
+ *   的网络环境**能跑通**；直连用 Node 的 `fetch`，**不认 `HTTP_PROXY`/`HTTPS_PROXY`**
+ *   （见 `model-direct.mjs` 文件头）。所以直连失败时要有明确的降级路径，
+ *   而不是让人以为"抽取坏了"。降级由调用方决定（`bridge.mjs#maybeExtractRecipe`）。
+ *
+ * ⚠️ 额度：用 `EXTRACT_DIRECT_DEFAULTS.maxTokens`（1600）**不是**判定那套的 300 ——
+ *    300 会把一份配方截断，而截断的表现是"解析不出 JSON"（我们的锅看起来像它的锅）。
+ *
+ * @param {object} opts 见下（`baseUrl` / `apiKey` / `model` 由 `resolveExtractTarget` 提供）
+ * @returns {Promise<{ok: boolean, text?: string, why?: string, ms: number, aborted?: boolean}>}
+ */
+export async function runDirect({
+  baseUrl,
+  apiKey,
+  model,
+  prompt,
+  timeoutMs = EXTRACT_DIRECT_DEFAULTS.timeoutMs,
+  maxTokens = EXTRACT_DIRECT_DEFAULTS.maxTokens,
+  temperature = EXTRACT_DIRECT_DEFAULTS.temperature,
+  signal,
+  fetchImpl,
+  log = () => {},
+  label = '抽取',
+} = {}) {
+  if (signal?.aborted) return { ok: false, why: `${label}在开始前已被取消`, ms: 0, aborted: true }
+  try {
+    const r = await chatOnce({
+      baseUrl,
+      apiKey,
+      model,
+      prompt,
+      timeoutMs,
+      maxTokens,
+      temperature,
+      signal,
+      fetchImpl,
+      label,
+    })
+    if (!r.ok) return { ok: false, why: r.why, ms: r.ms ?? 0, aborted: Boolean(r.aborted) }
+    const text = String(r.text ?? '').trim()
+    if (!text) return { ok: false, why: `${label}没有输出（响应体为空）`, ms: r.ms ?? 0 }
+    return { ok: true, text, ms: r.ms ?? 0 }
+  } catch (error) {
+    // chatOnce 契约上不抛；这一层是"万一"，同样不允许把异常漏给调用方
+    return { ok: false, why: `${label}直连异常：${error?.message ?? error}` }
   }
 }
 

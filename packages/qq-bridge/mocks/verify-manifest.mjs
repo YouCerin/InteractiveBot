@@ -584,6 +584,10 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
       // 联系人昵称（0.2.2）
       contactsList: () => ({ rel: 'memory/contacts.md', contacts: [], bad: [], max: 200 }),
       contactsSave: () => ({ saved: true, restartRequired: false, contacts: [] }),
+      // 按需建档（0.2.9）也要注入 —— 否则那两条路由在探测里走 notImplemented，
+      // 会被报成"文档谎称已实现"（这条检查就是这么抓漏注入的，这是第四次）。
+      buildMemory: async () => ({ ok: true, considered: 0, applied: [], ignored: [], entries: [] }),
+      memoryBuildCursor: () => ({ chatKey: 'group:1', userId: null, lastId: 0, considered: 0, entries: 0 }),
       requestRestart: () => {},
       requestStop: () => {},
       powerUpdateDelayMs: 0,

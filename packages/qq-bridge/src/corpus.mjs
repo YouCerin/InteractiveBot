@@ -425,9 +425,81 @@ export function createCorpus({ workspace, log = () => {}, readOnly = false } = {
     }
   }
 
+  /**
+   * 按"**还没被计入记忆的消息**"取一段（给"立刻建档"那个按钮用）。
+   *
+   * ⚠️ 与 `searchInner` 的关键差别：这里返回的是**全文**（不是截断预览）——
+   *    因为它的用途是把对话交给抽取模型，截断会把句子切断、让模型猜。
+   *    所以有两条硬上限兜住体积（条数 + 单条字数），超出如实报出来。
+   *
+   * @param {object} opts
+   * @param {string} opts.chatKey         会话（`group:` / `private:` 前缀）
+   * @param {string} [opts.userId]        只看这个人的发言（个人档案用；不传=整段会话）
+   * @param {number} [opts.afterId]       只取 id **大于**它的（游标 = 上次处理到哪条）
+   * @param {number} [opts.limit]         最多几条（默认 60）
+   * @param {number} [opts.maxChars]      单条正文上限（默认 500，超出截断并标记）
+   * @param {boolean} [opts.latest]       true = 取**最近** N 条（不是从 `afterId` 往后最早的 N 条）；
+   *   返回顺序仍是**由旧到新**。用途见 `bridge.mjs` 的「你被叫到之前群里刚说了什么」
+   *   （机器人只被唤醒的那几条消息进模型，所以它对自己没参与的那段是瞎的）。
+   * @returns {{ok: boolean, rows?: object[], why?: string, lastId?: number}}
+   */
+  function recentInner({ chatKey, userId = null, afterId = 0, limit = 60, maxChars = 500, latest = false } = {}) {
+    const ck = String(chatKey ?? '').trim()
+    if (!ck) return { ok: false, why: '必须指定会话（fail-closed）', rows: [] }
+    const max = Math.min(Math.max(1, Number(limit) || 60), 200)
+    const perChar = Math.min(Math.max(80, Number(maxChars) || 500), 4000)
+    const d = open()
+    if (!d) return { ok: false, why: '语料库不可用', rows: [] }
+    try {
+      const params = [ck]
+      let sql
+      if (latest) {
+        // ★ `latest`：要**最近 N 条**（不是最早 N 条）—— 语义不同，`afterId` 表达不了它。
+        //   用途是"你被叫到之前群里刚说了什么"（`bridge.mjs` 的最近上下文段）：
+        //   靠 `afterId` 得先知道最大 id，而那正好是这里不掌握的东西。
+        //   实现是 DESC 取 N 再翻回来 ⇒ 返回给调用方的仍是**由旧到新**。
+        sql = 'SELECT * FROM messages WHERE chat_key = ?'
+        if (userId) {
+          sql += ' AND user_id = ?'
+          params.push(String(userId))
+        }
+        sql += ' ORDER BY id DESC LIMIT ?'
+        params.push(max)
+      } else {
+        params.push(Number(afterId) || 0)
+        sql = 'SELECT * FROM messages WHERE chat_key = ? AND id > ?'
+        if (userId) {
+          sql += ' AND user_id = ?'
+          params.push(String(userId))
+        }
+        sql += ' ORDER BY id ASC LIMIT ?'
+        params.push(max)
+      }
+      const rows = d.prepare(sql).all(...params).map((row) => {
+        const full = String(row.content ?? '')
+        return {
+          id: Number(row.id),
+          messageId: row.message_id,
+          chatKey: row.chat_key,
+          userId: row.user_id,
+          senderName: row.sender_name,
+          isBot: Number(row.is_bot) === 1,
+          createdAt: Number(row.created_at),
+          text: full.length > perChar ? `${full.slice(0, perChar)}…（本条被截断）` : full,
+          truncated: full.length > perChar,
+        }
+      })
+      if (latest) rows.reverse() // 由旧到新（调用方不必猜顺序）
+      return { ok: true, rows, lastId: rows.length ? rows[rows.length - 1].id : Number(afterId) || 0 }
+    } catch (error) {
+      return { ok: false, why: error?.message ?? String(error), rows: [] }
+    }
+  }
+
   return {
     record: wrap(recordInner),
     search: wrap(searchInner),
+    recent: wrap(recentInner),
     stats: wrap(statsInner),
     prune: wrap(pruneInner),
     rebuild: wrap(rebuildInner),

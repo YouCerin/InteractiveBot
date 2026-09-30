@@ -39,11 +39,13 @@ import {
   buildExtractPrompt,
   summarizeForPrompt,
   extractRecipe,
+  runDirect,
   runHeadless,
   DEFAULT_EVERY_N,
   MAX_OPS_FOR_PROMPT,
 } from '../src/extract.mjs'
 import { normalizeRecipe, upsertRecipe, listRecipes, pickRecipes } from '../src/recipes.mjs'
+import { DIRECT_DEFAULTS, EXTRACT_DIRECT_DEFAULTS, resolveExtractTarget } from '../src/model-direct.mjs'
 
 let passed = 0
 let failed = 0
@@ -353,6 +355,119 @@ try {
 
   section('⑪ 默认节奏是常量（可被调用方覆盖）')
   check(`默认每 ${DEFAULT_EVERY_N} 回合一次`, DEFAULT_EVERY_N === 5, String(DEFAULT_EVERY_N))
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('⑫ ★★ 抽取走**直连**（0.2.9 用户决定）：契约与 headless 逐字对齐')
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    /** Response 形状的桩（`chatOnce` 只用 ok / status / text()）。 */
+    const fakeRes = (status, body) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
+    })
+    const okBody = { choices: [{ message: { content: FIXTURE } }] }
+
+    // 正常：拿到正文、形状与 headless 一致
+    {
+      const r = await runDirect({
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-test',
+        model: 'deepseek-flash',
+        prompt: '抽一下',
+        fetchImpl: async () => fakeRes(200, okBody),
+      })
+      check('成功时返回 {ok:true, text}（与 runHeadless 同一形状）',
+        r.ok === true && String(r.text).includes('title'), JSON.stringify(Object.keys(r)))
+      check('  text 就是模型正文（不含 JSON 外壳）', !String(r.text).includes('choices'), String(r.text).slice(0, 40))
+    }
+
+    // 失败路径：**一律不抛**（它是每 5 轮顺带做的增强路径）
+    {
+      const thrown = await runDirect({
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-test',
+        model: 'm',
+        prompt: 'x',
+        fetchImpl: async () => {
+          throw new Error('getaddrinfo ENOTFOUND')
+        },
+      })
+      check('★ 网络抛错 → {ok:false} 且**不抛**', thrown.ok === false, String(thrown.why))
+
+      const http500 = await runDirect({
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-test',
+        model: 'm',
+        prompt: 'x',
+        fetchImpl: async () => fakeRes(500, 'boom'),
+      })
+      check('★ HTTP 500 → {ok:false}', http500.ok === false, String(http500.why))
+
+      const empty = await runDirect({
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-test',
+        model: 'm',
+        prompt: 'x',
+        fetchImpl: async () => fakeRes(200, { choices: [{ message: { content: '   ' } }] }),
+      })
+      check('★ 空正文 → {ok:false}（不当成"抽到了空配方"）', empty.ok === false, String(empty.why))
+
+      const badKey = await runDirect({
+        baseUrl: 'http://api.deepseek.com',
+        apiKey: 'sk-test',
+        model: 'm',
+        prompt: 'x',
+        fetchImpl: async () => fakeRes(200, okBody),
+      })
+      check('★ 明文 http 端点被挡（别把 Authorization 裸奔）—— 由 chatOnce 的端点白名单兜住',
+        badKey.ok === false, String(badKey.why))
+    }
+
+    // 与 extractRecipe 接线：runner 可注入 ⇒ 直连与 headless **同一份下游逻辑**
+    {
+      const WS = join(ROOT, 'direct-ws')
+      const viaDirect = await extractRecipe({
+        task: { goal: '查个牌子' },
+        ops: [],
+        runner: (opts) =>
+          runDirect({
+            ...opts,
+            baseUrl: 'https://api.deepseek.com',
+            apiKey: 'sk-test',
+            model: 'deepseek-flash',
+            fetchImpl: async () => fakeRes(200, okBody),
+          }),
+      })
+      check('★★ `extractRecipe` + `runDirect` 能解析出配方（换通路没有换语义）',
+        viaDirect.ok === true && Boolean(viaDirect.recipe?.title), JSON.stringify(viaDirect.why ?? viaDirect.recipe?.title))
+      const up = upsertRecipe({ workspace: WS, recipe: viaDirect.recipe, source: 'auto' })
+      check('  抽到的配方照样能入库', up.ok === true, String(up.why ?? ''))
+    }
+
+    // 额度：抽取**不能**沿用判定那套 300（会把配方截断，而截断看起来像"格式不对"）
+    check(`★★ 抽取的输出额度（${EXTRACT_DIRECT_DEFAULTS.maxTokens}）明显大于判定的（${DIRECT_DEFAULTS.maxTokens}）`,
+      EXTRACT_DIRECT_DEFAULTS.maxTokens > DIRECT_DEFAULTS.maxTokens,
+      `${EXTRACT_DIRECT_DEFAULTS.maxTokens} vs ${DIRECT_DEFAULTS.maxTokens}`)
+
+    // 目标解析：**有主模型 key 才走直连**，没 key 要能说清为什么
+    {
+      const withKey = resolveExtractTarget({ config: { dsh: { model: 'deepseek-flash' } }, apiKey: 'sk-from-credentials' })
+      check('有凭据 → ok，且注明 key 的来源（便于排查"到底用了哪把 key"）',
+        withKey.ok === true && withKey.keySource === 'DSH_HOME/.credentials.yaml' && withKey.model === 'deepseek-flash',
+        JSON.stringify({ source: withKey.keySource, model: withKey.model }))
+      const fromConfig = resolveExtractTarget({ config: { dsh: { model: 'm', apiKey: 'sk-cfg' } } })
+      check('config 里有 key 也算（凭据文件不是唯一来源）',
+        fromConfig.ok === true && fromConfig.keySource === 'config.dsh.apiKey', String(fromConfig.keySource))
+      const noKey = resolveExtractTarget({ config: { dsh: { model: 'm' } } })
+      check('★★ 没有 key → ok:false，且**说清退回 headless**（降级不许静默）',
+        noKey.ok === false && /退回/.test(String(noKey.why)) && /DSH/.test(String(noKey.why)), String(noKey.why))
+      const noModel = resolveExtractTarget({ config: { dsh: {} }, apiKey: 'sk-x' })
+      check('没有模型名 → ok:false（不知道调哪个）', noModel.ok === false, String(noModel.why))
+      check('★ 返回里**不含**任何 key 字段以外的敏感信息（key 只用于请求头）',
+        Object.keys(withKey).sort().join(',') === 'apiKey,baseUrl,keySource,model,ok', Object.keys(withKey).join(','))
+    }
+  }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

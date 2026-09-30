@@ -228,8 +228,8 @@ try {
   section('⑩ 写盘：备份 + 快照刷新（不刷新会被回滚）')
   // ══════════════════════════════════════════════════════════════════════════
   const WS = join(ROOT, 'ws')
-  mkdirSync(join(WS, 'memory'), { recursive: true })
-  const rel = 'memory/private-123.md'
+  mkdirSync(join(WS, 'memory', 'people'), { recursive: true })
+  const rel = 'memory/people/123.md'
   const original = '# 某人\n\n- 据他说，他每天花30块\n'
   writeFileSync(join(WS, rel), original, 'utf8')
   // 先建立"桥接写下的"快照基准，模拟真实情况
@@ -264,8 +264,8 @@ try {
   {
     // 造一个**真的有重复**的记忆目录：定时整理要能把它收干净
     const WS2 = join(ROOT, 'sched')
-    mkdirSync(join(WS2, 'memory'), { recursive: true })
-    const dupRel = 'memory/private-777.md'
+    mkdirSync(join(WS2, 'memory', 'people'), { recursive: true })
+    const dupRel = 'memory/people/777.md'
     writeFileSync(
       join(WS2, dupRel),
       ['# 记忆', '', '- 他喜欢喝冰美式', '- 他喜欢喝冰美式。', '- 他的服务器是 Forge 端'].join('\n') + '\n',

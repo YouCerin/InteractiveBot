@@ -95,7 +95,7 @@ try {
     'QQ 100000001 是管理员',
     '群号 700000001',
     '私聊 private:100000001',
-    'memory/group-700000001.md',
+    'memory/groups/700000001.md',
     '100000001：管理员，会让小鲸鱼记东西',
     // 日期 / 时间戳 / 用量
     '2026-09-26 他在做 MC 服务器',
@@ -218,10 +218,10 @@ try {
   check('★★ 拒绝理由说明"隐私"（回执会带回给模型）',
     /隐私/.test(out.ignored[0]?.why ?? ''), out.ignored[0]?.why)
   check('正常那条**照常落盘**（闸门不能把整批都拒掉）',
-    readFileSync(join(WS, 'memory', 'private-100000001.md'), 'utf8').includes('MC 服务器'))
+    readFileSync(join(WS, 'memory', 'people', '100000001.md'), 'utf8').includes('MC 服务器'))
   check('★ 磁盘上**没有**那个手机号', (() => {
     try {
-      const t = readFileSync(join(WS, 'memory', 'private-100000001.md'), 'utf8')
+      const t = readFileSync(join(WS, 'memory', 'people', '100000001.md'), 'utf8')
       return !t.includes('13800138000')
     } catch {
       return false
