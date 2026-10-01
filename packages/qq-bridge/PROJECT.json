@@ -1480,6 +1480,11 @@
       "symptom": "★ 某份文本文件的中文突然变成怪字/乱码 —— 而 `npm test` 全绿、机器人照常跑",
       "cause": "**用它读/写了文件的工具在重编码**：① PowerShell 5.1 的 `Get-Content` 默认按**系统 ANSI（GBK）**解码（`-Encoding` 只作用于写，救不了读）；② `Set-Content -Encoding UTF8` 会**加 UTF-8 BOM**（5.1 的 `UTF8` 就是带 BOM）；③ PowerShell 的 `>` / `>>` 重定向把输出落成 **UTF-16LE**。★ 之所以没有任何测试拦得住：乱码**仍然是合法 JSON/Markdown/JS 字符串**，只有人读那几行字时才发现。",
       "fix": "① **先停手**，别再对同一个文件做写操作（更别想「再跑一次改回来」）；② 留证据（坏文件复制到 `cache/` + 记下命令与时间）；③ **优先 git 回退**：`git log -- <文件>` → `git checkout <ref> -- <文件>`；④ 回退不了才做结构修复（GBK 逆变换 + U+FFFD 占位，**救不回被吃掉的字**，必须如实告知）；⑤ 补跑 `node mocks/verify-text-encoding.mjs` + `node mocks/verify-manifest.mjs` + `npm test`。★ **完整的判据、标定数据、正确写法决策表与实测字节对照见 `docs/0.2.2-project-json-incident.md`**（这份守卫与 AGENT.md §6.6 就是那次事故的产物）"
+    },
+    {
+      "symptom": "★★★ **与上一条同症状、但原因完全不同**：SnowLuma 在跑、QQ 也登录着，3000/3001 却没人在听 —— 桥接先报 401、随后变成 ECONNREFUSED。判别点：日志里能看到**另一个账号**的 `listening 127.0.0.1:3000/`。",
+      "cause": "**SnowLuma 里配了两个 QQ 账号，两个账号的 OneBot 适配器配在了同一对端口上**（`snowluma/config/onebot_<uin>.json` 是各自独立的文件，但 host/port 都写着 127.0.0.1:3000 与 3001）。SnowLuma 启动时逐个 session 应用网络配置：**谁先绑谁占**。实测 2026-10-01 13:44:27 是「本人账号」先绑上 3000/3001，紧接着「机器人账号」两个适配器全部 `EADDRINUSE`，日志留下 `[OneBot] network startup degraded: UIN=… failures=2`。于是出现两个**看起来不相干**的症状：① 桥接拿的是**机器人账号**的 token 去连 3001，而对面的服务端属于另一个账号 ⇒ `rejected unauthorized WebSocket upgrade` / 401；② 本人账号那个 session 一旦关闭（实测 13:44:55），端口被释放，而机器人账号的适配器**在启动阶段就失败了、不会自己重试** ⇒ 3000/3001 彻底没人听 ⇒ 桥接一直 ECONNREFUSED。★ 为什么难查：SnowLuma 本身\"在跑\"（5099 控制台应答 200）、QQ 也真的登录着（日志里还在收群消息），所以一切\"看起来都正常\"，只有 OneBot 那一层是坏的。",
+      "fix": "让**只有一个账号**占这对端口：把另一个账号那份 `snowluma/config/onebot_<uin>.json` 的 `networks.httpServers` / `networks.wsServers` 置空（停用），或给它换一对端口（例如 3010/3011）。改完**必须重启 SnowLuma** —— 每个 session 的网络配置是启动时应用的，不会热加载。★ 与「没钩住 QQ」那条的判别：本签名能在日志里看到**另一个账号**的 `listening 127.0.0.1:3000/` 与 `EADDRINUSE`；「没钩住 QQ」则是**完全没有**任何 listening 行。★ 桥接侧的表现（先 401、后 ECONNREFUSED）是**同一个**根因的先后两幕，不要当成两个问题去修。"
     }
   ],
   "verificationStatus": {

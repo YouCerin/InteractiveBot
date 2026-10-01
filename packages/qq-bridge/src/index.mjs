@@ -1943,7 +1943,14 @@ async function main() {
   if (doctorOnly) {
     // 把进程登记一并交给体检 —— "另一个桥接也在跑"是唯一一类
     // "每个实例自己都正常、合起来却出怪事"的故障，必须能看出来。
-    const result = await runDoctor({ config, validate, processes: guard.list() })
+    //
+    // ⚠️ 这里曾经写成裸的 `validate`（一个**不存在的标识符**）—— `--doctor` 一跑就
+    //    `ReferenceError: validate is not defined`，而它是本项目最主要的排查入口
+    //    （README / RELEASE.md / start.bat 都指向它）。存在了 5 天没被发现，因为
+    //    `mocks/verify-doctor.mjs` **只直接调 `runDoctor(...)`**、从不走这条 CLI 路径
+    //    —— 又一次"纯函数测试看不见接线"。现在：① 该断言的地方补了一条文本守卫
+    //    （`verify-doctor.mjs` 的最后一段）；② 这份调用与 2238 行那处写法保持一致。
+    const result = await runDoctor({ config, validate: validateConfig, processes: guard.list() })
     const allOk = printDoctor(result)
     if (result.fatal.length) process.exit(1)
     process.exit(allOk ? 0 : 2)

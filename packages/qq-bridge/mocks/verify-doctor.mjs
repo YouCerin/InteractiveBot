@@ -12,11 +12,15 @@
  * 用法：node mocks/verify-doctor.mjs
  */
 
-import { mkdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runDoctor } from '../src/doctor.mjs'
 import { resolveInPackage, DIRS, findDshCliWithSource, readSearchPathsFromConfig } from '../src/local.mjs'
 import { startMockOneBot } from './mock-onebot-server.mjs'
+
+/** 包根（`packages/qq-bridge`）—— CLI 接线守卫要读 `src/index.mjs`。 */
+const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 const WS_DIR = join(DIRS.vendor, '..', '.tmp-verify-doctor')
 
@@ -267,6 +271,40 @@ async function main() {
     const result = await runDoctor({ config: makeConfig(), validate: makeValidate(), ...PORTS })
     const row = rowOf(result, '工作区（权限沙箱的根）')
     check('工作区被判为可用', row?.ok === true, row?.detail)
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  section('用例 8：★ CLI 接线守卫（`--doctor` 曾经一跑就崩）')
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // 真机事故（2026-10-01 排查"bot 为什么不可用"时撞上）：
+    //   `src/index.mjs` 里 `runDoctor({ config, validate, processes: … })` 写的是**裸的
+    //   `validate`** —— 那个名字在该作用域里根本不存在 ⇒ `--doctor` 直接
+    //   `ReferenceError: validate is not defined`。而 `--doctor` 是本项目最主要的排查入口
+    //   （README / RELEASE.md / start.bat 都指向它），它坏了等于"唯一的听诊器坏了"，
+    //   而且**看起来像机器人自己坏了**。存在了 5 天没人发现，原因就是本节要补的那个洞：
+    //   上面的用例**全部直接调 `runDoctor(...)`**，从不走 CLI 那条路径 ——
+    //   又一次"纯函数测试看不见接线"。
+    //
+    // ⚠️ 这是**文本守卫**，不是行为断言（真正的行为验证是 `node src/index.mjs --doctor`
+    //   跑一遍；它要连真协议端，不适合放进离线套件）。它的职责只有一个：
+    //   盯住"这个对象字面量有没有显式把 validate 传进去"。宁可要一道窄的守卫，
+    //   也不要"再也不会有人踩"的错觉 —— 所以注释里写明它的边界。
+    const indexSrc = readFileSync(join(PKG_ROOT, 'src', 'index.mjs'), 'utf8')
+    const calls = [...indexSrc.matchAll(/runDoctor\(\{([\s\S]{0,240}?)\}\)/g)].map((m) => m[1])
+    check('★ 找到了 runDoctor 的调用点（守卫本身没失效）', calls.length >= 2, `calls=${calls.length}`)
+    const missing = calls.filter((c) => !/\bvalidate\s*:/.test(c))
+    check(
+      '★★ index.mjs 里每处 runDoctor(...) 都**显式传了 `validate:`**'
+        + '（漏了就是 `--doctor` 一跑就 ReferenceError）',
+      missing.length === 0,
+      missing.length ? JSON.stringify(missing) : `（${calls.length} 处都传了）`,
+    )
+    check(
+      '★ 且没有裸的 `validate` 简写（那个标识符在这个作用域里不存在）',
+      !/[{,]\s*validate\s*[,}]/.test(indexSrc),
+      '',
+    )
   }
 
   await server.close()
