@@ -104,6 +104,10 @@ export function detectSpeedPreset(cfg: unknown): 'fast' | 'balanced' | 'careful'
  * 估算一条 len 字回复的等待时间（毫秒）：
  * 反应时间取区间中点 + 打字时间（len / charsPerSecond，受 typingMaxMs 限制），
  * 整体再受 maxDelayMs 限制。与 humanize.mjs 的曲线口径一致（近似）。
+ *
+ * ★★ 它是**等待下限**，不是"一定会额外等这么久"（2026-09-30 语义修正）：
+ * 回合本身跑得比它久就直接发，一个字都不再多等。展示时必须把这句话一起说
+ * —— 只显示"约 N 秒"而实际等到 20 多秒，正是用户报的那个"实际效果与描述不一致"。
  */
 export function estimateDelayMs(cfg: unknown, len = 200): number {
   const reactMin = getNum(cfg, 'humanize.reactMinMs', 3500)
@@ -267,6 +271,9 @@ export const DEMO_CONFIG: Record<string, unknown> = {
   // ★ 0.2.3：判定专用 key 配没配（值不回显）。它同时是**通路开关** ——
   //   填了才走直连、而且只用这把；留空 ⇒ 一次性 DSH 进程。
   hasJudgeKey: false,
+  // ★ 0.2.9/10-01：对话风格「拿不准问模型」的专用 key 配没配（值不回显）。
+  //   留空 = 复用 wake.judge.*；都空则走一次性 DSH 进程。
+  hasChatModeKey: false,
   access: { adminUsers: ['100000001'] },
   trigger: {
     private: true,
@@ -305,6 +312,15 @@ export const DEMO_CONFIG: Record<string, unknown> = {
         thinking: ['等下，我想想', '嗯……让我组织一下', '稍等'],
         blocked: ['这个我暂时做不了', '权限不够，换个做法试试？'],
       },
+    },
+  },
+  // §2.4.1 对话风格（闲聊态 / 工作态，2026-10-01）：按消息分两态。关掉 = 升级前行为逐字相同。
+  chat: {
+    mode: {
+      enabled: true,
+      style: '',
+      fallback: 'work',
+      ambiguous: { enabled: true, timeoutMs: 6000, maxPerHour: 30, apiKey: '', baseUrl: '', model: '' },
     },
   },
   session: { salt: '', instance: '' },

@@ -102,10 +102,18 @@ export function detectPromise({ text, from = 'user' } = {}) {
 /**
  * 承诺条目怎么写（**带来源**，因为它将来会被读回来当"我答应过什么"用）。
  *
- * @param {{from: 'bot'|'user', text: string}} opts
- * @returns {string} 形如「（我许的诺）我明天帮你查那个仓库」/「（他许的诺）他周四给你看结果」
+ * ★★ 2026-10-01 用户要求「承诺与约定要带时间戳」：句子里那些相对时间
+ *   （"明天""周四""下周"）**离开当天就没有意义** —— 一周后读到
+ *   「我周四给你看结果」，没人知道是哪个周四。所以落盘时把**说的日期**附在后面。
+ *
+ * ⚠️ 存**绝对日期**而不是"多久之前"：后者是注入时算出来的（见 `promiseAgeText`），
+ *   存下来只会立刻过期。
+ *
+ * @param {{from: 'bot'|'user', text: string, at?: number|Date}} opts
+ *   `at` 省略时**不附加日期**（老调用点与测试的逐字断言继续成立）。
+ * @returns {string} 形如「（我许的诺）我明天帮你查那个仓库（2026-10-01 说的）」
  */
-export function promiseEntryText({ from, text } = {}) {
+export function promiseEntryText({ from, text, at = null } = {}) {
   // ★ 先洗掉 @提及：QQ 里的 `@小鲸鱼` 是**平台标记**，不是承诺内容
   //   （真机实测条目长这样：「（对方许的诺）@小鲸鱼 我周四给你看结果」——
   //   被 @ 的是机器人自己，留在档案里只会让将来的自己读得莫名其妙）。
@@ -115,5 +123,47 @@ export function promiseEntryText({ from, text } = {}) {
     .trim()
   if (!body) return ''
   const clipped = body.length > PROMISE_MAX_CHARS ? `${body.slice(0, PROMISE_MAX_CHARS)}…` : body
-  return from === 'bot' ? `（我许的诺）${clipped}` : `（对方许的诺）${clipped}`
+  const head = from === 'bot' ? '（我许的诺）' : '（对方许的诺）'
+  const when = promiseDateTag(at)
+  return `${head}${clipped}${when}`
+}
+
+/** 承诺条目里的日期标记（绝对日期）。`at` 为空返回空串。 */
+export function promiseDateTag(at) {
+  if (at === null || at === undefined) return ''
+  const d = at instanceof Date ? at : new Date(Number(at))
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n) => String(n).padStart(2, '0')
+  return `（${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} 说的）`
+}
+
+/** 从条目里取回"说的日期"（毫秒；取不到返回 null）。 */
+export function promisedAtOf(entryText) {
+  const m = /（(\d{4})-(\d{2})-(\d{2}) 说的）/.exec(String(entryText ?? ''))
+  if (!m) return null
+  const t = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+  return Number.isNaN(t) ? null : t
+}
+
+/**
+ * 注入时补一句"这是多久以前说的"。
+ *
+ * ★ 为什么要在**注入时**算：条目里存的是绝对日期（不会过期），而"几天前说的"
+ *   每过一天就变一次 —— 只有注入的那一刻算才准。
+ * ★ 为什么值得占这几个字：承诺是**强记忆**，而"上周说的"和"上个月说的"
+ *   对"该不该主动提"是完全不同的判断（用户原话：真人式的表现是**到期前的自然提醒**，
+ *   或者事后顺势问一句"上次说的那个弄了吗"）。
+ *
+ * @param {string} entryText 已落盘的条目
+ * @param {{now?: number}} [opts]
+ * @returns {string} 空串 = 没有日期或不到一天（当天说的不需要补）
+ */
+export function promiseAgeText(entryText, { now = Date.now() } = {}) {
+  const at = promisedAtOf(entryText)
+  if (!at) return ''
+  const days = Math.floor((Number(now) - at) / 86_400_000)
+  if (days < 1) return ''
+  if (days === 1) return '（昨天说的）'
+  if (days < 30) return `（${days} 天前说的）`
+  return '（一个月前说的）'
 }

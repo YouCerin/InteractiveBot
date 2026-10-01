@@ -87,6 +87,9 @@ const p2 = (n) => String(n).padStart(2, '0')
  *        已启用技能的提示词片段（0.2.2）。**由桥接预先收集**（`src/extensions.mjs`），
  *        本模块只负责按顺序拼进提示词 —— 顺序固定：权限段之后、记忆段之前。
  * @param {string} ctx.nickname 当前说话人的昵称（按人昵称，0.2.2）。空 = 不注入任何东西。
+ * @param {''|'chat'|'work'} [ctx.turnMode] 这一轮的对话风格状态（2026-10-01）。
+ *        `'chat'` 时会在人设后插一句"这一轮按闲聊口吻"；其余值**一个字都不加**
+ *        （工作态 = 升级前的提示词，逐字基线钉着这一点）。
  */
 export async function buildChannelPrompt({
   now = new Date(),
@@ -113,6 +116,12 @@ export async function buildChannelPrompt({
   stickerLines = [],
   nickname = '',
   projectDocRel = '',
+  /** ★★ 这一轮是闲聊还是干活（2026-10-01，由 `bridge.mjs` 的 `#detectTurnMode` 判出来）。
+   *  `'chat'` = 闲聊态：人设里的口吻已按态替换过，这里再明确告诉模型"这一轮按闲聊来"；
+   *  `'work'` / 空 = 干活：**与升级前的提示词逐字相同**（不注入这一段）。 */
+  turnMode = '',
+  /** 判定结论的来源（日志/排查用；不进提示词）。 */
+  turnModeInfo = null,
   /** 本条消息里的视频（`renderSegments` 带出来的 `videoRefs`：`{url}`）。
    *  ★ 只带直链、**核心不下载** —— 见下面「视频」那一段与 `docs/0.2.7-qq-video-inbound.md`。 */
   videos = [],
@@ -180,6 +189,29 @@ export async function buildChannelPrompt({
   // 放在平台规则**之后**（硬规矩先说）、记忆**之前**（先身份后记忆）。
   if (personaText) lines.push('', personaText)
 
+  // ── ★★ 这一轮是闲聊还是干活（2026-10-01）────────────────────────────
+  //
+  // ★ 为什么必须有这**一句**，而不是"人设里已经写了两种口吻就够了"：
+  //   人设是**一段静态描述**，模型读不出"这一轮该用哪一种" —— 它只会挑一个
+  //   自己觉得合适的（实测就是挑回助手腔）。所以这个态必须由**代码**告诉它。
+  // ★ 位置：**紧贴人设之后**（它是对人设的限定，离开人设就没了指代对象），
+  //   而且在稳定前缀里 —— 态只有两个取值，缓存按态各存一份前缀，命中率不受影响。
+  // ★ 措辞只写"这一轮是什么、按哪一节来"，**不重复**风格细节：细节在
+  //   `styles/闲聊.md` 里（那份是使用者可改的），这里重复一遍就会两处漂移。
+  //
+  // ⚠️ **只在闲聊态注入**。工作态一个字都不加 —— 这不是省 token，而是
+  //    "工作态 = 升级前的行为"这条承诺的**可验证形式**：`verify-memory-roundtrip`
+  //    的逐字基线（`mocks/fixtures/prompt-golden.txt`）跑的就是工作态，
+  //    多一句话它就会红。所以"给工作态也加一句说明"这种改动**必须**连同基线
+  //    一起改，而那正是我们想要的摩擦。
+  if (turnMode === 'chat') {
+    lines.push(
+      '',
+      '【这一轮是**闲聊**】按上面「闲聊时的说话方式」那一节的口吻回（它覆盖前面与之冲突的通用说话规则）。' +
+        '这不是让你敷衍：真要查就去查，只是**说法**要像在 QQ 里跟人聊天。',
+    )
+  }
+
   // ── 权限等级（决定它能不能"动手"）────────────────────────────────────
   lines.push('', buildPermissionInstructions(tier, kind))
 
@@ -232,7 +264,18 @@ export async function buildChannelPrompt({
     verifyAndRestoreMemory({ workspace, log })
     // ★ 三层记忆：把**这一轮是谁在说话**传下去 —— 个人层的注入口径是
     //   "关于当前发言人"，群里因此只注入他那一份（别人看不到，别的群也看不到）。
-    const recall = readMemoryForPrompt({ workspace, kind, peerId, speakerId: senderId, log })
+    //   ★★ 2026-10-01 用户要求：群聊记忆的开头要像个人记忆一样**带上群名**。
+    //   群名来自 `identity`（协议端核实过的 `get_group_list`），传下去只为把
+    //   "本群记忆"那一行的标签写成「本群记忆·摸鱼群（只在这个群）」；
+    //   查不到时留空，标签退回不带名字的写法（**不编名字**）。
+    const recall = readMemoryForPrompt({
+      workspace,
+      kind,
+      peerId,
+      speakerId: senderId,
+      chatName: identity?.chatName ?? '',
+      log,
+    })
     // ★ H3：把"这一轮**真的注入了**哪些条目"记进使用侧车（只记时间与次数）。
     //   ⚠️ 只记"被注入"，不记"被用上" —— 我们观测不到模型到底依赖了哪条。
     try {

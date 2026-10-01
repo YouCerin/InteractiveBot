@@ -31,10 +31,12 @@ import {
   groupSlangRel,
   INJECT_ENTRIES_PERSON,
   layoutFor,
+  memoryFileTitle,
   memoryLayerOf,
   migrateMemoryLayout,
   personMemoryRel,
   readMemoryForPrompt,
+  repairGroupMemoryTitle,
   screenEntry,
   SCOPE,
   thirdPartyNegative,
@@ -49,7 +51,7 @@ import {
   normalizePrewakeMode,
   parseAffectGateVerdict,
 } from '../src/affect-gate.mjs'
-import { detectPromise, promiseEntryText } from '../src/promises.mjs'
+import { detectPromise, promiseEntryText, promiseAgeText, promisedAtOf } from '../src/promises.mjs'
 import {
   MIN_MESSAGES_FOR_LINE,
   notePersonTurn,
@@ -57,6 +59,7 @@ import {
   PEOPLE_MAX,
   readPersonStats,
   renderPersonStatsLine,
+  renderPersonHabitsLine,
   __resetPeopleStatsWarnings,
 } from '../src/people-stats.mjs'
 
@@ -457,6 +460,35 @@ try {
         promiseEntryText({ from: 'user', text: '我周四给你看' }) === '（对方许的诺）我周四给你看',
       '')
     check('★ 承诺条目过得了同一道闸门', screenEntry(SCOPE.FACT, promiseEntryText({ from: 'bot', text: '我明天帮你查那个仓库' })).ok, '')
+
+    /* ── ★★ 承诺带时间戳（2026-10-01 用户要求）────────────────────────────
+     *
+     * 用户原话：「承诺与约定（强记忆，要带时间戳）」+「真人式的表现不是背出来，
+     * 而是**到期前的自然提醒**，或者事后顺势问一句"上次说的那个弄了吗"」。
+     * 判据：句子里那些相对时间（"明天""周四"）**离开当天就没意义** ⇒ 落盘时附日期；
+     * 而"几天前说的"**每过一天就变** ⇒ 只能在注入时现算。
+     */
+    const at0 = Date.parse('2026-10-01T10:00:00')
+    const tagged = promiseEntryText({ from: 'user', text: '@小鲸鱼 我周四给你看结果', at: at0 })
+    check('★★ 落盘时附上"说的日期"（绝对日期，不会过期）',
+      tagged === '（对方许的诺）我周四给你看结果（2026-10-01 说的）', tagged)
+    check('★ @提及仍然被洗掉（与原来一致）', !tagged.includes('@小鲸鱼'), tagged)
+    check('★ 说的日期取回来是对的', promisedAtOf(tagged) === new Date(2026, 9, 1).getTime(),
+      String(promisedAtOf(tagged)))
+    check('★ 不带 at 时不附加日期（老调用点与逐字断言继续成立）',
+      promiseEntryText({ from: 'bot', text: '我明天帮你查' }) === '（我许的诺）我明天帮你查',
+      promiseEntryText({ from: 'bot', text: '我明天帮你查' }))
+    const day = 86_400_000
+    check('★ 注入时补"多久以前说的"（当天不补）',
+      promiseAgeText(tagged, { now: at0 }) === '' &&
+        promiseAgeText(tagged, { now: at0 + day }) === '（昨天说的）' &&
+        promiseAgeText(tagged, { now: at0 + 3 * day }) === '（3 天前说的）' &&
+        promiseAgeText(tagged, { now: at0 + 40 * day }) === '（一个月前说的）',
+      [0, 1, 3, 40].map((d) => promiseAgeText(tagged, { now: at0 + d * day }) || '（空）').join(' / '))
+    check('★ 没有日期的老条目**不补**（宁可不提，也不编一个时间）',
+      promiseAgeText('（对方许的诺）我周四给你看结果') === '')
+    check('★ 非承诺条目不受影响', promiseAgeText('他很爱听歌') === '')
+    check('★ 坏日期不崩', promiseAgeText('（我许的诺）x（2026-99-99 说的）') === '')
     check('★ @提及被洗掉（被 @ 的是机器人自己，留在档案里读着莫名其妙）',
       promiseEntryText({ from: 'user', text: '@小鲸鱼 我周四给你看结果' }) === '（对方许的诺）我周四给你看结果',
       promiseEntryText({ from: 'user', text: '@小鲸鱼 我周四给你看结果' }))
@@ -671,6 +703,99 @@ try {
         thirdPartyNegative('我朋友帮了我，那天我真蠢').hit === false,
       JSON.stringify([thirdPartyNegative('我朋友就是个小丑'), thirdPartyNegative('我朋友帮了我，那天我真蠢')]))
 
+    /* ══════════════════════════════════════════════════════════════════════
+     * ★★ 群聊记忆的"开头"要带群名（2026-10-01 用户要求）
+     * ══════════════════════════════════════════════════════════════════════
+     * 个人档的文件头本来就带名字（`# 忘忧（QQ …）`），群那份却只有一句
+     * 「# 记忆（桥接维护，勿手改）」—— 打开文件只看得出一个号码，认不出是哪个群。
+     * 而注入时那一行的标签也只有「本群记忆」，模型得靠来源标注里的号码去比对。
+     * 两处都要带上群名（**查不到就不编**）。
+     */
+    const wsN = newWs()
+    applyMemoryItems({
+      workspace: wsN,
+      kind: 'group',
+      peerId: GROUP_A,
+      senderId: X,
+      tier: 'user',
+      chatName: '摸鱼群',
+      items: [{ scope: SCOPE.FACT, text: '这是一个游戏群', source: 'marker' }],
+      log: () => {},
+    })
+    const gRel = `memory/groups/${GROUP_A}.md`
+    const gRaw = readFileSync(join(wsN, gRel), 'utf8')
+    check('★★ 新建群记忆的文件头**带群名**（不是光秃秃一个号码）',
+      gRaw.startsWith(`# 记忆·摸鱼群（群 ${GROUP_A}）（桥接维护，勿手改）`), gRaw.split('\n')[0])
+    check('★ 文件头只出现一次（不是写两遍）',
+      (gRaw.match(/# 记忆/g) ?? []).length === 1, JSON.stringify(gRaw.split('\n').slice(0, 4)))
+
+    // ★★ 重复头的真缺陷：文件"只有头、还没有条目"时再写一次，旧实现会**又追加一个头**
+    //    （`entries.length === 0 ? 头 : ''` 里 entries 是解析出来的条目，不含标题行）
+    const wsD = newWs()
+    mkdirSync(join(wsD, 'memory', 'groups'), { recursive: true })
+    writeFileSync(join(wsD, gRel), '# 记忆（桥接维护，勿手改）\n\n', 'utf8')
+    applyMemoryItems({
+      workspace: wsD,
+      kind: 'group',
+      peerId: GROUP_A,
+      senderId: X,
+      tier: 'user',
+      chatName: '摸鱼群',
+      items: [{ scope: SCOPE.FACT, text: '这是一个游戏群', source: 'marker' }],
+      log: () => {},
+    })
+    const dRaw = readFileSync(join(wsD, gRel), 'utf8')
+    check('★★★ 已有文件头时**不再写第二个头**（真机上出过：前两行一模一样）',
+      (dRaw.match(/# 记忆/g) ?? []).length === 1, JSON.stringify(dRaw.split('\n').slice(0, 4)))
+
+    // 注入侧：标签带群名；查不到群名时退回不带名字的写法
+    const withName = readMemoryForPrompt({ workspace: wsN, kind: 'group', peerId: GROUP_A, speakerId: X, chatName: '摸鱼群' })
+    check('★★ 注入标签带群名（「本群记忆·摸鱼群」）',
+      withName.blocks.some((b) => String(b.label).includes('本群记忆·摸鱼群')), JSON.stringify(withName.blocks.map((b) => b.label)))
+    const noName = readMemoryForPrompt({ workspace: wsN, kind: 'group', peerId: GROUP_A, speakerId: X })
+    check('★ 查不到群名时**退回不带名字的写法**（不编名字）',
+      noName.blocks.some((b) => String(b.label) === '本群记忆（只在这个群）'), JSON.stringify(noName.blocks.map((b) => b.label)))
+    check('★ 私聊那一份不受影响（它本来就没有群名）',
+      readMemoryForPrompt({ workspace: wsN, kind: 'private', peerId: X }).blocks.every((b) => !String(b.label).includes('本群记忆')),
+      '')
+
+    // 标题渲染本身（纯函数：三种形状）
+    check('★ 有群名 → 带群名 + 群号', memoryFileTitle({ rel: `memory/groups/${GROUP_A}.md`, chatName: '摸鱼群' }) === `# 记忆·摸鱼群（群 ${GROUP_A}）（桥接维护，勿手改）`)
+    check('★ 没群名 → 只写号码（不编）', memoryFileTitle({ rel: `memory/groups/${GROUP_A}.md` }) === `# 记忆·群 ${GROUP_A}（桥接维护，勿手改）`)
+    check('★ 黑话那份也认（带「群内黑话」）',
+      memoryFileTitle({ rel: `memory/groups/${GROUP_A}-slang.md`, chatName: '摸鱼群' }).includes('群内黑话'))
+    check('★ 非群聊文件用原来的通用头（不受影响）',
+      memoryFileTitle({ rel: 'MEMORY.md', chatName: '摸鱼群' }) === '# 记忆（桥接维护，勿手改）')
+
+    /* ── ★★ 自愈：老文件的标题要能补群名、并清掉重复的标题行 ───────────────
+     *
+     * 为什么自愈而不是手工改一次：老文件的标题只有一个号码，而**群名要协议端
+     * 查得到**才知道 —— 让它在"这个群下次说话"时自动补上，比手工猜一个名字可靠。
+     * 重复标题则是旧缺陷留下的痕迹（真机上出过），顺手在同一处修掉。
+     */
+    const wsR = newWs()
+    mkdirSync(join(wsR, 'memory', 'groups'), { recursive: true })
+    const rRel = `memory/groups/${GROUP_A}.md`
+    const BROKEN = `# 记忆（桥接维护，勿手改）\n# 记忆（桥接维护，勿手改）\n\n- 这是一个游戏群\n- 群友常拿它开玩笑\n`
+    writeFileSync(join(wsR, rRel), BROKEN, 'utf8')
+    const rep = repairGroupMemoryTitle({ workspace: wsR, rel: rRel, chatName: '摸鱼群', log: () => {} })
+    const repRaw = readFileSync(join(wsR, rRel), 'utf8')
+    check('★★ 自愈：标题补上群名', rep.changed === true && repRaw.startsWith(`# 记忆·摸鱼群（群 ${GROUP_A}）`), repRaw.split('\n')[0])
+    check('★★ 自愈：**重复的标题行被清掉**（真机上曾有两行一模一样的头）',
+      (repRaw.match(/# 记忆/g) ?? []).length === 1, JSON.stringify(repRaw.split('\n').slice(0, 4)))
+    check('★★ 自愈：正文一个字都不许动',
+      repRaw.includes('- 这是一个游戏群') && repRaw.includes('- 群友常拿它开玩笑'), repRaw)
+    check('★ 自愈是幂等的（第二次不用改、也不写盘）',
+      repairGroupMemoryTitle({ workspace: wsR, rel: rRel, chatName: '摸鱼群' }).changed === false)
+    check('★ 文件不存在时不动它（不凭空造文件）',
+      repairGroupMemoryTitle({ workspace: wsR, rel: `memory/groups/999999.md` , chatName: 'x' }).changed === false)
+    check('★ 没有标题行的文件不动它（不猜结构）', (() => {
+      const p = join(wsR, 'memory', 'groups', 'nohead.md')
+      writeFileSync(p, '- 只有条目\n', 'utf8')
+      const r = repairGroupMemoryTitle({ workspace: wsR, rel: 'memory/groups/nohead.md', chatName: 'x' })
+      return r.changed === false && readFileSync(p, 'utf8') === '- 只有条目\n'
+    })())
+
     // 端到端：走**同一条写入路径**，被拒要有原因、且磁盘上确实没有
     const ws = newWs()
     const r = applyMemoryItems({
@@ -756,6 +881,38 @@ try {
     check('★ 别人的会话拿不到这份统计（只给本人那一份）',
       !readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: Y }).text.includes('次话'),
       readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: Y }).text.slice(0, 80))
+
+    /* ── ★★ 稳定行为特征那一行（2026-10-01 用户要求「增加统计层」）──────────
+     *
+     * 用户点名要的是「稳定的行为特征」：活跃时段、发言风格、习惯动作、技术栈。
+     * 这一层**只写算得出来的**（计数器），所以这里逐条钉住"什么情况写、什么情况不写"。
+     */
+    const hb = (o) => renderPersonHabitsLine({ messages: 20, days: 4, chats: { 'group:1': 20 }, ...o })
+
+    check('★ 只在被叫到时才出现（mentioned 占绝大多数）',
+      hb({ mentioned: 20 }).includes('基本只在被叫到时才出现'), hb({ mentioned: 20 }))
+    check('★ 会主动找机器人说话', hb({ mentioned: 1 }).includes('会主动来找我说话'), hb({ mentioned: 1 }))
+    check('★ 一半一半时**一个字都不写**（不下模棱两可的结论）',
+      !hb({ mentioned: 10 }).includes('主动') && !hb({ mentioned: 10 }).includes('被叫到'), hb({ mentioned: 10 }))
+    check('★★ **没有 mentioned 数据时不许说"会主动"**（把"没有数据"说成"有数据"）',
+      !hb({}).includes('主动'), `实际：${hb({})}`)
+    check('★★ 真机那条老记录（33 条、无 mentioned/chars）不许编出发言风格',
+      !renderPersonHabitsLine({ messages: 33, days: 2, chats: { 'group:700000001': 33 } }).includes('主动'))
+    check('★ 话很短（按平均字符数，只给量级）', hb({ mentioned: 20, chars: 160 }).includes('话很短'))
+    check('★ 话偏长', hb({ mentioned: 20, chars: 1200 }).includes('说话偏长'))
+    check('★ 会话明显集中时才提"基本只在群里出现"',
+      hb({ mentioned: 1, chats: { 'group:1': 18, 'private:1': 2 } }).includes('基本只在群里出现'))
+    check('★ 会话不集中时**不写**（否则这行变成"他在哪几个群活动"的情报）',
+      !hb({ mentioned: 1, chats: { 'private:1': 10, 'group:1': 10 } }).includes('基本只在'))
+    check('  （对照）会话集中时才写那一条',
+      hb({ mentioned: 1, chats: { 'private:1': 18, 'group:1': 2 } }).includes('基本只在私聊里出现'))
+    check('★★ 那一行**不含任何号码/群号**（隐私边界）',
+      !/group:|private:|\d{6,}/.test(hb({ mentioned: 20, chars: 160 })),
+      hb({ mentioned: 20, chars: 160 }))
+    check('★ 只来过一天不算"习惯"', !hb({ mentioned: 20, days: 1 }).includes('稳定出现'))
+    check('★ 稳定出现几天要写出来', hb({ mentioned: 20, days: 4 }).includes('稳定出现了 4 天'))
+    check('★ 样本不足（少于注入门槛）→ 一行都不写', renderPersonHabitsLine({ messages: 2, mentioned: 2 }) === '')
+    check('★ 零消息 / null 不崩', renderPersonHabitsLine({ messages: 0 }) === '' && renderPersonHabitsLine(null) === '')
 
     // 坏文件：按空处理但**留证据**（不许静默）
     const ws2 = newWs()

@@ -19,7 +19,7 @@ import { makeSessionId, defaultInstanceTag } from './session-id.mjs'
 import { readFileSync as nodeReadFileSync } from 'node:fs'
 import { decideTrigger, REASON } from './trigger.mjs'
 import { renderSegments, markdownToPlain, splitForQQ } from './text.mjs'
-import { computeReplyDelay, splitIntoMessages } from './humanize.mjs'
+import { computeReplyDelay, isQuietNow, splitReplyForSend } from './humanize.mjs'
 // 记忆：桥接托管（见 memory-store.mjs）。旧的 memory.mjs 仍被 mocks 引用，
 // 但它那段"让模型自己去读写笔记"的指令已经**不再进入提示词**。
 import {
@@ -94,11 +94,23 @@ import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } 
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
 import { extractRecipe, runDirect, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './extract.mjs'
 import { createWakeJudge, judgeTransport, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
+// ★★ 对话风格判定器（2026-10-01）：与唤醒判定器**共用 `model-gate.mjs` 那一层政策**
+//   （通路/预算/超时/失败方向/用量归一），只换提示词、解析与失败方向。
+import { createModeJudge } from './wake-judge.mjs'
 import { resolveDirectTarget, resolveExtractTarget } from './model-direct.mjs'
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
 import { resolveActivePersona } from './personas.mjs'
+// ★★ 双态对话风格（2026-10-01）：闲聊态 / 工作态。
+//   · `chat-mode.mjs` 是纯函数（判定 + 人设分节替换）—— 零 I/O，可离线审阅；
+//   · `styles.mjs` 读 `styles/<名字>.md`（**每轮现读**：改完下一轮生效）。
+import { MODE, MODE_SOURCE, composePersonaForMode, describeMode, detectMode } from './chat-mode.mjs'
+import { ensureDefaultChatStyle, readChatStyle } from './styles.mjs'
+// ★ 风格目录的默认值：`DIRS.chatStyles`（包根下的 `styles/`）。
+//   为什么给默认值而不是要求调用方必传：测试构造 Bridge 时不该关心"风格文件放哪"，
+//   而且**忘了传**的表现是"闲聊态静默退回老腔调"——那是本项目最忌讳的一类失败。
+import { DIRS } from './local.mjs'
 import { ensureProjectDocCopy } from './project-doc.mjs'
 import { buildChannelPrompt } from './channel-prompt.mjs'
 import { collectSkillPromptSections, isSkillEnabled, skillToolFullName, callSkillAvailable } from './extensions.mjs'
@@ -177,6 +189,24 @@ export class Bridge extends EventTarget {
   #affectGate = null
 
   /**
+   * ★★ 对话风格判定器（2026-10-01）：规则拿不准时问一次模型"这条是闲聊还是干活"。
+   *
+   * 与唤醒判定器/情绪闸门同样**懒建 + 只建一次**：`chat.mode.enabled` 与
+   * `chat.mode.fallback` 每轮现读（⇒ 改完下一轮就生效），而**小时预算必须跨消息累积**
+   * —— 每条消息重建等于把 `chat.mode.ambiguous.maxPerHour` 这个成本上限变成摆设。
+   *
+   * ★ 为什么**不复用**唤醒判定器那个实例：两者的失败方向相反
+   *   （唤醒失败要"放过"= 照常回；这里失败要"工作态"= 保守），而且若共用一个预算，
+   *   闲聊判定的消耗会把唤醒判定的额度挤掉 —— 表现是"某天开始判定器不工作了"，
+   *   原因却在一个看起来无关的功能上。多一个实例换一条清晰的账，值得。
+   * @type {{judge: Function, budget: Function}|null}
+   */
+  #modeJudge = null
+
+  /** 已经喊过的风格文件问题（按理由去重，避免每轮刷一行）。 */
+  #chatStyleWarned = new Set()
+
+  /**
    * 每个会话"正在飞的那次判定"的取消柄（chatKey → AbortController）。
    *
    * 为什么要有它：判定要 3~5 秒，而这期间同一会话又来了新消息时，旧判定
@@ -187,6 +217,17 @@ export class Bridge extends EventTarget {
    * @type {Map<string, AbortController>}
    */
   #wakeAborts = new Map()
+
+  /**
+   * 每个会话"正在飞的那次**风格判定**"的取消柄（chatKey → AbortController）。
+   *
+   * 与 `#wakeAborts` 同一条理由：判定要 1~5 秒，这期间同一会话又来了新消息时，
+   * 旧判定的结论**指向一条已经被作废的消息** —— 让它跑完既浪费一次调用，
+   * 又会把一次用不上的判定结论写进日志（排查时会以为它判了当前这条）。
+   * 新消息到来 = 旧的立刻让路。
+   * @type {Map<string, AbortController>}
+   */
+  #modeAborts = new Map()
 
   /**
    * 已经喊过"零写入告警"的会话（只喊一次，避免刷屏把日志淹掉）。
@@ -350,7 +391,7 @@ export class Bridge extends EventTarget {
    * @param {import('./session-bridge.mjs').SessionRouter} opts.router
    * @param {object} opts.config
    */
-  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, affectGate = null, modelApiKey = '', log = () => {} }) {
+  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, affectGate = null, modeJudge = null, chatStyleDir = null, modelApiKey = '', log = () => {} }) {
     super()
     this.rpc = rpc
     this.onebot = onebot
@@ -366,6 +407,12 @@ export class Bridge extends EventTarget {
     //   从未注入过）。同一套辩证法在这里复用：**接线必须有它自己的断言。**
     //   不传 = 按配置现造（生产路径）。
     this.wakeJudgeInjected = wakeJudge
+    // ── 对话风格判定器（2026-10-01）：**同样可注入** ────────────────────────
+    //   它的正常路径也要问一次模型（只有规则拿不准的消息才会走到），
+    //   而这里要断言的恰恰是**桥接拿这个结论做了什么**：规则命中时**有没有白花钱**、
+    //   闲聊态有没有真的换上风格、判定失败时有没有回落到工作态。
+    //   不传 = 按配置现造（生产路径）。
+    this.modeJudgeInjected = modeJudge
     // ── 情绪闸门（2026-09-30）：**同样可注入**（理由与上面那段完全一样）─────
     //   它的正常路径也要问一次模型；而这里要断言的恰恰是**桥接拿这个结论做了什么**
     //   （影子模式写没写盘、判定说不通过时有没有手滑写进去、`off` 时有没有白花钱）。
@@ -486,6 +533,21 @@ export class Bridge extends EventTarget {
     // ★ 只用"正式名 + 别名"，**不含 `又称`**（如 DeepSeek）—— 技术群里那个词太常见，
     //   拿它当唤醒词会让机器人在不相关讨论里插嘴。这条判断写在 persona 的数据里。
     this.wakeKeywords = mergeWakeKeywords(this.config.trigger?.keywords ?? [], this.personaText)
+
+    // ★★ 对话风格（2026-10-01）：**每轮现读** `styles/<名字>.md`，所以改完
+    //   下一轮就生效（与人设的"改了要重启"刻意不同，理由见 styles.mjs 的文件头）。
+    //   ★ 这里只确保目录与出厂默认那份存在（**文件存在就不动**，所以"删掉"是真的删掉）；
+    //     读失败由 `#chatStyleForTurn` 那一层如实记日志。
+    this.chatStyleDir = chatStyleDir ?? DIRS.chatStyles
+    try {
+      const seeded = ensureDefaultChatStyle({ dir: this.chatStyleDir, log: (m) => this.log(m) })
+      if (seeded.created) this.log(`[chat-mode] 已落一份出厂默认的闲聊风格：${seeded.path}`)
+    } catch (error) {
+      this.log(`⚠️ [chat-mode] 风格目录没法准备（不影响使用，会走内置默认那份）：${error?.message ?? error}`)
+    }
+    // 风格文件读失败的告警**按理由去重**：文件不存在这件事每轮都会发生，
+    // 每轮喊一次会把真正该看的日志淹掉（与 `#warnInjectOnce` 同一条纪律）。
+    this.#chatStyleWarned = new Set()
 
     // ★ 会话 instance **在构造时算一次**，本次进程生命周期内固定不变。
     //
@@ -919,7 +981,7 @@ export class Bridge extends EventTarget {
     return this.#corpus?.stats(opts) ?? { ok: false, why: '语料库未启用' }
   }
 
-  #settleMemory({ chatKey, kind, peerId, senderId, tier, userText = '', answer = '', complete = true, sent = true }) {
+  #settleMemory({ chatKey, kind, peerId, senderId, tier, chatName = '', userText = '', answer = '', complete = true, sent = true }) {
     const workspace = this.config.dsh?.workspace
     // 标记**无条件剥离**（绝不能把内部协议发给用户），与"要不要落盘"是两件事
     const parsed = parseMemoryMarkers(answer)
@@ -964,11 +1026,15 @@ export class Bridge extends EventTarget {
     // ★ 机器人的那条**只在真的会发出去时**才记（`sent`）：被更新的消息作废的那一轮，
     //   用户根本没看到那句话，记成"我答应过"就是**假记忆**。
     const promiseItems = []
+    // ★★ 承诺带时间戳（2026-10-01 用户要求）：句子里那些相对时间（"明天""周四"）
+    //   离开当天就没有意义，所以落盘时附上**说的日期**。
+    //   ⚠️ 用 `Date.now()` 而不是模型给的时间：模型拿不到可信时钟。
+    const promiseAt = Date.now()
     const botPledge = detectPromise({ text: clean, from: 'bot' })
     if (botPledge.hit) {
       if (sent) {
-        promiseItems.push({ scope: SCOPE.FACT, text: promiseEntryText(botPledge), source: 'promise' })
-        this.log(`[memory] 承诺 → 记入会话层（${botPledge.why}）：${promiseEntryText(botPledge)}`)
+        promiseItems.push({ scope: SCOPE.FACT, text: promiseEntryText({ ...botPledge, at: promiseAt }), source: 'promise' })
+        this.log(`[memory] 承诺 → 记入会话层（${botPledge.why}）：${promiseEntryText({ ...botPledge, at: promiseAt })}`)
       } else {
         // ★ 不作数的那一轮**也要留一行**：这一条是"我明明答应过，它怎么没记"这类
         //   追问唯一的查证痕迹（不记是**对的**，但必须是**有理由的不记**）。
@@ -980,8 +1046,8 @@ export class Bridge extends EventTarget {
     const userPledge = detectPromise({ text: userText, from: 'user' })
     if (userPledge.hit) {
       // 用户那句话是**完整的**，与模型这轮跑没跑完无关（H1 三分类里的第一类）
-      promiseItems.push({ scope: SCOPE.FACT, text: promiseEntryText(userPledge), source: 'promise' })
-      this.log(`[memory] 承诺 → 记入会话层（${userPledge.why}）：${promiseEntryText(userPledge)}`)
+      promiseItems.push({ scope: SCOPE.FACT, text: promiseEntryText({ ...userPledge, at: promiseAt }), source: 'promise' })
+      this.log(`[memory] 承诺 → 记入会话层（${userPledge.why}）：${promiseEntryText({ ...userPledge, at: promiseAt })}`)
     }
 
     if (!enabled) {
@@ -1019,6 +1085,8 @@ export class Bridge extends EventTarget {
         peerId,
         senderId,
         tier,
+        // ★ 群名（这一轮协议端核实过）—— 只用于"新建群记忆时把头写成群名"
+        chatName,
         items: all,
         log: this.log,
       })
@@ -1364,6 +1432,8 @@ export class Bridge extends EventTarget {
           chatKey: mirrorKey,
           messageId: payload.message_id,
           text: rendered.text,
+          // ★ 群名（协议端核实过）：只用于"新建那份群记忆时把头写成群名"
+          chatName: identity?.chatName ?? '',
         })
       } catch (error) {
         // 增强路径：**任何**失败都不许影响消息处理（这里连日志都要给全）
@@ -1426,7 +1496,18 @@ export class Bridge extends EventTarget {
       if (workspace && this.config.memory?.enabled !== false && senderId) {
         // ★ 只传 `userId` 做**聚合键**（跨会话按人）；`chatKey` 只作为分会话明细记下来。
         //   为什么：个人层是"跟人走"的，统计也必须是 —— 否则私聊里读不到他在群里的那份。
-        notePersonTurn({ workspace, userId: senderId, chatKey: mirrorKey, log: (m) => this.log(m) })
+        notePersonTurn({
+          workspace,
+          userId: senderId,
+          chatKey: mirrorKey,
+          // ★★ 2026-10-01：多带两个**确定性**事实，用来算"稳定行为特征"
+          //   （"只在被叫到时才出现" / "话很短"）——
+          //   `mentioned` 只传布尔，`textLength` 只传长度：**都不含内容**
+          //   （本模块的隐私边界：只记数字）。
+          mentioned: rendered.mentioned === true,
+          textLength: String(rendered.text ?? '').length,
+          log: (m) => this.log(m),
+        })
       }
     } catch (error) {
       this.log(`⚠️ [people-stats] 统计没记上（聊天不受影响）：${error?.message ?? error}`)
@@ -1567,6 +1648,150 @@ export class Bridge extends EventTarget {
       return null
     }
     return this.#wakeJudge
+  }
+
+  /**
+   * 取（必要时建）**对话风格判定器**。**不抛错**：建不起来就返回 null，
+   * 调用方按"工作态"处理 —— 它是增强路径，坏了不能影响聊天本身。
+   *
+   * 通路的口径与唤醒判定器**刻意一致**（同一条推导、同一个兜底顺序），
+   * 差别只有三处，每一处都有理由：
+   *   · key：优先 `chat.mode.ambiguous.apiKey`，留空则**复用 `wake.judge.apiKey`**
+   *     （已经配过判定 key 的人不必再配一遍 —— 那两件事都是"直连问一次小模型"）；
+   *   · 超时：`chat.mode.ambiguous.timeoutMs`（默认 6000）—— 它加在回合**前面**，
+   *     所以和唤醒判定一样不能长；`verify-config` 里有一条断言盯着这个上界；
+   *   · 预算：`chat.mode.ambiguous.maxPerHour`（默认 30，**独立计数**）。
+   */
+  /**
+   * **造一个**对话风格判定器（不缓存、不做启停判断）。
+   *
+   * ⚠️ 为什么"造"与"取"必须分开（这一条是被逐字基线测试逼出来的）：
+   *   第一版把 `enabled=false` 的判断写在 `#ensureModeJudge` 里 —— 于是功能关掉时
+   *   **判定器压根没被建**，而建它时会打一行 `[chat-mode] 判定器已就绪…`。
+   *   结果"关掉功能"与"开着功能"的**日志不同**，而 `verify-chat-mode.mjs`
+   *   用日志/行为比对来证明"关掉后与升级前一致"—— 那一比就红。
+   *   现在启停只在 `#detectTurnMode` 一处判，造判定器这件事与开关无关，
+   *   两条路的差异只剩下"这一轮是不是问了模型"。
+   */
+  #makeModeJudge() {
+    const m = this.config.chat?.mode?.ambiguous ?? {}
+    const cliPath = this.config.dsh?.cliPath
+    const cwd = this.config.dsh?.workspace
+
+    // ★ 与唤醒判定器共用**同一把 key 的解析函数**（`resolveDirectTarget`）——
+    //   它只认 `config.wake.judge`，所以这里把模式判定那三项"投影"成同样的形状传进去。
+    //   多写一份解析 = 多一处会与界面说明分叉的地方。
+    const effectiveKey = String(m.apiKey ?? '').trim() || String(this.config.wake?.judge?.apiKey ?? '').trim()
+    const asJudge = {
+      apiKey: effectiveKey,
+      baseUrl: String(m.baseUrl ?? '').trim() || this.config.wake?.judge?.baseUrl,
+      model: String(m.model ?? '').trim() || this.config.wake?.judge?.model,
+    }
+    const transport = judgeTransport(asJudge)
+    const direct = effectiveKey
+      ? resolveDirectTarget({ config: { ...this.config, wake: { ...this.config.wake, judge: asJudge } } })
+      : null
+
+    const judge = createModeJudge({
+      transport,
+      cliPath,
+      cwd,
+      baseUrl: direct?.baseUrl ?? asJudge.baseUrl,
+      apiKey: direct?.apiKey ?? '',
+      model: direct?.model ?? '',
+      timeoutMs: m.timeoutMs,
+      maxPerHour: m.maxPerHour,
+      log: (msg) => this.log(msg),
+    })
+    this.log(
+      `[chat-mode] 判定器已就绪：通路=${transport}` +
+        (transport === 'http'
+          ? `（直连 ${direct?.ok ? direct.baseUrl : '**端点不合法**'} · 模型 ${direct?.model ?? '?'}` +
+            ` · ${m.apiKey ? 'chat.mode.ambiguous.apiKey' : '复用 wake.judge.apiKey'}）`
+          : '（没配专用 key ⇒ 用一次性 DSH 进程；填一把就会自动改走直连）') +
+        ` · timeout=${m.timeoutMs}ms · 上限 ${m.maxPerHour} 次/小时` +
+        '（只对"规则拿不准"的消息生效，规则命中不花这一次）',
+    )
+    if (transport === 'http' && direct && !direct.ok) {
+      this.log(`[chat-mode] ⚠️ 直连通路不可用（拿不准的消息会一律按工作态）：${direct.why}`)
+    }
+    return judge
+  }
+
+  /**
+   * 取（必要时建）对话风格判定器。**不抛错**：建不起来就返回 null，
+   * 调用方按"工作态"处理 —— 它是增强路径，坏了不能影响聊天本身。
+   */
+  #ensureModeJudge() {
+    if (this.modeJudgeInjected) return this.modeJudgeInjected
+    if (this.#modeJudge) return this.#modeJudge
+    try {
+      this.#modeJudge = this.#makeModeJudge()
+    } catch (error) {
+      this.log(`❌ [chat-mode] 判定器建不起来（这一层停用，拿不准的消息按工作态）：${error?.message ?? error}`)
+      return null
+    }
+    return this.#modeJudge
+  }
+
+  /**
+   * 这一轮该用闲聊态还是工作态（规则优先，拿不准才问一次模型）。
+   *
+   * ★ 三条边界，都写在返回值里而不是只写日志（镜像要靠它回答"这轮为什么是这个态"）：
+   *   · `chat.mode.enabled=false` ⇒ 恒工作态，**不计时也不判定**；
+   *   · 规则命中 ⇒ **一次模型调用都不产生**（`judged:false`）；
+   *   · 判定失败/超时/超预算 ⇒ 工作态（= 升级前的行为）。
+   */
+  async #detectTurnMode({ chatKey, text }) {
+    const cm = this.config.chat?.mode ?? {}
+    if (cm.enabled === false) {
+      return { mode: MODE.WORK, source: MODE_SOURCE.DISABLED, why: 'chat.mode.enabled=false', local: 'work', ms: 0, judged: false }
+    }
+    // ★ 上下文**必须去掉最后一条**：`#wakeContext` 投影的是会话镜像，而当前这条
+    //   消息在 `handleEvent` 里已经写进镜像了（`#mirror` 早于 `#runTurn`）。
+    //   不去掉的话判定提示词里会出现两次同一条消息，模型可能把"重复"当成强调。
+    const recent = this.#wakeContext(chatKey).slice(0, -1)
+    return detectMode({
+      text,
+      recent,
+      enabled: true,
+      ambiguous: cm.ambiguous?.enabled !== false,
+      // ★ `chat.mode.fallback`：判不出来时按哪个态走（默认 work = 升级前的行为）。
+      //   不传它的话这个配置项就是「写了不生效」的摆设（`model-gate` 的 failVerdict 恒为 work）。
+      fallback: cm.fallback === MODE.CHAT ? MODE.CHAT : MODE.WORK,
+      classify: (input, o) => {
+        const judge = this.#ensureModeJudge()
+        // 没有判定器（建不起来 / 注入为 null）⇒ 交给 detectMode 走"回落工作态"，
+        // 不在这里抛 —— 抛出去会让整轮失败，那是拿聊天给判定器陪葬。
+        if (!judge) return Promise.resolve({ verdict: MODE.WORK, judged: false, fallback: true, why: '判定器不可用' })
+        return judge.judge(input, o)
+      },
+      signal: this.#modeAborts.get(chatKey)?.signal,
+    })
+  }
+
+  /**
+   * 读这一轮的闲聊风格（**每轮现读**，所以改文件下一轮就生效）。
+   *
+   * ★ 读不到时**回落内置默认并留一行日志**（按理由去重）—— 与"人设读不到要大声报错、
+   *   不许退回内置"刻意相反，理由写在 `styles.mjs` 的文件头：人设是使用者亲手选的东西
+   *   （不生效必须说），而风格是功能的默认值（没有它闲聊态就没意义）。
+   *   但**"我改的文件没生效"必须能查**，所以日志不能省。
+   */
+  #chatStyleForTurn() {
+    const name = this.config.chat?.mode?.style || ''
+    const r = readChatStyle({ dir: this.chatStyleDir, name })
+    if (!r.ok) {
+      const key = `${r.source}:${r.why}`
+      if (!this.#chatStyleWarned.has(key)) {
+        this.#chatStyleWarned.add(key)
+        this.log(`⚠️ [chat-mode] ${r.why}`)
+      }
+    } else if (r.tooLong && !this.#chatStyleWarned.has('tooLong')) {
+      this.#chatStyleWarned.add('tooLong')
+      this.log(`⚠️ [chat-mode] ${r.why}`)
+    }
+    return r.text
   }
 
   /**
@@ -2137,6 +2362,15 @@ export class Bridge extends EventTarget {
 
   async #runTurn({ kind, peerId, senderId, tier, rendered, reason, identity = null, imageRefs = [], messageId = null, seq = 0 }) {
     const chatKey = `${kind}:${peerId}`
+    // ★★ 本轮的起算点（回应速度档位用）。
+    //
+    // 为什么是"回合开始"而不是"消息到达"：档位承诺的是**回复的回应速度**，
+    // 而使用者感知到的等待 = 模型思考/调工具的时间 + 我们额外压的时间。
+    // 从回合开始量，正好是"模型花了多久"；唤醒判定那 0~6 秒是另一件事
+    // （它有自己的超时与放过规则），混进来只会让档位在"开了语义唤醒"时变成另一个东西。
+    // ⚠️ 这个值一路传到 `#deliver`，档位据此决定"补时"还是"不再叠加"——
+    //    丢了它就等于退回老行为（说好的 8 秒等到 23 秒）。
+    const turnStartedAt = Date.now()
     // ★ H10：把"这一轮回答的是第几条消息"写进水位 —— 它让"旧回合作废"那套机制
     //   有了显式形式（`lastUserSeq > lastConsumedSeq` = 又来了一条更新的消息）。
     try {
@@ -2202,6 +2436,62 @@ export class Bridge extends EventTarget {
     const token = { text: normalized, superseded: false }
     this.#pending.set(chatKey, token)
 
+    // ── ★★ 这一轮是闲聊态还是工作态（2026-10-01）────────────────────────
+    //
+    // 位置很讲究，三条理由：
+    //   ① **在重复内容判断之后** —— 被判成重复的那条根本不回，判它的态纯属浪费
+    //      （拿不准时还要白花一次模型调用）；
+    //   ② **在投递（`rpc.prompt`）之前** —— 提示词要按态拼装，晚一步就得改两次；
+    //   ③ **在 `#withLock` 之前** —— 判定是 1~5 秒的调用，放进锁里会让同一会话
+    //      的后续消息队头阻塞（与唤醒闸门"必须在锁之外"是同一条理由）。
+    //
+    // ★ 结果**挂在 token 上**：这一轮到底是哪个态、判了多久、花了没有，
+    //   在镜像与日志里随时答得出来（"这条为什么像 AI / 为什么这么短"是
+    //   使用者第一个会问的问题，没有证据就只能靠猜）。
+    // ★ 旧消息的判定要被新消息打断（与 `#wakeAborts` 同一套）：那条结论
+    //   已经指向一条作废的消息，让它跑完只是白花钱。
+    this.#modeAborts.get(chatKey)?.abort?.()
+    const modeAbort = new AbortController()
+    this.#modeAborts.set(chatKey, modeAbort)
+    /**
+     * 判定出结论后释放取消柄。
+     * ★ 必须 `abort()` 再删：`model-gate` 走 headless 时会**起一个子进程**，
+     *   不 abort 就等于把一个已经没人等的子进程留在那里跑（`runHeadless` 的
+     *   abort 才是真正 kill 的那一步 —— 与 `#wakeAborts` 的 `releaseAc` 同一条纪律）。
+     */
+    const releaseModeAbort = () => {
+      if (this.#modeAborts.get(chatKey) !== modeAbort) return
+      try {
+        modeAbort.abort()
+      } catch {
+        /* 取消失败无所谓 */
+      }
+      this.#modeAborts.delete(chatKey)
+    }
+    const modeInfo = await this.#detectTurnMode({ chatKey, text: normalized })
+    releaseModeAbort()
+    token.mode = modeInfo.mode
+    token.modeInfo = modeInfo
+    this.log(`[chat-mode] ${describeMode(modeInfo)}｜判定耗时 ${modeInfo.ms}ms｜${normalized.slice(0, 30)}`)
+    // ★ 顺带把结论写回**镜像里那条用户消息**（只读、不参与任何判定）。
+    //
+    // 为什么不另记一条 notice：那会往聊天流里插一条根本没发出去的消息，
+    // 界面上看起来像"机器人说了这句话"。而"这条为什么短/为什么像 AI"是使用者
+    // 第一个会问的问题 —— 挂在消息上，界面（或 `/api/conversations`）随时答得出来。
+    // ⚠️ 整段包在 try 里：镜像是给界面看的辅助数据，绝不许它影响回合。
+    try {
+      const msgs = this.#conversations.get(chatKey)?.messages ?? []
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        if (msgs[i]?.role === 'user') {
+          msgs[i].mode = modeInfo.mode
+          msgs[i].modeSource = modeInfo.source
+          break
+        }
+      }
+    } catch {
+      /* 写不上只是少一个展示字段 */
+    }
+
     return this.#withLock(chatKey, async () => {
       // 无论从哪条路径返回，都要清掉"正在处理的那条"标记 ——
       // 否则下一次消息会被误判成"重复"而永远不回。
@@ -2232,6 +2522,36 @@ export class Bridge extends EventTarget {
       let interimTimer = null
       if (interim.enabled !== false) {
         interimTimer = setTimeout(() => {
+          // ── ★★ 静默时段：**不发**「先应一声」（用户 2026-09-30 要求）──────────
+          //
+          // 判在**回调里**而不是挂定时器之前，理由有两条，第二条是决定性的：
+          //   ① 终局判定要的是"发出的那一刻"—— 8 秒后可能已经跨过静默时段起点；
+          //   ② 一个长回合只挂**一个**定时器，回调里不判就再没有第二次机会
+          //      （回调只在 afterMs 那一刻跑一次，静默时段内更不该重挂一个补发）。
+          //
+          // 为什么这条要求本身是对的：静默时段的存在意义就是"夜里不发出'我在线'
+          // 的信号"。而「先应一声」恰好是最强的在线信号 —— 凌晨 3 点冒出一句
+          // "我在想"，把静默时段要遮的东西原样喊了出来，比不延迟更糟。
+          //
+          // ⚠️ 只影响这一条**提示**：正式回复照旧延后发出（"不拒答、只变慢"不变）。
+          if (isQuietNow(new Date(), this.config.humanize?.quietHours)) {
+            this.log('[bridge] 静默时段：不发「先应一声」（正式回复仍会延迟后发出）')
+            return
+          }
+          // ── ★★ 闲聊态：**不发**「先应一声」（用户 2026-10-01 要求）─────────
+          //
+          // 原话是「这个提醒仅在工作模式下触发」。理由和静默时段那条同源，但更直白：
+          // 闲聊态的全部意义就是"像真人打字" —— 而真人在群里闲聊时**不会**先发一句
+          // "等下，我查查"。那条提示是**工具人**的语言，它一出现，前面所有
+          // "极短/接梗/不解释"的努力就都白费了（一句话把人格打回原形）。
+          //
+          // 反面也说得通：闲聊态本来就不该跑很久（没有多步任务），真跑久了说明
+          // 这条其实该是工作态 —— 那是判定的问题，由日志（`[chat-mode]` 那一行）
+          // 去暴露，不靠这条提示来遮。
+          if (token.mode !== MODE.WORK) {
+            this.log('[bridge] 闲聊态：不发「先应一声」（这个提醒只在工作态触发）')
+            return
+          }
           const text = this.interimPicker.pick(collector)
           if (!text) return
           this.log(`[bridge] 回合仍在进行，先发一条：${text}`)
@@ -2274,6 +2594,11 @@ export class Bridge extends EventTarget {
               chatKey,
               // 消息 id（H6）：提示词里要给出它，模型才可能写 `[reply:#id]`
               messageId,
+              // ★★ 双态对话风格（2026-10-01）：**必须显式传** —— `#buildPrompt`
+              //     是另一个方法，拿不到 `#runTurn` 里的局部变量（这条纪律在本文件
+              //     里已经用"任务段在真机上从未注入过"付过一次学费）。
+              turnMode: modeInfo.mode,
+              turnModeInfo: modeInfo,
             }),
           },
         ]
@@ -2362,6 +2687,9 @@ export class Bridge extends EventTarget {
         peerId,
         senderId,
         tier,
+        // ★ 群名：`#verifyIdentity` 每轮从协议端核实（`get_group_list`），
+        //   这里只用来把**新建的**群记忆文件头写成群名而不是光秃秃的号码。
+        chatName: identity?.chatName ?? '',
         userText: rendered?.text ?? '',
         answer,
         complete: !(result.timedOut || result.aborted),
@@ -2575,7 +2903,13 @@ export class Bridge extends EventTarget {
       }
 
       // 登记进 in-flight：收尾时要等它发完，否则延迟中的回复会被掐死
-      const delivering = this.#deliver(kind, peerId, answer, result, { replyTo, faceId, sticker })
+      const delivering = this.#deliver(kind, peerId, answer, result, {
+        replyTo,
+        faceId,
+        sticker,
+        // ★ 档位要靠它算"已经花了多久"（见 #runTurn 顶部的 turnStartedAt）
+        turnStartedAt,
+      })
       this.#inFlight.add(delivering)
       try {
         await delivering
@@ -2773,7 +3107,7 @@ export class Bridge extends EventTarget {
    * @returns {Promise<{mode: string, recorded: boolean, verdict?: string, why: string}>}
    *   返回值只用于测试与日志；**任何分支都不抛**（增强路径纪律）。
    */
-  async #maybePrewakeAffect({ kind, peerId, senderId, senderName, chatKey, messageId, text } = {}) {
+  async #maybePrewakeAffect({ kind, peerId, senderId, senderName, chatKey, messageId, text, chatName = '' } = {}) {
     const mode = this.#prewakeMode()
     if (mode === PREWAKE.OFF) return { mode, recorded: false, why: '档位是 off' }
     if (kind !== 'group') return { mode, recorded: false, why: '私聊每条都唤醒，不走这条' }
@@ -2826,6 +3160,7 @@ export class Bridge extends EventTarget {
       peerId,
       senderId: String(senderId),
       tier: 'user',
+      chatName,
       items: [{ scope: SCOPE.PERSON, text: entry, source: 'cue-gate' }],
       log: (m) => this.log(m),
     })
@@ -2907,12 +3242,30 @@ export class Bridge extends EventTarget {
     //   `#stickerPromptBits()` 里的 `readStickerLibrary` + `labelCoverage`。
     //   而且这两段**不是**表情包技能贡献的（它的 `prompt.source = "none"`）。
     const sticker = this.#stickerPromptBits()
+    // ── ★★ 双态对话风格：人设文本**按态现拼**（2026-10-01）──────────────────
+    //
+    // 这一行以前是 `this.personaText`（构造期缓存、永远不会变）。现在多了一步：
+    // 闲聊态用 `styles/闲聊.md` **替换**基座人设里的【怎么说话】【别变成客服】
+    // 两节，其余各节逐字保留（理由与"为什么必须替换而不是追加"写在 chat-mode.mjs）。
+    //
+    // ★ 工作态走的是**同一个函数 + 同一个分支**：`composePersonaForMode` 对 work
+    //   直接原样返回 `personaText` —— 所以"关掉这个功能""工作态"两条路的提示词
+    //   与升级前**逐字相同**（`verify-memory-roundtrip` 的逐字基线钉着这一点）。
+    const turnMode = opts.turnMode === MODE.CHAT ? MODE.CHAT : MODE.WORK
+    const turnPersona =
+      turnMode === MODE.CHAT
+        ? composePersonaForMode({ personaText: this.personaText, mode: turnMode, style: this.#chatStyleForTurn() })
+        : this.personaText
     return buildChannelPrompt({
       rendered,
       reason,
       ...opts,
       config: this.config,
-      personaText: [this.personaText, sticker.personaNote].filter(Boolean).join('\n\n'),
+      personaText: [turnPersona, sticker.personaNote].filter(Boolean).join('\n\n'),
+      // ★ 状态本身也交给提示词那一层：模型需要知道"现在这条是闲聊"，
+      //   否则它看到的只是一份对它口吻的描述，而没有"什么时候按这个来"的判据。
+      turnMode,
+      turnModeInfo: opts.turnModeInfo ?? null,
       stickerLines: sticker.lines,
       // ── 视频（0.2.7，方案 A）────────────────────────────────────────────
       // ★ 只把**直链**交出去（`text.mjs` 的 `videoRefs`），核心**不下载视频**：
@@ -3197,6 +3550,10 @@ export class Bridge extends EventTarget {
    *   · 打字时间：由**回复有多长**决定 —— 所以必须等模型给出答案之后才可能算准
    * 如果一收到消息就固定 sleep 几秒再调模型，那就是"固定延迟"，本身也是机器特征。
    *
+   * ★★ 但这段延迟是**下限**不是**附加**（2026-09-30 语义修正）：本轮已经花掉
+   * 的时间算在等待里，超过档位目标就一个字都不再等。理由与口径见下面
+   * 「回应速度档位：它是「下限」不是「附加」」那一段 —— 那里才是权威。
+   *
    * ── 为什么用分条而不是一条长的 ───────────────────────────────────────
    * 真人长回复是分几条发的。分条还天然带上了 SendQueue 的间隔。
    */
@@ -3413,9 +3770,15 @@ export class Bridge extends EventTarget {
     }
   }
 
-  async #deliver(kind, peerId, answer, result, { replyTo = null, faceId = null, sticker = null } = {}) {
-    // 先按"观感"分条（真人不会把 800 字糊在一条里），再按单条上限兜底切分。
-    const humanChunks = splitIntoMessages(answer, {
+  async #deliver(kind, peerId, answer, result, { replyTo = null, faceId = null, sticker = null, turnStartedAt = null } = {}) {
+    // ── 分条（★ 两件事，顺序不能换）──────────────────────────────────────
+    //   ① **按"观感"分条**（`splitReplyForSend`）：真人长回复是分几条发的，
+    //      而模型用空行/换行分段就是在表达"这几句分开说"。
+    //      ⚠️ 这一步 2026-10-01 才真正生效 —— 原先用的 `splitIntoMessages` 第一行就是
+    //      `if (source.length <= maxChars) return [source]`，于是**短回复永远只有一条**，
+    //      实测把三段共 101 字的话糊成一个气泡发出去（投递账本 `total=1`）。
+    //   ② 再按 QQ 单条上限兜底硬切（`splitForQQ`，那是尺寸约束，不是观感）。
+    const humanChunks = splitReplyForSend(answer, {
       maxChars: this.config.humanize?.chunkChars ?? 300,
     })
     const limit = this.config.send?.maxCharsPerMessage ?? 1500
@@ -3431,13 +3794,38 @@ export class Bridge extends EventTarget {
     // ⚠️ 落账**失败不影响发送**（它是增强路径），但会留日志（第 9 条）。
     const ticket = this.#beginDelivery({ kind, peerId, chatKey: `${kind}:${peerId}`, chunks })
 
-    const { delayMs, reason } = computeReplyDelay({
+    // ── ★★ 回应速度档位：它是「下限」不是「附加」（2026-09-30 语义修正）──────
+    //
+    // 老实现把档位延迟**加在**本轮已经花掉的时间之上：模型想了 15 秒、均衡档
+    // 再等 8 秒 ⇒ 使用者实际等了 23 秒，而界面与 `humanize.speed` 的文案写的是
+    // "约 5~9 秒"。**功能描述与真实体验对不上**，就是这个问题的根因。
+    //
+    // 现在的口径（与 `computeReplyDelay` 的注释逐字对应）：
+    //   · 已用 < 档位目标 → 只补到档位目标（秒回观感消失，总时长≈档位）
+    //   · 已用 ≥ 档位目标 → **不再叠加，立刻发**（慢是因为模型真的在干活）
+    //
+    // `turnStartedAt` 缺失时退回老语义（纯计算用法/测试构造的 Bridge）——
+    // 生产路径不会缺：`#runTurn` 在回合一开始就取好了往下传。
+    const elapsedMs =
+      typeof turnStartedAt === 'number' && Number.isFinite(turnStartedAt)
+        ? Math.max(0, Date.now() - turnStartedAt)
+        : undefined
+    const { delayMs, reason, plannedMs } = computeReplyDelay({
       textLength: answer.length,
       humanize: this.config.humanize,
+      ...(elapsedMs === undefined ? {} : { elapsedMs }),
     })
+    // 档位/静默时段的人话名字 —— 日志里出现 `human-like` 这种内部值等于没说
+    const reasonText = reason === 'quiet-hours' ? '静默时段' : '回应速度档位'
     if (delayMs > 0) {
+      const target = typeof plannedMs === 'number' ? Math.round(plannedMs / 1000) : null
       this.log(
-        `[bridge] 拟人延迟 ${Math.round(delayMs / 1000)} 秒后再发（原因：${reason}，回复 ${answer.length} 字）`,
+        typeof elapsedMs === 'number' && target !== null
+          ? `[bridge] ${reasonText}：本轮已用 ${Math.round(elapsedMs / 1000)} 秒，` +
+              `补到档位目标 ${target} 秒 → 再等 ${Math.round(delayMs / 1000)} 秒后发` +
+              `（回复 ${answer.length} 字）`
+          : `[bridge] 拟人延迟 ${Math.round(delayMs / 1000)} 秒后再发` +
+              `（原因：${reason}，回复 ${answer.length} 字）`,
       )
       const interrupted = await this.#sleepUnlessClosing(delayMs)
       if (interrupted) {
@@ -3448,6 +3836,18 @@ export class Bridge extends EventTarget {
         // 少等几秒（拟人节奏打了折）比丢失整条回复好得多。
         this.log('[bridge] 收尾中：跳过剩余拟人延迟，立即发送')
       }
+    } else if (typeof elapsedMs === 'number' && typeof plannedMs === 'number' && plannedMs > 0) {
+      // ── 已用时间已经达到/超过档位目标：**不再叠加，立刻发** ──────────────
+      //
+      // ★ 这一条必须留日志。它是"档位为什么没生效"的**唯一可查证据** ——
+      //   使用者看到"我选了谨慎档怎么秒回"时，日志里要有
+      //   "本轮已用 12 秒 ≥ 目标 20 秒"这样一句，否则只能靠猜。
+      //   注意措辞是"本轮已用"，不是"忽略档位"：档位并没有被忽略，
+      //   它只是**已经靠模型自己的耗时满足了**。
+      this.log(
+        `[bridge] ${reasonText}：本轮实际已用 ${Math.round(elapsedMs / 1000)} 秒 ≥ ` +
+          `目标 ${Math.round(plannedMs / 1000)} 秒 → 不再叠加延迟，立即发送（回复 ${answer.length} 字）`,
+      )
     }
 
     // ── 发送（H6：引用段只跟第一条；表情段只跟最后一条）──────────────────
@@ -3595,7 +3995,12 @@ export class Bridge extends EventTarget {
 
     this.log(
       `[bridge] 已回复 ${kind}:${peerId}（${answer.length} 字，${chunks.length} 条，` +
-        `思考+工具 ${result.durationMs}ms，工具 ${result.toolCalls.length} 次，拟人延迟 ${Math.round(delayMs / 1000)}s` +
+        `思考+工具 ${result.durationMs}ms，工具 ${result.toolCalls.length} 次，` +
+        // ★ 措辞跟着语义改过（2026-09-30）：`delayMs` 现在是"**额外**等了多久"，
+        //   不是"档位目标"。写成"拟人延迟"会让排查的人以为档位没生效
+        //   （明明打印 0s，实际它只是被回合自身的耗时满足了）。
+        `档位目标 ${typeof plannedMs === 'number' ? Math.round(plannedMs / 1000) : '—'}s、` +
+        `额外等待 ${Math.round(delayMs / 1000)}s` +
         `${replyTo ? `，引用 #${replyTo}` : ''}${faceId ? `，表情 ${faceId}` : ''}` +
         `${sticker ? `，表情包 ${sticker.label}` : ''}）`,
     )

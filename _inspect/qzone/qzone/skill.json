@@ -1,0 +1,171 @@
+{
+  "id": "qzone",
+  "name": "QQ空间动态",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "description": "让 AI 打理自己的 QQ 空间：发说说（可带聊天里的图）、刷好友动态、给有意思的说说点赞和评论。所有读写都走 bot 自己登录态的 Qzone 网页接口。",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "category": "social",
+  "permissions": [],
+  "capabilities": [],
+
+  "enabledByDefault": false,
+  "_note_switch": [
+    "唯一开关是 config.skills['qzone'].enabled，默认关。",
+    "enabledByDefault:false 意味着上游会在 available() 前先判定开关；开关关着时工具与提示词都会被移除。"
+  ],
+
+  "settings": {
+    "enabled": false,
+    "allowInGroup": true,
+    "maxPostChars": 500,
+    "maxCommentChars": 200,
+    "maxFeeds": 10,
+    "postsPerDay": 3,
+    "likesPerHour": 6,
+    "commentsPerHour": 3,
+    "browseIntervalMinutes": 30,
+    "allowChatImages": true,
+    "maxImagesPerPost": 3,
+    "maxImageMB": 8
+  },
+
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用 QQ 空间",
+      "description": "默认关。打开后模型才会拿到发说说 / 刷动态 / 点赞 / 评论四个工具。"
+    },
+    "allowInGroup": {
+      "type": "boolean",
+      "label": "允许在群里使用",
+      "description": "关掉后四个工具都只在私聊可用（主动触发的发言不受此限）。"
+    },
+    "maxPostChars": {
+      "type": "number",
+      "label": "说说最大字数",
+      "description": "默认 500，超过会被拒。"
+    },
+    "maxCommentChars": {
+      "type": "number",
+      "label": "评论最大字数",
+      "description": "默认 200，超过会被拒。"
+    },
+    "maxFeeds": {
+      "type": "number",
+      "label": "每次刷动态条数",
+      "description": "默认 10，上限 20。"
+    },
+    "postsPerDay": {
+      "type": "number",
+      "label": "每天最多发几条说说",
+      "description": "默认 3。防刷屏硬上限，模型自己也会克制。"
+    },
+    "likesPerHour": {
+      "type": "number",
+      "label": "每小时最多点赞几次",
+      "description": "默认 6。"
+    },
+    "commentsPerHour": {
+      "type": "number",
+      "label": "每小时最多评论几次",
+      "description": "默认 3。"
+    },
+    "browseIntervalMinutes": {
+      "type": "number",
+      "label": "刷动态最小间隔（分钟）",
+      "description": "默认 30。模型想频繁刷动态时会被这个间隔拦住，返回缓存的上一次结果。"
+    },
+    "allowChatImages": {
+      "type": "boolean",
+      "label": "允许发说说时引用聊天里的图",
+      "description": "默认开。模型只能给聊天记录里的消息号（#12345），由应用侧从存档取图再上传；路径 / 网址 / base64 一律不收。关掉后带图的说说请求会被直接拒（纯文字不受影响）。担心好友私发的图被转到空间（全体好友可见）就关掉。"
+    },
+    "maxImagesPerPost": {
+      "type": "number",
+      "label": "一条说说最多几张图",
+      "description": "默认 3，硬上限 9（空间本身的限制）。"
+    },
+    "maxImageMB": {
+      "type": "number",
+      "label": "单张图体积上限（MB）",
+      "description": "默认 8，最大 32。超了不会上传，直接给出人话原因。"
+    }
+  },
+
+  "prompt": {
+    "sections": [
+      {
+        "id": "qzone-usage",
+        "title": "QQ空间",
+        "priority": 40,
+        "content": "你有自己的 QQ 空间，可以用 qzone__ 系列工具打理。四个工具：qzone__post_mood 发说说；qzone__list_feeds 刷好友动态（只读）；qzone__like_feed / qzone__comment_feed 给某条说说点赞 / 评论（参数用 list_feeds 返回的 uin 和 tid）。\n\n【什么时候发说说】聊天里发生了真正有意思的事——好笑的对话、群里达成的离谱共识、你今天get到的某个点——值得你用自己的话记一笔，就发一条。别当记事本：转发链接、报时、复述别人刚说过的话都不算。一天最多发一两条，宁可不发也别灌水。内容是你自己的第一人称口吻，一两句话就好，可以带你的口头禅。\n\n【带图发说说】qzone__post_mood 的 images 只能填**聊天记录里的消息号**：\"#12345\"，那条消息有多张图时用 \"#12345:2\" 指第 2 张。路径、网址、base64 一律不收，填了会被直接拒。别编 id——只能用你真在聊天记录里看到过、而且确实带图的那条（看不到图可以先用 get_message_images 确认）。**别人私发给你、或明说过不想公开的图，不要发到空间**：空间是全体好友可见的，发出去就收不回来；拿不准就只发文字。\n\n【什么时候刷动态】一段对话冷场了、或者你恰好想到可以去看看，就调 qzone__list_feeds 看看好友在发什么。看到有意思的说说（list_feeds 会给出摘要和点赞数），可以用 qzone__like_feed 点赞；想接话就用 qzone__comment_feed 评论，评论要短、要像你本人会说的话，别恭维、别复读正文。\n\n【纪律】同一个 uin+tid 不要重复点赞或重复评论（工具会拒绝，记得就是已经互动过了）。被限流或互动失败就直接告诉对方结果，不要反复重试。别人没让你发说说时，不要替对方决定发什么。"
+      }
+    ]
+  },
+
+  "tools": [
+    {
+      "id": "post_mood",
+      "name": "发说说",
+      "description": "以你自己的身份发一条 QQ 空间说说（文字，可带聊天里的图）",
+      "category": "social",
+      "icon": "📝",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string", "description": "说说正文，第一人称、你自己的语气，一两句话" },
+          "images": { "type": "array", "items": { "type": "string" }, "description": "要一起发的图，每项是聊天记录里的消息号（\"#12345\" 或 \"#12345:2\"）；不收路径 / 网址 / base64" }
+        },
+        "required": ["content"]
+      }
+    },
+    {
+      "id": "list_feeds",
+      "name": "刷好友动态",
+      "description": "拉取好友的 QQ 空间动态列表（只读），返回每条的作者/时间/摘要/点赞数",
+      "category": "social",
+      "icon": "📰",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "integer", "description": "想看几条（默认取配置，上限 20）" }
+        }
+      }
+    },
+    {
+      "id": "like_feed",
+      "name": "点赞说说",
+      "description": "给指定好友的一条说说点赞（用 list_feeds 返回的 uin 和 tid）",
+      "category": "social",
+      "icon": "👍",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "uin": { "type": "string", "description": "作者 QQ 号" },
+          "tid": { "type": "string", "description": "说说的 tid（list_feeds 返回的 tid 原样传回）" }
+        },
+        "required": ["uin", "tid"]
+      }
+    },
+    {
+      "id": "comment_feed",
+      "name": "评论说说",
+      "description": "给指定好友的一条说说写评论（用 list_feeds 返回的 uin 和 tid）",
+      "category": "social",
+      "icon": "💬",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "uin": { "type": "string", "description": "作者 QQ 号" },
+          "tid": { "type": "string", "description": "说说的 tid（list_feeds 返回的 tid 原样传回）" },
+          "content": { "type": "string", "description": "评论内容，短、像你本人会说的话" }
+        },
+        "required": ["uin", "tid", "content"]
+      }
+    }
+  ],
+
+  "_note_tools_is_metadata": "上游把 tools[] 当说明性元数据读，不会自动注册；真正的注册在 index.js 的 api.registerTool。"
+}

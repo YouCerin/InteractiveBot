@@ -21,7 +21,7 @@ import {
 import { decideTrigger, lintKeywords, REASON } from '../src/trigger.mjs'
 import { makeSessionId, defaultInstanceTag } from '../src/session-id.mjs'
 import { isSelfAuthored } from '../src/bridge.mjs'
-import { computeReplyDelay, isQuietHours, parseClock, splitIntoMessages } from '../src/humanize.mjs'
+import { computeReplyDelay, isQuietHours, isQuietNow, parseClock, splitIntoMessages, splitReplyForSend } from '../src/humanize.mjs'
 import {
   buildMemoryInstructions,
   MEMORY_PATHS,
@@ -533,6 +533,116 @@ section('humanize.mjs · 延迟计算')
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+section('humanize.mjs · ★★ 档位是「下限」不是「附加」（对齐 / 忽略）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 这一节盯的是一条**用户点名修的行为**（2026-09-30）：
+//   "回应速度档位会直接加载回复延迟上，导致实际效果与描述不一致"。
+// 老实现是附加式的：模型想 15 秒、均衡档再等 8 秒 ⇒ 实际 23 秒，
+// 而文案写的是"约 5~9 秒"。现在的口径是：
+//   · 实际已用 < 档位目标 → **只补到档位目标**
+//   · 实际已用 ≥ 档位目标 → **不再叠加，立刻发**
+{
+  const at = (h) => new Date(2026, 8, 25, h, 0, 0)
+  const rnd = () => 0.5 // 固定随机源：目标值可手算  // 手算基准（random 恒 0.5 ⇒ react=4000、jitter=1.0）：
+  //   10 字 → typing = round(10×200×1.0) = 2000 ⇒ planned = 6000
+  //   200 字 → typing 封顶 3000              ⇒ planned = 7000
+  const base = {
+    enabled: true,
+    reactMinMs: 2000,
+    reactMaxMs: 6000,
+    charsPerSecond: 5,
+    typingMaxMs: 3000,
+    maxDelayMs: 12_000,
+    quietHours: { enabled: false, start: '02:00', end: '07:00' },
+  }
+  const call = (opts) => computeReplyDelay({ humanize: base, now: at(14), random: rnd, ...opts })
+
+  const planned = call({ textLength: 10 }).plannedMs
+  check('目标等待（plannedMs）可手算 = 反应 4000 + 打字 2000', planned === 6000, `${planned}ms`)
+
+  // ── ① 模型一秒钟就答完了：补到档位，不再"秒回" ──
+  const fast = call({ textLength: 10, elapsedMs: 1000 })
+  check('★ 实际只用了 1 秒 → 补到档位目标（6 秒）再发', fast.delayMs === 5000, `${fast.delayMs}ms`)
+  check('★ 补时后总时长恰好等于档位目标（1 + 5 = 6 秒）',
+    fast.elapsedMs + fast.delayMs === planned, `${fast.elapsedMs} + ${fast.delayMs}`)
+
+  // ── ② 模型比档位还慢：一个字都不再等（这条就是"效果与描述不一致"的解药）──
+  const slow = call({ textLength: 10, elapsedMs: 15_000 })
+  check('★★ 实际用了 15 秒（≥ 目标 6 秒）→ 不再叠加任何延迟，立刻发',
+    slow.delayMs === 0, `${slow.delayMs}ms`)
+  check('★ 慢回合仍然报出目标值，日志才有话可说', slow.plannedMs === 6000, String(slow.plannedMs))
+
+  // ── ③ 边界：正好等于目标也**不再等**（0 毫秒的 sleep 没有意义）──
+  const exact = call({ textLength: 10, elapsedMs: planned })
+  check('★ 实际已用正好等于目标 → 立即发（不补 0 秒的等待）', exact.delayMs === 0, `${exact.delayMs}ms`)
+
+  // ── ④ 中间态：只补差额，不是"全量重来" ──
+  const half = call({ textLength: 10, elapsedMs: 2500 })
+  check('★ 实际已用 2.5 秒 → 只补剩下的 3.5 秒', half.delayMs === 3500, `${half.delayMs}ms`)
+
+  // ── ⑤ 长回复：目标更高，该补的也更多（打字时间确实在起作用）──
+  const long10 = call({ textLength: 200, elapsedMs: 1000 }).delayMs
+  check('★ 200 字（目标 7 秒）已用 1 秒 → 补 6 秒', long10 === 6000, `${long10}ms`)
+  check('长回复该补的比短回复多（目标更高）', long10 > fast.delayMs, `${long10} vs ${fast.delayMs}`)
+
+  // ── ⑥ 不传 elapsedMs = 老的附加语义（留给纯计算用法；桥接一定会传）──
+  check('不传 elapsedMs → 老语义：整段延迟照加（向后兼容，不是生产路径）',
+    call({ textLength: 10 }).delayMs === planned, `${call({ textLength: 10 }).delayMs}ms`)
+
+  // ── ⑦ 关掉人味层时，已用时长为多少都必须是 0（否则"关掉=秒回"就成了假话）──
+  check('★ 人味层关闭 → 已用时长为 20 秒也不延迟',
+    computeReplyDelay({ textLength: 10, humanize: { ...base, enabled: false }, elapsedMs: 20_000, now: at(14) }).delayMs === 0)
+  check('★ delay=false（测试开关）→ 也不延迟',
+    computeReplyDelay({ textLength: 10, humanize: { ...base, delay: false }, elapsedMs: 0, now: at(14) }).delayMs === 0)
+
+  // ── ⑧ 静默时段同样是"下限"：45~150 秒，已经等够了就发 ──
+  //
+  // 注意它**带随机**（在下限与上限之间取一个值）—— 第一版这里按 45000 断言，
+  // 结果拿到 97500（random 恒 0.5 时下限与上限的中点），是**测试写错了**。
+  // 把随机的那个值算出来再比，才既严格又正确。
+  const quietH = {
+    ...base,
+    quietHours: { enabled: true, start: '02:00', end: '07:00' },
+    quietDelayMinMs: 45_000,
+    quietDelayMaxMs: 150_000,
+  }
+  const qTarget = 97_500 // 45000 + 0.5 × (150000 − 45000)
+  const qFresh = computeReplyDelay({ textLength: 10, humanize: quietH, elapsedMs: 0, now: at(3), random: rnd })
+  check('静默时段：刚收到就回 → 等满这一次抽到的下限值',
+    qFresh.delayMs === qTarget, `${qFresh.delayMs}ms`)
+  const qMid = computeReplyDelay({ textLength: 10, humanize: quietH, elapsedMs: 20_000, now: at(3), random: rnd })
+  check('★ 静默时段：已经等了 20 秒 → 只补差额（97.5 − 20 秒）',
+    qMid.delayMs === qTarget - 20_000, `${qMid.delayMs}ms`)
+  const qDone = computeReplyDelay({ textLength: 10, humanize: quietH, elapsedMs: 120_000, now: at(3), random: rnd })
+  check('★ 静默时段：已经等了 120 秒（≥ 下限）→ 立刻发，不再叠加',
+    qDone.delayMs === 0, `${qDone.delayMs}ms`)
+  check('静默时段的原因仍然标出来（日志靠它区分两种延迟）', qDone.reason === 'quiet-hours', qDone.reason)
+  check('静默时段外仍走正常人味逻辑（这一节没把档位逻辑带偏）',
+    computeReplyDelay({ textLength: 10, humanize: base, elapsedMs: 0, now: at(14), random: rnd }).reason === 'human-like')
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('humanize.mjs · isQuietNow（静默时段要能单独判，供「先应一声」用）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 用户要求："静默时段下不会触发先应一声"。桥接在定时器回调里要现判一次，
+// 所以判定必须能独立调用，且**与 `computeReplyDelay` 用同一份口径**
+// （两份实现必然分叉，而分叉的表现是"凌晨先应一声、正式回复却按白天发"）。
+{
+  const at = (h, m = 0) => new Date(2026, 8, 25, h, m, 0)
+  const night = { enabled: true, start: '02:00', end: '07:00' }
+  check('03:00 在静默时段内', isQuietNow(at(3), night) === true)
+  check('14:00 不在静默时段内', isQuietNow(at(14), night) === false)
+  check('★ 跨午夜区间也认（23:00–07:00 的 23:30）',
+    isQuietNow(at(23, 30), { enabled: true, start: '23:00', end: '07:00' }) === true)
+  check('★ 与 isQuietHours 同口径（不是另写一份判定）',
+    isQuietNow(at(23, 30), night) === isQuietHours(at(23, 30), night))
+  check('未配置静默时段 → 恒 false（不拦「先应一声」）', isQuietNow(at(3), undefined) === false)
+  check('enabled=false → 恒 false', isQuietNow(at(3), { enabled: false, start: '02:00', end: '07:00' }) === false)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 section('humanize.mjs · 分条（真人长回复是分几条发的）')
 // ══════════════════════════════════════════════════════════════════════════
 {
@@ -553,6 +663,51 @@ section('humanize.mjs · 分条（真人长回复是分几条发的）')
   check('文本确实超过上限（否则本用例没有意义）', withSentences.length > 300, `${withSentences.length} 字`)
   check('优先在句号处切分', parts2.length > 1 && parts2[0].endsWith('。'), JSON.stringify(parts2.map((p) => p.length)))
   check('切分后无内容丢失', parts2.join('') === withSentences)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('humanize.mjs · ★★ 按段落分条（`splitReplyForSend`，2026-10-01）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 这一节钉的是一条**静默失效**：`splitIntoMessages` 第一行就是
+// `if (source.length <= maxChars) return [source]`，于是**短回复永远只有一条** ——
+// 而"三段短句分三次发"恰恰全是短回复。实机后果：一段 101 字的话被糊成一个气泡
+// （投递账本 `total=1`），而闲聊风格里那句「常拆两条」从来没有任何路径能让它生效。
+{
+  // 实机原文（用户截图里那条）
+  const real = `被叫到、但我最后没吐出一个字的时候
+
+比如觉得这条不用接就没写正文；或者只写了会被系统剥掉的标记，剥完剩空的；再或者工具跑了一轮但没输出文本
+
+具体是哪条规则判定成空的，我这边看不到，得翻桥接那边的代码`
+  const parts = splitReplyForSend(real, { maxChars: 300 })
+  check('★★★ 实机那条（三段空行分隔，101 字）→ **三条**', parts.length === 3, `${parts.length} 条`)
+  check('★ 每段内容原样保留', parts[0] === '被叫到、但我最后没吐出一个字的时候' && parts[2].startsWith('具体是哪条'))
+  check('★ 分段只去掉分隔空行，一个字都不改写',
+    parts.join('\n') === real.split(/\n\s*\n/).map((s) => s.trim()).join('\n'))
+  check('★★ 对照：旧的 splitIntoMessages 对同一条**只有 1 条**（这就是那个 bug）',
+    splitIntoMessages(real, { maxChars: 300 }).length === 1)
+
+  // 单换行的两行（截图里「问得我有点不好意思 / 算、算是吧」那种）
+  check('★ 单换行的两行短句 → 两条', splitReplyForSend('……问得我有点不好意思\n算、算是吧').length === 2)
+  check('★ 空行两段 → 两条', splitReplyForSend('哦——原来我现在长这样\n\n头上那个圈是鲸鱼尾巴吧').length === 2)
+
+  // ── 五道闸门：不该拆的**一律不许拆** ──
+  check('单段不拆（`ciallo~` 仍然只有一条）', splitReplyForSend('ciallo~').length === 1)
+  check('★ 系统提示不拆（一条消息里的换行不该变成两条提示）',
+    splitReplyForSend('（这次没有产生回复内容，请再试一次。）').length === 1 &&
+      splitReplyForSend('⚠️ 我这边没能把回复发出去，你刚才那条可能没收到 —— 请再发一次。').length === 1)
+  check('★ 段数超过上限不拆（八行不变成八条消息）',
+    splitReplyForSend('一\n二\n三\n四\n五\n六\n七\n八').length === 1)
+  check('★ 有长段落时不拆（那是一整段正文，不是"连发几条"）',
+    splitReplyForSend(`短句\n${'长'.repeat(200)}`).length === 1)
+  check('★ 总长超过 maxChars 时交给原来的长度切分（不在这里硬拆）',
+    splitReplyForSend(`${'段'.repeat(200)}\n\n${'落'.repeat(200)}`, { maxChars: 300 }).length === 2)
+  check('空输入返回空数组', splitReplyForSend('').length === 0)
+  check('纯空白返回空数组', splitReplyForSend('   \n\n  ').length === 0)
+  check('undefined 不崩', splitReplyForSend(undefined).length === 0)
+  check('上限可配（maxParts=2 时三段只拆两条）',
+    splitReplyForSend(real, { maxChars: 300, maxParts: 2 }).length === 1)
 }
 
 // ══════════════════════════════════════════════════════════════════════════

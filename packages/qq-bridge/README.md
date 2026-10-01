@@ -90,6 +90,7 @@ node mocks/verify-tasks.mjs       # ★★ 任务台账 + 回到第N步：零模
 node mocks/verify-recipes.mjs     # ★★ 配方库：长尾匹配要命中、置信度用平滑、requiredActions 不自动执行（67 项）
 node mocks/verify-extract.mjs     # ★★ 抽取解析：真实 headless 输出（裸词 / 多两个 `}`）都要能解析（71 项）
 node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线**（任务段/配方段真的进提示词）
+node mocks/verify-chat-mode.mjs   # ★★★ 闲聊/工作两态：分类器、风格文件、端到端接线（★ 含"规则命中不花钱"）
 node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）
 node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 需要能起子进程）
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
@@ -428,13 +429,18 @@ qq-bridge/
 │   ├── memory-files.mjs   ★ 记忆文件读写（越界检查 + sha256 冲突检测）
 │   ├── snowluma.mjs       ★ 探测/拉起 SnowLuma + token 解析（以它的配置为准）
 │   ├── mcp-profile.mjs    把 QQ 工具挂进 DSH 的 sdk profile
-│   ├── humanize.mjs       拟人延迟 / 静默时段 / 分条
+│   ├── humanize.mjs       拟人延迟 / 静默时段 / 分条（★ 延迟是「等待下限」：回合跑得比它久就直接发）
 │   ├── persona.mjs        人设提示词
-│   ├── speed.mjs          回应速度三档
+│   ├── personas.mjs       ★ 人设库（personas/<名字>.md，一个文件一套）
+│   ├── speed.mjs          回应速度三档（快速/均衡/谨慎，均为等待下限）
+│   ├── chat-mode.mjs      ★★ 双态对话风格：闲聊还是干活（规则优先，拿不准才问一次模型）
+│   ├── styles.mjs         ★ 对话风格文件（styles/<名字>.md，每轮现读）
 │   ├── memory.mjs         记忆约定（提示词那一段）
 │   ├── doctor.mjs         体检
 │   └── api.mjs            本地配置 HTTP 接口
 ├── mcp/mcp-qq-server.mjs  ★ QQ 工具服务器（戳一戳等，手写 MCP）
+├── personas/              ★ 人设库（一个 .md 一套，控制台里切换；**改了要重启**）
+├── styles/                ★ 对话风格（闲聊态说什么话；**改了下一轮就生效**）
 ├── config-ui/             ★ 控制台界面（React/Vite，构建产物 dist/ 由桥接伺服）
 ├── mocks/                 测试替身（不需要 QQ，不花钱）
 ├── vendor/                包内自带：node/ + node_modules/ws

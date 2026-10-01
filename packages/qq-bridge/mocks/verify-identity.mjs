@@ -340,25 +340,52 @@ async function main() {
   }
 
   /* ══════════════════════════════════════════════════════════════════════
-   * ⑥ 记忆隐私：非管理员不许复述记忆内容
+   * ⑥ 记忆：**按来源分档**（2026-10-01 用户拍板放宽）
    * ══════════════════════════════════════════════════════════════════════ */
-  section('⑥ 非管理员不得复述记忆内容')
+  section('⑥ 非管理员的记忆规矩：个人档可以说，其它档不能说')
   {
     const userBlock = buildPermissionInstructions('user', 'group')
     const adminBlock = buildPermissionInstructions('admin', 'group')
-    check('★ 普通用户段里有"不要说记忆里的内容"这条硬规矩',
-      userBlock.includes('不要说记忆里的内容'))
-    check('★ 明确禁止念原文/复述/总结',
-      userBlock.includes('不要') && userBlock.includes('念出来') && userBlock.includes('复述'))
-    check('★ 被追问时给的是"自然带过"的话术，而不是解释机制',
-      userBlock.includes('记不太清') && userBlock.includes('不要') && userBlock.includes('解释为什么'))
-    check('★ 管理员段没有这条限制（对主人不需要）',
-      !adminBlock.includes('不要说记忆里的内容'))
 
-    // 这一条是**提示词层**的约束：如实写在文档里，不能假装是硬墙
-    const src = String(userBlock)
-    check('（背景）它是提示词约束，不是硬墙 —— 记忆仍会注入到上下文里',
-      !src.includes('不会看到记忆'))
+    // ── ★ 放宽的那一半：允许用「关于正在跟你说话的这个人」那一档 ──
+    //
+    // 旧规矩是"一律不许复述记忆"，代价是用户报的那个观感：记忆里明明有关于他的
+    // 记录、也确实注入了（`--memory --inject` 可证），但被问"你记得我吗"只能回
+    // "记不太清" —— 看起来像失忆。现在按**来源**分档。
+    check('★★ 明确允许用「关于正在跟你说话的这个人」那一档',
+      userBlock.includes('关于正在跟你说话的这个人') && userBlock.includes('那一档可以说'))
+    check('★★ 允许"像真人记得对方"的表达（不是含糊其辞）',
+      userBlock.includes('你上次说过') && userBlock.includes('我记得你喜欢'))
+    check('★ 但**不是念条目**：仍禁止罗列整档、禁止提"档案/记录"这种存在',
+      userBlock.includes('不是念条目') && userBlock.includes('档案'))
+
+    // ── 仍然不能说的一半（这才是这条规矩真正要拦的东西）──
+    check('★★ 全局 / 本群 / 群黑话 / 管理员指令 那几档仍然绝不能说',
+      userBlock.includes('绝不能说出口') &&
+        userBlock.includes('全局记忆') && userBlock.includes('本群记忆') &&
+        userBlock.includes('群内黑话') && userBlock.includes('管理员指令'))
+    check('★ 给出了"为什么不能"（可能混着别人的事 / 是主人的判断）',
+      userBlock.includes('别人') && userBlock.includes('主人自己整理过'))
+    check('★ 引用个人档要换成第二人称（不把"他"字念出来）',
+      userBlock.includes('第二人称'))
+    check('★ 追问时给的是"挑一两件说、其余带过"，而不是解释分档机制',
+      userBlock.includes('记不太清') && userBlock.includes('不要') && userBlock.includes('分档'))
+    check('★ 明确禁止编造个人档里没有的事',
+      userBlock.includes('没写的事') && userBlock.includes('编'))
+    check('★ 涉及不在场的第三个人一律不接',
+      userBlock.includes('另一个不在场的人'))
+
+    // ── 顺带钉住一处**容易被读错**的边界（2026-10-01 改的时候改出来的）──
+    //
+    // 那段"做不了"的话术原先跟在旧的"记忆不许说"后面，指的是"不许复述记忆"。
+    // 规矩改成按档分之后，如果不同步重新定位，模型会把"对方追问记忆"
+    // 也理解成"要我做没权限的操作"，于是答"这个我做不了" —— 又回到失忆观感。
+    check('★★ 拒绝话术必须写明它管的是**权限**、与记忆规矩无关',
+      userBlock.includes('上面这些是**记忆**的规矩，与权限无关'))
+
+    // 管理员那条路不需要这套限制（他自己的记忆、他自己配的名单）
+    check('★ 管理员段没有这套分档限制（对主人不需要）',
+      !adminBlock.includes('能说的与不能说') && !adminBlock.includes('绝不能说出口'))
   }
 
   /* ══════════════════════════════════════════════════════════════════════

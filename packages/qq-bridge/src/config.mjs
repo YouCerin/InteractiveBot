@@ -25,6 +25,11 @@ import { buildSpeedPreset, DEFAULT_SPEED_PRESET, lintHumanize, detectSpeedPreset
 // ★ 档位的**唯一口径**在 `affect-gate.mjs`（`normalizePrewakeMode` / `isPrewakeMode`）：
 //   这里只负责"在启动时把写错的值喊出来"，判定逻辑一行都不抄 —— 抄了必然与那边漂。
 import { isPrewakeMode, normalizePrewakeMode } from './affect-gate.mjs'
+// ★★ 对话风格判定（2026-10-01）：**默认值只有一处定义**（`chat-mode.mjs` 的
+//   `MODE_JUDGE_DEFAULTS`）。这里不写字面量 —— 界面按配置显示"超时 6000ms"，
+//   而实际跑的是模块里的那个数，两处各写一份迟早会分叉（分叉的表现是
+//   "我明明把超时改大了，它还是 6 秒就放弃"）。
+import { MODE_JUDGE_DEFAULTS } from './chat-mode.mjs'
 
 /**
  * 把一个"路径列表"配置项解析成绝对路径数组。
@@ -381,6 +386,40 @@ export function normalizeConfig(c) {
         })(),
       }
     })(),
+    // ── ★★ 对话风格（闲聊态 / 工作态，2026-10-01）────────────────────────
+    //
+    // 用户的原话是「目前的对话太像 AI」—— 于是按消息分两态：闲聊时用
+    // `styles/闲聊.md` 的口吻（像真人打字），干活时维持既有做法。
+    // 判定逻辑见 `src/chat-mode.mjs`（纯函数，规则优先、拿不准才问一次模型）。
+    //
+    // ⚠️ `enabled` 默认 **true**，但**关掉时行为必须与升级前逐字一致** ——
+    //    `bridge.mjs` 里那两处（判态、注入风格）都以此为唯一闸门。
+    chat: {
+      mode: {
+        enabled: src.chat?.mode?.enabled !== false,
+        // 用哪一份风格文件（`styles/<名字>.md`）。留空 = 用默认那份「闲聊」。
+        // ★ 每轮现读，所以改文件/换名字**下一轮就生效**（与人设不同，见 styles.mjs）。
+        style: typeof src.chat?.mode?.style === 'string' ? src.chat.mode.style.trim() : '',
+        // 规则拿不准时按哪个态走。**默认 work** = 退回升级前的行为（保守方向）。
+        // 只接受这两个值；非法值保留原样并在这里告警（与 image.mode 同一条纪律：
+        // 静默改写会让"我明明设了"无从查起）。
+        fallback: src.chat?.mode?.fallback ?? 'work',
+        // 拿不准时允不允许问一次模型（关掉 = 纯规则，零额外调用）
+        ambiguous: {
+          enabled: src.chat?.mode?.ambiguous?.enabled !== false,
+          timeoutMs: src.chat?.mode?.ambiguous?.timeoutMs ?? MODE_JUDGE_DEFAULTS.timeoutMs,
+          maxPerHour: src.chat?.mode?.ambiguous?.maxPerHour ?? MODE_JUDGE_DEFAULTS.maxPerHour,
+          // 留空 = 复用 `wake.judge` 那把判定专用 key 与端点/模型
+          //（这样"已经配过判定 key"的人不必再配一遍）。
+          apiKey: typeof src.chat?.mode?.ambiguous?.apiKey === 'string' ? src.chat.mode.ambiguous.apiKey.trim() : '',
+          baseUrl:
+            typeof src.chat?.mode?.ambiguous?.baseUrl === 'string' && src.chat.mode.ambiguous.baseUrl.trim()
+              ? src.chat.mode.ambiguous.baseUrl.trim()
+              : '',
+          model: typeof src.chat?.mode?.ambiguous?.model === 'string' ? src.chat.mode.ambiguous.model.trim() : '',
+        },
+      },
+    },
     session: {
       salt: src.session?.salt || undefined,
       // instance 参与 sessionId 哈希。**留空 = 每次进程启动自动换新**。
@@ -786,6 +825,30 @@ export function validateConfig(config) {
       `humanize.speed「${config.humanize.speed}」不是有效档位，已按「${DEFAULT_SPEED_PRESET}」处理。` +
         `可选：${Object.keys(SPEED_PRESETS).join(' / ')}`,
     )
+  }
+
+  // ── 对话风格（闲聊 / 工作）──────────────────────────────────────────────
+  //
+  // ★ 这里**只做与清单无关的检查**（config.mjs 不 import chat-mode.mjs ——
+  //   那会把一个业务模块拖进这处本该是纯函数的地方；取值只有两个，写死即可）。
+  const cm = config.chat?.mode ?? {}
+  if (cm.fallback !== 'work' && cm.fallback !== 'chat') {
+    warn.push(
+      `chat.mode.fallback「${cm.fallback}」不是有效值（只能是 work / chat）—— ` +
+        '已按 work 处理（= 与升级前一致）。',
+    )
+  }
+  // ★ 只有"真的想要闲聊态"时才提醒判定通路 —— 默认 work 的人不需要这条噪音
+  //   （本项目最恨的一类东西是把真问题淹掉的假告警）。
+  if (cm.enabled !== false && cm.fallback === 'chat') {
+    const hasJudgeKey = Boolean(config.wake?.judge?.apiKey)
+    if (!hasJudgeKey && !config.dsh?.cliPath) {
+      warn.push(
+        'chat.mode.fallback = chat，但**判定通路没有配好**（wake.judge.apiKey 与 dsh.cliPath 都空）：' +
+          '规则拿不准的消息会拿不到模型判定，一律按工作态处理。' +
+          '填一把 chat.mode.ambiguous.apiKey（或 wake.judge.apiKey）即可走直连。',
+      )
+    }
   }
 
   // ── 扩展（技能 / 插件）相关 ──────────────────────────────────────────────

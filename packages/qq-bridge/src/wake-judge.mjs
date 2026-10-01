@@ -54,6 +54,11 @@
 
 import { parseLooseJson } from './extract.mjs'
 import { createModelGate } from './model-gate.mjs'
+// ★★ 对话风格判定（2026-10-01）：提示词、解析与取值都归 `chat-mode.mjs`
+//   （纯函数、可离线审阅）；这里只把它接进 `model-gate` 那套政策。
+//   ⚠️ 方向是**单向**的：chat-mode 不 import 本文件（否则就是循环依赖，
+//      而那会在运行时表现成"某些导出是 undefined"，极难查）。
+import { MODE, MODE_JUDGE_DEFAULTS, buildModePrompt, parseModeVerdict } from './chat-mode.mjs'
 
 /** 判定结论。只有两个取值 —— "放过"和"沉默"。 */
 export const VERDICT = {
@@ -507,5 +512,36 @@ export function createWakeJudge(opts = {}) {
     label: opts.label ?? '唤醒判定',
     timeoutMs: opts.timeoutMs ?? JUDGE_DEFAULTS.timeoutMs,
     maxPerHour: opts.maxPerHour ?? JUDGE_DEFAULTS.maxPerHour,
+  })
+}
+
+/**
+ * ★★ 对话风格判定器（2026-10-01）：问一次模型"这条消息是闲聊还是干活"。
+ *
+ * 放在这个文件里的理由：它和唤醒判定器是**同一类东西** —— 都是"挡在回合前面、
+ * 问一次小模型、拿一个二选一结论、失败要有一个确定方向"。政策层
+ * （`model-gate.mjs`）早就为此抽过一次，这里只给三样不同的东西：
+ * 提示词（`chat-mode.mjs` 的 `buildModePrompt`）、解析（`parseModeVerdict`）、
+ * 以及**失败方向**。
+ *
+ * ★ 失败方向 = `work`（工作态）。这不是"工作更好"，而是**工作态 = 升级前的行为**：
+ *   任何异常都退回已知的老行为，是唯一不会让使用者觉得"它今天怪怪的"的方向。
+ *   （情绪闸门那边也选了"保守"，但它保守的方向是**不记** —— 每个使用者的
+ *   "保守"不一样，所以这个值必须由调用方给，不能写在政策层里。）
+ *
+ * ★ `VERDICT` 那两个值是**唤醒那边的词汇**（answer/silent）。这里复用
+ *   `MODE` 常量而不是另造一套：判定结论的形状（一个字符串）是一样的，
+ *   造第二套只会让日志里出现两种写法。
+ */
+export function createModeJudge(opts = {}) {
+  return createModelGate({
+    ...opts,
+    buildPrompt: buildModePrompt,
+    parseVerdict: parseModeVerdict,
+    failVerdict: MODE.WORK,
+    tag: 'chat-mode',
+    label: opts.label ?? '对话风格判定',
+    timeoutMs: opts.timeoutMs ?? MODE_JUDGE_DEFAULTS.timeoutMs,
+    maxPerHour: opts.maxPerHour ?? MODE_JUDGE_DEFAULTS.maxPerHour,
   })
 }

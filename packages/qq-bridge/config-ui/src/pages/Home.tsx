@@ -48,6 +48,7 @@ function pathToTab(path: string): string | null {
     case 'send':
     case 'usage':
     case 'turn':
+    case 'chat':
       return 'pace'
     case 'memory':
     case 'image':
@@ -93,6 +94,8 @@ function buildPatch(
   // ★ 0.2.3：判定专用 key 的标记。**必须一起删** —— 它是后端给界面看的标记，
   //   留着就会被当成配置永久写进 config.json（没有任何测试会拦住这种脏键）。
   delete clean.hasJudgeKey
+  // ★ 0.2.9/10-01：对话风格判定 key 的标记，同样是**后端给界面看的标记**，必须一起删。
+  delete clean.hasChatModeKey
   if (tokens.wsToken.trim()) {
     ;(clean.onebot as Record<string, unknown>).wsToken = tokens.wsToken.trim()
   }

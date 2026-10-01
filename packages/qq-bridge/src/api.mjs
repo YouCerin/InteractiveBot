@@ -47,6 +47,9 @@ const SECRET_FIELDS = [
   //   所以界面必须能知道"配没配"却看不到值 —— 正是这一档存在的理由。
   //   `clearable`（允许 `null` 清空）在这里更要紧：清空它 = 从直连退回一次性 DSH 进程。
   { path: ['wake', 'judge', 'apiKey'], flag: 'hasJudgeKey', clearable: true },
+  // ★ 0.2.9/10-01：对话风格「拿不准问模型」的专用 key。留空 = 复用 wake.judge.*，
+  //   配了才独立计费/限流。与上面那把同规格：值不回显、null 可清除。
+  { path: ['chat', 'mode', 'ambiguous', 'apiKey'], flag: 'hasChatModeKey', clearable: true },
 ]
 
 const JSON_HEADERS = {

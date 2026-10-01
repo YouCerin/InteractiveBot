@@ -496,13 +496,14 @@ async function main() {
     const userBlock = buildPermissionInstructions('user', 'group')
     check('★ 群内角色没有污染权限判定（普通用户的权限段仍是"普通用户（只读）"）',
       userBlock.includes('【你的权限：普通用户（只读）】') && !userBlock.includes('【你的权限：管理员】'))
-    check('★ ★ 非管理员的权限段里必须明确禁止复述记忆原文',
-      userBlock.includes('不要说记忆里的内容') && userBlock.includes('不要') && userBlock.includes('记忆原文'))
+    check('★ ★ 非管理员的权限段里必须写明记忆分档（个人档可以说、其它档不能说）',
+      userBlock.includes('关于正在跟你说话的这个人') && userBlock.includes('那一档可以说') &&
+        userBlock.includes('绝不能说出口'))
     check('★ 提示词里不再出现"ask_user_question 可以用"这种自相矛盾',
       !userBlock.includes('ask_user_question'),
       userBlock.match(/可以用这些只读能力[^\n]*/)?.[0] ?? '')
-    check('★ 管理员段不提这条禁令（对主人不需要设这条限制）',
-      !buildPermissionInstructions('admin', 'private').includes('不要说记忆里的内容'))
+    check('★ 管理员段不提这套分档（对主人不需要设这条限制）',
+      !buildPermissionInstructions('admin', 'private').includes('绝不能说出口'))
   }
 
   console.log('\n── 用例 5f：协议端查不到身份时，必须"说不出来"而不是编 ───')

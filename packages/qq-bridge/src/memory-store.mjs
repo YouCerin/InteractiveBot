@@ -45,7 +45,11 @@ import { similarity } from './text-similarity.mjs'
 import { readUsage, applyRecencyOrder, recordWrite } from './memory-usage.mjs'
 // ★ 个人层的**行为统计**（0.2.9 决定：纳入）。只读侧车、只渲染一行 ——
 //   累加发生在 `bridge.mjs`（每条"他来找机器人说话"时 +1），注入侧只负责展示。
-import { readPersonStats, renderPersonStatsLine } from './people-stats.mjs'
+import { readPersonStats, renderPersonStatsLine, renderPersonHabitsLine } from './people-stats.mjs'
+// ★ 机器人自述（2026-10-01 用户要求：简化 + 降权）：写入侧拦、读取侧压成一行标签。
+import { isBotSelfEntry, compactSelfEntry } from './self-entries.mjs'
+// ★ 承诺的"多久以前说的"：注入时现算（条目里存的是绝对日期，见 promises.mjs）。
+import { promiseAgeText } from './promises.mjs'
 
 /** 各档作用域。 */
 export const SCOPE = {
@@ -365,9 +369,14 @@ function legacyPathOf(rel) {
  *     他在别的群说话时看得到（这正是"个人记忆跟人走"的含义）。
  *   · 指令档对所有会话都可见 —— 它本来就是跨群生效的东西，且只能由管理员写入。
  *
+ * @param {{kind: 'private'|'group', peerId: string, speakerId?: string|null, chatName?: string}} opts
+ *   `speakerId` = **这一轮是谁在说话**（群里才有区别）。
+ *   `chatName` = 群名（协议端核实过的）—— 只用来把那一行的标签写成
+ *   「本群记忆·摸鱼群（只在这个群）」而不是光秃秃的「本群记忆」。
+ *   查不到就留空，标签退回不带名字的写法（**不编名字**）。
  * @returns {{ text: string, files: string[], counts: Record<string, number> }}
  */
-export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null, log = () => {} }) {
+export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null, chatName = '', log = () => {} }) {
   const root = String(workspace ?? '')
   const L = layoutFor({ kind, peerId, speakerId })
   // ★ H3：读一次使用侧车，用来**决定显示顺序**（不改内容、不降权、不删 — 见 memory-usage.mjs）
@@ -377,7 +386,13 @@ export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null,
     //    第三项是"层"，只用来做**一件特殊的事**：给个人层补一行行为统计（见下）。
     ['全局记忆（对所有聊天都生效）', FILE.global, 'global'],
     // ② L2 群聊层：**只在这个群**。
-    ['本群记忆（只在这个群）', L.session, 'group'],
+    //
+    // ★★ 2026-10-01 用户要求：群聊记忆的开头**要像个人记忆一样带上群名** ——
+    //   个人记忆那一行写的是「关于正在跟你说话的这个人」，而群那一行只有
+    //   「本群记忆」，模型得靠来源标注里的群号才知道是哪个群。带上名字之后，
+    //   它一眼就知道"这是摸鱼群的约定"，不必去比对号码。
+    //   ⚠️ 查不到群名时**退回不带名字的写法**（宁可少一个名字，也不要编）。
+    [`本群记忆${groupLabelSuffix(chatName)}（只在这个群）`, L.session, 'group'],
     ['群内黑话（只在这个群）', L.slang, 'group'],
     // ③ L3 个人层：**跟人走**。私聊里就是他本人那份；群里只给当前发言人那份。
     ['关于正在跟你说话的这个人（跟人走，别人看不到）', L.person, 'person'],
@@ -404,8 +419,14 @@ export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null,
   //   ② 让"还没有任何条目、但确实常来"的人**也能被认出来** ——
   //      否则一个聊了很多次却什么都没记下的人，在模型眼里完全不存在。
   //   ⚠️ 计数是**确定性累加**的（`people-stats.mjs`），与模型无关，所以它不会被编。
+  // ★★ 2026-10-01 用户要求「增加统计层」：除了"熟不熟"，再给一行**稳定行为特征**
+  //   （只在被叫到时出现 / 话很短 / 基本只在群里出现 / 稳定出现了几天）。
+  //   同样全部来自计数器，样本不足就一个字都不写。
   const statsSpeaker = String(speakerId ?? peerId ?? '').trim()
-  const statsLine = L.person && statsSpeaker ? renderPersonStatsLine(readPersonStats({ workspace: root, userId: statsSpeaker, log })) : ''
+  const personRec = L.person && statsSpeaker ? readPersonStats({ workspace: root, userId: statsSpeaker, log }) : null
+  const statsLine = [renderPersonStatsLine(personRec), renderPersonHabitsLine(personRec)]
+    .filter(Boolean)
+    .join('　')
 
   const blocks = []
   const usedFiles = []
@@ -431,7 +452,20 @@ export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null,
     if (entries.length === 0 && !extra) continue
     // ★ 个人层用更紧的上限（见 `INJECT_ENTRIES_PERSON` 的理由）
     const limit = layer === 'person' ? INJECT_ENTRIES_PERSON : INJECT_ENTRIES
-    const shown = entries.slice(0, limit)
+    // ── ★★ 机器人自述：注入时**压成一行短标签**（2026-10-01 用户要求：简化 + 降权）──
+    //   已经落盘的那些不再逐字注入（真机那条 40+ 字的自述会占掉个人档的注入预算，
+    //   而它讲的是"我这边如何"，不是关于对方的任何事实）。
+    //   ⚠️ 只对**个人层**做：别的层里出现"我这边"多半是引用别人的话。
+    const rendered =
+      layer === 'person'
+        ? entries.map((e) => (isBotSelfEntry(e).hit ? compactSelfEntry(e) : e))
+        : // ── ★★ 承诺补一句"多久以前说的"（2026-10-01 用户要求）──────────────
+          //   条目里存的是**绝对日期**（不会过期），"几天前"只有注入这一刻算才准。
+          //   用户原话：真人式的表现不是背出来，而是**到期前的自然提醒**，
+          //   或者事后顺势问一句"上次说的那个弄了吗" —— 而"上周说的 / 上个月说的"
+          //   对"该不该主动提"是完全不同的判断。
+          entries.map((e) => (e.startsWith('（我许的诺）') || e.startsWith('（对方许的诺）') ? `${e}${promiseAgeText(e)}` : e))
+    const shown = rendered.slice(0, limit)
     const more = entries.length - shown.length
     const text =
       shown.join(' ') +
@@ -517,6 +551,17 @@ export function screenEntry(scope, entry) {
     return {
       ok: false,
       why: `${third.why} —— 涉及不在场的人，机器人不替任何人记这种评价（如果那件事本身值得记，请只记事实）`,
+    }
+  }
+  // ── ★★ 机器人自述（2026-10-01 用户要求：简化 + 降权）────────────────────
+  //   为什么在写入侧就拦：系统边界**每轮都在提示词里**（平台规则那一段），
+  //   不需要"记"；而且它一旦落盘会**每一轮**被注入，个人档里却塞着一段无主的自述。
+  //   ⚠️ 只是**不提议**，不是"这条有错" —— 所以回执的措辞要能让人看懂原因。
+  const self = isBotSelfEntry(text)
+  if (self.hit) {
+    return {
+      ok: false,
+      why: `${self.why} —— 我自己的边界由系统每轮告诉我，不用占记忆位置（要记就记关于对方的事）`,
     }
   }
   // ── 隐私：**双侧硬闸的写入侧**（详见 src/privacy.mjs）────────────────────
@@ -653,7 +698,127 @@ function readEntryLines(abs, { log = null, rel = abs } = {}) {
  * "以后在群里别提那件事" 被截成 "以后在群里别提" 意思就反了。
  * 到上限时整条**拒绝**并如实回报，让模型/使用者知道"这条没记上"。
  */
-function appendEntry({ workspace, rel, entry, log, forceSupersede = false }) {
+/**
+ * 群名 → 标签后缀（`·摸鱼群`）。查不到就空串（**不编名字**）。
+ * 与 `memoryFileTitle` 同一条规矩，只是渲染位置不同（一个是文件头、一个是注入标签）。
+ */
+function groupLabelSuffix(chatName) {
+  const n = String(chatName ?? '').trim()
+  return n ? `·${n}` : ''
+}
+
+/**
+ * 写文件头（只在文件**真的不存在或还是空的**时候写）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ★★ 2026-10-01 用户要求：群聊记忆开头要像个人记忆一样**带上群名**
+ * ══════════════════════════════════════════════════════════════════════════
+ * 个人档的文件头本来就带名字（`# 忘忧（QQ 100000001）`），群聊那份却只有
+ * 一句「# 记忆（桥接维护，勿手改）」—— 打开 `memory/groups/700000001.md`
+ * 只看得出一个号码，认不出是哪个群（与"会话列表只显示裸号码"是同一类问题）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 顺手修掉一个真缺陷：**文件头会被写两遍**
+ * ══════════════════════════════════════════════════════════════════════════
+ * 原判据是 `entries.length === 0 ? 头 : ''` —— 而 `entries` 是**解析出来的条目**，
+ * 不包含标题行。于是"文件只有头、还没有任何条目"时再写一次，就**又追加一个头**。
+ * 真机上 `memory/groups/700000001.md` 正是这样（前两行一模一样）。
+ * 现在判据改成**看文件本身**：不存在、或去掉空白后为空，才写头。
+ *
+ * @returns {string} 要追加的内容（没有头要写时返回空串）
+ */
+function memoryHeaderFor({ abs, rel = '', chatName = '' }) {
+  let raw = ''
+  try {
+    raw = existsSync(abs) ? readFileSync(abs, 'utf8') : ''
+  } catch {
+    // 读不出来就**不写头**（宁可少一行标题，也不要多写一个头出来）
+    return ''
+  }
+  if (raw.trim() !== '') return ''
+  const title = memoryFileTitle({ rel, chatName })
+  return `${title}\n\n`
+}
+
+/**
+ * 一个记忆文件的标题行（**人话，不是号码**）。
+ *
+ * 有群名就写「# 记忆·摸鱼群（群 700000001）（桥接维护，勿手改）」；
+ * 查不到群名时**只写号码**，不编名字（与"发言人昵称查不到就不编"同一条规矩）。
+ */
+export function memoryFileTitle({ rel = '', chatName = '' } = {}) {
+  const name = String(chatName ?? '').trim()
+  const m = /^memory\/groups\/(\d{5,15})(-slang)?\.md$/.exec(String(rel ?? '').replace(/\\/g, '/'))
+  if (!m) return MEMORY_FILE_HEADER
+  const gid = m[1]
+  const slang = Boolean(m[2])
+  if (!name) return `# 记忆·群 ${gid}${slang ? '（群内黑话）' : ''}（桥接维护，勿手改）`
+  return `# 记忆·${name}（群 ${gid}）${slang ? '（群内黑话）' : ''}（桥接维护，勿手改）`
+}
+
+/** 标题行认得出吗（新旧两种写法都算）。 */
+const TITLE_LINE_RE = /^#\s*记忆[·（(]/
+
+/**
+ * 把群记忆的标题**改成当前该有的样子**（可带群名），并顺手清掉**重复的标题行**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么自愈而不是手工修一次性
+ * ══════════════════════════════════════════════════════════════════════════
+ *   · 老文件的标题只有一个号码，而群名要**协议端查得到**才知道 —— 让它在
+ *     "这个群下次说话"时自动补上，比手工猜一个名字可靠；
+ *   · 重复标题是**真缺陷留下的痕迹**（旧判据 `entries.length === 0` 会在
+ *     "只有头、没有条目"时再写一个头）。自愈能在下一次写入时把它修掉，
+ *     而已经被写坏的那份不用等人工处理。
+ *
+ * ⚠️ 三条纪律：
+ *   ① **只在真的需要改时**才写盘（否则每轮都动文件、还刷快照）；
+ *   ② 只动**标题行**：正文、条目、分节一个字符都不碰；
+ *   ③ 写盘后**刷新快照**，否则下一次读记忆会被篡改检测当成"绕过桥接的改动"回滚。
+ *
+ * @returns {{changed: boolean, removed?: number, title?: string, why?: string}}
+ */
+export function repairGroupMemoryTitle({ workspace, rel, chatName = '', log = () => {} } = {}) {
+  const resolved = resolveMemoryPath(workspace, rel)
+  if (!resolved.ok) return { changed: false, why: resolved.error }
+  const abs = resolved.abs
+  try {
+    if (!existsSync(abs)) return { changed: false, why: '文件不存在' }
+    const raw = readFileSync(abs, 'utf8')
+    const lines = raw.split('\n')
+    const wanted = memoryFileTitle({ rel, chatName })
+    const isTitle = (l) => TITLE_LINE_RE.test(l.trim())
+    const titleIdx = lines.map((l, i) => (isTitle(l) ? i : -1)).filter((i) => i >= 0)
+    if (titleIdx.length === 0) return { changed: false, why: '没有标题行（不动它）' }
+
+    const firstBody = lines.findIndex((l, i) => i > titleIdx[0] && l.trim() !== '')
+    const alreadyOk = titleIdx.length === 1 && lines[titleIdx[0]] === wanted
+    if (alreadyOk) return { changed: false, why: '标题已经是对的' }
+
+    // 保留第一条标题行之前的内容，把**所有**标题行收成一条，其余内容原样
+    const head = lines.slice(0, titleIdx[0])
+    const body = lines.slice(titleIdx[0]).filter((l) => !isTitle(l))
+    // 去掉标题与正文之间的多余空行，重新拼一份干净的
+    while (body.length > 0 && body[0].trim() === '') body.shift()
+    const next = [...head, wanted, ...(body.length > 0 ? ['', ...body] : [''])]
+    const text = next.join('\n')
+    if (text === raw) return { changed: false, why: '算下来没有变化' }
+
+    writeFileSync(abs, text, 'utf8')
+    saveSnapshot({ workspace, rel })
+    log(
+      `[memory] 群记忆标题已更新：${wanted}` +
+        (titleIdx.length > 1 ? `（顺手清掉 ${titleIdx.length - 1} 行重复标题）` : ''),
+    )
+    return { changed: true, removed: titleIdx.length - 1, title: wanted }
+  } catch (error) {
+    // 自愈失败**绝不能**影响主流程，但要留证据
+    log(`⚠️ [memory] 群记忆标题自愈失败（不影响这一轮）：${error?.message ?? error}`)
+    return { changed: false, why: error?.message ?? String(error) }
+  }
+}
+
+function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatName = '' }) {
   const resolved = resolveMemoryPath(workspace, rel)
   if (!resolved.ok) return { ok: false, why: `路径不合法：${resolved.error}` }
   const abs = resolved.abs
@@ -703,7 +868,7 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false }) {
 
   try {
     mkdirSync(join(abs, '..'), { recursive: true })
-    const header = entries.length === 0 ? `# 记忆（桥接维护，勿手改）\n\n` : ''
+    const header = memoryHeaderFor({ abs, rel, chatName })
     writeFileSync(abs, `${header}${line}\n`, { flag: 'a', encoding: 'utf8' })
   } catch (error) {
     return { ok: false, why: `写盘失败：${error.message}` }
@@ -730,10 +895,13 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false }) {
  * @param {string|number} opts.peerId
  * @param {string|number} opts.senderId
  * @param {'admin'|'user'} opts.tier  发起人的真实权限（由 roster 判定）
+ * @param {string} [opts.chatName] 群名（协议端核实过的）。**只用于写文件头**：
+ *   新建那份群记忆时把头写成「# 记忆·摸鱼群（群 700000001）…」而不是一个裸号码。
+ *   查不到就留空 —— 那时只写号码，**不编名字**（与"昵称查不到就不编"同一条规矩）。
  * @param {{scope: string, text: string}[]} opts.items
  * @returns {{applied: object[], ignored: object[], wroteFiles: string[]}}
  */
-export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, items, log = () => {} }) {
+export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, chatName = '', items, log = () => {} }) {
   // ★ 三层的读写落点由 `layoutFor` 一处产出（读/写分头写迟早分叉，
   //   而分叉的表现是"写进去了、下一轮却不注入" —— 等于没记）。
   //   `senderId` 就是**这一轮真实核实过的发言人**，个人层的落点由它决定（D20：代码裁定归属）。
@@ -834,8 +1002,13 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, item
     const prefix = scope === SCOPE.SLANG ? '（黑话）' : ''
     // ★ H4：模型显式写了 `fix` 档 → 它明确说了"这是在更正上面记错的某一条"，
     //   于是把相似度门槛降到 floor（不再要求自指式措辞 —— 那种措辞实测认不全）。
-    const r = appendEntry({ workspace, rel, entry: `${prefix}${entry}`, log, forceSupersede: item.force === true })
+    const r = appendEntry({ workspace, rel, entry: `${prefix}${entry}`, log, forceSupersede: item.force === true, chatName })
     if (r.ok) {
+      // ★ 顺手自愈群记忆的标题（补群名 / 清重复头）。**只在群聊层**做，
+      //   而且它自己会判断"要不要改"（不需要改就一次盘都不写）。
+      if (kind === 'group' && (scope === SCOPE.FACT || scope === SCOPE.SLANG)) {
+        repairGroupMemoryTitle({ workspace, rel, chatName, log })
+      }
       // ★ H4：把"这条更正了上面哪一条"的痕迹带出去（调用方要据此写日志/审计）
       //   —— 不传出去的话，"标注到底发生了没有"在外面完全看不见。
       applied.push({ scope, entry, source, rel, deduped: r.deduped, superseded: r.superseded ?? null })
@@ -1107,6 +1280,32 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
       '或从别处看到的），这条比"记住"更重要。',
     '没记上的条目会在下一轮以"回执"告诉你，那时要**如实跟对方说没记住**，不要假装记住了。',
     '只在真正值得长期记住时才提议（偏好、约定、群内黑话、纠正过你的地方）；宁少勿多。',
+    // ══════════════════════════════════════════════════════════════════════
+    // ★★ 两条分界线（2026-10-01 用户给的规格）
+    // ══════════════════════════════════════════════════════════════════════
+    // 用户原话是「值得记的 / 不值得记的」两张清单。写进提示词的价值在于：
+    // 模型**本来就有**记录能力，缺的是"什么该记"的判断 —— 而判断错了不会报错，
+    // 只会让档案越来越像监视日志（"他今天要早起"这种），或者漏掉真正有用的
+    // 稳定特征。所以这两段是判据，不是口号。
+    '**值得记的**（按价值从高到低）：',
+    '· **稳定的行为特征**（最有价值）：他一般什么时候在、怎么说话（话短话长、爱玩梗、毒舌但人不坏）、',
+    '  有没有固定习惯动作、技术栈与爱好。判据是"**下次还用得上**"，不是"这次发生了"。',
+    '· **与这个群有关的事实与共同经历**（"上次那个链接""我们聊过的那台机器"）。',
+    '· **承诺与约定**（强记忆）：谁说过"下周把项目发出来"这类话。写法见下面"带时间"。',
+    '· **自我认同信息**（低频但高权重）：他怎么称呼自己、职业/专业、所在城市 ——',
+    '  **前提是他自己主动说过，而且在这个群的语境下用得上**（聊天气、约线下）。',
+    '**不值得记的**（记了反而显得 creepy，真人也不会翻这种旧账）：',
+    '· **一次性、即时的事**：「我今天要早起」「我待会出门」—— 对未来互动毫无价值，还像在监视。',
+    '· **纯闲聊流水**：吃了什么、随口抱怨 —— 记住并使用会出戏。',
+    '· **极短暂的情绪**（一次性的烦躁/开心）—— 除非**持续出现**，才升级成长期特征。',
+    '· **过于私密的细节** —— 真人朋友也有"不问的事"，越界会立刻出戏。',
+    '**怎么写（这一条同样重要，用户点名）**：',
+    '· **压缩成判据式的一句话**，不要把对方原话抄进去。',
+    '  反例：「他有工作，节假日（比如国庆）也要上班，他上班要对着电脑坐一整天」',
+    '  正例：「他工作很忙、也挺累，工作离不开电脑」',
+    '  —— 丢掉具体日期与逐条列举，保留**下次还用得上**的那部分。',
+    '· **别写机器人自己**（"我这边会被挡下来""我会跟他说没权限"这类）：',
+    '  那是我自己的边界，系统每轮都会告诉我，不占记忆位置。',
     // ══════════════════════════════════════════════════════════════════════
     // 怎么写：**区分 fact 的两种落点**（这一节是按实测数据改的）
     // ══════════════════════════════════════════════════════════════════════
