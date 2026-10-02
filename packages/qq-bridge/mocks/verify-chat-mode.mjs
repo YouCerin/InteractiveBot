@@ -502,6 +502,22 @@ section('⑥ 风格文件：读得到 / 读不到 / 空 / 超长')
       /也还是这一句/.test(shippedText) && /不松口/.test(shippedText))
     check('★ 情色暗示那条列了不许做的事（追问/科普/说教/生气/长篇道歉）',
       /不追问细节、不科普、不说教、不生气、不道歉长篇/.test(shippedText))
+    // ★★ 使用者逐字给的第三批（2026-10-02）：别主动抖记忆细节 / 别顺势自述 / 省略号别滥用
+    check('★★ 写着"别主动抖记忆里的细节"，且带着使用者给的坏例子',
+      shippedText.includes('别主动抖记忆里的细节') &&
+        shippedText.includes('原主人估计也不认，他连显卡都没挑好呢'),
+      shippedText.includes('别主动抖记忆里的细节') ? '' : '（这条规则丢了）')
+    check('★★ 写着"问到你自己时只给结论"，且带着使用者给的两个例句',
+      shippedText.includes('问到你自己时只给结论') &&
+        shippedText.includes('鱼头用的什么手机') &&
+        shippedText.includes('X99 主板'),
+      shippedText.includes('问到你自己时只给结论') ? '' : '（这条规则丢了）')
+    check('★ 自我问题那条给了**期望答案**（只答"没有手机"，不展开）',
+      shippedText.includes('手机？没有手机'))
+    check('★★ 省略号只在"无语"时用（原来的写法只说"可以用……开场"，没禁止滥用）',
+      /省略号只在"无语"的时候用/.test(shippedText) && /不是语气装饰/.test(shippedText))
+    check('★ 省略号那条点名了不许挂的场合（正常说话/回答/开玩笑）',
+      /正常说话、回答问题、开玩笑都不带它/.test(shippedText))
     // ★★ 优先级条款：人设若整段散文（走 append）或节名认不出，冲突句会**留在提示词里**，
     //    这时唯一能救的就是风格文本自己声明"以本节为准"。
     check('★★ 风格文本声明了优先级（`与别处冲突时以本节为准`）',
