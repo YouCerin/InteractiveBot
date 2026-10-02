@@ -1257,12 +1257,73 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
     // ★★ 防"接线断了"（2026-10-02 实测事故）：renderClusters 的**定义**在某次重构里被删了，
     //   调用点还留着 —— 一点「整理评论」就报 `renderClusters is not defined`，
     //   页面其它部分照常，只有那条异步路径炸。静态对账能当场抓住这一类。
+    // ★★★ 泛化（同一天的第二起：`evidenceText is not defined`）：上面那条只扫 `renderXxx`，
+    //   而第三版重写"修改意见"时丢掉的 `evidenceText` 不在 render 系列里 ⇒ 断言看不见它，
+    //   于是"整理**成功**"这条最要紧的路径上产物渲染不出来，却一个红灯都没有。
+    //   判据改成：**所有**不带点的函数调用（`f(` 而不是 `.f(`），要么本文件有定义，
+    //   要么在宿主全局白名单里。加新调用名时不许"顺手"往白名单里塞 —— 那是把这条断言改空。
     {
-      const calledRenderers = new Set([...app.matchAll(/\b(render[A-Z]\w*)\s*\(/g)].map((m) => m[1]))
-      const definedRenderers = new Set([...app.matchAll(/function\s+(render[A-Z]\w*)\s*\(/g)].map((m) => m[1]))
-      const undef = [...calledRenderers].filter((n) => !definedRenderers.has(n))
-      check('★★ app.js 里每个 renderXxx 调用都有定义（防「点了整理就报 not defined」）',
-        undef.length === 0, undef.join(' | ') || `（${definedRenderers.size} 个都已定义）`)
+      // 根本不是调用：关键字，以及 `map(async (r) => …)` 这种会被正则当成 `async(` 的
+      const NOT_CALLS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'function', 'await', 'else', 'do', 'delete', 'void', 'in', 'of', 'instanceof', 'new', 'async'])
+      // 浏览器 / JS 宿主全局：它们在 app.js 里**当然**没有定义（这份页面零依赖，只有这些）
+      const HOST_GLOBALS = new Set(['Boolean', 'Date', 'Error', 'Number', 'Option', 'String', 'URLSearchParams', 'clearTimeout', 'encodeURIComponent', 'fetch', 'setTimeout'])
+      const calledNames = new Set(
+        [...app.matchAll(/(^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[2]).filter((n) => !NOT_CALLS.has(n)),
+      )
+      const definedNames = new Set([
+        ...[...app.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
+        ...[...app.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g)].map((m) => m[1]),
+      ])
+      const undef = [...calledNames].filter((n) => !definedNames.has(n) && !HOST_GLOBALS.has(n))
+      // `calledNames.size >= 50` 是**防空断言**：正则若被改坏、扫出 0 个名字，这条必须红
+      check('★★★ app.js 里**每个**不带点的函数调用都有定义（防「点了 XX 就报 not defined」）',
+        calledNames.size >= 50 && undef.length === 0,
+        undef.length ? undef.join(' | ') : `（扫了 ${calledNames.size} 个调用名，全都有定义或是宿主全局）`)
+    }
+
+    // ★★★ 依据评论的编号要能**真的换回原文** —— 这里不查字符串，把那个纯函数抠出来跑一遍。
+    //   为什么必须"跑"而不是"查名字在不在"：`evidenceText` 上一版就是这样被静默删掉的
+    //   （名字在调用点、定义没了），而它换回来的原文是**判断意见对不对的唯一依据** ——
+    //   一个"看着像原文"的假回显比报错更糟。所以：编号 - 1 的下标要对得上服务端的
+    //   `commentLine`（`comments[i]` → `[i+1]`），对不上时**如实说对不上**。
+    {
+      const src = app.replace(/\r\n/g, '\n') // 本文件是 CRLF：先转 LF 再按行边界抠
+      const at = src.indexOf('function evidenceText(')
+      const end = at < 0 ? -1 : src.indexOf('\n}\n', at)
+      const body = at >= 0 && end > at ? src.slice(at, end + 3) : ''
+      // 这三个是那个函数的全部外部依赖（`state` / 两个小工具）：注入进去就能在 Node 里跑
+      const truncate = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n)}…` : String(s ?? ''))
+      const verdictLabel = (id) => ({ good: '对', ok: '还行', bad: '不对' }[id] ?? id)
+      const stateStub = {
+        cons: {
+          comments: [
+            { verdict: 'bad', comment: '上来就自报参数', reply: '我住在一台 X99 主板的机箱里面', points: [] },
+            { verdict: 'good', comment: '', reply: '手机？没有手机', points: [{ title: '解释清晰' }] },
+          ],
+        },
+      }
+      let evidenceText = null
+      try {
+        evidenceText = body
+          ? new Function('state', 'truncate', 'verdictLabel', `${body}\nreturn evidenceText`)(stateStub, truncate, verdictLabel)
+          : null
+      } catch (error) {
+        evidenceText = null
+      }
+      check('★★ evidenceText 存在且能被取出来跑（不是只查名字在不在）',
+        typeof evidenceText === 'function',
+        typeof evidenceText === 'function' ? `（抠出 ${body.length} 字）` : at < 0 ? '（app.js 里没有 function evidenceText）' : '（抠出来的代码跑不起来）')
+      const one = typeof evidenceText === 'function' ? String(evidenceText('1')) : ''
+      const two = typeof evidenceText === 'function' ? String(evidenceText('2')) : ''
+      const miss = typeof evidenceText === 'function' ? String(evidenceText('99')) : ''
+      check('★★ 编号 N 换成的是**第 N 条**评论（`编号 - 1` 的下标，与服务端 commentLine 同源）',
+        one.includes('上来就自报参数') && two.includes('手机？没有手机') && !two.includes('自报参数'),
+        one.split('\n')[0] || '（没跑成）')
+      check('★ 只点了标签、没写字的条目也显示得出来（"点标签 = 评论"这个口径）',
+        two.includes('解释清晰'), two.split('\n')[0] || '（没跑成）')
+      check('★★★ 编号对不上时**如实说对不上**，绝不拿别的评论冒充原文',
+        miss.includes('找不到') && !miss.includes('机箱') && !miss.includes('手机'),
+        miss.split('\n')[0] || '（没跑成）')
     }
     const called = new Set([...app.matchAll(/['"`](\/api\/[\w/-]+)/g)].map((m) => m[1]))
     // ★★ 这一条防的是"页面调了一个不存在的接口"—— 它在浏览器里只表现为"点了没反应"，

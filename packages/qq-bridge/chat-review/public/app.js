@@ -1478,6 +1478,7 @@ function renderSuggestions(l) {
       const det = document.createElement('details')
       det.appendChild(el('summary', '', `展开依据的评论（${ev.length} 条）`))
       for (const n of ev) det.appendChild(el('div', 'ev-line', evidenceText(n)))
+      det.appendChild(el('div', 'note', '编号是**整理那一刻**提示词里的编号（从 1 起）：换过范围、或之后撤销/补过评分，编号就可能对不上（对不上时会如实说，不拿别的评论冒充）。'))
       card.appendChild(det)
     }
     box.appendChild(card)
@@ -1485,6 +1486,41 @@ function renderSuggestions(l) {
   box.appendChild(
     el('div', 'note', '这些只是**意见**：评审台不会改 styles/闲聊.md（按你的要求，改动由 LLM 另外执行）。用下面的「复制」把它整段拿走。'),
   )
+}
+
+/**
+ * 依据评论的编号 → 这一行的显示文本（`renderSuggestions` 的 `<details>` 里用）。
+ *
+ * ★★ 为什么这个函数是**补回来**的（2026-10-02 实测事故，与 `renderClusters` 同一类）：
+ *   第三版（`d83f927`）重写"修改意见"这一块时，`evidenceText` 的**定义**跟着上一版的
+ *   折叠块一起被删了，而**调用点留了下来**（第 1480 行）。症状极隐蔽：整理**成功**之后
+ *   一渲染意见就报 `evidenceText is not defined` —— 页面其它部分照常可用，只有这条
+ *   异步路径炸，而且炸掉的正是"人最想看的那个产物"。它之所以没被当时的接线审计拦住，
+ *   是因为那条断言只扫 `renderXxx`（`evidenceText` 不在这个系列里）——
+ *   所以第 ⑦ 节现在扫**所有**不带点的函数调用。
+ *
+ * ★ 编号的含义（与服务端**同源**，所以能换回原文）：`chat-review-consolidate.mjs` 的
+ *   `commentLine` 按 `comments[i]` 写成 `[i+1]`，而页面拿到的 `state.cons.comments`
+ *   就是 `store.comments(scope)` —— 同一份、同一顺序、同样只含"有评论"的评分。
+ *   所以 `编号 - 1` 就是它的下标。
+ * ⚠️ 它是"**整理那一刻**的编号"：换过范围、或之后撤销/补过评分，编号都可能对不上。
+ *   对不上时**如实说对不上**，绝不拿旁边一条冒充原文 —— 本仓库最忌"编数据"。
+ */
+function evidenceText(n) {
+  const list = Array.isArray(state.cons.comments) ? state.cons.comments : []
+  const at = Number(n) - 1
+  const row = Number.isInteger(at) && at >= 0 ? list[at] : null
+  if (!row) {
+    return `[${String(n ?? '—')}] 这个编号在当前范围里找不到对应的评论 —— 意见可能是别的范围整理的，或之后撤销过评分。`
+  }
+  // 评论 = 自由文本**或**点过的标签（使用者 2026-10-02 的口径：点标签就等于评论）
+  const text = String(row.comment ?? '').trim()
+  const tags = (Array.isArray(row.points) ? row.points : [])
+    .map((p) => String(p?.title ?? p?.id ?? ''))
+    .filter(Boolean)
+  const said = text || (tags.length ? `（只点了标签没写字）${tags.join('、')}` : '（这条没给评论文本）')
+  const reply = truncate(String(row.reply ?? '').replace(/\s+/g, ' '), 60)
+  return `[${n}] ${verdictLabel(row.verdict)}｜评论：${said}${reply ? `\n      当时它说：「${reply}」` : ''}`
 }
 
 /** 四种动作的白名单（与服务端 `SUGGESTION_ACTIONS` 同源；这里只用来挡模型给的野值）。 */
