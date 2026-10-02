@@ -423,6 +423,9 @@ export function createReviewServer({
             chatLabel: b.chatLabel ?? '',
             items: b.items,
             scored: b.scored,
+            // ★ 契约（API.md）说有 `commented`，那就必须有 —— 页面靠它显示"这批写了几条评论"。
+            //   第一版漏了它，页面只好多发一次 /api/stats 去凑，还在表里显示"—"。
+            commented: b.commented,
             createdAt: b.createdAt,
           })),
         })
@@ -535,7 +538,7 @@ export function createReviewServer({
         })
         return json(res, 200, {
           ok: true,
-          batch: { id: meta.id, label: meta.label, items: meta.items, scored: meta.scored },
+          batch: { id: meta.id, label: meta.label, items: meta.items, scored: meta.scored, commented: meta.commented },
           filter,
           total: filtered.length,
           offset,

@@ -664,11 +664,17 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
   check('★ POST /api/pull 真的拉出回合（2 个）', pull.body.ok && pull.body.items === 2, JSON.stringify(pull.body.error ?? pull.body.items))
   check('★ 新建的批次出现在 /api/sources 里', (await api('/api/sources')).body.batches.length === 1)
   const batchId = pull.body.batch.id
+  // ★★ 契约（API.md）写的 `commented` 必须**真的在**这两处：第一版只在 progress 里有，
+  //    页面只好多发一次 /api/stats 去凑、表里显示"—"。契约与实现不一致，页面就只能靠猜。
+  check('★★ /api/sources 的批次带 commented（契约里有就必须有）',
+    'commented' in (await api('/api/sources')).body.batches[0], JSON.stringify((await api('/api/sources')).body.batches[0]))
 
   const items = await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=unrated`)
   check('★ GET /api/items 默认只推没评的（页面第一屏就该是待评的）',
     items.body.ok && items.body.total === 2 && items.body.items.every((i) => i.score === null), JSON.stringify(items.body.total))
   check('★ 条目带上下文（评审必须有上下文）', items.body.items[0].context.length >= 1, JSON.stringify(items.body.items[0].context))
+  check('★★ /api/items 的批次元信息也带 commented（同一个契约，两处都要）',
+    'commented' in items.body.batch, JSON.stringify(items.body.batch))
   const firstId = items.body.items[0].id
   const secondId = items.body.items[1].id
 
