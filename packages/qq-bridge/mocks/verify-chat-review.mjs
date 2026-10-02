@@ -59,6 +59,7 @@ import {
   clusterComments,
   consolidateComments,
   parseConsolidation,
+  repairJsonText,
 } from '../src/chat-review-consolidate.mjs'
 import {
   constantMatches,
@@ -529,6 +530,54 @@ section('④ 整理：评论 → **对 styles/闲聊.md 的修改意见**（★ 
     parseConsolidation('{"points":[{"title":"x"}],"rewritten":"整篇新文件"}').ok === false)
   check('★ 空回复 / 散文 → 失败并说明',
     parseConsolidation('').ok === false && parseConsolidation('我觉得可以这样改…').ok === false)
+
+  // ── 4b-2. ★★ 修"未转义的 ASCII 双引号"（2026-10-02 使用者第一次真跑整理就炸的那条）──
+  //
+  // 失败原文：`模型的 JSON 解析失败：Expected ',' or '}' after property value in JSON
+  // at position 99 (line 1 column 100)`。
+  // 根因是**设计缺陷**不是模型失手：`styles/闲聊.md` 本身含 ASCII 双引号
+  // （`…任何关于"说多长""要不要分条"…的要求…`），而提示词要模型**引用原句**来指认改哪一条
+  // ⇒ 它抄进 JSON 时那些 `"` 没转义 ⇒ 当场崩。
+  {
+    const styleSnippet = '任何关于"说多长""要不要分条"的要求，闲聊时一律作废'
+    // 真实形状：把风格文件里那句**原样**塞进 target / advice，一个引号都不转义
+    const modelOut =
+      `{"suggestions":[{"action":"rewrite","target":"优先级 · ${styleSnippet}",` +
+      `"advice":"把「${styleSnippet}」改写成更短的","reason":"评论说这条被误解","evidence":["2"]}],"notes":""}`
+    const repaired = parseConsolidation(modelOut)
+    check('★★★ 字符串里有未转义的双引号 ⇒ 修一次再解析（而不是报"解析失败"就完）',
+      repaired.ok === true, repaired.why ?? '')
+    check('★★ 修完的字符串**逐字等于原文**（引号没丢、没被吞、没变中文引号）',
+      repaired.ok && repaired.suggestions[0].target === `优先级 · ${styleSnippet}`,
+      repaired.ok ? repaired.suggestions[0].target : '')
+    check('★ 修过的要**如实标出来**（`+repaired`）——不许把修复当成本来就好',
+      repaired.via === 'raw+repaired', String(repaired.via))
+    check('★ 修复器只动它该动的：合法的收尾引号不被误转义',
+      repairJsonText('{"a":"b","c":1}').changed === false,
+      JSON.stringify(repairJsonText('{"a":"b","c":1}')))
+
+    const newline = parseConsolidation('{"suggestions":[{"action":"add","advice":"第一行\n第二行","reason":"r","evidence":[]}]}')
+    check('★★ 值里有裸换行 ⇒ 转成 \\n 再解析（模型手滑的第二种）',
+      newline.ok && newline.suggestions[0].advice === '第一行\n第二行', JSON.stringify(newline.suggestions?.[0]?.advice ?? newline.why))
+
+    const trailing = parseConsolidation('{"suggestions":[{"action":"add","advice":"x","evidence":[],},],"notes":""}')
+    check('★ 尾随逗号 ⇒ 丢掉它再解析（第三种）', trailing.ok === true, trailing.why ?? '')
+
+    const hopeless = parseConsolidation('{"suggestions":[{"advice": ')
+    check('★★ 修不好就**照旧失败**，并带上位置/原文片段（不许把坏 JSON 当成功）',
+      hopeless.ok === false && /位置|原文末尾/.test(hopeless.why), hopeless.why.slice(0, 120))
+
+    const promptWithRules = buildConsolidatePrompt({
+      comments: [{ id: '1', verdict: 'bad', comment: '太长', reply: 'x', context: [] }],
+      styleText: '【x】\n',
+    }).prompt
+    check('★★ 提示词明令：字符串里不许有未转义的 ASCII 双引号，引用原句改用「」',
+      promptWithRules.includes('未转义的 ASCII 双引号') && promptWithRules.includes('一律改写成中文引号'),
+      '')
+    check('★ 提示词明令：值里不许有裸换行（要换行写 \\n）', promptWithRules.includes('不许出现裸换行'))
+    check('★★ 提示词里的**示例本身不再教坏**（原来那行示例里就带着未转义的 `"无语"`）',
+      !promptWithRules.includes('只在"无语"的时候'), '')
+  }
 
   // ── 4c. 锚点：用途改成"提示覆盖情况"，不再是应用门禁 ────────────────────
   check('★★ 现有风格文件本身覆盖全部锚点（锚点表是照着它定的）',

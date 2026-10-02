@@ -135,11 +135,17 @@ export function buildConsolidatePrompt({ comments = [], styleText = '', anchors 
       '   如果它已经写得很好、这次不需要动，**不要在意见里提它**：',
       anchorList,
       '5. **只输出 JSON**（不要解释、不要 markdown 代码块），形状严格如下：',
-      '{"suggestions":[{"action":"rewrite","target":"说话方式 · 「省略号只在"无语"的时候用」",',
+      '{"suggestions":[{"action":"rewrite","target":"说话方式 · 「省略号只在「无语」的时候用」",',
       '  "advice":"……", "reason":"……", "evidence":["2","5"]}],',
       ' "notes":"可选：一句话总体说明（没有就空串）"}',
       '',
       '⚠️ 再强调一次：**不要**给 `rewritten`（整份新文件），**只要** `suggestions`。',
+      '',
+      '🚨 **JSON 里的字符串有两条硬规矩**（违反了整份输出就作废，人那边只会看到"解析失败"）：',
+      '   · **字符串内部不许出现未转义的 ASCII 双引号 `"`**。你要引用风格文件里的原句时',
+      '     （它本身就含 `"说多长"` 这种引号），**一律改写成中文引号「」**，',
+      '     例如把 `任何关于"说多长"的要求` 写成 `任何关于「说多长」的要求`。',
+      '   · **值里不许出现裸换行**：要换行就写两个字符 `\\n`，不要真的回车。',
     ].join('\n'),
     kept: lines.length,
     truncatedComments: withText.length - lines.length,
@@ -173,7 +179,122 @@ export function anchorCoverage({ suggestions = [], anchors = STYLE_ANCHORS } = {
   return { covered, uncovered, checked: anchors.length }
 }
 
-/** 从模型的回复里抠出 JSON（容错：剥 ``` 围栏、取第一个大括号块）。 */
+/**
+ * **修复模型手写的 JSON**（不改语义，只补它忘了的转义）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么必须有这一层（2026-10-02 使用者第一次真跑整理就炸了）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 失败原文：`模型的 JSON 解析失败：Expected ',' or '}' after property value in JSON
+ * at position 99 (line 1 column 100)`。
+ *
+ * 根因不是模型偶发失手，而是**设计缺陷**：`styles/闲聊.md` 本身含 ASCII 双引号
+ * （例如 `…任何关于"说多长""要不要分条"…的要求…`），而我们要模型**引用现有文件的原文**
+ * 来指认"改哪一条"。它把原句抄进 JSON 字符串时，那些 `"` 没有转义 ⇒ JSON 当场崩，
+ * 位置正好落在第一处引用上。
+ *
+ * ── 判定一个 `"` 是"收尾"还是"正文里的引号" ───────────────────────────────
+ * 在字符串内部遇到 `"` 时，**往后跳过空白**看下一个字符：
+ *   · `,` `}` `]` `:` 或**输入结束** ⇒ 合法的收尾引号；
+ *   · 其它 ⇒ 它属于正文，必须转义成 `\"`。
+ * 这条判据正是 `"说多长"` 这类引用的识别依据（引号后面跟的是汉字，不是分隔符）。
+ *
+ * 另外两种常见手滑一并处理：字符串里的**裸换行**（转成 `\n`）、
+ * **尾随逗号**（`,"}` / `,]`，丢掉那个逗号）。
+ *
+ * @returns {{text: string, changed: boolean, fixes: number}}
+ */
+export function repairJsonText(input) {
+  const s = String(input ?? '')
+  let out = ''
+  let inStr = false
+  let esc = false
+  let fixes = 0
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i]
+    if (!inStr) {
+      if (c === '"') {
+        inStr = true
+        out += c
+        continue
+      }
+      // 尾随逗号：`,"}` / `,]` —— 逗号后面（跳过空白）直接是收尾符号
+      if (c === ',') {
+        let j = i + 1
+        while (j < s.length && /\s/.test(s[j])) j += 1
+        if (s[j] === '}' || s[j] === ']') {
+          fixes += 1
+          continue
+        }
+      }
+      out += c
+      continue
+    }
+    // ── 字符串内部 ────────────────────────────────────────────────────────
+    if (esc) {
+      out += c
+      esc = false
+      continue
+    }
+    if (c === '\\') {
+      out += c
+      esc = true
+      continue
+    }
+    if (c === '\n') {
+      out += '\\n'
+      fixes += 1
+      continue
+    }
+    if (c === '\r') {
+      out += '\\r'
+      fixes += 1
+      continue
+    }
+    if (c === '\t') {
+      out += '\\t'
+      fixes += 1
+      continue
+    }
+    if (c === '"') {
+      let j = i + 1
+      while (j < s.length && /\s/.test(s[j])) j += 1
+      const next = s[j]
+      const legit =
+        next === undefined || next === ',' || next === '}' || next === ']' || next === ':'
+      if (legit) {
+        inStr = false
+        out += c
+        continue
+      }
+      out += '\\"'
+      fixes += 1
+      continue
+    }
+    out += c
+  }
+  return { text: out, changed: fixes > 0, fixes }
+}
+
+/**
+ * 从 JSON 报错信息里抠出位置，并给出那一小段原文（定位用，别让人对着 "第 100 列" 猜）。
+ *
+ * ⚠️ 不是所有报错都带 position（例如 `Unexpected end of JSON input`）—— 那种情况下
+ * 退化成"原文末尾一小段"：截断类错误的问题几乎总在末尾，给人看的价值一样。
+ */
+function locateJsonError(error, text) {
+  const m = /position (\d+)/.exec(String(error?.message ?? ''))
+  if (m) {
+    const at = Number(m[1])
+    const from = Math.max(0, at - 40)
+    const snippet = String(text).slice(from, at + 40).replace(/\s+/g, ' ')
+    return `｜位置 ${at} 附近：…${snippet}…`
+  }
+  const tail = String(text).slice(-60).replace(/\s+/g, ' ')
+  return tail ? `｜原文末尾：…${tail}` : ''
+}
+
+/** 从模型的回复里抠出 JSON（容错：剥 ``` 围栏、取第一个大括号块、**修复未转义的引号**）。 */
 export function parseConsolidation(raw) {
   let text = String(raw ?? '').trim()
   if (!text) return { ok: false, why: '模型返回了空内容' }
@@ -185,11 +306,29 @@ export function parseConsolidation(raw) {
     if (start < 0 || end <= start) return { ok: false, why: '模型没按 JSON 形状回答（找不到 JSON 对象）' }
     text = text.slice(start, end + 1)
   }
+  const shape = fence ? 'fence' : 'raw'
   let data = null
+  let via = shape
   try {
     data = JSON.parse(text)
-  } catch (error) {
-    return { ok: false, why: `模型的 JSON 解析失败：${error?.message ?? error}` }
+  } catch (first) {
+    // ★ 第一遍失败 ⇒ 按"它忘了转义"修一次再试（判据见 repairJsonText 的注释）
+    const fix = repairJsonText(text)
+    if (!fix.changed) {
+      return { ok: false, why: `模型的 JSON 解析失败：${first?.message ?? first}${locateJsonError(first, text)}` }
+    }
+    try {
+      data = JSON.parse(fix.text)
+      // ★ 如实标出"这份是修过的"——不许把修复当成本来就好（排查时要能分辨）
+      via = `${shape}+repaired`
+    } catch (second) {
+      return {
+        ok: false,
+        why:
+          `模型的 JSON 解析失败（已尝试修复 ${fix.fixes} 处仍未通过）：${second?.message ?? second}` +
+          `${locateJsonError(second, fix.text)}`,
+      }
+    }
   }
   if (!data || typeof data !== 'object') return { ok: false, why: '模型返回的 JSON 不是对象' }
   const incoming = Array.isArray(data.suggestions) ? data.suggestions : []
@@ -213,7 +352,7 @@ export function parseConsolidation(raw) {
     notes: String(data.notes ?? '').trim(),
     /** 被丢掉的条数（模型给了形状但没给建议正文）—— 如实报出来，不静默吞掉。 */
     droppedEmpty: incoming.length - suggestions.length,
-    via: fence ? 'fence' : 'raw',
+    via,
   }
 }
 
