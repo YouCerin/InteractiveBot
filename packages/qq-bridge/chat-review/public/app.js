@@ -1273,6 +1273,38 @@ const ACTION_LABEL = { rewrite: '改这一条', merge: '并进另一条', delete
  *   「只要意见，修改内容由 LLM 另外执行」。所以评审台**不写** `styles/闲聊.md` ——
  *   它只把"该改哪一条、改成什么、为什么"摆出来，并给一个**一键复制**。
  */
+/**
+ * 渲染**本地聚类**（模型没成功时的退路）。
+ *
+ * ★ 为什么要有它、以及这个函数曾经不存在：整理失败时服务端会回 `clusters`
+ *   ——把说法相近的评论分成组并计数。它是"整理没成，但素材还在"的唯一可视证据，
+ *   所以必须在失败路径上画出来。
+ * ⚠️ 2026-10-02 实测事故：`renderClusters` 的**定义**在某次重构里被删掉了，
+ *   而调用点还留着（第 1260 行）—— 结果是**一点「整理评论」就报
+ *   `renderClusters is not defined`**：页面其它部分照常，只有这条异步路径炸。
+ *   本仓库最忌讳的"接线断了"就是这一类，所以补上定义的同时，
+ *   测试里加了一条断言：**app.js 里每个 render 系列调用都必须有定义**（静态对账，见 verify-chat-review 第 ⑦ 节）。
+ */
+function renderClusters(clusters) {
+  const box = $('clusters')
+  clear(box)
+  const bad = Array.isArray(clusters?.bad) ? clusters.bad : []
+  const good = Array.isArray(clusters?.good) ? clusters.good : []
+  if (!bad.length && !good.length) return
+  box.appendChild(
+    el('h3', 'sug-head', `本地聚类（相似评论分组，零模型调用）—— 共 ${bad.length + good.length} 组`),
+  )
+  for (const [kind, rows] of [['bad', bad], ['good', good]]) {
+    for (const c of rows) {
+      const row = el('div', `cluster cluster-${kind}`)
+      row.appendChild(el('span', 'cluster-count', `×${numOrDash(c?.count)}`))
+      row.appendChild(el('span', 'cluster-text', String(c?.text ?? '（没给文本）')))
+      box.appendChild(row)
+    }
+  }
+  box.appendChild(el('div', 'note', '这些组**不是**修改意见：它们只是"哪些评论在说同一件事"。要成体系还得让模型归纳。'))
+}
+
 function renderSuggestions(l) {
   const box = $('suggestions')
   clear(box)

@@ -1116,6 +1116,16 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
       existsSync(join(PKG_ROOT, 'chat-review', 'public', 'style.css')))
   if (existsSync(appPath)) {
     const app = readFileSync(appPath, 'utf8')
+    // ★★ 防"接线断了"（2026-10-02 实测事故）：renderClusters 的**定义**在某次重构里被删了，
+    //   调用点还留着 —— 一点「整理评论」就报 `renderClusters is not defined`，
+    //   页面其它部分照常，只有那条异步路径炸。静态对账能当场抓住这一类。
+    {
+      const calledRenderers = new Set([...app.matchAll(/\b(render[A-Z]\w*)\s*\(/g)].map((m) => m[1]))
+      const definedRenderers = new Set([...app.matchAll(/function\s+(render[A-Z]\w*)\s*\(/g)].map((m) => m[1]))
+      const undef = [...calledRenderers].filter((n) => !definedRenderers.has(n))
+      check('★★ app.js 里每个 renderXxx 调用都有定义（防「点了整理就报 not defined」）',
+        undef.length === 0, undef.join(' | ') || `（${definedRenderers.size} 个都已定义）`)
+    }
     const called = new Set([...app.matchAll(/['"`](\/api\/[\w/-]+)/g)].map((m) => m[1]))
     // ★★ 这一条防的是"页面调了一个不存在的接口"—— 它在浏览器里只表现为"点了没反应"，
     //    而服务端日志干干净净，是最难查的一类。静态对账能当场抓住。
