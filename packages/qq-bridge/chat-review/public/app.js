@@ -682,7 +682,13 @@ async function togglePoint(pointId) {
   //   ⚠️ 只在**还没有结论**时推导：已经有结论时不覆盖（"这条整体不对、但接梗这点做对了"
   //   是完全合法的判断，标签不该把它翻过来）。
   const pickedKind = (state.points.items.find((x) => x.id === pointId) ?? {}).kind
+  // ★★ 这一次点击**是不是"就是判档"**：是的话，它和按 1/2/3 是同一件事 ——
+  //   使用者 2026-10-02 明确要求「选择了分组后，应同样跳到下一个记录」。
+  //   ⚠️ 只在"本来还没结论"时为真：已经有结论时再点第二个标签是**补充**，
+  //   那时跳走会让人没法给同一条记两个标签（"整体不对，但接梗这点做对了"）。
+  let derived = false
   if (!d.verdict && (pickedKind === 'good' || pickedKind === 'bad')) {
+    derived = true
     d.verdict = pickedKind
     renderVerdicts(item)
   }
@@ -692,6 +698,13 @@ async function togglePoint(pointId) {
     renderPointPicker(item)
     showError(data.error ?? '点没能存上')
     return
+  }
+  // 这一下就是判档 ⇒ 与判档按钮同一条路径：**立刻换下一条**（先换卡，不等往返）。
+  // 进度不在这里手算：`postScore` 成功时会用服务端回的 progress 校一遍。
+  if (derived) {
+    consumeCurrent()
+    renderCard()
+    focusComment()
   }
   const p = state.points.items.find((x) => x.id === pointId)
   toast(`${was.includes(pointId) ? '取消了' : '记下了'}「${p?.title ?? pointId}」`, 'ok')

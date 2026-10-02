@@ -1123,6 +1123,11 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
       check('★★ togglePoint 会从标签分组推出结论（点「不对」组的标签 = 判"不对"）',
         /d\.verdict\s*=/.test(body) && /kind/.test(body) && /!\s*d\.verdict/.test(body),
         body ? body.split('\n').filter((l) => /verdict|kind/.test(l)).slice(0, 3).join(' / ').trim() : '（没找到 togglePoint）')
+      check('★★ 这一下就是判档时**要跳到下一条**（与按 1/2/3 同一条路径）',
+        /consumeCurrent\s*\(/.test(body) && /renderCard\s*\(/.test(body) && /if\s*\(derived\)/.test(body),
+        body.split('\n').filter((l) => /derived|consumeCurrent/.test(l)).slice(0, 3).join(' / ').trim())
+      check('★ 已有结论时再点标签只是补充，不跳走（否则没法给一条记两个标签）',
+        /let derived = false/.test(body) && /!\s*d\.verdict/.test(body), '')
       check('★ 推导只在**还没有结论**时发生（不覆盖已有的明确判断）',
         /if\s*\(!\s*d\.verdict/.test(body), '')
     }
