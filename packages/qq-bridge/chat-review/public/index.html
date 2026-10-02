@@ -130,6 +130,12 @@
           <div class="pp-head">
             <span class="pp-title">标签（点一下记下这一类；标签是你自己写的）</span>
             <button id="btn-points-reload" class="ghost small" title="重新取标签表">↻ 刷新标签</button>
+            <!-- ★ 「删除标签」是个**模式开关**（使用者 2026-10-02 要求的交互）：
+                 点开 → 每个标签上出现一个 ×，点 × 就删掉那个标签；再点一次（或 Esc）结束。
+                 它是个破坏性模式，所以按钮在选中态要明显（见 style.css 的 .on），
+                 文案也在「删除标签 / 完成删除」之间切换。 -->
+            <button id="btn-points-delete" class="ghost small"
+              title="点开之后每个标签上会出现一个 ×，点 × 就删掉那个标签">删除标签</button>
           </div>
           <div class="pp-group">
             <div class="pp-kind bad">

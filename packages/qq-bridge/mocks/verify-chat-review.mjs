@@ -1116,6 +1116,32 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
       existsSync(join(PKG_ROOT, 'chat-review', 'public', 'style.css')))
   if (existsSync(appPath)) {
     const app = readFileSync(appPath, 'utf8')
+  // ══ 「删除标签」模式（使用者 2026-10-02 要求的交互）═══════════════════════
+  // 点「删除标签」→ 每个标签上出现 × → 点 × 删掉它 → 再点一次结束。
+  // 静态能钉住的是**接线**（真点击行为要人到浏览器里点），所以这里钉六条：
+  // 按钮存在、模式状态存在、× 不许冒泡、删除走既有的那条 DELETE、"再点一次会退出"、
+  // 以及**破坏性模式不许滑到别的上下文**（Esc/换条目/换页签/刷新标签表都要退出）。
+  {
+    const html2 = existsSync(join(PKG_ROOT, 'chat-review', 'public', 'index.html'))
+      ? readFileSync(join(PKG_ROOT, 'chat-review', 'public', 'index.html'), 'utf8')
+      : ''
+    check('★★ 打分页有「删除标签」开关（HTML 里真有这个按钮）',
+      /id="btn-points-delete"/.test(html2), html2 ? '' : '（读不到 index.html）')
+    check('★★ app.js 里有删除模式状态', /deleteMode/.test(app))
+    check('★★ × 的点击必须 stopPropagation（否则冒泡会把标签记到当前条目上 —— 删一个反而记一笔）',
+      /point-x/.test(app) && /stopPropagation\(\)/.test(app) &&
+        /stopPropagation\(\)[\s\S]{0,220}?deletePointInPlace/.test(app), '')
+    check('★★ 删除走的是既有的 DELETE /api/points（没有新接口，契约不用改）',
+      /api\/points\?id=[\s\S]{0,160}?method:\s*'DELETE'/.test(app), '')
+    check('★ 再点一次按钮会**退出**（使用者的原话：再次点击删除标签按钮结束）',
+      /setPointsDeleteMode\(!state\.points\.deleteMode\)/.test(app), '')
+    check('★★ 破坏性模式不许滑到别的上下文：Esc / 换条目 / 换页签 / 刷新标签表 都退出',
+      (app.match(/setPointsDeleteMode\(false/g) ?? []).length >= 4,
+      `退出调用 ${(app.match(/setPointsDeleteMode\(false/g) ?? []).length} 处（要 >=4）`)
+    check('★ 开关的文案与选中态只有一处改（renderPointsToolbar），两态文案都在',
+      /function renderPointsToolbar/.test(app) && /'完成删除'/.test(app) && /'删除标签'/.test(app))
+  }
+
     // ★★ 点标签必须**自己推出结论**（2026-10-02 使用者报的：点标签却回「结论只能是 good / ok / bad」
     //   —— 人已经在标签分组里做出了选择，页面却把空结论发给服务端）。这条静态断言钉住推导存在。
     {

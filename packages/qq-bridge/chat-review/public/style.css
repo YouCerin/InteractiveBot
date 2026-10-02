@@ -121,6 +121,15 @@ select { min-width: 120px; max-width: 460px; }
 }
 .table td { border-bottom: 1px solid #23272f; padding: 7px 8px; vertical-align: middle; }
 .table td.b-label { font-weight: 600; word-break: break-all; }
+/* ── 「删除标签」模式（使用者 2026-10-02 要求的交互）────────────────────
+   破坏性模式的两条视觉纪律：① 开关自己有**明显选中态**（红底红边），
+   人一眼就知道"我现在在删东西"；② 标签上挂出 ×、整颗按钮变红调，
+   与"记下这一类"的正常态**不可能混淆**。 */
+#btn-points-delete.on { background: #3a1d1d; border-color: #d9534f; color: #ffb3b0; }
+.point-btn.del-mode { background: #2a1a1a; border-color: #6d3434; color: #ffd7d5; padding-right: 6px; }
+.point-btn.del-mode:hover { border-color: #d9534f; }
+.point-x { margin-left: 6px; padding: 0 4px; border-radius: 8px; background: #d9534f; color: #fff; font-weight: 700; cursor: pointer; }
+.point-x:hover { background: #ff6b66; }
 .table td.ops, .table th.ops { text-align: right; white-space: nowrap; }
 .table td.ops button { margin-left: 6px; }
 

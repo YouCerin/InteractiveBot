@@ -37,7 +37,7 @@ const state = {
   taxonomy: { ok: false, verdicts: [], why: '' }, // 只留三档结论：标签体系已删除
   // ★★ 标签表：人工写、可编辑（位置就是打分卡片上那排按钮）。内部字段仍叫 `points`（历史名）。
   //    但性质不同 —— 标签是服务端预先写死的分类，点是使用者从评论里长出来、**可编辑**的词汇表。
-  points: { ok: false, why: '还没取到标签表', kinds: ['bad', 'good'], titleMax: 12, items: [] },
+  points: { ok: false, why: '还没取到标签表', kinds: ['bad', 'good'], titleMax: 12, items: [], deleteMode: false },
   importFormat: 'forward-json',
   score: {
     batch: '', filter: 'unrated',
@@ -46,6 +46,9 @@ const state = {
     exhausted: false, fetching: false, fetchError: '',
     scored: null, total: null, commented: null, // 一律先 null：没拿到真进度就显示 —，不显示 0
     loadedFor: '', ctxOpen: true,
+    // ★ 上一次渲染的是哪一条：**换条目要退出「删除标签」模式**
+    //   （否则会留下"看起来能点、其实在删"的状态，见 setPointsDeleteMode）
+    currentId: '',
   },
   reportBatch: 'all', reportVerdict: '', reportSearch: '', reportPoint: '',
   stats: null,
@@ -210,6 +213,9 @@ async function loadTaxonomy() {
  *   而**不是**画成"这个批次没有点"（那会让人以为点丢了）。
  */
 async function loadPoints() {
+  // ★ 刷新标签表 = 一次"世界变了"：删除模式必须退出（使用者要求）。
+  //   退得**静默**：人点的是「刷新」，不该被一句提示打断。
+  if (state.points.deleteMode) setPointsDeleteMode(false, { toastIt: false })
   const data = await api('/api/points')
   state.points = data.ok
     ? {
@@ -218,8 +224,9 @@ async function loadPoints() {
         kinds: Array.isArray(data.kinds) && data.kinds.length ? data.kinds : ['bad', 'good'],
         items: Array.isArray(data.points) ? data.points : [],
         titleMax: Number(data.titleMax) || 12,
+        deleteMode: false,
       }
-    : { ok: false, why: String(data.error ?? '接口失败'), kinds: ['bad', 'good'], titleMax: 12, items: [] }
+    : { ok: false, why: String(data.error ?? '接口失败'), kinds: ['bad', 'good'], titleMax: 12, items: [], deleteMode: false }
   if (state.page === 'score') renderCard()
   if (state.page === 'report') {
     renderPointsAdmin()
@@ -548,6 +555,12 @@ function renderCard() {
   }
   card.hidden = false
   empty.hidden = true
+  // ★ 换条目就退出「删除标签」模式（使用者要求）：它是个**破坏性**模式，
+  //   绝不许"滑"到另一条记录上还亮着 —— 那时人以为在点标签，其实在删。
+  if (s.currentId !== item.id) {
+    s.currentId = item.id
+    if (state.points.deleteMode) setPointsDeleteMode(false, { toastIt: false })
+  }
   renderContext(item)
   $('reply').textContent = String(item.reply ?? '')
   renderItemMeta(item)
@@ -564,7 +577,74 @@ function renderCard() {
  *   两者各自留痕、谁也不覆盖谁。已选的点在评论框上方单独显示一行（可点 × 取消）。
  * ★ 拉不到标签表时显示"拿不到 + 为什么"，**不显示成"没有标签"**（那会让人以为标签丢了）。
  */
+/**
+ * 「删除标签」模式（使用者 2026-10-02 要求的交互）。
+ *
+ * 为什么要有它：标签是**人造的**，就一定会有人造错的时候；而报告页那张表离打分现场太远
+ * （要切页签、要在几十行里找），删一个错标签的成本比建它还高。
+ * 所以把删除做成打分页上的一个**开关**：点开 → 每个标签上出现 ×，点 × 就删；
+ * 再点一次（或 Esc、或换条目/换页签/刷新标签表）结束。
+ *
+ * ⚠️ 它是个**破坏性模式**，所以三条纪律：
+ *   ① 开关本身有明显选中态，文案变成「完成删除」（人必须能一眼看出自己在哪个模式里）；
+ *   ② 模式里点标签**本体**不选中、不判档、不跳条目 —— 只提示"点 × 才是删"（防误操作）；
+ *   ③ 换条目/换页签/Esc/刷新标签表**一律退出**（模式不许"滑"到别的上下文里）。
+ */
+function setPointsDeleteMode(on, { toastIt = true } = {}) {
+  const next = Boolean(on)
+  if (state.points.deleteMode === next) return
+  state.points.deleteMode = next
+  renderPointPicker(currentItem())
+  if (toastIt) {
+    toast(
+      next
+        ? '删除标签：点标签上的 × 就删掉它（再点一次「完成删除」结束）'
+        : '已退出删除标签',
+      next ? '' : 'ok',
+    )
+  }
+}
+
+/** 开关按钮自己的样子（文案 + 选中态）—— 与模式状态永远同步，只有这一处改它。 */
+function renderPointsToolbar() {
+  const b = $('btn-points-delete')
+  if (!b) return
+  const on = Boolean(state.points.deleteMode)
+  b.textContent = on ? '完成删除' : '删除标签'
+  b.classList.toggle('on', on)
+  b.title = on
+    ? '结束删除模式（按 Esc 也行）—— 结束之后点标签又是"记下这一类"'
+    : '点开之后每个标签上会出现一个 ×，点 × 就删掉那个标签'
+}
+
+/**
+ * 在打分页**就地**删一个标签（走的就是报告页那条 `DELETE /api/points`，没有新接口）。
+ *
+ * ★ 确认框必须先说清"删标签**不删评分**"：已经记过它的评分不会跟着消失，
+ *   报告页会把它们显示成「（已删除的标签）」—— 不说清的话，人不敢删。
+ * ★ `usedBy`（有多少条评分在用它）服务端只在 `DELETE` 的响应里给，
+ *   所以**事前**用点表里的 `count`、**事后**用响应里的 `usedBy` 如实报 —— 不编数。
+ */
+async function deletePointInPlace(p) {
+  const used = Number(p?.count) || 0
+  const ok = window.confirm(
+    `删掉标签「${p?.title ?? p?.id}」？\n\n` +
+      `· 它被记过 ${used} 次；\n` +
+      '· **已经记下的评分不会跟着删** —— 报告页会把它们显示成「（已删除的标签）」；\n' +
+      '· 打分页上这个按钮会消失；删除模式仍然开着，可以接着删下一个。\n\n确定要删吗？',
+  )
+  if (!ok) return
+  const data = await api(`/api/points?id=${encodeURIComponent(p.id)}`, { method: 'DELETE' })
+  if (!data.ok) return void showError(data.error ?? '删不掉')
+  state.points = { ...state.points, items: Array.isArray(data.points) ? data.points : state.points.items }
+  toast(`删掉了标签「${p?.title ?? p.id}」（有 ${numOrDash(data.usedBy)} 条评分引用过它）`, 'ok')
+  renderPointPicker(currentItem())
+  renderPointsAdmin()
+  await loadStats()
+}
+
 function renderPointPicker(item) {
+  renderPointsToolbar()
   const s = state.score
   const selected = Array.isArray(s.draft?.points) ? s.draft.points : ensureDraft(item).points
   const box = $('points-pick-empty')
@@ -583,7 +663,25 @@ function renderPointPicker(item) {
       const b = el('button', on ? 'point-btn on' : 'point-btn', p.title)
       b.type = 'button'
       b.title = `${p.summary || '（没有摘要）'}\n已记 ${p.count ?? 0} 次 · 来源 ${p.source ?? '?'} · ${p.id}`
-      b.onclick = () => togglePoint(p.id)
+      if (state.points.deleteMode) {
+        // 删除模式：按钮变成"一个带 × 的靶子"。
+        b.classList.add('del-mode')
+        const x = el('span', 'point-x', '×')
+        x.title = `删掉标签「${p.title}」`
+        x.onclick = (ev) => {
+          // ★★ 必须 stopPropagation + preventDefault：× 是按钮的**子元素**，
+          //   冒泡上去会触发按钮自己的 onclick —— 那就会顺手把这个标签记到当前条目上，
+          //   于是"删一个标签"变成"给它记一笔"，是最坏的一种误操作。
+          ev.stopPropagation()
+          ev.preventDefault()
+          void deletePointInPlace(p)
+        }
+        b.appendChild(x)
+        // 本体的点击在删除模式里什么都不做（只提示），避免误删与误记
+        b.onclick = () => toast('删除模式：点标签右上角的 × 才是删；再点一次「删除标签」结束')
+      } else {
+        b.onclick = () => togglePoint(p.id)
+      }
       list.appendChild(b)
       if (!state.points.items.length) break
     }
@@ -652,6 +750,10 @@ function renderItemMeta(item) {
  * （旧数据里的 `tags` 读得进来但**不参与任何逻辑**：契约明说不丢历史。）
  */
 function ensureDraft(item) {
+  // ★ 空条目也要能返回一份草稿：`renderPointPicker` 会在"退出删除模式/刷新标签表"时被调用，
+  //   而那一刻可能正好没有当前条目（例如批次刚换、或还没拉到数据）。
+  //   返回一份**临时**对象即可 —— 它不会被写回任何地方，调用方也不必到处判 null。
+  if (!item) return { verdict: null, comment: '', points: [] }
   if (!item._draft) {
     item._draft = {
       verdict: item.score?.verdict ?? null,
@@ -1468,9 +1570,15 @@ function bind(id, prop, handler) {
 }
 
 function bindEvents() {
-  bind('tab-import', 'onclick', () => void switchTab('import'))
-  bind('tab-score', 'onclick', () => void switchTab('score'))
-  bind('tab-report', 'onclick', () => void switchTab('report'))
+  // ★ 切页签就退出「删除标签」模式（使用者要求）：模式不许跟着人跑到别的上下文里
+  const tab = (id, page) =>
+    bind(id, 'onclick', () => {
+      if (state.points.deleteMode) setPointsDeleteMode(false, { toastIt: false })
+      void switchTab(page)
+    })
+  tab('tab-import', 'import')
+  tab('tab-score', 'score')
+  tab('tab-report', 'report')
   bind('btn-reload', 'onclick', async () => {
     await Promise.all([loadHealth(), loadTaxonomy(), refreshSources()])
     if (state.page === 'score') { renderCard(); void loadProgressTruth() }
@@ -1491,6 +1599,8 @@ function bindEvents() {
   bind('score-batch', 'change', (e) => void loadBatch(e.target.value, $('score-filter').value))
   bind('score-filter', 'change', (e) => void loadBatch($('score-batch').value, e.target.value))
   bind('btn-undo', 'onclick', () => void undoLast())
+  // 「删除标签」开关：再点一次就结束（使用者要求的正是这个手感）
+  bind('btn-points-delete', 'onclick', () => setPointsDeleteMode(!state.points.deleteMode))
   bind('btn-toggle-ctx', 'onclick', () => {
     state.score.ctxOpen = !state.score.ctxOpen
     renderContext(currentItem() ?? {})
@@ -1557,6 +1667,11 @@ document.addEventListener('keydown', (e) => {
   const tagName = (e.target?.tagName ?? '').toLowerCase()
   const typing = tagName === 'input' || tagName === 'select' || tagName === 'textarea'
   if (e.ctrlKey || e.metaKey || e.altKey) return
+  if (e.key === 'Escape' && state.points.deleteMode) {
+    // ★ 删除模式**优先**吃掉 Esc（使用者要求它能退出这个模式）：
+    //   它是个破坏性模式，退出键必须随时有效、且不能被"焦点在输入框"挡住。
+    return void setPointsDeleteMode(false)
+  }
   if (e.key === 'Escape') {
     if (typing) return void e.target.blur() // 失焦即存；也顺手把 1/2/3 还给快捷键
     return void ($('error-banner').hidden = true)
