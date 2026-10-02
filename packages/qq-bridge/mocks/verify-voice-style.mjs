@@ -290,24 +290,51 @@ section('④ 人设分节与拼装（★ 最容易把人格弄坏的地方）')
 // ══════════════════════════════════════════════════════════════════════════
 section('④b 编号式人设（`二、怎么说话`）也要走替换 —— 别名表')
 // ══════════════════════════════════════════════════════════════════════════
-// 缺陷现场（2026-10-01，用户当前启用的正是这一份）：
-//   分节器第一版只认 `【】`，`软糯小鲸鱼（情绪）.md`（`一、`…`八、` 编号散文）
-//   被当成"没分节的人设" → 走**追加** → 同一份提示词里同时有原人设的
-//   「长一点也完全可以」与说话方式的「极短」两套相反口吻。
+// 缺陷现场（2026-10-01）：分节器第一版只认 `【】`，而当时出厂那份
+// `软糯小鲸鱼（情绪）.md` 用的是 `一、`…`八、` 编号散文 —— 它被当成"没分节的人设"
+// → 走**追加** → 同一份提示词里同时有原人设的「长一点也完全可以」与说话方式的
+// 「极短」两套相反口吻。
+//
+// ⚠️ 0.3.0alpha：那份编号式人设**已经下线**（出厂收敛成唯一一份，
+// 见 `src/personas.mjs` 的 `DEFAULT_PERSONA_FILES`）。∴ 这条判据不再拿它当被测对象，
+// 改成**内联写一份编号式人设** —— 覆盖的能力（编号式标题要认、要替换、标题原样保留）
+// 一个字都没变，而且不依赖"出厂恰好有那样一份"。
 {
-  const soft = join(PKG_ROOT, 'personas', '软糯小鲸鱼（情绪）.md')
-  check('★ 用户启用的那份编号式人设在仓库里', existsSync(soft), soft)
+  const numbered = [
+    '【名字（机器可读，改格式会让"叫名字"失效）】',
+    '正式名: 小鲸鱼',
+    '别名: 小鱼 / 鲸鱼 / D指导',
+    '又称: DeepSeek',
+    '',
+    '一、性格',
+    '',
+    '温柔是底色。',
+    '',
+    '二、怎么说话',
+    '',
+    '像打字，不像写作文。偏好短句；需要说清楚就说够，长一点也完全可以。',
+    '',
+    '三、表情包',
+    '',
+    '表情包是情绪的标点。',
+    '',
+    '四、其他',
+    '',
+    '大部分时候用「你」。',
+    '',
+  ].join('\n')
 
-  if (existsSync(soft)) {
-    const text = readFileSync(soft, 'utf8')
-    const { sections } = splitPersonaSections(text)
+  check('★ 内联的编号式人设是本套件自己造的（不再依赖出厂有那样一份）', numbered.includes('二、怎么说话'))
+
+  {
+    const { sections } = splitPersonaSections(numbered)
     const titles = sections.map((s) => s.title)
-    check('★ 编号式人设切得出节（`一、`/`二、`…）', sections.length >= 5, `${sections.length} 节：${titles.join(' / ')}`)
+    check('★ 编号式人设切得出节（`一、`/`二、`…）', sections.length >= 4, `${sections.length} 节：${titles.join(' / ')}`)
     check('★★ 编号式节名认得出来（`二、怎么说话` → 怎么说话）',
       titles.some((t) => canonicalStyleSection(t) === '怎么说话'), titles.join(' / '))
     check('★ 序号不算进节名', !titles.some((t) => /^[一二三四五六七八九十]+、/.test(t)), titles.join(' / '))
 
-    const d = composeVoice({ personaText: text, style: '【说话方式】\n极短。' })
+    const d = composeVoice({ personaText: numbered, style: '【说话方式】\n极短。' })
     check('★★★ 编号式人设走的是 replace（曾经错走 append）', d.strategy === 'replace', d.strategy)
     check('★★ 被替换的是"口吻"那一节', d.replaced.length >= 1 && /怎么说话/.test(d.replaced.join('/')), d.replaced.join('/'))
     check('★★ 原人设里与"极短"冲突的长短句**已经不在了**（替换的意义所在）',

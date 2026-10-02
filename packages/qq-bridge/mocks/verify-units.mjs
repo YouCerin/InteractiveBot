@@ -941,7 +941,14 @@ section('persona.mjs · 人设（也是账号存活相关配置）')
   const none = buildPersona({ preset: 'none' })
 
   check('默认预设可用且非空', full.length > 0, `${full.length} 字`)
-  check('精简版更短（token 预算友好）', lite.length < full.length, `${lite.length} vs ${full.length}`)
+  // ★★★ 0.3.0alpha：出厂从"两套/多档"收敛成**唯一一份** —— 旧的 `mermaid-lite`
+  //   （"精简版"）已经下线，它的 id 仍然认得，但取值就是这同一份。
+  //   ∴ 旧的那条"精简版更短"**没有对象了**（两个 id 返回同一串），改成钉住**收敛本身**：
+  //   四个 id 必须两两相等 ⇒ 老配置拿到的是这一份，而不是一段空白或一个报错。
+  check('★★★ 旧预设 id 与默认指向**同一份**（0.3.0alpha 的收敛：老配置不报错、也不空白）',
+    lite === full && full === buildPersona({ preset: 'mermaid-emotional' }) &&
+      full === buildPersona({ preset: 'mermaid-soft' }),
+    `mermaid ${full.length} / mermaid-lite ${lite.length}`)
   check('none 预设返回空串（用于排查"是不是人设的锅"）', none === '')
 
   // ── 反客服腔：这些要求必须在里面 ──

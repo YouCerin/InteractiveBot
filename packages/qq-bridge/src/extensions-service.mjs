@@ -206,9 +206,9 @@ export function createExtensionService({
           status: 400,
         }
       }
-      // 枚举类开关（目前只有 persona.preset）："关"= 取值 none，"开"= 回到精简档。
-      // ★ 如实说明：打开时用的是**默认档**而不是"你上次用的那一档" —— 我们没有存历史档位，
-      //   假装记得会让用户以为设置被保留了。要换档请到「人设」页里选。
+      // 枚举类开关（目前只有 persona.preset）："关"= 取值 none，"开"= 回到出厂那份人设。
+      // ★ 如实说明：打开时用的是**出厂那份**而不是"你上次用的那一套" —— 我们没有存历史选择，
+      //   假装记得会让用户以为设置被保留了。要换人设请到「人设」页里选。
       const value = kind.kind === 'enum' ? (enabled ? kind.onValue : kind.offValue) : enabled
       let raw
       try {

@@ -277,8 +277,8 @@ export const BUILTIN_PLUGINS = [
     enabledPath: 'persona.preset',
     hot: false,
     why: '人设文本在**构造期算一次并缓存**（bridge.mjs:238 一带调 buildPersona）——刻意如此，改成每轮重算会白白多花 token',
-    what: '它是谁、怎么说话（这一格的"关"= 预设切成 `none`）。',
-    offEffect: '关掉后：不注入人设段，机器人不再有固定说话风格。',
+    what: '它是谁、怎么说话（这一格的"关"= 预设切成 `none`）。★ 0.3.0alpha 起出厂只有一份人设（`小鲸鱼（完整带情绪）`），它就是唯一默认。',
+    offEffect: '关掉后：不注入人设段，机器人不再有固定说话风格（只有说话方式那一层）。',
     uiTab: 'persona',
   },
   {
@@ -324,7 +324,10 @@ export function pluginSwitchKind(plugin) {
   if (plugin.choice && Array.isArray(plugin.choice.options) && plugin.choice.options.length > 0) {
     return { kind: 'choice', options: plugin.choice.options }
   }
-  if (plugin.enabledPath === 'persona.preset') return { kind: 'enum', offValue: 'none', onValue: 'mermaid-lite' }
+  // ★ 0.3.0alpha：这个 onValue 从 `mermaid-lite`（旧"精简档"）改成唯一那份出厂人设。
+  //   它只在**老写法**（`persona.active` 留空、用 `persona.preset`）下才会被写到配置里；
+  //   新写法走的人设库用的是 `persona.active`（文件名），与本项无关。
+  if (plugin.enabledPath === 'persona.preset') return { kind: 'enum', offValue: 'none', onValue: 'mermaid-emotional' }
   if (plugin.enabledPath.endsWith('Users') || plugin.enabledPath.endsWith('Allowlist')) return { kind: 'list' }
   return { kind: 'boolean' }
 }

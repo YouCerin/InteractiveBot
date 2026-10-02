@@ -22,7 +22,9 @@ import { cn } from '@/lib/utils'
  * ② 它现在的**正文**长什么样（能看、能改）。
  *
  * 形状：人设是一个**库** —— `personas/<名字>.md`，一个文件一套人设，
- * 文件名叫什么这一页里就叫什么。默认两套也是其中两个文件，不是代码里的特例。
+ * 文件名叫什么这一页里就叫什么。★ 0.3.0alpha 起**出厂只有一份**
+ * （`小鲸鱼（完整带情绪）`，也是唯一默认人设）—— 它同样是"库里的一个文件"，
+ * 不是代码里的特例；库里仍可以有多份（复制出变体来对比）。
  *
  * ★ 生效方式：人设在启动构造期算一次并缓存，切换/改了正在用的那一套都要**重启** ——
  *   后端在响应里如实回 `restartRequired`，界面照它说，不许自己猜。
@@ -190,7 +192,7 @@ function CurrentPersonaCard({
           </InlineNote>
         )}
 
-        {/* 选择人设（单选列表，在本卡内）。列表与顺序都照后端（默认两套固定在前）。 */}
+        {/* 选择人设（单选列表，在本卡内）。列表与顺序都照后端（出厂那份固定在最前）。 */}
         <div className="space-y-1.5">
           {shelf?.personas.map((p) => (
             <div
@@ -264,7 +266,7 @@ function CurrentPersonaCard({
 
         {/* 空态：一套都没有时不要显示空白区块 */}
         {shelf && shelf.personas.length === 0 && (
-          <InlineNote level="warn">一套人设都没有。点下面的「恢复默认两套」把出厂的请回来。</InlineNote>
+          <InlineNote level="warn">一套人设都没有。点下面的「恢复默认人设」把出厂那份请回来。</InlineNote>
         )}
 
         <div className="flex flex-wrap items-center gap-2">
@@ -277,7 +279,7 @@ function CurrentPersonaCard({
             size="sm"
             onClick={() => void runAction({ action: 'restore-defaults' })}
           >
-            恢复默认两套
+            恢复默认人设
           </Button>
           <span className="text-xs text-muted-foreground">切换/改名/删除正在用的那套后，需要重启才生效。</span>
         </div>

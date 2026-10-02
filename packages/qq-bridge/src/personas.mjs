@@ -9,7 +9,9 @@
  * 也没法给一套人设起名字。
  *
  * 现在：`personas/<名字>.md` —— 每一套人设是**一个文件**，文件名叫什么，人设栏里就叫什么。
- *   · 默认那两套（小鲸鱼·精简 / 小鲸鱼·完整）**也是其中两个文件**，一样能改、能复制、能删；
+ *   · 出厂那**一份**（小鲸鱼·完整带情绪）**也是其中一个文件**，一样能改、能复制、能删；
+ *     ★ 0.3.0alpha：出厂从"两套"收敛成"一份"（见 `DEFAULT_PERSONA_FILES` 的注释）。
+ *       库本身仍然是**多文件**的（可以复制出变体来对比），只是出厂只摆这一份。
  *   · 新建时**必须给名字**（名字就是文件名，显示在人设栏里）；
  *   · 切换 = 改 `persona.active`（写配置 → **需要重启**，人设是构造期缓存的）。
  *
@@ -38,10 +40,20 @@ export const PERSONA_NONE = 'none'
  *  非空、≤24 字、不含路径分隔符与 Windows 保留字符、不以点开头/结尾。 */
 const NAME_RE = /^(?!\.)[^\\/:*?"<>|\u0000-\u001F]{1,24}(?<!\.)$/
 
-/** 默认那两套人设（**也是文件**，只是"出厂时就摆在那儿"）。顺序 = 界面上的顺序。 */
+/**
+ * **唯一出厂人设**（0.3.0alpha 收敛：原来这里是两套 —— 完整带情绪 + 软糯）。
+ *
+ * ★ 为什么只留一份（用户 2026-10-02 的决定）：把「小鲸鱼（完整带情绪）」定为
+ *   **唯一默认人设，以后只改这一份**。多套出厂人设的代价是真实的：每加一份就要在
+ *   常量、播种、`恢复默认`、断言与文档五处各维护一遍，而"想短一点"这个诉求现在
+ *   由**说话方式**（`src/voice.mjs`）那一层承担，不必再换一套人设。
+ * ★ 它是**数组**（不是单值）只是为了让调用方（`ensureDefaultPersonas` /
+ *   `restoreDefaultPersonas` / `listPersonas` 的 `isDefault`）不改形状就继续工作 ——
+ *   那些函数的语义是"把出厂那份/那几份摆回去"，一份也成立。
+ * ★ 顺序 = 界面上的顺序（现在只有一条）。
+ */
 export const DEFAULT_PERSONA_FILES = [
   { name: '小鲸鱼（完整带情绪）', text: PERSONA_PRESETS['mermaid-emotional'] },
-  { name: '软糯小鲸鱼（情绪）', text: PERSONA_PRESETS['mermaid-soft'] },
 ]
 
 /** 新建人设时的起手模板（**空模板**：只给名字块和几条提示，不替用户写性格）。 */
@@ -87,9 +99,9 @@ function pathOf(dir, name) {
 }
 
 /**
- * 首次使用时把默认那两套**落成文件**。
+ * 首次使用时把**出厂那份人设**落成文件。
  *
- * ★ 只在目录**不存在或一个文件都没有**时落 —— 使用者把某一套删掉/改名了，
+ * ★ 只在目录**不存在或一个文件都没有**时落 —— 使用者把它删掉/改名了，
  *   我们不能每次启动都把它变回来（那会让"删除"变成假的）。
  */
 export function ensureDefaultPersonas({ dir } = {}) {
@@ -116,9 +128,9 @@ export function ensureDefaultPersonas({ dir } = {}) {
 /**
  * 列出全部人设（含大小与最后修改时间；`active` 标记由调用方传入的配置决定）。
  *
- * ★ **纯读，不落文件**。默认那两套的落地由 `ensureDefaultPersonas()` 在**启动时**做一次；
+ * ★ **纯读，不落文件**。出厂那份的落地由 `ensureDefaultPersonas()` 在**启动时**做一次；
  *   如果把"落默认"挂在这个函数上，那"把所有人设都删掉"就永远不成立 ——
- *   下一次打开控制台（会调它）默认两套又会自己回来。
+ *   下一次打开控制台（会调它）它又会自己回来。
  */
 export function listPersonas({ dir, active } = {}) {
   const root = dirOf(dir)
@@ -158,7 +170,7 @@ export function listPersonas({ dir, active } = {}) {
         blocked: text.trim() ? !scanPersonaText(text).ok : false,
       }
     })
-    // 默认那两套排前面（顺序稳定），其余按名字排
+    // 出厂那份排最前（顺序稳定），其余按名字排
     .sort((a, b) => {
       const ia = DEFAULT_PERSONA_FILES.findIndex((d) => d.name === a.name)
       const ib = DEFAULT_PERSONA_FILES.findIndex((d) => d.name === b.name)
@@ -249,12 +261,12 @@ export function deletePersona({ dir, name } = {}) {
   // 复核：不信任"调用没报错"就等于"真的删掉了"（上面那个教训）。
   if (existsSync(p.abs)) return { ok: false, error: '删除后文件仍然存在（可能被占用）' }
   // ★ 删完一份都不剩时**不自动把默认补回来** —— "删了却又自己回来"会让删除变成假的。
-  //   界面给一个明确的「恢复默认两套」按钮（`restoreDefaultPersonas`），由人决定。
+  //   界面给一个明确的「恢复默认人设」按钮（`restoreDefaultPersonas`），由人决定。
   return { ok: true, name: p.name }
 }
 
 /**
- * 明确要求时把默认那两套补回来（**只在人点了按钮时调**，不在删除后自动调）。
+ * 明确要求时把**出厂那份**补回来（**只在人点了按钮时调**，不在删除后自动调）。
  * 已存在的（含改过内容的）**不动** —— 它可能已经是使用者自己的东西了。
  */
 export function restoreDefaultPersonas({ dir } = {}) {
@@ -405,7 +417,7 @@ export function applyPersonaAction({ dir, config, action, name, to, text, copyFr
         {
           hint: r.created.length
             ? `补回了：${r.created.join('、')}。已存在的人设**没有被覆盖**。${affects ? '（其中包含正在用的那一套，需要重启才生效。）' : ''}`
-            : '默认那两套都在，什么都没做。',
+            : '出厂人设已经在库里，什么都没做。',
         },
       )
     }
