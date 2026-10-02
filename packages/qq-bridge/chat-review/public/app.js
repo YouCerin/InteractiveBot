@@ -55,7 +55,7 @@ const state = {
   // 整理那一块的全部状态：GET 一进报告页就拉（不花钱），POST 只在人点击时发生
   cons: {
     loaded: false, latest: null, comments: [], counts: null, model: null,
-    limits: null, anchors: [], clusters: null, error: '', busy: false, armed: false,
+    limits: null, anchors: [], clusters: null, error: '', rawFile: '', busy: false, armed: false,
   },
 }
 
@@ -1317,7 +1317,7 @@ async function loadConsolidate({ keepLocal = false } = {}) {
     anchors: Array.isArray(data.anchors) ? data.anchors : [],
   })
   // 换了范围时，上一次的失败信息/本地聚类/"仍然应用"的武装状态都作废
-  if (!keepLocal) Object.assign(c, { clusters: null, error: '', armed: false })
+  if (!keepLocal) Object.assign(c, { clusters: null, error: '', rawFile: '', armed: false })
   renderConsolidate()
 }
 
@@ -1328,6 +1328,7 @@ async function runConsolidate() {
   if (c.model?.ok !== true) return toast('整理不可用（原因见按钮旁的那句话）', 'err')
   c.busy = true
   c.error = ''
+  c.rawFile = ''
   renderConsolidate()
   toast('正在调模型整理评论…（几十秒都算正常，别刷新页面）')
   const res = await api('/api/consolidate', { method: 'POST', body: { scope: state.reportBatch || 'all' } })
@@ -1342,7 +1343,12 @@ async function runConsolidate() {
     return void loadConsolidate({ keepLocal: true })
   }
   // ★ 失败仍是 HTTP 200：error 原样显示，本地聚类与评论原文都要在 —— 素材不能跟着"看不见"
-  Object.assign(c, { error: String(res.error ?? '服务端没给 error'), clusters: res.clusters ?? null })
+  // ★ 并且把「模型原文落盘在哪」也显示出来（2026-10-03）：失败要能被查，不能只有一句报错
+  Object.assign(c, {
+    error: String(res.error ?? '服务端没给 error'),
+    clusters: res.clusters ?? null,
+    rawFile: String(res.rawFile ?? ''),
+  })
   if (Array.isArray(res.comments) && res.comments.length) c.comments = res.comments
   renderConsolidate()
   toast('整理没成 —— 评论原文与本地聚类都在页面上，没有丢', 'err')
@@ -1385,7 +1391,11 @@ function renderConsolidate() {
   const errBox = $('consolidate-error')
   errBox.hidden = !c.error
   errBox.textContent = c.error
-    ? `整理没成：${c.error}\n（评论原文见上面的「评论清单」，素材没丢；下面的本地聚类是"哪些评论在说同一件事"）`
+    ? `整理没成：${c.error}\n` +
+      (c.rawFile
+        ? `模型这次的原文已经逐字落盘，排查就看它：${c.rawFile}\n`
+        : '') +
+      '（评论原文见上面的「评论清单」，素材没丢；下面的本地聚类是"哪些评论在说同一件事"）'
     : ''
 
   const l = c.latest

@@ -563,6 +563,49 @@ section('④ 整理：评论 → **对说话方式的修改意见**（★ 不写
     check('★★ 修不好就**照旧失败**，并带上位置/原文片段（不许把坏 JSON 当成功）',
       hopeless.ok === false && /位置|原文末尾/.test(hopeless.why), hopeless.why.slice(0, 120))
 
+    // ── ★★ 字符串**外面**多打 / 串位的引号（2026-10-03 使用者第二次报的那条）──
+    //
+    // 报错：`Expected ',' or '}' after property value in JSON at position 2343`，
+    // 现场 `…"evidence":["5","26"]}]","notes":"…"`：数组收尾 `]` 后面**多打了一个引号**。
+    // 旧判据只管"已经在字符串里"，外面看见 `"` 就无条件开字符串 ⇒ `,` `}` 被吞进正文。
+    const strayShape = parseConsolidation(
+      '{"suggestions":[{"action":"add","target":"t","advice":"a","reason":"r",' +
+        '"evidence":["5","26"]}]","notes":"评审里正面样本集中在两类"}')
+    check('★★★ 字符串外面多打一个引号（`]","notes"`）⇒ 丢掉它再解析（不再是"解析失败"就完）',
+      strayShape.ok === true, strayShape.why ?? '')
+    check('★★ 丢的是**那个多打的引号**，后面的 `,` `notes` 与数组内容都在',
+      strayShape.ok &&
+        strayShape.notes === '评审里正面样本集中在两类' &&
+        strayShape.suggestions[0].evidence.length === 2,
+      strayShape.ok ? `${strayShape.notes} / ${JSON.stringify(strayShape.suggestions[0].evidence)}` : '')
+
+    // 同族：一次出现两处（`]` 后一处、数组收尾后一处），且结果必须是**合法 JSON**
+    const twoStrays = '{"suggestions":[{"evidence":["5","26"]"}]","notes":"x"}'
+    const twoFixed = repairJsonText(twoStrays)
+    check('★★ 同族形状（`]"}]`）也修得掉：一次修两处，且结果是合法 JSON',
+      twoFixed.fixes === 2 && (() => { try { JSON.parse(twoFixed.text); return true } catch { return false } })(),
+      `${twoFixed.fixes} / ${twoFixed.text}`)
+    check('★ 修完的文本是**幂等**的（再修一次 changed=false，不会越修越坏）',
+      repairJsonText(twoFixed.text).changed === false, twoFixed.text)
+    // ★ 第三种位置：杂散引号紧跟在 `}` 后面（对象收尾）—— 判据要对**所有值收尾符**都成立
+    //   （只挡住 `]` 是不够的：变异测试把 `}` 放进"可以开字符串"那组时，原来一条断言都不红）
+    const afterBrace = '{"suggestions":[{"advice":"a","extra":{"x":1}"}],"notes":"n"}'
+    const braceFix = repairJsonText(afterBrace)
+    check('★★ 杂散引号跟在 `}` 后面也丢得掉（`}"}` ⇒ `}}`）',
+      braceFix.fixes === 1 &&
+        (() => { try { JSON.parse(braceFix.text); return true } catch { return false } })(),
+      `${braceFix.fixes} / ${braceFix.text}`)
+    check('★ 并且这条也走通了整条解析（不是只有修复器自己觉得对）',
+      parseConsolidation(afterBrace).ok === true, parseConsolidation(afterBrace).why ?? '')
+    // ★ 这条判据为什么敢直接丢字符：合法 JSON 里 `"` 只可能出现在 `{ [ , :` 之后
+    check('★ 判据的根据：合法 JSON 不会走到"丢引号"那条路（嵌套/空值/空数组都逐字不动）',
+      repairJsonText('{"a":["1","2"],"b":{"c":"d"},"e":[],"f":""}').changed === false,
+      JSON.stringify(repairJsonText('{"a":["1","2"],"b":{"c":"d"},"e":[],"f":""}')))
+    // ★ 空白与换行**不参与**"上一个有意义的字符"（否则美化过的 JSON 会被自己修坏）
+    check('★ 缩进/换行的 JSON（模型偶尔会美化）照样一个字不动',
+      repairJsonText('{\n  "a": ["1", "2"],\n  "b": {\n    "c": "d"\n  },\n  "e": []\n}').changed === false,
+      JSON.stringify(repairJsonText('{\n  "a": ["1", "2"],\n  "b": {\n    "c": "d"\n  },\n  "e": []\n}')))
+
     const promptWithRules = buildConsolidatePrompt({
       comments: [{ id: '1', verdict: 'bad', comment: '太长', reply: 'x', context: [] }],
       styleText: '【x】\n',
@@ -681,6 +724,29 @@ section('④ 整理：评论 → **对说话方式的修改意见**（★ 不写
   //   连同那两个模块一起删掉。编辑人设走 `src/personas.mjs` 的 `savePersona()`
   //   （那条路有它自己的纪律：原子写 + 结尾换行 + 长度上限）。
   //   ∴ 这一节不再有断言 —— 少掉的不是覆盖，而是**一整层已不存在的机制**。
+
+  // ── 4i. 整理失败时的模型原文：落盘 + **只留最近 20 份**（2026-10-03 第五笔）──
+  //
+  // 这部分的意义是"下一次失败能查"（那次报障时原文一个字节都没留）。
+  // 落盘本身在 HTTP 层有断言；这里盯的是**封顶**：不封顶这个目录会被淹掉，
+  // 而"淹掉"的表现是没人再看它 —— 等于证据又没了。
+  {
+    const failWs = freshDir('review-failed')
+    const st = createReviewStore({ workspace: failWs, log: () => {} })
+    for (let i = 0; i < 23; i += 1) {
+      st.saveFailure({ scope: 'all', why: `第 ${i} 次`, raw: `坏 JSON ${i}`, at: 1000 + i })
+    }
+    const kept = st.listFailures()
+    check('★★ 失败原文只留最近 20 份（旧的自动作废，不许无限增长）', kept.length === 20, String(kept.length))
+    check('★ 留下的是**最近的**那 20 份（最新那份在最前，最老的 3 份已经删掉）',
+      kept[0]?.why === '第 22 次' && kept[19]?.why === '第 3 次',
+      `${kept[0]?.why} … ${kept[19]?.why}`)
+    check('★ 每份都记着 why 与原文本身（不留原文就等于没留）',
+      kept[0]?.raw === '坏 JSON 22' && kept[0]?.chars === [...'坏 JSON 22'].length,
+      JSON.stringify({ raw: kept[0]?.raw, chars: kept[0]?.chars }))
+    check('★ 落盘目录就在评审数据下面（`runtime/chat-review/failed/`）',
+      st.files.failed === join(failWs, REVIEW_REL, 'failed'), st.files.failed)
+  }
 }
 // ══════════════════════════════════════════════════════════════════════════
 section('⑤ 语料库新增的两个只读方法（评审台的数据源）')
@@ -724,7 +790,7 @@ section('⑤ 语料库新增的两个只读方法（评审台的数据源）')
 section('⑥ 端到端 HTTP：每条路由 + 错误码')
 // ══════════════════════════════════════════════════════════════════════════
 const live = []
-async function withServer(tag, fn, { log = () => {} } = {}) {
+async function withServer(tag, fn, { log = () => {}, modelText = null } = {}) {
   const ws = freshDir(tag)
   const styleDir = freshDir(`${tag}-style`)
   // ★★ 0.3.0alpha：评审的目标是**当前生效那份人设**（说话方式就在它里面）。
@@ -753,7 +819,8 @@ async function withServer(tag, fn, { log = () => {} } = {}) {
     callModel: async () => ({
       ok: true,
       ms: 7,
-      text: JSON.stringify({
+      // ★ `modelText` 让某一节可以指定"假模型吐什么"（整理失败的那条路要用它）
+      text: modelText ?? JSON.stringify({
         // 假模型的产出必须是**意见**（这一版没有"整篇重写"这回事）
         suggestions: [
           {
@@ -1015,6 +1082,86 @@ await withServer('http', async ({ api, post, base, ws, styleDir, voicePath, app 
     readFileSync(voicePath, 'utf8') === styleBefore, '')
 })
 
+// ── ④c. ★★★ 使用者 2026-10-03 报的那条：`]` 后面多一个 `"` ────────────────────
+//
+// 报错原文：`模型的 JSON 解析失败（已尝试修复 1 处仍未通过）：Expected ',' or '}'
+// after property value in JSON at position 2343 (line 1 column 2344)`，现场是
+// `…"evidence":["5","26"]}]","notes":"…"` —— 数组收尾后**多打了一个引号**。
+// 旧判据只在"已经在字符串里"时判引号；字符串**外面**看见 `"` 就无条件开字符串，
+// 于是后面的 `,` `}` 全被当成正文吞进去。两件事都要钉住：
+//   ① 这个形状必须整理成功；② 万一还有修不好的，**模型原文必须落盘**
+//   （这次最贵的地方就是"失败了但一个字节的证据都没留"）。
+//
+// ⚠️ 这两段都**原样复刻失败现场**，不许先手工把 JSON 修好再喂进来 ——
+//    那样测的就是"我自己会不会写 JSON"，不是"这条修复在不在"。
+const STRAY_QUOTE_MODEL_TEXT =
+  '{"suggestions":[{"action":"add","target":"说话方式 · 「极短」",' +
+  '"advice":"问手机就答手机，别交代配置参数","reason":"对方只问手机，它讲了机箱",' +
+  '"evidence":["5","26"]}]","notes":"评审里正面样本集中在两类"}'
+// ★ 这份是"修不好"的样本（字符串没闭合，末尾就断了）。它**故意长于 2000 字**：
+//   截断线上一个版本是 `.slice(0, 2000)`，一次真实故障的位置在 **2343** —— 也就是说
+//   老写法会把现场切掉一半。样本太短的话，下面那条"不许截断"的断言就是空的。
+const UNREPAIRABLE_MODEL_TEXT =
+  `{"suggestions":[{"action":"rewrite","target":"说话方式 · 「极短」","advice":"${'把这一条改短一点。'.repeat(260)}` +
+  '"reason":"评论说这条被误解","evidence":["5","26"]}]'
+
+await withServer(
+  'consolidate-stray-quote',
+  async ({ api, post }) => {
+    const pulled = await post('/api/pull', { chatKey: 'group:700001' })
+    const batchId = pulled.body.batch.id
+    const items = await api(`/api/items?batch=${encodeURIComponent(batchId)}`)
+    await post('/api/score', { id: items.body.items[0].id, verdict: 'bad', comment: '说话太冲' })
+    const done = await post('/api/consolidate', { scope: batchId })
+    check('★★★ 数组收尾后多打一个引号（`]","notes"`）⇒ 现在**整理成功**，不再报解析失败',
+      done.body.ok === true, String(done.body.error ?? ''))
+    check('★★ 被丢掉的是**那个多打的引号**，后面的 `,` `notes` 与数组内容都在',
+      done.body.ok &&
+        done.body.consolidation.notes === '评审里正面样本集中在两类' &&
+        done.body.consolidation.suggestions[0].evidence.length === 2,
+      done.body.ok
+        ? `${done.body.consolidation.notes} / ${JSON.stringify(done.body.consolidation.suggestions[0].evidence)}`
+        : '')
+    check('★ 修过的要如实标出来（`+repaired`），不许把修复当成本来就好',
+      done.body.ok && String(done.body.consolidation.via).endsWith('+repaired'),
+      String(done.body.consolidation?.via))
+  },
+  { modelText: STRAY_QUOTE_MODEL_TEXT },
+)
+
+// 修不好的那种：**证据必须落盘**（这次的教训）
+await withServer(
+  'consolidate-unrepairable',
+  async ({ api, post }) => {
+    const pulled = await post('/api/pull', { chatKey: 'group:700001' })
+    const batchId = pulled.body.batch.id
+    const items = await api(`/api/items?batch=${encodeURIComponent(batchId)}`)
+    await post('/api/score', { id: items.body.items[0].id, verdict: 'bad', comment: '太长了' })
+    const failed = await post('/api/consolidate', { scope: batchId })
+    check('★★ 修不好 ⇒ 照旧失败（不许把坏 JSON 当成功）',
+      failed.body.ok === false && /解析失败/.test(String(failed.body.error)), String(failed.body.error ?? ''))
+    check('★★★ 失败时**模型原文落盘**了（`runtime/chat-review/failed/`）——不许只说一句"解析失败"就完',
+      typeof failed.body.rawFile === 'string' && existsSync(failed.body.rawFile),
+      String(failed.body.rawFile))
+    check('★★ 落盘的原文**逐字等于**假模型吐的那份（不许截断）',
+      existsSync(String(failed.body.rawFile)) &&
+        JSON.parse(readFileSync(String(failed.body.rawFile), 'utf8')).raw === UNREPAIRABLE_MODEL_TEXT,
+      '')
+    check('★★ 失败时**评论原文**照旧一起回给页面（素材不能跟着消失）',
+      Array.isArray(failed.body.comments) && failed.body.comments.length >= 1)
+    // ★ 响应里**只给路径**，不把上万字的原文塞进 HTTP 响应（页面不需要它）
+    check('★ 响应里不带原文本身（只带路径与字符数）',
+      !('raw' in failed.body) && failed.body.rawChars === [...UNREPAIRABLE_MODEL_TEXT].length,
+      String(failed.body.rawChars))
+    check('★ 落盘目录就在评审数据下面（`runtime/chat-review/failed/`），不进发布包',
+      String(failed.body.rawFile).includes(join(REVIEW_REL, 'failed')), String(failed.body.rawFile))
+    // ★ 这一条盯的是"上面那条不许截断的断言本身不是空的"：样本必须**长于**旧的 2000 字截断线
+    check('★ 这份"修不好"的样本长于 2000 字（否则上面"不许截断"那条断言是空的）',
+      [...UNREPAIRABLE_MODEL_TEXT].length > 2000, String([...UNREPAIRABLE_MODEL_TEXT].length))
+  },
+  { modelText: UNREPAIRABLE_MODEL_TEXT },
+)
+
 // 语料库不可用时：不许假装有数据
 await withServer('nocorpus', async ({ api, post, ws, app }) => {
   // 把语料库换成一个打不开的东西（同名的目录会让 SQLite 直接失败）
@@ -1203,6 +1350,14 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
       existsSync(join(PKG_ROOT, 'chat-review', 'public', 'style.css')))
   if (existsSync(appPath)) {
     const app = readFileSync(appPath, 'utf8')
+  // ══ 整理失败时的「证据在哪」（2026-10-03 第五笔）══════════════════════════
+  // 后端把模型原文落盘、并把路径放进响应；页面必须**把它显示出来** ——
+  // 否则那条证据只存在于控制台日志里，而使用者看的是页面（这次报障就是这么来的）。
+  // ★ 拆成两条：变异测试证明"只写一条"是空的（把存进状态那句打断，原来那条照样绿）。
+  check('★★ 页面把响应里的 `rawFile` 存进状态（`res.rawFile` 真的读了）',
+    /rawFile:\s*String\(res\.rawFile/.test(app))
+  check('★★ 整理失败那块把它显示出来（条件与那句文案要连在一起 —— 只查"rawFile 出现过"是不够的）',
+    /\(c\.rawFile[\s\S]{0,200}?逐字落盘/.test(app))
   // ══ 「删除标签」模式（使用者 2026-10-02 要求的交互）═══════════════════════
   // 点「删除标签」→ 每个标签上出现 × → 点 × 删掉它 → 再点一次结束。
   // 静态能钉住的是**接线**（真点击行为要人到浏览器里点），所以这里钉六条：

@@ -180,6 +180,17 @@ export function anchorCoverage({ suggestions = [], anchors = STYLE_ANCHORS } = {
 }
 
 /**
+ * `"` 能不能在这里**开**一个字符串？（判据的由来看 `repairJsonText` 的注释）
+ *
+ * 合法 JSON 里 `"` 只出现在"该出现键或值"的位置 —— 前面一个有意义的字符是
+ * `{` `[` `,` `:`，或什么都没有。反过来说，前面是 `}` `]`、刚收尾的字符串、
+ * 裸字面量时，这个 `"` 一定是多打的。
+ * ★ 这条判据对**合法输入永远为真**（合法 JSON 不会走到 else 分支）—— 所以它只可能修好。
+ */
+const canOpenStringAfter = (prev) =>
+  prev === '' || prev === '{' || prev === '[' || prev === ',' || prev === ':'
+
+/**
  * **修复模型手写的 JSON**（不改语义，只补它忘了的转义）。
  *
  * ══════════════════════════════════════════════════════════════════════════
@@ -201,6 +212,22 @@ export function anchorCoverage({ suggestions = [], anchors = STYLE_ANCHORS } = {
  *   · 其它 ⇒ 它属于正文，必须转义成 `\"`。
  * 这条判据正是 `"说多长"` 这类引用的识别依据（引号后面跟的是汉字，不是分隔符）。
  *
+ * ── 字符串**外面**的 `"` 也要判（2026-10-03 补的第二个洞）─────────────────
+ * 上面那条只管"已经在字符串里"，外面看到 `"` 就无条件开一个字符串。于是模型**多打**
+ * 一个引号时，后面的 `,` `}` 全被当成正文吞进字符串，最后还是死在
+ * `Expected ',' or '}' after property value`，而且位置指着那个引号，离真正的错处挺远。
+ * 使用者 2026-10-03 报的就是这条（原文形状，两次都是 `]` 后面多一个 `"`）：
+ *   · `…"evidence":["5","26"]}]","notes":"…"`   ← `]` 后面多一个 `"`
+ *   · `…"evidence":["5","26"]"}]`               ← 同族（数组收尾后多一个 `"`）
+ * 判据：`"` 只有在**该出现键或值**的位置才能开字符串 —— 前面一个有意义的字符是
+ * `{` `[` `,` `:`，或什么都没有。反过来，前面是 `}` `]`、刚收尾的字符串、裸字面量时，
+ * 这个引号一定是多打的 ⇒ **丢掉它**。
+ * ★ 合法 JSON 里 `"` 永远只出现在前一组位置 ⇒ 这条判据**碰不到任何本来合法的输入**，
+ *   只可能修好，不可能修坏（这是它敢直接丢字符的理由）。
+ * ⚠️ 刻意**不猜**另一种形状："漏了逗号"（`{"a":1"b":2}`、`]"notes"`）。要修它就得猜
+ *   "这个引号是串位的还是少了个逗号"，猜错会把**本来能修的**变成修不了的。宁可照旧
+ *   失败，并且把模型原文落盘（见 `consolidateComments` 的 `raw`）—— 有了真证据再动它。
+ *
  * 另外两种常见手滑一并处理：字符串里的**裸换行**（转成 `\n`）、
  * **尾随逗号**（`,"}` / `,]`，丢掉那个逗号）。
  *
@@ -212,12 +239,21 @@ export function repairJsonText(input) {
   let inStr = false
   let esc = false
   let fixes = 0
+  /** 已输出内容里**最后一个有意义的字符**（跳过空白）—— 判定"这里能不能开字符串"要靠它。 */
+  let prev = ''
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i]
     if (!inStr) {
       if (c === '"') {
+        if (!canOpenStringAfter(prev)) {
+          // ★ 多打的引号（2026-10-03 报的那条）：丢掉它，**别**开字符串。
+          //   开下去会把后面的 `,` `}` 一起当成正文吞掉，最后死在离现场很远的位置。
+          fixes += 1
+          continue
+        }
         inStr = true
         out += c
+        prev = c
         continue
       }
       // 尾随逗号：`,"}` / `,]` —— 逗号后面（跳过空白）直接是收尾符号
@@ -230,6 +266,7 @@ export function repairJsonText(input) {
         }
       }
       out += c
+      if (!/\s/.test(c)) prev = c
       continue
     }
     // ── 字符串内部 ────────────────────────────────────────────────────────
@@ -267,6 +304,7 @@ export function repairJsonText(input) {
       if (legit) {
         inStr = false
         out += c
+        prev = c
         continue
       }
       out += '\\"'
@@ -437,7 +475,9 @@ export async function consolidateComments({
   }
   const parsed = parseConsolidation(r.text)
   if (!parsed.ok) {
-    return { ok: false, why: parsed.why, clusters: fallback(), ms: r?.ms, raw: String(r.text ?? '').slice(0, 2000) }
+    // ★ 失败必须**带上模型原文**（不截断）：调用方要把它落盘当证据。
+    //   2026-10-03 的教训 —— 只留一句报错，就得靠合成坏 JSON 去反推形状。
+    return { ok: false, why: parsed.why, clusters: fallback(), ms: r?.ms, raw: String(r.text ?? '') }
   }
   const coverage = anchorCoverage({ suggestions: parsed.suggestions, anchors })
   return {

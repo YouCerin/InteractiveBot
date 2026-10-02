@@ -337,6 +337,7 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
   const indexPath = join(dir, 'index.json')
   const scoresPath = join(dir, 'scores.json')
   const consolidateDir = join(dir, 'consolidations')
+  const failedDir = join(dir, 'failed')
   const batchPath = (id) => join(dir, 'batches', `${id}.json`)
   const pointsPath = join(dir, 'points.json')
 
@@ -724,6 +725,54 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
     return { ok: true, consolidation: record }
   }
 
+  /**
+   * **把"整理没成"连同模型原文一起落盘**（2026-10-03 补）。
+   *
+   * 为什么必须落盘：使用者 2026-10-03 报整理失败时，系统手上只有一句
+   * `模型的 JSON 解析失败（已尝试修复 1 处仍未通过）：… position 2343 …`，
+   * 而**模型原文一个字节都没留** —— 只能靠合成相似的坏 JSON 反推形状。
+   * 这正是本项目最贵的一类缺陷（"失败但没有证据"；`bridge.mjs` 抽取那段
+   * 已经为同一件事付过一次学费，见那里的注释）。
+   *
+   * 落在 `runtime/chat-review/failed/<时间>.json`，只留最近 20 份：
+   * 它是排查素材，不是归档 —— 不限量的话这个目录很快就被淹掉，反而没人看。
+   */
+  function saveFailure({ scope = 'all', why = '', raw = '', at = Date.now() } = {}) {
+    const id = `f-${new Date(at).toISOString().replace(/[:.]/g, '-')}`
+    const abs = join(failedDir, `${id}.json`)
+    writeJsonAtomic(abs, {
+      version: REVIEW_VERSION,
+      id,
+      scope: String(scope),
+      createdAt: at,
+      why: String(why ?? ''),
+      chars: [...String(raw ?? '')].length,
+      raw: String(raw ?? ''),
+    })
+    // 时间戳前缀排出来就是时间序，直接从旧到新删
+    try {
+      const files = readdirSync(failedDir).filter((f) => f.endsWith('.json')).sort()
+      for (const f of files.slice(0, Math.max(0, files.length - 20))) unlinkSync(join(failedDir, f))
+    } catch (error) {
+      log(`⚠️ [评审台] 清理旧的失败原文失败（不影响这次记录）：${error?.message ?? error}`)
+    }
+    return { ok: true, id, file: abs, chars: [...String(raw ?? '')].length }
+  }
+
+  function listFailures() {
+    if (!existsSync(failedDir)) return []
+    try {
+      return readdirSync(failedDir)
+        .filter((f) => f.endsWith('.json'))
+        .map((f) => readJson(join(failedDir, f), null, log))
+        .filter(Boolean)
+        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    } catch (error) {
+      log(`⚠️ [评审台] 列失败原文失败：${error?.message ?? error}`)
+      return []
+    }
+  }
+
   function listConsolidations() {
     if (!existsSync(consolidateDir)) return []
     try {
@@ -761,6 +810,9 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
     saveConsolidation,
     listConsolidations,
     latestConsolidation,
+    // ── 整理失败时的模型原文（排查用；见 saveFailure 的注释）──
+    saveFailure,
+    listFailures,
     /** 给 `/api/items` 用：某批次的条目 + 评分（分页是 HTTP 层的事）。 */
     itemsWithScores(scope) {
       const { items, metas } = collect(scope)
@@ -771,6 +823,13 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
     invalidate() {
       knownIds = null
     },
-    files: { index: indexPath, scores: scoresPath, dir, batches: () => readdirSync(dir), consolidations: consolidateDir },
+    files: {
+      index: indexPath,
+      scores: scoresPath,
+      dir,
+      batches: () => readdirSync(dir),
+      consolidations: consolidateDir,
+      failed: failedDir,
+    },
   }
 }

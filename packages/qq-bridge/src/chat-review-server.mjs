@@ -689,12 +689,26 @@ export function createReviewServer({
           })
           if (!result.ok) {
             // ★ 失败也要把**评论原文**一起回给页面：整理没成，素材不能跟着"消失"
+            // ★ 并且把**模型原文落盘**（2026-10-03 补）：这次报"整理没成"时，系统手上
+            //   只有一句解析报错，模型到底写了什么形状一个字都没留 —— 那种失败是查不了的。
+            //   有 raw 才落盘（模型调用本身失败的没有 raw，原因已在 why 里）。
+            const evidence = result.raw
+              ? store.saveFailure({ scope: postScope, why: result.why, raw: result.raw })
+              : null
+            if (evidence?.ok) {
+              say(`[评审台] 整理失败：${result.why}｜模型原文 ${evidence.chars} 字已落盘：${evidence.file}`)
+            } else {
+              say(`[评审台] 整理失败：${result.why}`)
+            }
             return json(res, 200, {
               ok: false,
               error: result.why,
               clusters: result.clusters ?? null,
               comments: cs,
               ms: result.ms ?? Date.now() - started,
+              // 给人看的落盘位置（**只给路径，不把原文塞进响应** —— 页面不需要它）
+              rawFile: evidence?.file ?? null,
+              rawChars: evidence?.chars ?? null,
             })
           }
           const saved = store.saveConsolidation({ scope: postScope, result, styleBefore: String(style.text ?? '') })
