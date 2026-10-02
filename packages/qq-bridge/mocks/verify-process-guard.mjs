@@ -162,6 +162,55 @@ async function main() {
     g.release()
   }
 
+  section('②b 冲突提示要按**档位**说（那句"抢 OneBot 事件流"曾经漏给别的档位）')
+  {
+    // ★ 实测背景（2026-10-02）：聊天记录评审台（`profile='chat-review'`）启动时，
+    //   屏幕上先出现「同时跑两个会抢同一个 OneBot 事件流（同一句话可能被回两次）」——
+    //   对一个只读语料库、根本不发消息的工具来说，这句话**把人引向完全无关的方向**。
+    //   后果与档位绑定，所以：默认给桥接那句，别的档位自己传 `conflictHint`；
+    //   而**打算自己接管冲突**的档位（评审台启动就是先请旧的退）可以把话整个关掉。
+    const LIVE_PID = 4 // Windows 上 pid 4 = System，跨版本都在（与 ② 同一招）
+    const withReg = (profile) => {
+      writeReg([{ pid: LIVE_PID, profile, instanceId: 'aaaa1111', updatedAtMs: Date.now(), port: 4410 }])
+    }
+    const capture = (opts) => {
+      const logs = []
+      const g = createProcessGuard({
+        pkgRoot: ROOT,
+        profile: 'chat-review',
+        port: 4410,
+        log: (m) => logs.push(String(m)),
+        ...opts,
+      })
+      const r = g.claim()
+      // ⚠️ 登记表要在 `release()` **之前**读：release 会把自己摘掉，之后再看就没了
+      //   （第一版就是这么写错的 —— 断言测的其实是"release 生效了"）
+      const regWhileClaimed = readReg()
+      g.release()
+      return { logs, r, regWhileClaimed }
+    }
+
+    withReg('chat-review')
+    const def = capture({})
+    check('前提：确实报出了冲突（否则下面几条断言是空的）', def.r.conflicts.length === 1, JSON.stringify(def.r.conflicts))
+    check('★ 不传时仍是桥接那句（桥接那条路不许被顺手改掉）',
+      def.logs.some((l) => /OneBot 事件流/.test(l)), def.logs.join(' | '))
+
+    withReg('chat-review')
+    const custom = capture({ conflictHint: '两边会抢同一份评审数据，后写的覆盖先写的' })
+    check('★★ 传了 conflictHint 就用它（别的档位能说对自己的后果）',
+      custom.logs.some((l) => /抢同一份评审数据/.test(l)) && !custom.logs.some((l) => /OneBot/.test(l)),
+      custom.logs.join(' | '))
+
+    withReg('chat-review')
+    const quiet = capture({ reportConflicts: false })
+    check('★★ reportConflicts:false ⇒ 一个字都不报（"打算自己接管"的档位不该先喊一声）',
+      !quiet.logs.some((l) => /检测到/.test(l)), quiet.logs.join(' | ') || '（安静）')
+    check('★ 但它照样登记了自己、也照样报出 conflicts（静默的只是话，不是判定）',
+      quiet.r.conflicts.length === 1 && quiet.regWhileClaimed.some((e) => e.pid === process.pid),
+      `conflicts=${quiet.r.conflicts.length} 登记了自己=${quiet.regWhileClaimed.some((e) => e.pid === process.pid)}`)
+  }
+
   section('③-c runningBridges：CLI 冲突判定必须按**数量**，不能按 isSelf')
   {
     // ★ 复现实测遇到的第二个假警告：进程表清干净后只剩**唯一一个**桥接，

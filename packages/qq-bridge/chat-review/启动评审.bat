@@ -19,6 +19,8 @@ if not exist "%NODE%" (
 echo.
 echo   Starting the chat-log review tool (standalone, not part of the console).
 echo   It reads the local corpus read-only and writes review data only.
+echo   If another copy is already running on this port, it will be asked to
+echo   exit first and this one takes over (no need to close it by hand).
 echo   Close this window to stop it.
 echo.
 

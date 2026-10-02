@@ -120,6 +120,133 @@ export function chatLabelOf(chatKey) {
 }
 
 /**
+ * 探测某个端口上是不是**评审台**（用它自己 `/api/health` 自报的 `tool` 字段认）。
+ *
+ * ★ 为什么必须先认身份再动手：这个函数的下一个动作是"请它退出"，甚至是"停掉它"。
+ *   只按"端口被占"就动手，会误伤任何一个恰好用了 4410 的程序 —— 而"误杀别人的进程"
+ *   比"我自己起不来"严重得多（与 `process-guard.killEntry` 那条"PID 复用也要拦住"
+ *   是同一条纪律）。
+ *
+ * @returns {Promise<{reachable: boolean, ours: boolean, startedAt?: number|null, why?: string}>}
+ *   `reachable:false` = 端口上没人在说话（大概率空着，也可能是占端口的不是 HTTP 服务）。
+ */
+export async function probeReviewHealth({ port, fetchImpl = fetch, timeoutMs = 900 } = {}) {
+  const p = Number(port)
+  if (!Number.isInteger(p) || p <= 0) return { reachable: false, ours: false, why: `端口号不合法：${port}` }
+  try {
+    const res = await fetchImpl(`http://127.0.0.1:${p}/api/health`, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return { reachable: true, ours: false, why: `端口 ${p} 上有服务，但它回的是 HTTP ${res.status}` }
+    const body = await res.json().catch(() => null)
+    if (body && body.tool === 'chat-review') return { reachable: true, ours: true, startedAt: body.startedAt ?? null }
+    return { reachable: true, ours: false, why: `端口 ${p} 上有服务，但它不是评审台（health 里没有 tool=chat-review）` }
+  } catch (error) {
+    return { reachable: false, ours: false, why: `端口 ${p} 上没有回应（${error?.message ?? error}）` }
+  }
+}
+
+/**
+ * 启动前**先接管端口**：把已经在跑的那一份评审台停掉。
+ *
+ * ── 为什么要有它（用户 2026-10-02 明确要求）──────────────────────────────
+ * 常见用法是双击 `启动评审.bat`。使用者想再开一份（或上一次的窗口被最小化、
+ * 忘了它还开着）时，旧做法是 `listen` 直接 EADDRINUSE 退出 —— 他看到的是
+ * "点了一下，窗口自己关了，什么都没发生"。所以启动第一步就是：**把旧的请走**。
+ *
+ * ── 三级手段，从最客气到最不客气，每一级都先认对方是谁 ────────────────────
+ *   ① **请它自己退**：`POST /api/shutdown`（不需要 PID、不涉及杀进程，最安全）；
+ *      然后**等端口真的空出来**才算成功（不能"发了请求就当它退了"）。
+ *   ② 它不退 → 从**进程登记**里找同一个 `profile` 的活条目，走 `killEntry(pid)` ——
+ *      那里有"PID + 命令行里的 instanceId"双重校验，专门防 PID 被复用后误杀。
+ *   ③ 连登记里都没有 → **拒绝动手**，如实说清"它还活着但我停不掉，请手动关那个窗口"。
+ *      （宁可让使用者手动关一下，也不要盲杀一个 PID。）
+ *
+ * @param {object} opts
+ * @param {number} opts.port
+ * @param {(m: string) => void} [opts.log]
+ * @param {() => object[]} [opts.listRunning] 进程登记（`guard.list()`）；不传 = 不做第 ② 级
+ * @param {(pid: number) => {ok: boolean, error?: string}} [opts.kill] 带身份校验的停进程（`guard.killEntry`）
+ * @param {number} [opts.graceMs]     等它自己退的耐心（默认 5 秒）
+ * @param {Function} [opts.fetchImpl] / [opts.sleep] 测试注入
+ * @returns {Promise<{ok: boolean, how?: 'none'|'graceful'|'killed', pid?: number, foreign?: boolean, why?: string}>}
+ */
+export async function stopRunningReviewServer({
+  port,
+  log = () => {},
+  listRunning = null,
+  kill = null,
+  graceMs = 5000,
+  fetchImpl = fetch,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  const p = Number(port)
+  const first = await probeReviewHealth({ port: p, fetchImpl })
+  if (!first.reachable) return { ok: true, how: 'none', why: '端口上没有回应（没有旧实例要停）' }
+  if (!first.ours) return { ok: false, foreign: true, why: first.why }
+
+  // ① 请它自己退
+  let asked = false
+  try {
+    const res = await fetchImpl(`http://127.0.0.1:${p}/api/shutdown`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(2000),
+    })
+    asked = Boolean(res?.ok)
+  } catch {
+    asked = false
+  }
+  if (asked) {
+    const deadline = Date.now() + Math.max(500, Number(graceMs) || 5000)
+    while (Date.now() < deadline) {
+      await sleep(200)
+      const again = await probeReviewHealth({ port: p, fetchImpl, timeoutMs: 400 })
+      if (!again.reachable) {
+        log(`[评审台] 端口 ${p} 上那份旧实例已经自己退出了`)
+        return { ok: true, how: 'graceful' }
+      }
+    }
+    log(`⚠️ [评审台] 端口 ${p} 上的旧实例**收到了关闭请求但没退**（等了 ${Math.round(graceMs / 1000)} 秒）`)
+  } else {
+    log(`⚠️ [评审台] 端口 ${p} 上的旧实例不接受关闭请求（可能是旧版本，还没有 /api/shutdown）`)
+  }
+
+  // ② 走进程登记 + 带身份校验的停进程
+  const entries = typeof listRunning === 'function' ? listRunning() : []
+  const target = entries.find((e) => Number(e.port) === p && !e.isSelf && e.state !== 'dead')
+  if (!target) {
+    return {
+      ok: false,
+      why:
+        `端口 ${p} 上确实还有一份评审台，但它没在进程登记里（多半是**加了登记之前**启动的旧版本），` +
+        `我**没法确认那个 PID 是谁**，所以不动手。\n` +
+        `   要手动关它：netstat -ano | findstr :${p}（最后一列是 PID）→ 关掉那个窗口，或 taskkill /PID <pid> /T /F\n` +
+        `   要直接绕开：node chat-review/server.mjs --port ${p + 1}`,
+    }
+  }
+  if (typeof kill !== 'function') {
+    return { ok: false, pid: target.pid, why: `旧实例还在（pid ${target.pid}），但这个入口没有接"停进程"的能力` }
+  }
+  const killed = kill(target.pid)
+  if (killed?.ok) {
+    // 停完要**复核端口真的空了**，否则下一步 listen 还是会撞上
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      await sleep(150)
+      const again = await probeReviewHealth({ port: p, fetchImpl, timeoutMs: 300 })
+      if (!again.reachable) {
+        log(`[评审台] 已停掉占用端口 ${p} 的旧实例（pid ${target.pid}）`)
+        return { ok: true, how: 'killed', pid: target.pid }
+      }
+    }
+    return { ok: false, pid: target.pid, why: `已发出停止信号，但端口 ${p} 仍被占着（pid ${target.pid}）` }
+  }
+  return {
+    ok: false,
+    pid: target.pid,
+    why: `停不掉旧实例（pid ${target.pid}）：${killed?.error ?? '未知原因'}`,
+  }
+}
+
+/**
  * 起服务器（**导出**是为了能被测试直接起一个，不必 spawn 子进程）。
  *
  * @param {object} opts
@@ -129,6 +256,8 @@ export function chatLabelOf(chatKey) {
  * @param {(m: string) => void} [opts.log]
  * @param {string} [opts.staticDir]         静态目录（测试可指向别处）
  * @param {string} [opts.styleDir]          风格文件所在目录（默认包根的 `styles/`；测试指向临时目录）
+ * @param {Function} [opts.onShutdown]      `POST /api/shutdown` 时干什么（默认 = 关监听并退出进程）
+ * @param {number} [opts.shutdownDelayMs]   先回响应再退出的缓冲（默认 150ms）
  */
 export function createReviewServer({
   workspace,
@@ -137,6 +266,8 @@ export function createReviewServer({
   log = () => {},
   staticDir = STATIC,
   styleDir = join(PKG_ROOT, 'styles'),
+  onShutdown = null,
+  shutdownDelayMs = 150,
 } = {}) {
   const root = String(workspace ?? '')
   if (!root) throw new Error('没有工作区，读不到语料库与评审数据')
@@ -448,6 +579,29 @@ export function createReviewServer({
         const r = store.deleteBatch(batchId)
         if (!r.ok) return fail(res, 404, r.why)
         return json(res, 200, { ok: true, removed: r.removed })
+      }
+
+      // ── ⑬ 请自己退出（给"启动时先接管端口"用）────────────────────────
+      //
+      // 为什么要有这条：常见用法是双击 `启动评审.bat`，而使用者可能忘了上一次那份
+      // 还开着（窗口被最小化）。没有它时，新实例只会 EADDRINUSE 退出，
+      // 使用者看到"点了一下窗口自己关了"。有了它，新实例启动第一步就是请旧的退下。
+      //
+      // ⚠️ 它**不是**远程关机后门：只监听 127.0.0.1、只关自己、而且必须显式 POST。
+      //    没接 `onShutdown` 的实例（比如测试里随手起的）会如实回 501，而不是假装退出。
+      if (req.method === 'POST' && path === '/api/shutdown') {
+        if (typeof onShutdown !== 'function') {
+          return fail(res, 501, '这个实例没有接"被关闭"这件事（onShutdown 没传），所以我不会假装退出')
+        }
+        json(res, 200, { ok: true, stopping: true, hint: '正在退出；新的实例会接管这个端口。' })
+        setTimeout(() => {
+          try {
+            onShutdown()
+          } catch (error) {
+            say(`❌ [评审台] 退出回调炸了：${error?.message ?? error}`)
+          }
+        }, Math.max(0, Number(shutdownDelayMs) || 0))
+        return
       }
 
       // ── 静态页 ───────────────────────────────────────────────────────

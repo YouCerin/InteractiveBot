@@ -18,7 +18,9 @@
  * 用法：node mocks/verify-chat-review.mjs
  */
 
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,7 +50,7 @@ import {
   unifiedDiff,
   validateScore,
 } from '../src/chat-review-store.mjs'
-import { createReviewServer } from '../src/chat-review-server.mjs'
+import { createReviewServer, probeReviewHealth, stopRunningReviewServer } from '../src/chat-review-server.mjs'
 import { createCorpus } from '../src/corpus.mjs'
 
 const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -73,6 +75,20 @@ function freshDir(tag) {
   const dir = mkdtempSync(join(tmpdir(), `dsh-review-${tag}-${process.pid}-`))
   tmpDirs.push(dir)
   return dir
+}
+
+/** 轮询等一个条件成真（给"端口空出来了吗""子进程起来了吗"这类等待用）。 */
+async function waitFor(fn, timeoutMs = 5000, stepMs = 200) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      if (await fn()) return true
+    } catch {
+      /* 还没好 */
+    }
+    if (Date.now() >= deadline) return false
+    await new Promise((r) => setTimeout(r, stepMs))
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -588,6 +604,136 @@ await withServer(
   // 模拟"父进程消失、stdout 管道断了"：任何一次 console.log 都会抛
   { log: () => { throw new Error('EPIPE: 管道断了') } },
 )
+
+// ══════════════════════════════════════════════════════════════════════════
+section('⑥b 启动时**先接管端口**：请旧实例退，认不出就绝不动手')
+// ══════════════════════════════════════════════════════════════════════════
+// 用户 2026-10-02 明确要求：启动评审台时先关掉已在跑的那一份，
+// 否则端口被占、新实例只会 EADDRINUSE 退出（使用者看到"点了一下窗口自己关了"）。
+//
+// ★ 这一节最要紧的不是"能停掉旧的"，而是**停错东西的风险**：
+//   所以三条安全断言（别人的服务不许碰 / 登记里没有就不动手 / 没真空出来不许报成功）
+//   和"能接管"同等重要。
+{
+  const ws = freshDir('takeover')
+  const styleDir = freshDir('takeover-style')
+  writeFileSync(join(styleDir, '闲聊.md'), '【x】\n', 'utf8')
+
+  /** 起一个评审台并**真的监听**，返回 {app, port, close}。 */
+  async function listenReview(opts = {}) {
+    const app = createReviewServer({ workspace: ws, styleDir, log: () => {}, ...opts })
+    await new Promise((r) => app.server.listen(0, '127.0.0.1', r))
+    return { app, port: app.server.address().port }
+  }
+  /** 真拿一个空闲端口号（先绑再放），用来造"端口空着"的场景。 */
+  async function freePort() {
+    const s = createServer(() => {})
+    await new Promise((r) => s.listen(0, '127.0.0.1', r))
+    const p = s.address().port
+    await new Promise((r) => s.close(r))
+    return p
+  }
+
+  // ① 端口空着
+  const none = await stopRunningReviewServer({ port: await freePort(), log: () => {} })
+  check('★ 端口空着 ⇒ 没有旧实例要停（是 ok，不是错误）', none.ok === true && none.how === 'none', JSON.stringify(none))
+
+  // ② 端口上跑着**别人** ⇒ 拒绝动手，而且那个人必须还活着
+  let killAttempted = false
+  const foreign = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, hello: '我不是评审台' }))
+  })
+  await new Promise((r) => foreign.listen(0, '127.0.0.1', r))
+  const fPort = foreign.address().port
+  const probeForeign = await probeReviewHealth({ port: fPort })
+  check('★ 健康探测认身份：回的不是评审台 ⇒ ours=false（附理由）',
+    probeForeign.reachable === true && probeForeign.ours === false && /不是评审台/.test(probeForeign.why), probeForeign.why)
+  const foreignStop = await stopRunningReviewServer({
+    port: fPort,
+    log: () => {},
+    listRunning: () => [{ pid: 999999, port: fPort, isSelf: false, state: 'alive' }],
+    kill: () => {
+      killAttempted = true
+      return { ok: true }
+    },
+  })
+  check('★★ 端口上是别的东西 ⇒ foreign 拒绝（照旧起不开，但绝不误伤）',
+    foreignStop.ok === false && foreignStop.foreign === true, JSON.stringify(foreignStop))
+  check('★★ 而且**连 kill 都不试**（这是"误杀"的唯一入口）', killAttempted === false)
+  const foreignAlive = await fetch(`http://127.0.0.1:${fPort}/`).then((r) => r.ok).catch(() => false)
+  check('★★ 那个"别人"必须还活着（误杀比起不来严重得多）', foreignAlive === true)
+  await new Promise((r) => foreign.close(r))
+
+  // ③ 端口上是**评审台** ⇒ 请它自己退（graceful），端口真的空出来
+  let asked = 0
+  const one = await listenReview({
+    onShutdown: () => {
+      asked += 1
+      one.app.server.close()
+    },
+  })
+  const takeover = await stopRunningReviewServer({ port: one.port, log: () => {} })
+  check('★★ 端口上是评审台 ⇒ 请它自己退（graceful，不需要杀进程）',
+    takeover.ok === true && takeover.how === 'graceful', JSON.stringify(takeover))
+  check('★ 它的退出回调真的被执行了（不是"发了请求就当它退了"）', asked === 1, String(asked))
+  const rebind = await new Promise((r) => {
+    const s = createServer(() => {})
+    s.once('error', (e) => r(e.code))
+    s.listen(one.port, '127.0.0.1', () => s.close(() => r('ok')))
+  })
+  check('★★ 接管之后端口**真的能用了**（绑定验证，不看它的自述）', rebind === 'ok', String(rebind))
+
+  // ④ 旧实例**不接受**被关闭（没接 onShutdown ⇒ 501）⇒ 走登记里那条带身份校验的 kill
+  const stubborn = await listenReview()
+  const noShutdown = await fetch(`http://127.0.0.1:${stubborn.port}/api/shutdown`, { method: 'POST' })
+    .then((r) => r.status)
+    .catch(() => 0)
+  check('★★ 没接 onShutdown 的实例如实回 501（不假装退出）', noShutdown === 501, String(noShutdown))
+  let killedPid = null
+  const escalated = await stopRunningReviewServer({
+    port: stubborn.port,
+    log: () => {},
+    graceMs: 600,
+    listRunning: () => [{ pid: 4242, port: stubborn.port, isSelf: false, state: 'alive' }],
+    kill: (pid) => {
+      killedPid = pid
+      return { ok: true }
+    },
+  })
+  check('★ 它不退 ⇒ 用登记里的 pid 走带身份校验的 kill', killedPid === 4242, String(killedPid))
+  check('★★ 但端口没真空出来时**不许宣称成功**（kill 报 ok ≠ 事情办成了）',
+    escalated.ok === false && /仍被占着/.test(escalated.why), JSON.stringify(escalated))
+  const refused = await stopRunningReviewServer({ port: stubborn.port, log: () => {}, graceMs: 600, listRunning: () => [] })
+  check('★★ 登记里找不到它 ⇒ 明确拒绝动手，并给出"手动关"的办法',
+    refused.ok === false && /手动关/.test(refused.why), refused.why)
+  const stubbornStill = await probeReviewHealth({ port: stubborn.port })
+  check('★ 它当然还在（我们没动它）', stubbornStill.ours === true)
+  stubborn.app.close()
+
+  // ⑤ 真机上最常见的路径：另一个**子进程**在跑，我把它接管过来
+  //    （这是唯一一次真的 spawn —— `stdio:'ignore'` 是受限环境里能用的那种）
+  const childPort = await freePort()
+  const child = spawn(process.execPath, [join(PKG_ROOT, 'chat-review', 'server.mjs'), '--port', String(childPort)], {
+    cwd: PKG_ROOT,
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  const up = await waitFor(async () => (await probeReviewHealth({ port: childPort, timeoutMs: 400 })).ours, 8000)
+  check('★★ 真的能起一个子进程实例（接管场景的前提）', up === true, `端口 ${childPort}`)
+  if (up) {
+    const real = await stopRunningReviewServer({ port: childPort, log: () => {}, graceMs: 6000 })
+    check('★★★ 真机路径：新实例启动时把旧的那份请走了（graceful 成功）',
+      real.ok === true && real.how === 'graceful', JSON.stringify(real))
+    const portFree = await waitFor(async () => !(await probeReviewHealth({ port: childPort, timeoutMs: 300 })).reachable, 6000)
+    check('★★★ 端口真的空出来了（下一个实例能绑上）', portFree === true)
+  }
+  try {
+    child.kill()
+  } catch {
+    /* 已经退了 */
+  }
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份互相对账）')

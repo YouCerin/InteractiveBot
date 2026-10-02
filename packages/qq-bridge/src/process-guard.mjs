@@ -158,6 +158,20 @@ export function createProcessGuard({
   profile = 'bridge',
   port = null,
   log = () => {},
+  /**
+   * 发现同 profile 的其它进程时，除了"检测到 N 个"之外还要说清**后果**。
+   *
+   * ★ 为什么必须可配：后果是与档位绑定的（桥接=抢 OneBot 事件流；
+   *   评审台=抢同一份评审数据）。默认给桥接那句话，别的档位自己传。
+   */
+  conflictHint = '同时跑两个会抢同一个 OneBot 事件流（同一句话可能被回两次），建议先停掉一个。',
+  /**
+   * 汇总报告时**是否**要报"同 profile 的其它进程"。
+   *
+   * ★ 什么时候该关掉：调用方**打算自己接管**这份冲突时（聊天记录评审台启动时就是
+   *   先请旧的退出）—— 那时先喊一句"还有别的在跑"再默默把它停掉，只会让人以为出了问题。
+   */
+  reportConflicts = true,
   // 可注入：测试里要验证"心跳过期"这条判定，不能真等两分钟。
   staleMs = STALE_MS,
   /**
@@ -253,14 +267,20 @@ export function createProcessGuard({
     if (cleaned.length) {
       log(`[guard] 清理了 ${cleaned.length} 条已失效的进程登记（PID 已不存在）`)
     }
-    if (conflicts.length) {
+    if (conflicts.length && reportConflicts) {
       // ★ 只报告，不擅自杀。理由：判定依据里含"心跳过期"这种可能误判的信号，
       //   而误杀一个正在干活的机器人比多跑一个更糟。
       log(
         `⚠️ 检测到 ${conflicts.length} 个**其它** ${profile} 进程仍在运行：` +
           conflicts.map((c) => `pid ${c.pid}（${c.reason}）`).join('、'),
       )
-      log('   → 同时跑两个会抢同一个 OneBot 事件流（同一句话可能被回两次），建议先停掉一个。')
+      // ★★ 后果要按**档位**说（2026-10-02 修）：这段原先把桥接的后果写死了
+      //   （"会抢同一个 OneBot 事件流、同一句话可能被回两次"），而它现在也被
+      //   非桥接的档位用（聊天记录评审台 profile='chat-review'）—— 那时这句话
+      //   是**错的**，而且会把人引到完全无关的方向去查。
+      //   真实后果是"同一个 profile 抢同一种资源"，各档位自己最清楚，所以：
+      //   有 `conflictHint` 就用它，否则按桥接的默认说法。
+      log(`   → ${conflictHint ?? '同时跑两个会抢同一份状态，建议先停掉一个。'}`)
       log(`   → 查看：node src/index.mjs --processes    强制停掉：node src/index.mjs --processes --kill <pid>`)
     }
 
