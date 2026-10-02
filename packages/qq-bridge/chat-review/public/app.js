@@ -179,7 +179,7 @@ function renderHealth() {
     const node = el('span', 'hv', `说话方式 ${numOrDash(sf.chars)} 字｜sha256 ${sha ? sha.slice(0, 8) : '（未给）'}`)
     node.title = String(sf.path ?? '')
     box.appendChild(node)
-  } else box.appendChild(el('span', 'hv bad', `说话方式源码读不到${sf?.path ? `（${sf.path}）` : ''}`))
+  } else box.appendChild(el('span', 'hv bad', `那份人设读不到${sf?.path ? `（${sf.path}）` : ''}`))
   const started = el('span', 'hv', `启动于 ${fmtTime(h.startedAt)}`)
   started.title = `本次服务进程的启动时间（分辨页面跑的是不是新起的进程）\ntool=${h.tool ?? '（未给）'}`
   box.appendChild(started)
@@ -390,7 +390,7 @@ async function removeBatch(b) {
   const n = Number.isFinite(b?.items) ? ` ${b.items} 条条目和` : ''
   const ok = window.confirm(
     `确认删除批次「${label}」？\n\n· 会删掉它的${n}全部评分，**不可撤销**；\n` +
-      '· 只动工作区里的评审数据：语料库和说话方式源码都不会被改。',
+      '· 只动工作区里的评审数据：语料库和人设文件都不会被改。',
   )
   if (!ok) return
   const data = await api(`/api/batch?id=${encodeURIComponent(String(b?.id ?? ''))}`, { method: 'DELETE' })
@@ -1396,7 +1396,7 @@ function renderConsolidate() {
     const trunc = Number.isFinite(ps.truncatedComments) && ps.truncatedComments > 0 ? `（另有 ${ps.truncatedComments} 条因长度没喂进去）` : ''
     $('consolidate-meta').textContent =
       `整理 ${l.id}｜${fmtTime(l.createdAt)}｜模型 ${l.model ?? '（未给）'}｜${numOrDash(l.ms)} ms\n` +
-      `修改意见 ${n} 条｜针对 src/voice.mjs 的说话方式（提这份意见时它 ${numOrDash(l.styleBeforeChars)} 字）｜` +
+      `修改意见 ${n} 条｜针对那份人设（提这份意见时它 ${numOrDash(l.styleBeforeChars)} 字）｜` +
       `喂进去 ${numOrDash(ps.kept)} 条评论${trunc}` +
       (l.notes ? `\n总体说明：${l.notes}` : '')
   } else {
@@ -1418,7 +1418,7 @@ const ACTION_LABEL = { rewrite: '改这一条', merge: '并进另一条', delete
  *
  * ★ 为什么这里没有"应用"按钮了（2026-10-02 第三版）：使用者要求
  *   「最终基于评价过的消息记录和评论，生成说话方式的修改意见」+
- *   「只要意见，修改内容由 LLM 另外执行」。所以评审台**不写** `src/voice.mjs` 的 `VOICE_STYLE` ——
+ *   「只要意见，修改内容由 LLM 另外执行」。所以评审台**不写**那份人设 ——
  *   它只把"该改哪一条、改成什么、为什么"摆出来，并给一个**一键复制**。
  */
 /**
@@ -1484,7 +1484,7 @@ function renderSuggestions(l) {
     box.appendChild(card)
   }
   box.appendChild(
-    el('div', 'note', '这些只是**意见**：评审台不会改 src/voice.mjs（按你的要求，改动由 LLM 另外执行）。用下面的「复制」把它整段拿走。'),
+    el('div', 'note', '这些只是**意见**：评审台不会改那份人设（按你的要求，改动由 LLM 另外执行）。用下面的「复制」把它整段拿走。'),
   )
 }
 

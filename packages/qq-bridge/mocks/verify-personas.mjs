@@ -84,9 +84,31 @@ const cfg = (persona) => ({ persona })
  *     不该为了让测试好写而多留一份。
  */
 const SIDE = '软糯小鲸鱼（情绪）'
-/** 在某个目录里现建一份侧人设（内容是出厂那份 + 一句标记）。返回目录。 */
+
+/**
+ * 侧人设的正文：**独立短文**（不复用出厂那份）。
+ *
+ * ★ 为什么不用 `copyFrom: 出厂那份`：那样侧人设会长到几千字，**贴着上限走** ——
+ *   0.3.0alpha 第二步把说话方式并进人设后，出厂那份涨到 4742 字，`withSide()` 当场
+ *   因为超上限而抛（"正文 4741 字，超过上限 4000 字"）。测试不该被"当前那份出厂人设
+ *   恰好多长"绑架 —— 它要验的是**库的管理动作**，一份自足的短文足够。
+ * ★ 带名字块：这样 `hasNameBlock` 那类断言才有意义。
+ */
+const SIDE_TEXT = [
+  '【名字（机器可读，改格式会让"叫名字"失效）】',
+  '正式名: 软糯小鲸鱼',
+  '别名: 软糯 / 鲸鱼',
+  '又称: DeepSeek',
+  '',
+  '【怎么说话】',
+  '',
+  '偏好短句；需要说清楚就说够。',
+  '',
+].join('\n')
+
+/** 在某个目录里现建一份侧人设。返回目录。 */
 function withSide(dir) {
-  const r = createPersona({ dir, name: SIDE, copyFrom: DEFAULT_PERSONA_FILES[0].name })
+  const r = createPersona({ dir, name: SIDE, text: SIDE_TEXT })
   if (!r.ok) throw new Error(`建侧人设失败：${r.error ?? JSON.stringify(r)}`)
   return dir
 }
@@ -117,6 +139,30 @@ section('① 出厂那一份：落成**文件**（不是代码里的特例），
   check('★★★ 三个旧预设 id 仍然认，但取值全是**这唯一一份**（老配置不报错、不空白）',
     ['mermaid', 'mermaid-lite', 'mermaid-soft'].every((id) => PERSONA_PRESETS[id] === DEFAULT_PERSONA_FILES[0].text),
     ['mermaid', 'mermaid-lite', 'mermaid-soft'].map((id) => (PERSONA_PRESETS[id] === DEFAULT_PERSONA_FILES[0].text ? 'ok' : 'x')).join(''))
+
+  // ── ★★★ 常量必须与**仓库里那份文件**逐字一致 ──────────────────────────
+  //
+  // ⚠️ 上面几条只比"常量与常量"（`DEFAULT_PERSONA_FILES[0].text` vs `PERSONA_PRESETS[...]`），
+  //    两个都在代码里 —— 于是**改了 .md 而忘了同步常量，它们照样是绿的**。
+  //    变异测试当场抓到了这一点（把文件里"不像在写回答"改成"不太像"⇒ 一条都没红）。
+  //    ∴ 必须**读那个文件**来比。这条断言才是"两份会漂"的真正门禁。
+  const factoryFile = readFileSync(join(PKG_ROOT, 'personas', `${DEFAULT_PERSONA_FILES[0].name}.md`), 'utf8')
+  check('★★★ 仓库里那份人设文件与 `FACTORY_PERSONA` 常量**逐字一致**（改了文件必须同步常量）',
+    factoryFile === DEFAULT_PERSONA_FILES[0].text,
+    factoryFile === DEFAULT_PERSONA_FILES[0].text
+      ? `${factoryFile.length} 字`
+      : `文件 ${factoryFile.length} 字 vs 常量 ${DEFAULT_PERSONA_FILES[0].text.length} 字 —— ` +
+        '改了 personas/*.md 就要把 src/persona.mjs 的 FACTORY_PERSONA 同步过去（「恢复默认」靠它）')
+
+  // ── ★★★ 长度上限必须**容得下出厂那份**（否则自相矛盾）────────────────
+  //
+  // 这条也是变异测试教出来的：把 `PERSONA_MAX_CHARS` 从 8000 改回 4000（低于出厂那份 4742 字）
+  // 时，**一条断言都没红** —— 而那个状态下"以出厂那份为基础新建 / 保存"会被直接拒、
+  // 界面字数计数器一直显示超标。上限的意义是"别把提示词撑爆"，不是"比出厂那份还小"。
+  const factoryChars = [...DEFAULT_PERSONA_FILES[0].text].length
+  check('★★★ 长度上限容得下出厂那份（否则"以它为基础新建"会被自己的上限拒掉）',
+    PERSONA_MAX_CHARS > factoryChars,
+    `上限 ${PERSONA_MAX_CHARS} vs 出厂 ${factoryChars} 字`)
   check('新建模板自带名字块（新起一套时"叫名字"不会静默失效）',
     PERSONA_TEMPLATE.includes('【名字（机器可读'))
 

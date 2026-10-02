@@ -519,6 +519,9 @@ export function createWakeJudge(opts = {}) {
 //
 // ⚠️ 被它一起带走的还有三样，都在别处删干净了：
 //   · `chat.mode.ambiguous.*` 那组配置（含它自己的小时预算与通路）；
+//   · 更后面（0.3.0alpha 两步走）连"说话方式"本身也搬了家：先是 `src/voice.mjs` 的
+//     `VOICE_STYLE` 常量 + `composeVoice()` 每轮替换，最后**写进了人设文件**
+//     （`src/voice.mjs` / `src/voice-source.mjs` 都已删除）。
 //   · `bridge.mjs` 的 `#detectTurnMode` / `#modeJudge` / `#modeAborts`；
 //   · 界面上"拿不准按哪个态"那张卡片。
 // 唤醒判定器**不受影响** —— 它一直是独立的一个实例、independent 的预算。

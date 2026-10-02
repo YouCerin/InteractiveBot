@@ -11,7 +11,7 @@
  *
  * ── 它连什么、不连什么（边界如实说）────────────────────────────────────
  * · **不连桥接**：它直接读工作区里的语料库（`runtime/corpus.sqlite`，只读）
- *   与 `src/voice.mjs` 里那份说话方式。桥接在跑、甚至桥接没跑，它都能用。
+ *   与当前那份**人设文件**（说话方式就在它里面）。桥接在跑、甚至桥接没跑，它都能用。
  * · 写操作只有两件：写评分、删批次 —— **都在 `runtime/chat-review/` 下**。
  *   ★ 0.3.0alpha：原先还有第三件「**应用草稿**」（唯一会碰文案文件的操作，
  *   要备份 + 显式确认）—— **那条路已经删掉了**（`/api/apply` 是 404）。
@@ -55,10 +55,51 @@ import {
   clusterComments,
   consolidateComments,
 } from './chat-review-consolidate.mjs'
-import { readVoiceSource, sha256, voiceSourcePath } from './voice-source.mjs'
 import { chatOnce, resolveDirectTarget } from './model-direct.mjs'
 import { createCorpus, silenceSqliteWarning } from './corpus.mjs'
 import { PKG_ROOT } from './local.mjs'
+import { createHash } from 'node:crypto'
+import { readFileSync as readFileSyncTop } from 'node:fs'
+
+/** 出厂那份人设的文件名（评审的默认目标）。 */
+const DEFAULT_PERSONA_NAME = '小鲸鱼（完整带情绪）'
+
+/** 默认评审目标：`personas/<出厂那份>.md`。 */
+function defaultPersonaPath() {
+  return join(PKG_ROOT, 'personas', `${DEFAULT_PERSONA_NAME}.md`)
+}
+
+/** 文本 sha256（"这份意见针对哪一版"就靠它）。 */
+function hashText(text) {
+  return createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex')
+}
+
+/**
+ * 读评审目标（**人设文件**）的现状。
+ *
+ * ★ 为什么是"读人设文件"而不是读某个常量：0.3.0alpha 第二步把说话方式**写进了人设文件**，
+ *   所以"要改的那份文案"就是它。评审台只读不写 —— 意见里记一个 sha 就够了。
+ * ★ 读不到时**不回落**任何内置文本（如实失败）：目标不存在就说明白，
+ *   而不是拿一份别的东西冒充"当前文案"（那会让意见指向一份没人用的文本）。
+ */
+function readReviewTarget(path) {
+  let text = ''
+  try {
+    text = readFileSyncTop(path, 'utf8')
+  } catch (error) {
+    const missing = error?.code === 'ENOENT'
+    return {
+      ok: false,
+      text: '',
+      sha256: '',
+      chars: 0,
+      source: missing ? 'missing' : 'unreadable',
+      why: missing ? `找不到 ${path}` : `读不出 ${path}：${error?.message ?? error}`,
+    }
+  }
+  const trimmed = text.trim()
+  return { ok: true, text: trimmed, sha256: hashText(trimmed), chars: [...trimmed].length, source: 'file' }
+}
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 /** 静态页在包根的 `chat-review/public/`（`src/` 的上一级）。 */
@@ -269,7 +310,8 @@ export async function stopRunningReviewServer({
  * @param {string[]} [opts.selfNames]       导入时把哪些昵称当机器人（默认见 SELF_NAMES_DEFAULT）
  * @param {(m: string) => void} [opts.log]
  * @param {string} [opts.staticDir]         静态目录（测试可指向别处）
- * @param {string} [opts.voicePath]         说话方式源码（默认包根的 `src/voice.mjs`；测试指向临时副本）
+ * @param {string} [opts.personaPath]       评审目标：当前生效那份人设文件
+ *        （默认 `personas/小鲸鱼（完整带情绪）.md`；测试可指向临时副本）
  * @param {Function} [opts.onShutdown]      `POST /api/shutdown` 时干什么（默认 = 关监听并退出进程）
  * @param {number} [opts.shutdownDelayMs]   先回响应再退出的缓冲（默认 150ms）
  * @param {object} [opts.config]            归一化配置（解析模型通路用；不传 = 整理功能不可用）
@@ -281,7 +323,7 @@ export function createReviewServer({
   selfNames = SELF_NAMES_DEFAULT,
   log = () => {},
   staticDir = STATIC,
-  voicePath = '',
+  personaPath = '',
   onShutdown = null,
   shutdownDelayMs = 150,
   config = null,
@@ -308,15 +350,18 @@ export function createReviewServer({
       /* 管道断了/日志写不出去：服务照常 */
     }
   }
-  // ── 0.3.0alpha：评审的目标从 `styles/闲聊.md` 换成 `src/voice.mjs` ──────────
+  // ── 0.3.0alpha：评审的目标是**当前生效那份人设** ────────────────────────
   //
-  // 原来这里要过 `resolveChatStyleName` 拼 `styles/<名字>.md`（那个"空名字会拼出
-  // `<styles>/.md`"的坑就是这么来的，详见 styles.mjs 的注释）。双态拆掉之后
-  // 说话方式**只有一份**、而且它就在 `src/voice.mjs` 的 `VOICE_STYLE` 常量里 ——
-  // 于是"拼路径 + 空名字回落 + 目录不存在回落内置默认"这一整条都没有对象了。
-  // ★ 但**评审台读它这件事本身没变**：修改意见必须指向那份文案里的具体条目，
+  // 这条路的演进（读注释的人容易混，所以写清）：
+  //   · 0.3.0beta：目标是 `styles/闲聊.md`（要过 `resolveChatStyleName` 拼路径 ——
+  //     那个"空名字会拼出 `<styles>/.md`"的坑就是这么来的）；
+  //   · 0.3.0alpha 第一步：目标换成 `src/voice.mjs` 的 `VOICE_STYLE` 常量；
+  //   · 0.3.0alpha 第二步（**当前**）：那段内容**搬进了人设文件**，所以目标是
+  //     **人设文件本身**（`personas/<名字>.md`）。
+  // ★ **评审台读它这件事没变**：修改意见必须指向那份文案里的具体条目，
   //   而且每条意见都记着当时的 sha（"这份意见针对哪一版"永远查得到）。
-  const styleFile = String(voicePath ?? '') || voiceSourcePath()
+  // ★ 默认取 `personas/` 下出厂那一份；测试可以用 `personaPath` 指向临时副本。
+  const styleFile = String(personaPath ?? '') || defaultPersonaPath()
   const store = createReviewStore({ workspace: root, log: say })
   // ⚠️ 这里**没有**"点表播种"了（2026-10-02 第三版）：使用者要求
   //   「标签系统改为人工写标签」，而自动播种正是上一版把长句子塞进按钮的元凶。
@@ -333,9 +378,9 @@ export function createReviewServer({
 
   const staticRoot = normalize(resolve(staticDir))
 
-  /** 说话方式的现状（`/api/health` 与整理共用；**每条请求现读**）。 */
+  /** 评审目标的现状（`/api/health` 与整理共用；**每条请求现读**）。 */
   function styleFacts() {
-    return readVoiceSource({ path: styleFile })
+    return { ...readReviewTarget(styleFile), path: styleFile }
   }
 
   const server = createServer(async (req, res) => {
@@ -383,7 +428,7 @@ export function createReviewServer({
             path: styleFile,
             exists,
             chars,
-            sha256: sha256(String(style.text ?? '')),
+            sha256: hashText(String(style.text ?? '')),
             source: style.source,
             why: style.why ?? null,
           },

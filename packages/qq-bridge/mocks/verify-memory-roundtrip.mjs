@@ -1304,51 +1304,46 @@ async function main() {
         false, `${FIXTURE} 缺失；确要重建就先建 ${REGEN_MARK}，并在提交信息里说明为什么`)
     } else {
       const want = norm(readFileSync(FIXTURE, 'utf8'))
-      // ── ★★★ 先把"说话方式"这一段从两边剥掉，再逐字比其余部分 ──────────────
+      // ── ★★★ 逐字比对（**整份**提示词，不再剥任何东西）─────────────────────
       //
-      // 为什么要剥（这一条是 0.3.0alpha 才想清楚的，前身是 §5④ 那条教训的同类）：
-      //   说话方式（`src/voice.mjs` 的 `VOICE_STYLE`，约 2900 字）**每一轮**都进提示词。
-      //   它是一段会被人反复改的文案 —— 而 fixture 是逐字快照。
-      //   不剥的话，**改文案里一个逗号**就会让"提示词结构没漂"这条断言变红，
-      //   而红的原因并不是结构问题（转交文档 §5④ 记的正是这一类误报：
-      //   当年拿一个自然语言词组当位置探针，风格文件里出现同样的词就误红）。
-      //   ∴ 剥掉它之后，这条断言只盯**其余各段的拼装与顺序** —— 那是它真正要保护的东西；
-      //   而"说话方式到底有没有进去、是不是当前那一份"由下面两条**定向**断言负责。
-      const voice = await import('../src/voice.mjs').then((m) => m.VOICE_STYLE.trim())
-      const stripVoice = (s) => String(s).split(voice).join('<VOICE>')
-      const wantBody = stripVoice(want)
-      const gotBody = stripVoice(golden)
-      const sameBody = wantBody === gotBody
-      check('★★★ 提示词**除说话方式之外**与基线逐字相同（结构没漂：段落、顺序、措辞）', sameBody,
-        sameBody ? `${gotBody.length} 字（已剥掉 ${voice.length} 字的说话方式）` : (() => {
-          const i = [...wantBody].findIndex((c, k) => c !== gotBody[k])
-          return `第一处差异在第 ${i} 字：基线「${wantBody.slice(Math.max(0, i - 30), i + 30)}」 vs 现在「${gotBody.slice(Math.max(0, i - 30), i + 30)}」`
+      // 这一条在 0.3.0alpha 中间那一版曾经"先把说话方式剥掉再比" —— 因为当时
+      // 说话方式是 `src/voice.mjs` 的一段**会被人反复改**的常量，不剥的话改一个逗号
+      // 就会让"结构没漂"误红（转交文档 §5④ 记的正是这类误报）。
+      // ★ 0.3.0alpha 第二步之后**不需要剥了**：说话方式就在**人设文件**里，而人设是
+      //   **数据不是代码** —— 改它本来就该重建这份基线（基线的用途就是"钉住这一份"）。
+      //   ∴ 这里回到最朴素也最强的判据：**整份提示词逐字相同**。
+      const same = want === golden
+      check('★★★ 提示词与基线**逐字相同**（段落、顺序、措辞一个字都不许漂）', same,
+        same ? `${golden.length} 字` : (() => {
+          const i = [...want].findIndex((c, k) => c !== golden[k])
+          return `第一处差异在第 ${i} 字：基线「${want.slice(Math.max(0, i - 30), i + 30)}」 vs 现在「${golden.slice(Math.max(0, i - 30), i + 30)}」`
         })())
-      check('  长度也在同一量级（±2%）', Math.abs(gotBody.length - wantBody.length) / Math.max(1, wantBody.length) < 0.02,
-        `基线 ${wantBody.length} / 现在 ${gotBody.length}`)
+      check('  长度也在同一量级（±2%）', Math.abs(golden.length - want.length) / Math.max(1, want.length) < 0.02,
+        `基线 ${want.length} / 现在 ${golden.length}`)
 
-      // ── 定向断言①：说话方式**真的注入了**，而且是**当前那一份**（逐字）──
-      //   这一条把"文案改了没重生成基线"这件事**指出来**，而不是让它表现成
+      // ── 定向断言：说话方式**真的在提示词里**，而且是**当前人设文件那一份** ──
+      //   这一条把"人设改了没重生成基线"这件事**指出来**，而不是让它表现成
       //   "结构漂了"那种误导人的红。
-      const voiceInPrompt = golden.includes(voice)
-      check('★★★ 说话方式**逐字**在提示词里（当前 `VOICE_STYLE` 那一份）', voiceInPrompt,
-        voiceInPrompt
-          ? `${voice.length} 字`
-          : '提示词里的说话方式与 src/voice.mjs 的 VOICE_STYLE 不一致 —— 若你刚刚有意改了文案，' +
+      const personaText = readFileSync(join(PKG_ROOT_FOR_FIXTURE, 'personas', '小鲸鱼（完整带情绪）.md'), 'utf8').trim()
+      const inPrompt = golden.includes(personaText)
+      check('★★★ 当前那份人设**逐字**在提示词里（说话方式就在它里面）', inPrompt,
+        inPrompt
+          ? `${personaText.length} 字`
+          : '提示词里的人设与 personas/小鲸鱼（完整带情绪）.md 不一致 —— 若你刚刚有意改了它，' +
             '请建 `.regenerate-golden` 重建基线（并在提交信息里说明为什么）')
       check('★ 而且只注入一次（拼接重复会让它吃两份 token）',
-        golden.split(voice).length - 1 === 1,
-        `出现 ${golden.split(voice).length - 1} 次`)
+        golden.split(personaText).length - 1 === 1,
+        `出现 ${golden.split(personaText).length - 1} 次`)
 
       // ── 定向断言②：融合的那条开口子真的进了提示词 ──────────────────────
-      const allowance = await import('../src/voice.mjs').then((m) => m.WORK_ALLOWANCE.trim())
-      check('★★ 融合的开口子（真在干活时该说清就说清）在提示词里', golden.includes(allowance))
+      check('★★ 融合的开口子（真在干活时该说清就说清）在提示词里',
+        golden.includes('真在干活时，该说清就说清'))
 
-      // ── 反向断言：被替换掉的那两节与那句冲突指令**不许**出现在提示词里 ──
+      // ── 反向断言：被取代的那两节与那句冲突指令**不许**出现在提示词里 ──────
       //   （这是 0.3.0alpha 的核心承诺，由**结构标记**判，不用自然语言词组）
-      check('★★★ 基座的【怎么说话】【别变成客服】已被替换掉（提示词里没有这两个标题）',
+      check('★★★ 旧的【怎么说话】【别变成客服】两节已被取代（提示词里没有这两个标题）',
         !golden.includes('【怎么说话】') && !golden.includes('【别变成客服】'))
-      check('★★★ 基座那句相反指令（"认真问技术问题就认真答"）不在提示词里',
+      check('★★★ 那句相反指令（"认真问技术问题就认真答"）不在提示词里',
         !golden.includes('但对方认真问事实、技术问题时，就认真答'))
       check('★ 双态时代那句「这一轮是闲聊」也不在（没有第二个态可指）',
         !golden.includes('【这一轮是**闲聊**】'))

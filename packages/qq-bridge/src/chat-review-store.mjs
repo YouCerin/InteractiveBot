@@ -28,8 +28,9 @@
  *   · ★ 为什么这是对的：上一版实测跑出来 **2389 → 2388 字**，等于把原文件还给我 ——
  *     整篇重写在这个场景里没有产出价值，而"该改哪一条"才是人能直接用的东西。
  *
- * **0.3.0alpha 补注**：上述文案的位置从 `styles/闲聊.md` 换成了 `src/voice.mjs`
- * 的 `VOICE_STYLE`（说话方式只剩这一份）。本模块的**行为一个字没变** ——
+ * **0.3.0alpha 补注**：上述文案的位置搬过两次 ——
+ * `styles/闲聊.md` → 第一步 `src/voice.mjs` 的 `VOICE_STYLE` → **第二步：就在人设文件里**
+ * （`personas/小鲸鱼（完整带情绪）.md`）。本模块的**行为一个字没变** ——
  * 它本来就不关心那份文案在哪，只看调用方传进来的 `styleBefore`。
  *
  * ── 写操作只剩两件（都在工作区 `runtime/chat-review/` 下）─────────────────
@@ -40,7 +41,12 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
 import { dirname, join } from 'node:path'
 
 import { anchorCoverage, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
-import { sha256 } from './voice-source.mjs'
+import { createHash } from 'node:crypto'
+
+/** 文本 sha256（"这份意见是针对哪一版提的"就靠它）。 */
+function sha256(text) {
+  return createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex')
+}
 
 /** 评审数据放在工作区的 `runtime/` 下（与语料库、任务台账同级；不进发布包）。 */
 export const REVIEW_REL = 'runtime/chat-review'
@@ -318,7 +324,7 @@ function readJson(abs, fallback, log) {
  * ⚠️ 它**不需要**那份文案的路径 —— 这一版不写它（产物是修改意见，
  * 由人拿去给 LLM 执行）。那份文案的正文由调用方读好后作为 `styleBefore` 传进
  * `saveConsolidation`，只用来记"这份意见是针对哪个版本提的"。
- * （0.3.0alpha：那段正文现在由 `src/voice-source.mjs` 的 `readVoiceSource()` 读。）
+ * （0.3.0alpha 第二步：那段正文就是**人设文件本身**，由 `chat-review-server.mjs` 现读。）
  *
  * @param {object} opts
  * @param {string} opts.workspace 工作区（评审数据写在它下面）

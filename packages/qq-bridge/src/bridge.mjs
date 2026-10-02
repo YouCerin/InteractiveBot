@@ -99,14 +99,7 @@ import { buildPermissionInstructions, createRoster } from './roster.mjs'
 import { createInterimPicker } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
 import { resolveActivePersona } from './personas.mjs'
-// ★★ 说话方式（0.3.0alpha）：**只有一份口径**，所有回合都用它。
-//   0.3.0beta 的「闲聊态 / 工作态」双态已拆掉（判定器、`chat.mode.*` 配置、
-//   `styles/闲聊.md` 与那个"每轮现读风格文件"的通道一并下线）——
-//   融合的理由、以及那条消解自相矛盾的唯一新增条款（`WORK_ALLOWANCE`）
-//   都写在 `voice.mjs` 的文件头里，改这里之前先读它。
-//   · `voice.mjs` 是纯函数（拼装说话方式）—— 零 I/O，可离线审阅；
-//   · `persona-sections.mjs` 是节名归一与按节替换（同样是纯函数）。
-import { VOICE_STYLE, composeVoice } from './voice.mjs'
+import { personaVoiceSections } from './persona-sections.mjs'
 import { ensureProjectDocCopy } from './project-doc.mjs'
 import { buildChannelPrompt } from './channel-prompt.mjs'
 import { collectSkillPromptSections, isSkillEnabled, skillToolFullName, callSkillAvailable } from './extensions.mjs'
@@ -185,17 +178,14 @@ export class Bridge extends EventTarget {
   #affectGate = null
 
   /**
-   * 上一次记过日志的"说话方式拼装结果"签名（`replace:怎么说话` / `append` / `none`）。
+   * 上一次记过日志的"人设形状"签名（`has:说话方式…` / `none:3`）。
    *
-   * 为什么要记：`composeVoice` 有**两条**路 ——
-   *   · `replace`：人设分得出「口吻节」⇒ 真换掉了；
-   *   · `append` ：分不出节 / 没有口吻节（整篇散文）⇒ 只能追加，
-   *     **原人设里与说话方式冲突的句子还在提示词里**，模型要自己取舍。
-   * 这条差别决定了"这套人设到底换没换成功"，但它**在提示词里看不出来**
-   * （两种情况提示词里都有那段说话方式）。所以记一行日志，并且在结果**变化时**
-   * 再记一次（人设要重启才换，但这里仍按签名去重，避免每轮刷屏）。
+   * 为什么要记：说话方式现在**就在人设文件里**，"这份人设到底有没有那一节"只能靠日志回答 ——
+   * 它在提示词里看不出来（散文人设与多节人设最终都是"一段人设文本"）。
+   * 按签名去重：人设要重启才换，但同一个形状不必每轮刷屏。
    * @type {string}
    */
+  #personaShapeLogged = ''
   #personaStrategyLogged = ''
 
   /**
@@ -509,19 +499,21 @@ export class Bridge extends EventTarget {
     //   拿它当唤醒词会让机器人在不相关讨论里插嘴。这条判断写在 persona 的数据里。
     this.wakeKeywords = mergeWakeKeywords(this.config.trigger?.keywords ?? [], this.personaText)
 
-    // ★★ 说话方式（0.3.0alpha）：**只有一份口径**，没有"读哪个文件"这回事了。
+    // ★★ 说话方式（0.3.0alpha）：**它就在人设文件里**，这一层不再拼任何东西。
     //
-    //   0.3.0beta 在这里做的是"每轮现读 `styles/<名字>.md`"（所以改文件下一轮生效），
-    //   双态拆掉之后这份口径**搬进了 `src/voice.mjs` 的常量**，于是：
-    //     · 没有"文件读不到就回落内置默认"这件事（那个回落路径与它的日志一起去掉了）；
-    //     · 也没有"两份文本会漂"这件事（`chat-style-sync.mjs` 与评审台对着文件
-    //       干活的那条通道一并重接到 `src/voice.mjs`）；
-    //     · 改动生效要**重启**（与 `src/*.mjs` 全体一致）—— 这是这一次的行为变化，
-    //       写在 0.3.0alpha 的发布说明里，别让它变成使用者自己发现的意外。
-    //   ★ `VOICE_STYLE` 在这里被引用一次：它是"这个人设文件里有没有可替换的口吻节"
-    //     之外唯一的口径来源，也是 `composeVoice` 的默认值 —— 引用它让"这一版用的是
-    //     哪份说话方式"在源码里可 grep。
-    this.voiceStyle = VOICE_STYLE
+    //   演进到这里经过了两步（读注释的人容易以为是同一件事，所以写清）：
+    //     · 0.3.0beta：说话方式是 `styles/<名字>.md`，**每轮现读**，闲聊态才替换人设的
+    //       【怎么说话】【别变成客服】两节；
+    //     · 0.3.0alpha 第一步：双态拆掉，口径搬进 `src/voice.mjs` 的常量，由
+    //       `composeVoice()` 每轮替换那两节；
+    //     · 0.3.0alpha 第二步（**当前**）：出厂人设只剩一份，于是把那段内容**直接写进
+    //       `personas/小鲸鱼（完整带情绪）.md`**，`src/voice.mjs` 与
+    //       `src/voice-source.mjs` **整个删掉** —— 提示词直接用**完整人设**
+    //       （`this.personaText`），再没有"替换/追加"这回事。
+    //   ∴ 现在的规矩很简单：**要改说话方式就改那个人设文件**（改了要重启，人设是构造期缓存的）。
+    //   ⚠️ 唯一要盯的是"这份人设里到底有没有说话方式那一节"—— 使用者完全可以把文件换成
+    //      自己写的散文（那时就没有）。这属于**配置问题不是故障**，所以只记一行日志、
+    //      不拦、也不回落内置（`#notePersonaShape`）。
 
     // ★ 会话 instance **在构造时算一次**，本次进程生命周期内固定不变。
     //
@@ -1625,30 +1617,29 @@ export class Bridge extends EventTarget {
   }
 
   /**
-   * 把"这一轮人设是怎么拼出来的"记一行（**只在结果变化时记**，不每轮刷屏）。
+   * 把"这份人设长什么样"记一行（**只在形状变化时记**，不每轮刷屏）。
    *
    * ── 为什么非要有这一行 ────────────────────────────────────────────────
-   * `composeVoice` 对"人设里没有可识别的口吻节"是**退让**的：
-   * 它改成把说话方式**追加**在末尾，原人设里与它冲突的句子（例如
-   * 「需要说清楚就说够，**长一点也完全可以**」）**原样留在提示词里**。
-   * 两种情况在提示词里看起来都"有一段说话方式"，光看提示词分不出来 ——
-   * 用户当前启用的 `软糯小鲸鱼（情绪）.md` 第一版走的就是这条退让路
-   * （分节器当时只认 `【】`，而那份人设写的是 `二、怎么说话`）。
-   *
-   * 所以：`replace` 记一行"真的换掉了哪几节"，`append` 记一行⚠️并**给出怎么改**
-   * （把口吻那节命名成 `【怎么说话】` 或 `二、怎么说话`）。
+   * 说话方式现在**就在人设文件里**（0.3.0alpha 第二步），所以这一层不再拼任何东西 ——
+   * 但"这份人设里到底有没有说话方式那一节"仍然是个**只有日志能回答**的问题：
+   *   · 换成自己写的散文 ⇒ 说话方式那两节（或替换后的那一节）根本不存在，
+   *     提示词里就只剩那段散文；**这属于配置问题，不是故障**，所以不拦、也不回落内置；
+   *   · 而且它在**提示词里看不出来**（散文人设和多节人设，最终都是"一段人设文本"）。
+   * ∴ 记一行：认得出就报"有说话方式这一节（第 N 节）"，认不出就 ⚠️ 并**给出怎么改**
+   *   （把口吻那节命名为「【说话方式…】」或「【怎么说话】」或编号式「二、怎么说话」）。
    */
-  #notePersonaStrategy({ strategy, replaced = [] } = {}) {
-    const sig = `${strategy}:${replaced.join(',')}`
-    if (sig === this.#personaStrategyLogged) return
-    this.#personaStrategyLogged = sig
-    if (strategy === 'replace') {
-      this.log(`[voice] 人设：已替换 ${replaced.length} 节（${replaced.join('、')}），其余各节逐字保留`)
-    } else if (strategy === 'append') {
+  #notePersonaShape(personaText) {
+    const { voice, sections } = personaVoiceSections(personaText)
+    const sig = voice ? `has:${voice.title}` : `none:${sections.length}`
+    if (sig === this.#personaShapeLogged) return
+    this.#personaShapeLogged = sig
+    if (voice) {
+      this.log(`[persona] 说话方式：人设里有「${voice.title}」这一节（共 ${sections.length} 节），提示词直接用整份人设`)
+    } else {
       this.log(
-        '⚠️ [voice] 这套人设里分不出「怎么说话」那一节，说话方式只能**追加**在末尾 —— ' +
-          '原人设里与它冲突的说法**仍然在提示词里**（靠那段文本的「以本节为准」压住）。' +
-          '要在提示词里真正替换掉，就把口吻那一节命名为「【怎么说话】」或「二、怎么说话」。',
+        '⚠️ [persona] 这套人设里**没有**可识别的「说话方式」那一节 —— ' +
+          '提示词里就只有你写的正文（不再有内置口吻兜底）。' +
+          '要让它回到出厂那份，就把口吻那节命名为「【说话方式…】」或「【怎么说话】」或「二、怎么说话」。',
       )
     }
   }
@@ -2327,7 +2318,7 @@ export class Bridge extends EventTarget {
     //   · `#detectTurnMode` 那一档"规则拿不准就问一次模型"的调用与它的小时预算；
     //   · `#modeAborts` 那套"旧判定让路"的取消柄；
     //   · 把 `mode` / `modeSource` 写回会话镜像、供界面回答"这条为什么这么短"。
-    // 现在说话方式只有一份（`src/voice.mjs`），这一轮**没有态**可判 ——
+    // 现在说话方式只有一份、而且**就在人设文件里**，这一轮**没有态**可判 ——
     // 判定那一步既不产生行为差异，也不再有成本，留着只会让人以为它还在起作用。
 
     return this.#withLock(chatKey, async () => {
@@ -3075,25 +3066,23 @@ export class Bridge extends EventTarget {
     //   `#stickerPromptBits()` 里的 `readStickerLibrary` + `labelCoverage`。
     //   而且这两段**不是**表情包技能贡献的（它的 `prompt.source = "none"`）。
     const sticker = this.#stickerPromptBits()
-    // ── ★★ 说话方式：人设文本**每轮现拼**（0.3.0alpha）────────────────────
+    // ── ★★ 说话方式：**就在人设文本里**（0.3.0alpha 第二步）─────────────
     //
-    // 这一行以前是 `this.personaText`（构造期缓存、永远不会变）。0.3.0beta 只在
-    // **闲聊态**拼（工作态直接用人设原文，那条路是"工作态 = 升级前行为"的实现）；
-    // 0.3.0alpha 拆掉双态之后**每一轮都拼** —— 说话方式只有一份，没有"哪一轮不换"。
+    // 0.3.0beta 在闲聊态"用风格文件替换人设的两节"；0.3.0alpha 第一步改成
+    // `composeVoice()` 每轮替换；**现在不再拼任何东西** —— 出厂人设只剩一份，
+    // 说话方式已经**直接写进那个人设文件**，所以提示词用的是**完整人设**
+    // （`this.personaText`，构造期缓存的那一份）；`src/voice.mjs` 与
+    // `src/voice-source.mjs` 都删掉了，那一层连常量带同步工具一起不存在了。
     //
-    // ★ 用 `composeVoice`：它除了文本还回一个 `strategy`，而 `strategy` 正是
-    //   "这套人设到底换成功了没有"的唯一可见证据 → 记日志
-    //   （`#notePersonaStrategy`，只在结果变化时记一行）。
-    // ★ 它替换的是人设里的【怎么说话】【别变成客服】两节，其余各节**逐字保留**
-    //   （理由与"为什么必须替换而不是追加"写在 `persona-sections.mjs` 的文件头）。
-    const composed = composeVoice({ personaText: this.personaText, style: this.voiceStyle })
-    this.#notePersonaStrategy(composed)
+    // ★ 保留的**唯一**一件事是可观测性：`#notePersonaShape()` 记一行"这份人设里
+    //   有没有说话方式那一节"（换成人写的散文时就没有）—— 那在提示词里看不出来。
+    this.#notePersonaShape(this.personaText)
     return buildChannelPrompt({
       rendered,
       reason,
       ...opts,
       config: this.config,
-      personaText: [composed.text, sticker.personaNote].filter(Boolean).join('\n\n'),
+      personaText: [this.personaText, sticker.personaNote].filter(Boolean).join('\n\n'),
       stickerLines: sticker.lines,
       // ── 视频（0.2.7，方案 A）────────────────────────────────────────────
       // ★ 只把**直链**交出去（`text.mjs` 的 `videoRefs`），核心**不下载视频**：

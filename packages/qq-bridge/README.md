@@ -63,7 +63,10 @@ npm test                         # 全部离线套件（实测：所有套件退
 # ⚠️⚠️ 括号里的数字**不是同一时刻量的**，而且不少已经漂了。0.3.0alpha 收尾时用
 #   「逐个套件实跑、读它自己的收尾行」的方式复核过一部分（写明了量到的值）：
 #     · 已核过并改准：verify-manifest 37、verify-release-hygiene 35、
-#       verify-imports 9、verify-voice-style 131、verify-chat-review 288
+#       verify-imports 9、verify-persona 106、verify-personas 103、verify-chat-review 277
+#       （0.3.0alpha 第二步：`verify-voice-style.mjs` **已删除** —— 说话方式从"代码常量 +
+#        每轮替换人设两节"改成"**就写在人设文件里**"，那个套件有一半在测已删的机制；
+#        里面仍然有意义的内容断言已归位到 `verify-persona.mjs`）
 #     · 实测**对不上、但本次没改**（超出版本范围，留着是**已知漂移**）：
 #       verify-persona 实测 60、verify-corpus 58、verify-extract 85、
 #       verify-memory-consolidate 77、verify-privacy 67、verify-oplog 49、
@@ -73,7 +76,7 @@ npm test                         # 全部离线套件（实测：所有套件退
 #       verify-session-state 48、verify-memory-supersede 50、verify-memory-stats 29、
 #       verify-memory-usage 54、verify-api-h13 29、verify-marker 46、verify-text-encoding 21
 #     · 复核方式（可复现）：在 `packages/qq-bridge` 下逐个 `node mocks/verify-*.mjs`，
-#       读它的收尾行（「…全部通过（N 项）」）。链上共 **67 套**。
+#       读它的收尾行（「…全部通过（N 项）」）。链上共 **66 套**（0.3.0alpha 收尾实测）。
 #   ∴ **不要**把这些数字当权威 —— 权威是 `node mocks/verify-*.mjs` 自己的输出。
 node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（37 项）
 node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）
@@ -82,7 +85,7 @@ node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环
 node mocks/verify-api-h13.mjs    # ★★ H13 四个接口（真起 HTTP 服务）：漏 await、token 泄露、跨会话检索、**畸形返回不拖垮进程**（29 项）
 node mocks/verify-config.mjs     # 配置解析与校验（42 项）
 node mocks/verify-units.mjs      # 纯逻辑：文本/唤醒/会话/防自环/人味层/人设/记忆
-node mocks/verify-persona.mjs    # ★★ 人设加固：反注入拦得住、正常人设不许误伤、名字表真的能唤醒（52 项）
+node mocks/verify-persona.mjs    # ★★ 人设加固：反注入拦得住、正常人设不许误伤、名字表真的能唤醒、**说话方式逐字在人设文件里**、**人设文件与 `FACTORY_PERSONA` 常量逐字一致**（106 项）
 node mocks/verify-images.mjs     # 看图：SSRF 防护 + 防 DoS（145 项）
 node mocks/verify-identity.mjs   # ★ 身份核实：谁在说话、会话名、"身份不得变成权限"、权限判据自解释（57 项）
 node mocks/verify-memory-store.mjs # 记忆存储层：分档、内容过滤、篡改回滚、**注入面规则**（97 项）
@@ -105,7 +108,6 @@ node mocks/verify-oplog.mjs       # ★★ 操作日志：参数与结果都记�
 node mocks/verify-tasks.mjs       # ★★ 任务台账 + 回到第N步：零模型参与也完整、连续回退能恢复、闲置要降级（125 项）
 node mocks/verify-recipes.mjs     # ★★ 配方库：长尾匹配要命中、置信度用平滑、requiredActions 不自动执行（67 项）
 node mocks/verify-extract.mjs     # ★★ 抽取解析：真实 headless 输出（裸词 / 多两个 `}`）都要能解析（71 项）
-node mocks/verify-voice-style.mjs # ★★★ 说话方式（唯一口径）：常量 / 按节替换 / 每轮注入 / 端到端接线（131 项）
 node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）
 node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 需要能起子进程）
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
@@ -441,63 +443,76 @@ async createSession(sessionId) {
 | 工具 | 用途 | 端口 | 文档 |
 |---|---|---|---|
 | `sticker-label/` | 给表情包贴语义标签 | 4399 | `sticker-label/README.md` |
-| `chat-review/` | 导入聊天记录 → 人工打分 + 写评论 → 整理成对 `src/voice.mjs` 那份说话方式的**修改意见** | 4410 | `chat-review/README.md` |
+| `chat-review/` | 导入聊天记录 → 人工打分 + 写评论 → 整理成对 **`personas/` 里当前那份人设的说话方式**的**修改意见**（0.3.0alpha 第二步起评审目标是人设文件本身） | 4410 | `chat-review/README.md` |
 
 ---
 
-### 9. ★ 说话方式只有**一份**（0.3.0alpha）：改口吻改 `src/voice.mjs`，**改了要重启**
+### 9. ★ 说话方式只有**一份**，而且**就写在人设文件里**（0.3.0alpha）：改口吻改 `personas/小鲸鱼（完整带情绪）.md`，**改了要重启**
 
 0.3.0beta 试过按**每条消息**判「闲聊 / 工作」两态：闲聊时换成 `styles/闲聊.md` 的口吻，
 干活时维持老说法（"工作态 = 升级前的行为"是那一版的安全边界）。
-0.3.0alpha 把那条分界线**拆掉**了 —— 说话方式**只有一份**（`src/voice.mjs` 里的 `VOICE_STYLE`
-常量），**所有回合都用它**，闲聊如此，干活也如此。
+0.3.0alpha 把那条分界线**拆掉**了 —— 说话方式**只有一份**，**所有回合都用它**，闲聊如此，干活也如此。
 
 **为什么融合而不是留着两态**：分两态等于同一份提示词里两处对同一件事给**相反**指令 ——
 基座的「但对方认真问事实、技术问题时，就认真答」对上「**极短**、别把一句回答扩成一段」，
 模型只能自己挑一套听，两个方向都不稳定；而且判定本身要花一次模型调用、还会判错。
-融合后的口径是「**默认极短 + 真在干活时允许说清**」（`WORK_ALLOWANCE`，融合的**唯一新增条款**），
-**不是**把那两句都留下 —— 留下一对相反指令正是这次要消灭的东西本身。
+融合后的口径是「**默认极短 + 真在干活时允许说清**」，**不是**把那两句都留下 ——
+留下一对相反指令正是这次要消灭的东西本身。
+
+> **★ 这一版走了两步，第一步被第二步推翻（如实记下）**：
+> 第一步把说话方式做成了**源码里的常量** `src/voice.mjs` 的 `VOICE_STYLE`，
+> 每轮去**替换**人设里的【怎么说话】【别变成客服】两节（还配了 `composeVoice()` 与
+> 写回用的 `src/voice-source.mjs`）。使用者最初要的其实是「**把内容真正搬进人设文件**」，
+> 他问起之后按他的口径改了回来 —— **现在 `src/voice.mjs` / `src/voice-source.mjs` 都已删除**，
+> 提示词**直接用整份人设**（`src/bridge.mjs` 的 `#buildPrompt` 不再拼任何东西）。
 
 **使用者要知道的三件事**：
 
-1. **要改口吻就改 `src/voice.mjs` 的 `VOICE_STYLE`**。
+1. **要改口吻就改 `personas/小鲸鱼（完整带情绪）.md`**（说话方式那一节就在里面）。
    原来那份 `styles/闲聊.md` **连目录一起下线了**，不再有任何代码读它。
-2. ★ **改完要重启**才生效。0.3.0beta 的风格文件是每轮现读；现在它和项目里其它源码一样，
-   启动时读一次 —— 这是为了"说话方式与其它所有源码同一种存在形式"。
-3. 如果你以前改过 `styles/闲聊.md`，**那份改动升级后不再生效**（要改就改上面那个常量）。
+2. ★ **改完要重启**才生效。0.3.0beta 的风格文件是每轮现读；现在它跟整个人设一样，
+   在**构造期**读一次（人设是构造期缓存的）。
+3. 如果你以前改过 `styles/闲聊.md`，**那份改动升级后不再生效**（要改就改人设文件里那一节）。
    > 顺带说明为什么它以前"看起来"生效过：`styles/` 目录**从来没有进过发布包**
    > （`scripts/assemble-release.mjs` 的 `COPY_DIRS` 里没有它），线上一直跑的就是内置常量，
    > 那份文件只是开发期的一份镜像。
 
 **这一版保留不变的东西**（别读成"顺手改了"）：
 
-- 人设仍然是**按节替换**：说话方式只**替换**人设里的
-  【怎么说话】【别变成客服】两节（编号式 `二、怎么说话` 也认），其余各节逐字保留；
-  ★ 但**人设文件本身在这一版换过** —— 出厂从三份收敛成唯一一份
-  （`personas/小鲸鱼（完整带情绪）.md`，见本节末尾那段）；
+- **人设库仍然是多文件**的（能新建 / 复制 / 改名 / 删除，用来做变体对比），
+  `persona.active` 的三条回落规则没变，"读不到不许静默退回内置"没变；
+  ★ 但**出厂人设在本版收敛成唯一一份**（`personas/小鲸鱼（完整带情绪）.md`，见本节末尾那段）；
 - 长任务超过 8 秒的「先应一声」**保留并默认开启**（只去掉了"闲聊态不发"那条抑制，
   因为它依赖已删除的分类器；**静默时段仍然不发**）；
 - 分条发送（`humanize` 的 `splitReplyForSend`）**没动**；
 - 唤醒判定器（`src/wake-judge.mjs`）**完全不受影响** —— 删掉的只是同一个文件里那个
   「这一轮是闲聊还是干活」的判定器；
-- 聊天记录评审台（`chat-review/`）**仍在**，只是评审目标换成了 `src/voice.mjs`。
+- 聊天记录评审台（`chat-review/`）**仍在**，只是评审目标换成了**当前那份人设文件**
+  （`chat-review/` 的启动选项是 `personaPath`，`/api/health` 的 `styleFile.path` 指向那个 `.md`）。
 
+> ★ `#notePersonaShape()` 只**记一行日志**（前缀 `[persona]`）：这份人设里有没有可识别的
+> 「说话方式」那一节。**不拦、也不回落内置** —— 自己写的散文人设没有那一节只是配置事实。
 > 完整清单、取证方式与已知边界见 `docs/0.3.0alpha-release-notes.md`。
 
 ### 出厂人设只剩一份（本版第二件事）
 
 `personas/小鲸鱼（完整带情绪）.md` 是**唯一默认人设**，以后要改口吻/性格**只改这一个文件**
-（运行期读的就是它；人设是构造期缓存的，**改了要重启**）。
+（运行期读的就是它；人设是构造期缓存的，**改了要重启**）。它现在是 **4742 字 / 126 行**
+（说话方式整节也搬进来了）。
 
 - 另外两份（`小鲸鱼（精简）`、`软糯小鲸鱼（情绪）`）**已删除** —— "想短一点"这个诉求
-  现在由**说话方式**（`src/voice.mjs`）那一层承担，不必再换一套人设；
+  现在由**说话方式那一节**承担（就在这个人设文件里），不必再换一套人设；
 - ★ **旧人设预设 id 仍然认得**（`mermaid` / `mermaid-lite` / `mermaid-soft`），
   但取值**全是这一份** —— 老配置里写着 `persona.preset: "mermaid-lite"` 的人
   不会在升级后报"预设不存在"，也不会拿到一段空白；
 - 人设库本身**仍然是多文件**的：能新建 / 复制 / 改名 / 删除（用来做变体对比）。
   界面上那个按钮现在叫「**恢复默认人设**」（原来叫"恢复默认两套"）；
 - 代码里那份常量（`src/persona.mjs` 的 `FACTORY_PERSONA`）只用于**首次播种**与「恢复默认」，
-  与文件有断言盯着逐字一致 —— 改了文件又想"恢复默认"给出新内容，得同步它。
+  与文件有断言盯着**逐字一致**（`verify-persona.mjs` 真的**读文件**来比）——
+  **改了 `personas/*.md` 必须同步那个常量**，否则这条断言会红；
+- ★ **字数上限 `PERSONA_MAX_CHARS` 从 4000 抬到 8000**：说话方式搬进来之后出厂那份自己就有
+  4742 字，旧上限会让"以出厂那份为基础新建 / 保存"被自己的上限拒掉、界面字数计数器一直显示超标 ——
+  **旧上限与出厂人设自相矛盾**。界面不用改代码（它照后端给的 `maxChars` 显示）。
 
 ---
 

@@ -107,14 +107,14 @@ export function buildConsolidatePrompt({ comments = [], styleText = '', anchors 
 
   return {
     prompt: [
-      '你在帮人修订一个 QQ 机器人（「小鲸鱼」）的**说话方式**（`src/voice.mjs` 里的 `VOICE_STYLE`）。',
+      '你在帮人修订一个 QQ 机器人（「小鲸鱼」）的**说话方式**（它在当前那份人设里）。',
       '人已经逐条评审过它的真实发言并写了评论。你要做的是：**基于"评过的发言 + 那些评论"，',
       '给出针对这份说话方式的【修改意见】**。',
       '',
       '⚠️ 你**不需要**、也**不要**输出整份新文件 —— 使用者明确要求「只要意见，修改内容由 LLM 另外执行」。',
       '每条意见都必须是**可以照着动手的一处修改**。',
       '',
-      '【现有的说话方式全文（src/voice.mjs 的 VOICE_STYLE）】',
+      '【现有的说话方式全文（当前那份人设）】',
       String(styleText ?? '').slice(0, Number(limits.styleChars) || 9000),
       '',
       `【人工评审意见（共 ${lines.length} 条）】`,
@@ -192,7 +192,7 @@ export function anchorCoverage({ suggestions = [], anchors = STYLE_ANCHORS } = {
  * （例如 `…任何关于"说多长""要不要分条"…的要求…`），而我们要模型**引用现有文件的原文**
  * 来指认"改哪一条"。它把原句抄进 JSON 字符串时，那些 `"` 没有转义 ⇒ JSON 当场崩，
  * 位置正好落在第一处引用上。
- * ★ 0.3.0alpha：文案从 `styles/闲聊.md` 搬到了 `src/voice.mjs` 的 `VOICE_STYLE`，
+ * ★ 0.3.0alpha：文案搬过两次（`styles/闲聊.md` → `src/voice.mjs` 的常量 → **人设文件**），
  *   但**那些 ASCII 双引号照旧在**（整篇逐字保留）—— 所以这一层不能删。
  *
  * ── 判定一个 `"` 是"收尾"还是"正文里的引号" ───────────────────────────────
