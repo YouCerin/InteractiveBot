@@ -392,7 +392,7 @@ section('⑤ 语料库新增的两个只读方法（评审台的数据源）')
 section('⑥ 端到端 HTTP：每条路由 + 错误码')
 // ══════════════════════════════════════════════════════════════════════════
 const live = []
-async function withServer(tag, fn) {
+async function withServer(tag, fn, { log = () => {} } = {}) {
   const ws = freshDir(tag)
   const styleDir = freshDir(`${tag}-style`)
   writeFileSync(join(styleDir, '闲聊.md'), readFileSync(join(PKG_ROOT, 'styles', '闲聊.md'), 'utf8'), 'utf8')
@@ -405,7 +405,7 @@ async function withServer(tag, fn) {
   c.record({ kind: 'group', peerId: '700001', senderName: '小鲸鱼', text: '原主人估计也不认', isBot: true, at })
   c.close()
 
-  const app = createReviewServer({ workspace: ws, styleDir, log: () => {} })
+  const app = createReviewServer({ workspace: ws, styleDir, log })
   await new Promise((r) => app.server.listen(0, '127.0.0.1', r))
   const port = app.server.address().port
   const base = `http://127.0.0.1:${port}`
@@ -572,6 +572,22 @@ await withServer('nocorpus', async ({ api, post, ws, app }) => {
   check('★ 但导入与打分照常可用（工具不该被语料库拖死）',
     (await post('/api/import', { format: 'text', text: '小鲸鱼: 在的\n', batchLabel: '无库导入' })).body.ok === true)
 })
+
+// 日志写不出去时：服务不许跟着倒
+await withServer(
+  'badlog',
+  async ({ api, base }) => {
+    // 先制造一条**会写日志**的失败请求（静态资源 404 → `say()` 被调用 → 我们的 log 抛）
+    const miss = await fetch(`${base}/nope-${'x'.repeat(200)}.js`)
+    const health = await api('/api/health')
+    const sources = await api('/api/sources')
+    check('★★ 日志写不出去（stdout 管道断了 / 父进程没了）也不许弄挂服务',
+      miss.status === 404 && health.body.ok === true && sources.body.ok === true,
+      `404=${miss.status} health=${health.body.ok} sources=${sources.body.ok}`)
+  },
+  // 模拟"父进程消失、stdout 管道断了"：任何一次 console.log 都会抛
+  { log: () => { throw new Error('EPIPE: 管道断了') } },
+)
 
 // ══════════════════════════════════════════════════════════════════════════
 section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份互相对账）')

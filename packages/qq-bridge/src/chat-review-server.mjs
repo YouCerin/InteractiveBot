@@ -142,11 +142,27 @@ export function createReviewServer({
   if (!root) throw new Error('没有工作区，读不到语料库与评审数据')
 
   silenceSqliteWarning()
+  /**
+   * 内部日志：**写不出去也不许弄挂服务**。
+   *
+   * ★ 为什么要有这一层（实测踩到）：这个工具要么前台跑在 cmd 窗口里，要么被别的
+   *   进程拉起（我这边的编排就是后者）。**父进程消失时 stdout 的管道就断了** ——
+   *   那时 `console.log` 会抛 EPIPE，于是"一条 404 的日志"就能把整个服务带走。
+   *   症状是"它自己没了、没有任何线索"，而且它只在被托管运行时出现，手工跑永远复现不了。
+   *   ∴ 日志是增强路径：失败的代价只能是"这条没记下来"，不能是"服务停了"。
+   */
+  const say = (m) => {
+    try {
+      log(m)
+    } catch {
+      /* 管道断了/日志写不出去：服务照常 */
+    }
+  }
   // ★★ 必须先过 `resolveChatStyleName`：`chatStylePath()` 只拼路径，空名字会拼出
   //    `<styles>/.md`（一个不存在的文件）—— 那会让"应用草稿"写错地方而**看起来成功了**。
   //    实测就是评审台自己的测试抓到的（详见 styles.mjs 里这个函数的注释）。
   const styleFile = chatStylePath({ dir: styleDir, name: resolveChatStyleName(styleName) })
-  const store = createReviewStore({ workspace: root, styleFile, log })
+  const store = createReviewStore({ workspace: root, styleFile, log: say })
   // ★ 只读：这个工具**绝不往语料库里写**（它是"过去发生了什么"的证据，不是它的地盘）
   const corpus = createCorpus({ workspace: root, log, readOnly: true })
 
@@ -165,9 +181,9 @@ export function createReviewServer({
     res.on('finish', () => {
       // 失败必须留证据；2xx 只在显式开了 verbose 时打（否则控制台会被几百条刷满）
       if (res.statusCode >= 400) {
-        log(`❌ [评审台] ${req.method} ${path} → ${res.statusCode}（${Date.now() - startedAt}ms）`)
+        say(`❌ [评审台] ${req.method} ${path} → ${res.statusCode}（${Date.now() - startedAt}ms）`)
       } else if (process.env.DSH_REVIEW_VERBOSE) {
-        log(`[评审台] ${req.method} ${path} ${res.statusCode} ${Date.now() - startedAt}ms`)
+        say(`[评审台] ${req.method} ${path} ${res.statusCode} ${Date.now() - startedAt}ms`)
       }
     })
 
@@ -477,7 +493,7 @@ export function createReviewServer({
       res.end(bodyBuf)
     } catch (error) {
       // 任何未预料的异常都不许静默：页面会看到一句人话，日志里有原始信息
-      log(`❌ [评审台] ${req.method} ${path} 抛异常：${error?.stack ?? error}`)
+      say(`❌ [评审台] ${req.method} ${path} 抛异常：${error?.stack ?? error}`)
       if (!res.headersSent) fail(res, 500, `服务端异常：${error?.message ?? error}`)
       else res.end()
     }
