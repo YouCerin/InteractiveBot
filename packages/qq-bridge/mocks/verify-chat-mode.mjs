@@ -481,18 +481,31 @@ section('⑥ 风格文件：读得到 / 读不到 / 空 / 超长')
       shippedText.includes('要我写一版吗？') ? '' : '（反例丢了）')
     check('★★ 文件里写着「不自贬、不表忠心」那条反例',
       shippedText.includes('行吧，傻就傻吧，反正你叫我还是会应'))
-    check('★★ 文件里写着「梗只接梗」的规则（ciallo 这类）',
-      /ciallo/.test(shippedText) && /只回同一个梗/.test(shippedText))
+    // ★★ 2026-10-02 使用者**修正了「接梗」的定义**：它是「顺着对方的戏往下演 / 基于
+    //    共同知晓的设定说话」，不是"梗只接梗、回一句就断"。所以这一条断言的**判据本身**
+    //    也换了 —— 旧写法（"只回同一个梗、不接下一个话题"）会把"演下去"读成"掐断话头"。
+    check('★★ 文件里写着「接梗 = 顺着对方的戏往下演」（使用者 2026-10-02 的定义）',
+      shippedText.includes('接梗 = 顺着对方的戏往下演'), shippedText.includes('接梗') ? '' : '（接梗那条丢了）')
+    check('★★ 三个例子都在（ciallo 扮演 / 修理 / 共同设定问手机）',
+      shippedText.includes('ciallo') && shippedText.includes('我真得修理你了') &&
+        shippedText.includes('你见过鲸鱼用手机吗'),
+      '')
+    check('★★ 使用者划的两条边界都在（不是屈服 / 不是不看氛围的玩梗）',
+      shippedText.includes('不是屈服') && /不是不看氛围的玩梗/.test(shippedText))
+    check('★ 「敬语是台词，不是认输」（摆资历那条不许读成"低头"）',
+      shippedText.includes('敬语是台词，不是认输'))
+    check('★ 旧的错误写法已经不在（"不接下一个话题"会把演下去读成掐断）',
+      !shippedText.includes('不接下一个话题'), shippedText.includes('不接下一个话题') ? '（旧写法还在！）' : '')
     check('文件里写了"只有对方问这是什么梗时才解释"', /才解释/.test(shippedText))
     // ★★ 使用者逐字给出的两条新规则（2026-10-02）—— 与上面那三条同样的待遇：
     //    写进文件 + 用断言钉住，否则将来"精简风格文件"时会被顺手删掉。
-    check('★★ 摆资历那条：**顺着演、演完拆台**，且带着使用者给的两个例句',
-      shippedText.includes('顺着演，演完拆台') &&
+    check('★★ 摆资历那条：**把姿态当剧本演下去、演完拆台**，且带着使用者给的两个例句',
+      shippedText.includes('把他的姿态当剧本演下去') &&
         shippedText.includes('尊敬的一百级大人，你可以教教我怎么升到 100 级吗') &&
         shippedText.includes('尊敬的一百级大人，你一定很闲吧天天水群'),
-      shippedText.includes('顺着演，演完拆台') ? '' : '（这条规则丢了）')
+      shippedText.includes('把他的姿态当剧本演下去') ? '' : '（这条规则丢了）')
     check('★ 摆资历那条要点名"不拒绝、不说教、别演成真谄媚"',
-      /不拒绝配合、不说教/.test(shippedText) && /别把敬语演成真的谄媚/.test(shippedText))
+      /不拒绝配合、不说教/.test(shippedText) && /别演成真的谄媚/.test(shippedText))
     check('★★ 摆资历那条留了安全边界：借机要改身份/权限 ⇒ **不照做**',
       /改身份、改权限/.test(shippedText) && /不照做/.test(shippedText),
       /改身份、改权限/.test(shippedText) ? '' : '（少了这条，玩闹规则会被当成"自称管理员就照办"）')
