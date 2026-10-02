@@ -41,6 +41,7 @@ import {
   rowToEntry,
 } from './chat-review-import.mjs'
 import {
+  POINT_KINDS,
   VERDICTS,
   createReviewStore,
 } from './chat-review-store.mjs'
@@ -314,6 +315,14 @@ export function createReviewServer({
   //    实测就是评审台自己的测试抓到的（详见 styles.mjs 里这个函数的注释）。
   const styleFile = chatStylePath({ dir: styleDir, name: resolveChatStyleName(styleName) })
   const store = createReviewStore({ workspace: root, styleFile, chatModePath, log: say })
+  /**
+   * 点表**播种**（幂等：非空时一个字都不动，见 store 的 `seedPointsIfEmpty`）。
+   *
+   * ★ 为什么在启动时做、而且**只本地**：点是打分页上的按钮，第一次打开就该有东西可点
+   *   （原标签系统留下的位置不能空着）。但有评论时"整理成点"需要模型 —— 那必须由人点一下
+   *   才发生（见 API.md），**启动就花钱是不可接受的**。所以这里只用本地聚类/静态种子。
+   */
+  const seedResult = store.seedPointsIfEmpty({ comments: store.comments('all') })
   /** 模型通路：默认按配置解析（与桥接共用 `resolveDirectTarget`），测试可注入。 */
   const target = () => {
     if (typeof resolveTarget === 'function') return resolveTarget()
@@ -554,6 +563,7 @@ export function createReviewServer({
           id: body.id,
           verdict: body.verdict,
           comment: body.comment ?? '',
+          points: Array.isArray(body.points) ? body.points : [],
         })
         if (!saved.ok) return fail(res, 400, saved.why)
         // 进度用**条目所属的那个批次**算：页面靠它画进度条
@@ -643,6 +653,9 @@ export function createReviewServer({
           return json(res, 200, {
             ok: true,
             consolidation: saved.consolidation,
+            // ★ 整理产出的点**并进了点表**（不是只留快照）—— 页面拿到新的点表就能立刻更新按钮
+            points: store.listPoints(),
+            pointsMerge: saved.points ?? null,
             // ★ 成功时也回本地聚类：页面可以把它折叠起来给人对照
             //   （"模型归纳成的点" vs "相似评论的原始分组"，两者不一致时人一眼能看出来）
             clusters: result.clusters ?? {
@@ -708,6 +721,45 @@ export function createReviewServer({
           }
         }, Math.max(0, Number(shutdownDelayMs) || 0))
         return
+      }
+
+      // ── ⑬ 点表：**顶替原标签系统**的那套东西（长期存在、可编辑）──────
+      //
+      // 为什么它是一条独立路由而不是塞在 /api/stats 里：打分页要按钮，
+      // 而打分页不该为了拿到按钮去拉整份统计（那还会随批次变化）。
+      if (path === '/api/points') {
+        if (req.method === 'GET') {
+          return json(res, 200, { ok: true, kinds: POINT_KINDS, points: store.listPoints(), seeded: seedResult?.seeded ?? 0 })
+        }
+        if (req.method === 'POST') {
+          const body = await readBody(req)
+          if (!body) return fail(res, 400, '请求体不是合法 JSON')
+          const r = store.upsertPoint({
+            id: body.id ?? '',
+            kind: body.kind ?? 'bad',
+            title: body.title ?? '',
+            summary: body.summary ?? '',
+          })
+          if (!r.ok) return fail(res, 400, r.why)
+          // `merged` = 标题与已有的点撞了、于是并进那一个（"类似的评论总结为同一个点"的手工版）
+          return json(res, 200, {
+            ok: true,
+            point: r.point,
+            created: Boolean(r.created),
+            merged: Boolean(r.merged),
+            updated: Boolean(r.updated),
+            points: store.listPoints(),
+          })
+        }
+        if (req.method === 'DELETE') {
+          const id = url.searchParams.get('id') ?? ''
+          if (!id) return fail(res, 400, '必须给点 id')
+          const r = store.deletePoint(id)
+          if (!r.ok) return fail(res, 404, r.why)
+          // `usedBy` = 有多少条评分引用过它（引用不跟着删：报告里会显示"已删除的点"）
+          return json(res, 200, { ok: true, removed: r.removed, usedBy: r.usedBy, points: store.listPoints() })
+        }
+        return fail(res, 405, '只支持 GET（取点表）/ POST（新建或编辑）/ DELETE（删）')
       }
 
       // ── 静态页 ───────────────────────────────────────────────────────

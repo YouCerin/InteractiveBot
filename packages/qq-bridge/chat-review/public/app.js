@@ -35,6 +35,9 @@ const state = {
   // ★ 取不到时要能区分"还没取到"和"服务端说不可用"，否则页面会显示成"0 个会话"
   sources: { corpus: { ok: false, why: '还没取到数据源', chats: [] }, batches: [] },
   taxonomy: { ok: false, verdicts: [], why: '' }, // 只留三档结论：标签体系已删除
+  // ★★ 点表：它**顶替**了原来的标签（位置就在打分卡片上那排按钮），
+  //    但性质不同 —— 标签是服务端预先写死的分类，点是使用者从评论里长出来、**可编辑**的词汇表。
+  points: { ok: false, why: '还没取到点表', kinds: ['bad', 'good'], items: [], seeded: 0 },
   importFormat: 'forward-json',
   score: {
     batch: '', filter: 'unrated',
@@ -44,7 +47,7 @@ const state = {
     scored: null, total: null, commented: null, // 一律先 null：没拿到真进度就显示 —，不显示 0
     loadedFor: '', ctxOpen: true,
   },
-  reportBatch: 'all', reportVerdict: '', reportSearch: '',
+  reportBatch: 'all', reportVerdict: '', reportSearch: '', reportPoint: '',
   stats: null,
   // 整理那一块的全部状态：GET 一进报告页就拉（不花钱），POST 只在人点击时发生
   cons: {
@@ -193,6 +196,41 @@ async function loadTaxonomy() {
     note.textContent = state.taxonomy.ok ? '' : `拿不到 /api/taxonomy（${state.taxonomy.why}）：判档用的是契约里固定的三档（对 / 还行 / 不对）。`
   }
   if (state.page === 'score') renderCard()
+}
+
+/* ── 点表（顶替原标签：打分卡片上那排按钮 + 报告页的点管理）───────────── */
+
+/**
+ * 拉点表。
+ *
+ * ★ 为什么单独一条请求而不是从 `/api/stats` 里捎带：打分页要按钮，
+ *   而打分页**不该为了拿到按钮去拉整份统计**（那还会随批次变化、越拉越慢）。
+ * ★ 拉不到时 `ok:false` 要一路带到按钮区：显示"拿不到点表 + 为什么"，
+ *   而**不是**画成"这个批次没有点"（那会让人以为点丢了）。
+ */
+async function loadPoints() {
+  const data = await api('/api/points')
+  state.points = data.ok
+    ? {
+        ok: true,
+        why: '',
+        kinds: Array.isArray(data.kinds) && data.kinds.length ? data.kinds : ['bad', 'good'],
+        items: Array.isArray(data.points) ? data.points : [],
+        seeded: Number(data.seeded) || 0,
+      }
+    : { ok: false, why: String(data.error ?? '接口失败'), kinds: ['bad', 'good'], items: [], seeded: 0 }
+  if (state.page === 'score') renderCard()
+  if (state.page === 'report') {
+    renderPointsAdmin()
+    renderCommentList()
+  }
+}
+
+/** 点表按 kind 分组（bad / good），组内按 count 降序（常用的排前面，少翻）。 */
+function pointsByKind(kind) {
+  return state.points.items
+    .filter((p) => p.kind === kind)
+    .sort((a, b) => (b.count ?? 0) - (a.count ?? 0) || String(a.title).localeCompare(String(b.title)))
 }
 
 /* ── 页签切换 ───────────────────────────────────────────────────────── */
@@ -513,8 +551,67 @@ function renderCard() {
   $('reply').textContent = String(item.reply ?? '')
   renderItemMeta(item)
   renderVerdicts(item)
+  renderPointPicker(item)
   renderComment(item)
   maybePrefetch()
+}
+
+/**
+ * 点按钮（**就是原来标签按钮的位置**）。
+ *
+ * ★ (a) 语义（使用者拍板）：点一下**只记点，不往评论框里自动写字** ——
+ *   两者各自留痕、谁也不覆盖谁。已选的点在评论框上方单独显示一行（可点 × 取消）。
+ * ★ 拉不到点表时显示"拿不到 + 为什么"，**不显示成"没有点"**（那会让人以为点丢了）。
+ */
+function renderPointPicker(item) {
+  const s = state.score
+  const selected = Array.isArray(s.draft?.points) ? s.draft.points : ensureDraft(item).points
+  const box = $('points-pick-empty')
+  if (box) {
+    box.hidden = state.points.ok && state.points.items.length > 0
+    box.textContent = !state.points.ok
+      ? `拿不到点表（${state.points.why}）—— 点按钮暂时用不了；评论照常可以写。按「↻ 刷新点」重试。`
+      : '点表还是空的 —— 去「③ 报告」页最下面的「点表」里新建几个，或者先写评论再点「整理评论」让它自己长出来。'
+  }
+  for (const kind of ['bad', 'good']) {
+    const list = $(`points-${kind}`)
+    if (!list) continue
+    clear(list)
+    for (const p of pointsByKind(kind)) {
+      const on = selected.includes(p.id)
+      const b = el('button', on ? 'point-btn on' : 'point-btn', p.title)
+      b.type = 'button'
+      b.title = `${p.summary || '（没有摘要）'}\n已记 ${p.count ?? 0} 次 · 来源 ${p.source ?? '?'} · ${p.id}`
+      b.onclick = () => togglePoint(p.id)
+      list.appendChild(b)
+      if (!state.points.items.length) break
+    }
+  }
+  renderPickedPoints(selected, item)
+}
+
+/** 已选的点（评论框上方那一行）—— 与评论**并存**，不是替代关系。 */
+function renderPickedPoints(selected, item) {
+  const wrap = $('picked-points')
+  if (!wrap) return
+  clear(wrap)
+  const chosen = (selected ?? []).map((id) => {
+    const p = state.points.items.find((x) => x.id === id)
+    return p ? { id, title: p.title } : { id, title: `（已删除的点 ${id}）` }
+  })
+  wrap.hidden = chosen.length === 0
+  if (!chosen.length) return
+  wrap.appendChild(el('span', 'picked-label', '已选的点：'))
+  for (const c of chosen) {
+    const chip = el('span', 'picked-chip', c.title)
+    const x = el('button', 'picked-x', '×')
+    x.type = 'button'
+    x.title = '取消这个点（不动评论）'
+    x.onclick = () => togglePoint(c.id)
+    chip.appendChild(x)
+    wrap.appendChild(chip)
+  }
+  if (item) wrap.title = '点与评论各自留痕：点一下不会替你写字，写字也不会自动选点'
 }
 
 function renderContext(item) {
@@ -555,9 +652,38 @@ function renderItemMeta(item) {
  */
 function ensureDraft(item) {
   if (!item._draft) {
-    item._draft = { verdict: item.score?.verdict ?? null, comment: typeof item.score?.comment === 'string' ? item.score.comment : '' }
+    item._draft = {
+      verdict: item.score?.verdict ?? null,
+      comment: typeof item.score?.comment === 'string' ? item.score.comment : '',
+      // ★ 已选的点也要回填：重评这条时不许把它原来点过的点丢掉
+      points: Array.isArray(item.score?.points) ? [...item.score.points] : [],
+    }
   }
   return item._draft
+}
+
+/**
+ * 切换一个点（点一下 = 记下这一类）。
+ *
+ * ★ (a) 语义：**只记点，不碰评论框**。用 `force` 立刻落盘（一次点击就是一次决定），
+ *   写失败就把它改回去并报错 —— 与判档那条乐观推进同一条纪律。
+ */
+async function togglePoint(pointId) {
+  const item = currentItem()
+  if (!item) return
+  const d = ensureDraft(item)
+  const was = [...d.points]
+  d.points = d.points.includes(pointId) ? d.points.filter((x) => x !== pointId) : [...d.points, pointId]
+  renderPointPicker(item)
+  const data = await postScore(item, { verdict: d.verdict, comment: commentValue(), points: d.points })
+  if (!data.ok) {
+    d.points = was
+    renderPointPicker(item)
+    showError(data.error ?? '点没能存上')
+    return
+  }
+  const p = state.points.items.find((x) => x.id === pointId)
+  toast(`${was.includes(pointId) ? '取消了' : '记下了'}「${p?.title ?? pointId}」`, 'ok')
 }
 
 function renderVerdicts(item) {
@@ -601,9 +727,17 @@ function focusComment() {
 
 /** 落盘一条评分；返回值给调用方决定"要不要把这条放回来"。 */
 async function postScore(item, snapshot) {
-  const data = await api('/api/score', { method: 'POST', body: { id: item.id, verdict: snapshot.verdict, comment: snapshot.comment } })
+  const data = await api('/api/score', {
+    method: 'POST',
+    body: {
+      id: item.id,
+      verdict: snapshot.verdict,
+      comment: snapshot.comment,
+      points: Array.isArray(snapshot.points) ? snapshot.points : [],
+    },
+  })
   if (data.ok) {
-    item.score = data.score ?? { id: item.id, verdict: snapshot.verdict, comment: snapshot.comment }
+    item.score = data.score ?? { id: item.id, verdict: snapshot.verdict, comment: snapshot.comment, points: snapshot.points ?? [] }
     applyProgress(data.progress)
   }
   return data
@@ -640,8 +774,8 @@ async function applyVerdict(verdict, { refocus = false } = {}) {
   }
   d.verdict = verdict
   d.comment = typed
-  const snapshot = { verdict, comment: typed }
-  item.score = { id: item.id, verdict, comment: typed, at: Date.now() }
+  const snapshot = { verdict, comment: typed, points: [...d.points] }
+  item.score = { id: item.id, verdict, comment: typed, points: [...d.points], at: Date.now() }
   addProgress(delta)
   consumeCurrent()
   renderCard()
@@ -671,7 +805,7 @@ async function saveComment() {
   if (value === d.comment) return
   d.comment = value
   if (!d.verdict) return toast('评论先记着：判档时一起落盘（按 1 / 2 / 3 或点上面的按钮）')
-  const res = await postScore(item, { verdict: d.verdict, comment: d.comment })
+  const res = await postScore(item, { verdict: d.verdict, comment: d.comment, points: [...d.points] })
   if (!res.ok) toast(`评论没存上（${res.error ?? '未知原因'}）`, 'err')
 }
 
@@ -731,7 +865,7 @@ function renderReportBatchSelect() {
 async function enterReport() {
   if (!state.sources.batches.length) await refreshSources()
   renderReportBatchSelect()
-  await reloadReport()
+  await Promise.all([reloadReport(), loadPoints()])
 }
 async function reloadReport() { await Promise.all([loadStats(), loadConsolidate()]) }
 
@@ -785,6 +919,40 @@ function renderStats(data) {
   box.appendChild(el('div', 'stats-line', Number.isFinite(c.withText)
     ? `带评论 ${c.withText} 条 / 只判档没写评论 ${numOrDash(c.withoutText)} 条 —— 整理「点」只吃带评论的那些。`
     : '服务端没给 comments.withText —— "有多少条带评论"这个数字不知道（不猜）。'))
+
+  // ── 点排行（顶替原来的标签排行）：点一下 = 只看"记过这个点"的评论 ──
+  const pts = Array.isArray(data.points) ? data.points : []
+  const pointHits = data.pointCounts && typeof data.pointCounts === 'object' ? data.pointCounts : {}
+  box.appendChild(el('h3', 'sug-head', `点排行（${pts.length} 个点，记过 ${numOrDash(data.pointsUsed)} 条评分）`))
+  if (!pts.length) {
+    box.appendChild(el('div', 'note', '点表还是空的 —— 去下面「点表」那张卡新建几个，或者在「整理评论」里让它从评论里长出来。'))
+    return
+  }
+  const rank = el('div', 'point-rank')
+  for (const p of pts.slice(0, 30)) {
+    // 被记了几次：count 是"支撑它的评论数"，pointCounts 是"这个范围里被点了多少次" —— 两个数都给，别混
+    const n = Number(pointHits[p.id] ?? 0)
+    const b = el('button', `point-chip ${p.kind === 'good' ? 'good' : 'bad'}${state.reportPoint === p.id ? ' on' : ''}`)
+    b.appendChild(el('span', 'pc-title', String(p.title)))
+    b.appendChild(el('span', 'pc-count', `记过 ${n} · count ${p.count ?? 0}`))
+    b.title = `${p.summary || '（没有摘要）'}\n${state.reportPoint === p.id ? '再点一次取消筛选' : '点一下：只看记过这个点的评论'}`
+    b.onclick = () => {
+      state.reportPoint = state.reportPoint === p.id ? '' : p.id
+      renderCommentList()
+      renderStats(state.stats)
+    }
+    rank.appendChild(b)
+  }
+  box.appendChild(rank)
+  if (state.reportPoint) {
+    const clearBtn = el('button', 'ghost small', '清掉点的筛选')
+    clearBtn.onclick = () => {
+      state.reportPoint = ''
+      renderCommentList()
+      renderStats(state.stats)
+    }
+    box.appendChild(clearBtn)
+  }
 }
 
 /** 评论清单：新 → 旧，可按判档筛选、可按文字搜索。这是"素材"本身，永远显示。 */
@@ -797,10 +965,13 @@ function renderCommentList() {
   const q = state.reportSearch.trim().toLowerCase()
   const rows = all.filter((r) => {
     if (state.reportVerdict && r?.verdict !== state.reportVerdict) return false
+    // 按点筛（点排行点一下就筛）：只看"记过这个点"的评论
+    if (state.reportPoint && !(Array.isArray(r?.points) ? r.points : []).some((p) => p?.id === state.reportPoint)) return false
     return !q || `${r?.comment ?? ''}\n${r?.reply ?? ''}`.toLowerCase().includes(q)
   })
   $('comment-list-note').textContent = data
-    ? `共 ${all.length} 条评分（带评论 ${all.filter((r) => hasCommentText(r?.comment)).length} 条），当前显示 ${rows.length} 条｜新 → 旧`
+    ? `共 ${all.length} 条评分（带评论 ${all.filter((r) => hasCommentText(r?.comment)).length} 条` +
+      `${state.reportPoint ? `，筛了点 ${state.reportPoint}` : ''}），当前显示 ${rows.length} 条｜新 → 旧`
     : '还没有统计数据 —— 清单不可用（原因见上方红条）。'
   if (!data) return void box.appendChild(el('div', 'empty', '拉不到统计 —— 评论清单也一起不可用；不会显示一个空的"看起来没评过"的清单。'))
   if (!all.length) return void box.appendChild(el('div', 'empty', '还没有任何评分 —— 去「② 打分」页评几条，这里就有清单了。'))
@@ -818,12 +989,108 @@ function commentRow(r) {
   card.appendChild(head)
   const comment = String(r?.comment ?? '').trim()
   card.appendChild(el('div', comment ? 'cm-comment' : 'cm-comment empty-comment', comment || '（只判了档，没写评论 —— 它不参与整理）'))
+  // ★ 点与评论**各自留痕**：这里把这条记过的点也显示出来（(a) 语义：点不写进评论正文）
+  const ps = Array.isArray(r?.points) ? r.points : []
+  if (ps.length) {
+    const row = el('div', 'cm-points')
+    row.appendChild(el('span', 'picked-label', '记的点：'))
+    for (const p of ps) row.appendChild(el('span', `point-chip ${p?.kind === 'good' ? 'good' : 'bad'}`, String(p?.title ?? p?.id ?? '')))
+    card.appendChild(row)
+  }
   card.appendChild(el('div', 'cm-reply-label', '被评的那句话：'))
   card.appendChild(el('div', 'cm-reply', String(r?.reply ?? '（服务端没给 reply）')))
   const ctx = contextText(r?.context)
   if (ctx) card.appendChild(el('div', 'cm-ctx', ctx))
   card.appendChild(el('div', 'cm-id', `id ${r?.id ?? '—'}`))
   return card
+}
+
+/* ── 点表管理（报告页最下面那张卡）──────────────────────────────────────
+ *
+ * ★ 为什么这一块必须存在：点是**使用者的词汇表**，不是代码里的常量。
+ *   没有编辑入口的话，"点不合理"就只能去找开发者改代码 —— 那就退回到标签时代了。
+ * ★ 标题即时落盘（改一个字就发一次），因为它是"我记住的说法"，攒着必丢。
+ * ★ 与已有的点同义（服务端按归一化标题判）时会**并进那一个**：页面如实说"已并入"，
+ *   绝不假装新建成功（否则人会以为自己建了两个，实际只有一个）。
+ */
+
+function renderPointsAdmin() {
+  const box = $('points-admin')
+  if (!box) return
+  clear(box)
+  const note = $('points-admin-note')
+  if (!state.points.ok) {
+    note.textContent = `拿不到点表：${state.points.why} —— 下面显示不了任何点（不显示成"没有点"）。`
+    return
+  }
+  const items = state.points.items
+  note.textContent = items.length
+    ? `共 ${items.length} 个点（bad ${pointsByKind('bad').length} / good ${pointsByKind('good').length}）` +
+      `${state.points.seeded ? `｜这次启动播了 ${state.points.seeded} 个初始点` : ''}｜count = 有多少条评论支撑它`
+    : '点表是空的 —— 用上面的表单新建一个，或者去上面点「整理评论」让点从评论里长出来。'
+  for (const p of items.slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind)) || (b.count ?? 0) - (a.count ?? 0))) {
+    const row = el('div', 'pt-row')
+    const kind = el('select', 'pt-kind')
+    for (const k of ['bad', 'good']) {
+      const o = new Option(k === 'bad' ? '不该这样' : '这样很好', k)
+      if (p.kind === k) o.selected = true
+      kind.appendChild(o)
+    }
+    kind.onchange = () => void savePoint({ id: p.id, kind: kind.value, title: p.title, summary: p.summary })
+    row.appendChild(kind)
+
+    const title = el('input', 'pt-title')
+    title.value = p.title
+    title.title = `来源 ${p.source ?? '?'}｜count ${p.count ?? 0}｜${p.id}`
+    // 失焦即存；值没变就不发请求（避免点一下别处就打一次接口）
+    title.onblur = () => {
+      if (title.value.trim() !== p.title) void savePoint({ id: p.id, kind: kind.value, title: title.value, summary: p.summary })
+    }
+    row.appendChild(title)
+
+    const summary = el('input', 'pt-summary')
+    summary.value = p.summary ?? ''
+    summary.placeholder = '摘要（可选，按钮的 title 里显示）'
+    summary.onblur = () => {
+      if (summary.value.trim() !== (p.summary ?? '')) void savePoint({ id: p.id, kind: kind.value, title: title.value, summary: summary.value })
+    }
+    row.appendChild(summary)
+
+    row.appendChild(el('span', 'pt-count', `×${p.count ?? 0}`))
+    row.appendChild(el('span', 'pt-source', String(p.source ?? '')))
+    const del = el('button', 'ghost danger', '删除')
+    del.onclick = () => void removePoint(p)
+    row.appendChild(del)
+    box.appendChild(row)
+  }
+}
+
+async function savePoint({ id, kind, title, summary }) {
+  const data = await api('/api/points', { method: 'POST', body: { id: id ?? '', kind, title, summary } })
+  if (!data.ok) return void showError(data.error ?? '点没存上')
+  state.points = { ...state.points, ok: true, items: Array.isArray(data.points) ? data.points : state.points.items }
+  if (data.merged) toast(`「${data.point?.title ?? title}」已并入已有的同名点（不重复建）`, 'ok')
+  else if (data.created) toast(`新建了点「${data.point?.title ?? title}」`, 'ok')
+  renderPointsAdmin()
+  renderCard()
+  await loadStats() // 报告页的点排行要跟着变
+}
+
+async function removePoint(p) {
+  const used = Number(p?.count) || 0
+  const ok = window.confirm(
+    `删掉点「${p?.title ?? p?.id}」？\n\n` +
+      `· 它被记过 ${used} 次（count）；**已经记下的评分不会跟着删** —— 报告页会把它们显示成「（已删除的点）」；\n` +
+      '· 打分页上这个按钮会消失。\n\n确定要删吗？',
+  )
+  if (!ok) return
+  const data = await api(`/api/points?id=${encodeURIComponent(p.id)}`, { method: 'DELETE' })
+  if (!data.ok) return void showError(data.error ?? '删不掉')
+  state.points = { ...state.points, items: Array.isArray(data.points) ? data.points : state.points.items }
+  toast(`删掉了点「${p?.title ?? p.id}」（有 ${numOrDash(data.usedBy)} 条评分引用过它）`, 'ok')
+  renderPointsAdmin()
+  renderCard()
+  await loadStats()
 }
 
 // `GET /api/consolidate`：取这个范围**最近一次**整理 + 评论 + 模型可用性 + 锚点清单。
@@ -864,7 +1131,15 @@ async function runConsolidate() {
   if (res.ok === true && res.consolidation) {
     Object.assign(c, { latest: res.consolidation, clusters: res.clusters ?? null, error: '', armed: false })
     renderConsolidate()
-    toast(`整理完成：${numOrDash(res.consolidation.points?.length)} 个点，${numOrDash(res.ms)} ms`, 'ok')
+    const merge = res.pointsMerge ?? null
+    toast(
+      `整理完成：${numOrDash(res.consolidation.points?.length)} 个点（点表新建 ${numOrDash(merge?.created)} / 并入 ${numOrDash(merge?.merged)}），${numOrDash(res.ms)} ms`,
+      'ok',
+    )
+    // ★ 整理产出的点**并进了点表** —— 打分页那排按钮要立刻反映出来（不必重启、不必再整理一次）
+    if (Array.isArray(res.points)) state.points = { ...state.points, ok: true, items: res.points }
+    renderPointsAdmin()
+    renderCard()
     return void loadConsolidate({ keepLocal: true })
   }
   // ★ 失败仍是 HTTP 200：error 原样显示，本地聚类与评论原文都要在 —— 素材不能跟着"看不见"
@@ -1210,6 +1485,20 @@ function bindEvents() {
   })
   bind('btn-consolidate', 'onclick', () => void runConsolidate())
   bind('btn-apply', 'onclick', () => void applyConsolidation())
+  // 点表：刷新 + 新建（编辑与删除在 renderPointsAdmin 里逐个绑）
+  bind('btn-points-reload', 'onclick', () => void loadPoints())
+  bind('btn-point-new', 'onclick', () => {
+    const title = String($('np-title')?.value ?? '').trim()
+    if (!title) return toast('先给新点起个标题', 'err')
+    void savePoint({
+      id: '',
+      kind: $('np-kind')?.value === 'good' ? 'good' : 'bad',
+      title,
+      summary: String($('np-summary')?.value ?? ''),
+    })
+    if ($('np-title')) $('np-title').value = ''
+    if ($('np-summary')) $('np-summary').value = ''
+  })
 }
 
 // ── 键盘：打分页不该用鼠标 ──────────────────────────────────────────
@@ -1253,7 +1542,8 @@ document.addEventListener('keydown', (e) => {
 
 async function boot() {
   bindEvents()
-  await Promise.all([loadHealth(), loadTaxonomy()])
+  // 点表启动就要有：打分页那排按钮是它的第一落点（原标签的位置不能空着）
+  await Promise.all([loadHealth(), loadTaxonomy(), loadPoints()])
   await switchTab('import') // 打开页面先落在导入页：第一次用它的人要从这里开始
 }
 

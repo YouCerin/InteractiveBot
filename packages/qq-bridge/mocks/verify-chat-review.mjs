@@ -39,11 +39,16 @@ import {
 } from '../src/chat-review-import.mjs'
 import {
   COMMENT_MAX_CHARS,
+  POINT_KINDS,
+  POINT_TITLE_MAX_CHARS,
   REVIEW_REL,
+  SEED_POINTS,
   VERDICTS,
   aggregateStats,
   createReviewStore,
+  normalizePointTitle,
   unifiedDiff,
+  validatePoint,
   validateScore,
 } from '../src/chat-review-store.mjs'
 import {
@@ -303,6 +308,123 @@ section('③ 仓库：批次 / 评分 / 撤销 / 删除 / 进度')
   check('★ 删批次连带删掉它的评分', del.ok && Object.keys(store.scores()).length === 0, JSON.stringify(del))
   check('★ 删过之后打分会被拒（不再是已知条目）', store.saveScore({ id: items[0].id, verdict: 'bad' }).ok === false)
   check('★ 删不存在的批次 → 明说（不是静默成功）', store.deleteBatch('nope').why.includes('没有这个批次'))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('③b 点表：顶替原标签的评论词汇表（可编辑、幂等播种、整理并入）')
+// ══════════════════════════════════════════════════════════════════════════
+// 使用者 2026-10-02：「这些点将替代原有标签系统，方便我便捷评论，类似的评论总结为同一个点，
+// 此前进行过的备注就是评论，将这些已有的评论整理为初始的点放在原标签系统的地方」。
+{
+  const ws = freshDir('pts')
+  const styleDir = freshDir('pts-style')
+  writeFileSync(join(styleDir, '闲聊.md'), '【x】\n- 极短。\n', 'utf8')
+  const store = createReviewStore({ workspace: ws, styleFile: join(styleDir, '闲聊.md') })
+  const P = () => store.listPoints()
+
+  check('★ 一开始点表是空的（还没播种）', P().length === 0, String(P().length))
+  check('★ 归一化：标点/空白/全角/大小写都不影响"是不是同一个点"',
+    normalizePointTitle('太长了。') === normalizePointTitle('太长了') &&
+      normalizePointTitle('ＴＯＯ  ＬＯＮＧ') === normalizePointTitle('too long'),
+    `${normalizePointTitle('太长了。')} / ${normalizePointTitle('ＴＯＯ  ＬＯＮＧ')}`)
+  check('★ 校验：标题不能空、分类只有 bad/good、标题有长度上限',
+    validatePoint({ kind: 'bad', title: ' ' }).ok === false &&
+      validatePoint({ kind: 'x', title: 'a' }).ok === false &&
+      validatePoint({ kind: 'bad', title: 'x'.repeat(POINT_TITLE_MAX_CHARS + 1) }).ok === false &&
+      POINT_KINDS.join() === 'bad,good')
+
+  // ── 播种：幂等 + 不覆盖（使用者编辑过的点不许自己回来）──
+  const seed1 = store.seedPointsIfEmpty({ points: SEED_POINTS })
+  check('★★ 点表为空时播种 8 个初始点', seed1.ok && seed1.seeded === SEED_POINTS.length, JSON.stringify(seed1.seeded))
+  check('★ 播下的点标了来源 seed（页面上如实显示来源）', P().every((p) => p.source === 'seed'))
+  const seed2 = store.seedPointsIfEmpty({ points: SEED_POINTS })
+  check('★★ 点表非空 ⇒ **一个字都不动**（幂等）', seed2.seeded === 0 && P().length === SEED_POINTS.length, JSON.stringify(seed2.why))
+  const edited = P()[0]
+  store.upsertPoint({ id: edited.id, kind: edited.kind, title: '我改过的标题', summary: '我改过的摘要' })
+  store.deletePoint(P()[1].id)
+  const before = P().length
+  store.seedPointsIfEmpty({ points: SEED_POINTS })
+  check('★★ 编辑/删除之后**再播种也不会把它们补回来**（"删掉必须是真的"）',
+    P().length === before && P().some((p) => p.title === '我改过的标题') && P().every((p) => p.id !== undefined),
+    `${before} → ${P().length}`)
+  check('★ 编辑过的点来源变成 manual（seed 只属于没动过的）',
+    P().find((p) => p.title === '我改过的标题').source === 'manual')
+
+  // ── 新建 / 同义并入 ──
+  const made = store.upsertPoint({ kind: 'bad', title: '我自己加的' , summary: '说明' })
+  check('★ 新建一个点', made.ok && made.created && made.point.id.startsWith('p-'), JSON.stringify(made.point?.id))
+  const same = store.upsertPoint({ kind: 'bad', title: '  我自己加的。 ' })
+  check('★★ 同义（归一化后相同）⇒ **并进已有的那一个**，不新增',
+    same.ok && same.merged === true && same.point.id === made.point.id && P().filter((p) => normalizePointTitle(p.title) === '我自己加的').length === 1,
+    JSON.stringify(same.point?.id))
+  const renamed = store.upsertPoint({ id: made.point.id, kind: 'good', title: '改过名了' })
+  check('★ 编辑：标题/分类都能改', renamed.ok && renamed.point.title === '改过名了' && renamed.point.kind === 'good')
+  check('★ 编辑不存在的点 → 明说', store.upsertPoint({ id: 'p-999', kind: 'bad', title: 'x' }).why.includes('没有这个点'))
+
+  // ── 评分带点 + 未知点被拒 ──
+  const items = [{ id: 'q1', batch: 'bp', source: 'import', chatKey: 'g', chatLabel: '群 g', at: 1, context: [], reply: 'r1' }]
+  store.createBatch({ label: 'bp', source: 'import', items })
+  const pid = P()[0].id
+  const s1 = store.saveScore({ id: 'q1', verdict: 'bad', comment: '评论', points: [pid] })
+  check('★★ 评分可以带点（点是点表里的 id）', s1.ok && s1.score.points[0] === pid)
+  check('★★ 写一个点表里没有的 id ⇒ **拒绝并点名**（不许留一条点不到的"点"）',
+    store.saveScore({ id: 'q1', verdict: 'bad', points: ['p-不存在'] }).why.includes('p-不存在'),
+    store.saveScore({ id: 'q1', verdict: 'bad', points: ['p-不存在'] }).why)
+  check('★ 点与评论**各自留痕**（(a) 语义：点一下不写评论、写评论不选点）',
+    store.scores().q1.comment === '评论' && store.scores().q1.points.length === 1)
+
+  // ── 统计：点排行 + 清单里带上点 ──
+  const st = store.stats('bp')
+  check('★★ 统计带点排行（pointCounts + 每个点被点了多少次）',
+    st.pointCounts[pid] === 1 && st.pointsUsed === 1, JSON.stringify(st.pointCounts))
+  check('★ 评论清单每条带已还原的点（id + kind + title）',
+    st.list[0].points[0].id === pid && st.list[0].points[0].title === P()[0].title, JSON.stringify(st.list[0].points))
+
+  // ── 删点：引用不跟着删，如实报 usedBy ──
+  const del = store.deletePoint(pid)
+  check('★★ 删点如实报"有几条评分引用过它"', del.ok && del.usedBy === 1, JSON.stringify(del.usedBy))
+  const st2 = store.stats('bp')
+  check('★★ 引用**不跟着删**：清单里显示成「（已删除的点 …）」而不是编一个标题',
+    st2.list[0].points[0].id === pid && /已删除的点/.test(st2.list[0].points[0].title), JSON.stringify(st2.list[0].points))
+  check('★ 删不存在的点 → 明说', store.deletePoint('p-404').why.includes('没有这个点'))
+
+  // ── 旧数据兼容：note 当评论 ──
+  const ws2 = freshDir('pts-legacy')
+  const store2 = createReviewStore({ workspace: ws2, styleFile: join(styleDir, '闲聊.md') })
+  store2.createBatch({ label: 'bl', source: 'import', items: [{ ...items[0], id: 'l1', batch: 'bl' }] })
+  // 手写一份"旧形状"的 scores.json：tag 时代的字段是 note + tags
+  writeFileSync(
+    join(ws2, REVIEW_REL, 'scores.json'),
+    JSON.stringify({ version: 1, scores: { l1: { verdict: 'bad', note: '这是我以前写的备注', tags: ['too_long'], at: 1 } }, order: ['l1'] }),
+    'utf8',
+  )
+  store2.invalidate()
+  check('★★ 旧系统的「备注」= 评论：读得出来（不然使用者写过的字会像从没存在过）',
+    store2.scores().l1.comment === '这是我以前写的备注', JSON.stringify(store2.scores().l1))
+  check('★ 旧的 tags 继续被忽略（标签体系已删）', store2.scores().l1.tags === undefined)
+  check('★ 旧数据也能当整理的素材（comments 里认它）', store2.comments('bl').length === 1)
+  check('★★ 有评论时播种走**本地聚类**（不调模型：启动就花钱是不可接受的）',
+    (() => {
+      const r = store2.seedPointsIfEmpty({ comments: store2.comments('bl') })
+      return r.ok && r.source === 'consolidated' && r.seeded >= 1 && store2.listPoints().every((p) => p.source === 'consolidated')
+    })(),
+    JSON.stringify(store2.listPoints().map((p) => p.title)))
+
+  // ── 整理产出的点并进点表（同类归并、count 累加）──
+  const ws3 = freshDir('pts-merge')
+  const store3 = createReviewStore({ workspace: ws3, styleFile: join(styleDir, '闲聊.md') })
+  store3.upsertPoint({ kind: 'bad', title: '省略号滥用' })
+  const m1 = store3.mergePoints([
+    { kind: 'bad', title: '省略号滥用', summary: '新的摘要', evidence: ['1', '2', '3'] },
+    { kind: 'bad', title: '太长', summary: '新点', evidence: ['4'] },
+    { kind: 'bad', title: '   ', summary: '空标题（模型有时会给）' },
+  ])
+  check('★★ 整理并入：同义并进已有的（count 累加）、新的建出来、空标题跳过',
+    m1.created === 1 && m1.merged === 1 && store3.listPoints().length === 2, JSON.stringify(m1))
+  const ell = store3.listPoints().find((p) => normalizePointTitle(p.title) === '省略号滥用')
+  check('★ 并入时 count += 证据条数（点排行的输入）', ell.count === 3, String(ell.count))
+  check('★ 并入时摘要以新值覆盖（新的通常更贴近现在的说法）', ell.summary === '新的摘要')
+  check('★ 空标题的条目被跳过（不写半个点）', store3.listPoints().every((p) => String(p.title).trim()))
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -651,6 +773,27 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
     tax.body.ok && tax.body.removed === true && tax.body.verdicts.length === 3 && !tax.body.tags,
     JSON.stringify(tax.body))
 
+  // ── 点表：打分页那排按钮的来源（原标签的位置）──────────────────────────
+  const pts0 = await api('/api/points')
+  check('★★ GET /api/points：服务启动时**已经播过种**（第一次打开就有东西可点，原标签的位置不空着）',
+    pts0.body.ok && pts0.body.points.length === SEED_POINTS.length && pts0.body.seeded === SEED_POINTS.length,
+    `points=${pts0.body.points?.length} seeded=${pts0.body.seeded}`)
+  check('★ 带上两个分类（页面照它分两组按钮）', pts0.body.kinds.join() === 'bad,good')
+  const httpPid = pts0.body.points[0].id
+
+  const ptNew = await post('/api/points', { kind: 'bad', title: 'HTTP 新建的点', summary: '摘要' })
+  check('★ POST /api/points 新建', ptNew.body.ok && ptNew.body.created === true && ptNew.body.point.id, JSON.stringify(ptNew.body.error ?? ''))
+  const ptMerge = await post('/api/points', { kind: 'bad', title: '  HTTP 新建的点。 ' })
+  check('★★ 同义标题 → 并进已有的那一个（页面据此提示"已并入"）',
+    ptMerge.body.ok && ptMerge.body.merged === true && ptMerge.body.point.id === ptNew.body.point.id, JSON.stringify(ptMerge.body))
+  const ptEdit = await post('/api/points', { id: ptNew.body.point.id, kind: 'good', title: 'HTTP 改过的点', summary: '' })
+  check('★ POST /api/points 编辑（带 id）', ptEdit.body.ok && ptEdit.body.updated === true && ptEdit.body.point.kind === 'good')
+  const ptBad = await post('/api/points', { kind: 'bad', title: '   ' })
+  check('★ 空标题 → 400（不许建一个点不出名字的点）', ptBad.status === 400, ptBad.body.error)
+  const ptDel = await api(`/api/points?id=${encodeURIComponent(ptNew.body.point.id)}`, { method: 'DELETE' })
+  check('★ DELETE /api/points 删掉，并报 usedBy', ptDel.body.ok && 'usedBy' in ptDel.body, JSON.stringify(ptDel.body.usedBy))
+  check('★ 删不存在的点 → 404', (await api('/api/points?id=p-404', { method: 'DELETE' })).status === 404)
+
   const sources = await api('/api/sources')
   check('★ GET /api/sources 列语料库会话（带机器人发言数）',
     sources.body.ok && sources.body.corpus.chats[0].botReplies === 2 && sources.body.corpus.chats[0].label === '群 700001',
@@ -682,10 +825,16 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
   check('★ GET /api/items 不认识 filter 时按"未评"处理（不是 500）',
     (await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=乱写`)).body.total === 2)
 
-  const scored = await post('/api/score', { id: firstId, verdict: 'bad', comment: '问手机就答手机，别交代机箱' })
+  const scored = await post('/api/score', { id: firstId, verdict: 'bad', comment: '问手机就答手机，别交代机箱', points: [httpPid] })
   check('★ POST /api/score 落盘并回进度（含"有评论"计数）',
     scored.body.ok && scored.body.progress.scored === 1 && scored.body.progress.commented === 1 && scored.body.batchId === batchId,
     JSON.stringify(scored.body.progress))
+  check('★★ POST /api/score 收 `points`（(a) 语义：点与评论各自留痕）',
+    scored.body.score.points.length === 1 && scored.body.score.points[0] === httpPid && scored.body.score.comment.includes('机箱'),
+    JSON.stringify(scored.body.score))
+  const unknownPoint = await post('/api/score', { id: firstId, verdict: 'bad', points: ['p-404'] })
+  check('★★ 未知点 id → 400 并点名（页面会把理由显示出来，不静默丢点）',
+    unknownPoint.status === 400 && /p-404/.test(unknownPoint.body.error), unknownPoint.body.error)
   check('★ 打分后"未评"少了一条', (await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=unrated`)).body.total === 1)
   check('★ 打分后"已评"能查到它', (await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=rated`)).body.total === 1)
   const badScore = await post('/api/score', { id: firstId, verdict: '乱写' })
@@ -697,7 +846,13 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
 
   const undone = await post('/api/undo', { batch: batchId })
   check('★ POST /api/undo 撤销刚打的那条', undone.body.ok && undone.body.undone?.id === firstId && undone.body.progress.scored === 0)
-  await post('/api/score', { id: firstId, verdict: 'bad', comment: '别把记忆里的显卡当谈资' })
+  // ★★ 覆盖是**整条替换**：重评时不给 `points` 就等于把点清空（与 comment 同一条语义）。
+  //    页面每次都会带上它回填的 points，所以不会误清 —— 但这条事实必须钉住，
+  //    否则"某次重评之后点悄悄没了"会变成一个查不出来的谜。
+  const cleared = await post('/api/score', { id: firstId, verdict: 'bad', comment: '重评一次，没带点' })
+  check('★★ 重评不带 points ⇒ 点被清空（覆盖 = 整条替换，与 comment 同一语义）',
+    cleared.body.ok && cleared.body.score.points.length === 0, JSON.stringify(cleared.body.score.points))
+  await post('/api/score', { id: firstId, verdict: 'bad', comment: '别把记忆里的显卡当谈资', points: [httpPid] })
   await post('/api/score', { id: secondId, verdict: 'bad', comment: '这句可以更短' })
 
   const stats = await api(`/api/stats?batch=${encodeURIComponent(batchId)}`)
@@ -706,6 +861,12 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
     JSON.stringify(Object.keys(stats.body)))
   check('★ 评论清单带被评原文与上下文（报告页要能逐条读）',
     stats.body.list[0].reply.length > 0 && Array.isArray(stats.body.list[0].context))
+  // ⚠️ 别假设 `list[0]` 就是带点的那条：两条评分可能同毫秒落盘，顺序由 `at` 决定
+  const rowWithPoints = stats.body.list.find((r) => Array.isArray(r.points) && r.points.length)
+  check('★★ /api/stats 带点排行（pointCounts / pointsUsed / points）与清单里还原好的点',
+    stats.body.pointCounts?.[httpPid] === 1 && stats.body.pointsUsed === 1 &&
+      Array.isArray(stats.body.points) && rowWithPoints?.points?.[0]?.title,
+    JSON.stringify({ counts: stats.body.pointCounts, used: stats.body.pointsUsed, pts: rowWithPoints?.points }))
 
   // ④ 整理：**注入假模型**（测试绝不真调模型）
   const notConsolidated = await api(`/api/consolidate?scope=${encodeURIComponent(batchId)}`)
@@ -1006,6 +1167,11 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
     check('★ 页面用了「整理 + 应用」两个接口（改版后的核心动作）',
       called.has('/api/consolidate') && called.has('/api/apply'),
       [...called].join(' '))
+    check('★★ 页面用了点表三条路（打分页的按钮 + 可编辑的点管理）',
+      called.has('/api/points'), [...called].join(' '))
+    check('★★ 页面把 `points` 发给了打分接口（点与评论各自留痕，不是只写评论）',
+      /points:\s*(Array\.isArray\(snapshot\.points\)|\[]|\[\.\.\.)/.test(app) || /points,/.test(app),
+      '')
     check('★★ 页面**不再**调用已经删掉的 /api/draft（旧的"草稿=追加一段"那条路）',
       !called.has('/api/draft'), [...called].join(' '))
 

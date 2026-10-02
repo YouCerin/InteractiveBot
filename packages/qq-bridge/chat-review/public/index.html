@@ -118,9 +118,27 @@
         <div class="reply" id="reply"></div>
         <div class="meta-line" id="item-meta"></div>
 
-        <!-- 三档结论是**唯一**的定量输入（契约固定）；标签按钮已整套删除 -->
+        <!-- 三档结论是**唯一**的定量输入（契约固定） -->
         <div class="verdicts" id="verdicts"></div>
         <div class="note" id="taxonomy-note" hidden></div>
+
+        <!-- ★★ 点按钮 —— 就是原来标签按钮待的位置。
+             点是**从评论里长出来的**评论词汇表（可编辑），点一下只记点、**不往评论框写字**。 -->
+        <div class="points-pick">
+          <div class="pp-head">
+            <span class="pp-title">点一下记下这一类（原标签的位置）</span>
+            <button id="btn-points-reload" class="ghost small" title="重新取点表">↻ 刷新点</button>
+          </div>
+          <div class="pp-group">
+            <div class="pp-kind bad">不该这样</div>
+            <div class="pp-list" id="points-bad"></div>
+          </div>
+          <div class="pp-group">
+            <div class="pp-kind good">这样很好</div>
+            <div class="pp-list" id="points-good"></div>
+          </div>
+          <div class="pp-empty" id="points-pick-empty" hidden></div>
+        </div>
 
         <!-- ★ 评论才是主角：它是「点」的唯一素材，所以给足高度、给足焦点样式。
              没有保存按钮 —— 失焦即存（见 app.js 的 saveComment）。 -->
@@ -128,6 +146,7 @@
           评论 —— 说清"哪里对 / 哪里不对"（离开输入框即存，没有保存按钮）
           <span class="hint">整理「点」只吃这里的评论；只判档不写字也能用，但那一档不进整理。</span>
         </label>
+        <div class="picked" id="picked-points" hidden></div>
         <textarea id="comment" class="comment-box" rows="5"
           placeholder="例如：问手机就答手机，别交代机箱。对方要的是一句回答，不是自我介绍。"></textarea>
 
@@ -168,6 +187,27 @@
           <span class="note" id="comment-list-note"></span>
         </div>
         <div id="comment-list"></div>
+      </section>
+
+      <!-- ★★ 点管理：点表是**可编辑**的（改标题/摘要/删/新建）——
+           它是使用者的评论词汇表，不是代码里的常量，所以必须有地方改它。 -->
+      <section class="card" id="points-admin-card">
+        <h2>点表（打分页那排按钮）</h2>
+        <div class="note" id="points-admin-note"></div>
+        <div class="row">
+          <label>分类
+            <select id="np-kind">
+              <option value="bad">不该这样（bad）</option>
+              <option value="good">这样很好（good）</option>
+            </select>
+          </label>
+          <label class="grow">新建一个点（与已有的同义时会并进那一个） <input id="np-title" placeholder="例如：太长" /></label>
+          <button id="btn-point-new" class="primary">新建点</button>
+        </div>
+        <label class="grow">摘要（可选，按钮的 title 提示里显示）
+          <input id="np-summary" placeholder="一句话说清这个点在说什么" />
+        </label>
+        <div id="points-admin"></div>
       </section>
 
       <!-- 整理区：GET /api/consolidate 一进页就拉（最近一次 + 评论 + 模型可用性 + 锚点清单）。

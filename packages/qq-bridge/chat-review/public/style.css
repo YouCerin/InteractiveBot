@@ -199,6 +199,45 @@ select { min-width: 120px; max-width: 460px; }
 .keys-sub { margin-top: 4px; font-size: 11.5px; }
 .keys-sub b { color: var(--fg); }
 
+/* ── 点按钮（原标签按钮的位置）──────────────────────────────────────
+   点是**从评论里长出来的**评论词汇表，点一下只记点、不往评论框写字。
+   选中态必须一眼看得出（边框 + 底色），否则"我点过没有"要靠猜。 */
+.points-pick { margin-top: 14px; }
+.pp-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.pp-title { color: var(--dim); font-size: 12.5px; }
+.pp-group { margin-bottom: 6px; }
+.pp-kind { font-size: 11.5px; margin-bottom: 4px; }
+.pp-kind.bad { color: #ff8a8a; }
+.pp-kind.good { color: #7ee2a8; }
+.pp-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.pp-empty { margin-top: 6px; padding: 8px 10px; border-radius: 6px; background: #221c14; border: 1px solid #4a3a1c; color: #e8c98a; font-size: 12px; }
+.point-btn { background: #191d25; border: 1px solid #2c3340; color: var(--fg); border-radius: 14px; padding: 5px 11px; font-size: 12.5px; cursor: pointer; }
+.point-btn:hover { border-color: #4a5468; }
+.point-btn.on { background: #1d2b45; border-color: var(--accent); color: #cfe0ff; box-shadow: 0 0 0 1px var(--accent) inset; }
+.picked { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; }
+.picked-label { color: var(--dim); }
+.picked-chip { background: #1d2b45; border: 1px solid var(--accent); color: #cfe0ff; border-radius: 12px; padding: 3px 6px 3px 10px; }
+.picked-x { margin-left: 6px; background: none; border: none; color: #9fb6e0; cursor: pointer; font-size: 13px; padding: 0 2px; }
+.picked-x:hover { color: #fff; }
+.point-chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 4px 10px; font-size: 12px; border: 1px solid #2c3340; background: #191d25; }
+.point-chip.bad { border-color: #573036; }
+.point-chip.good { border-color: #2c5741; }
+button.point-chip { cursor: pointer; }
+button.point-chip.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.pc-count { color: var(--dim); font-size: 11px; }
+.point-rank { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.cm-points { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+
+/* ── 点表管理（报告页最下面那张卡）────────────────────────────────── */
+#points-admin-card .row { align-items: flex-end; }
+.pt-row { display: grid; grid-template-columns: 96px 1fr 1.4fr 54px 74px 64px; gap: 8px; align-items: center; margin-bottom: 6px; }
+.pt-row .pt-kind, .pt-row .pt-title, .pt-row .pt-summary { font-size: 12.5px; padding: 5px 8px; }
+.pt-count { color: var(--fg); font-size: 12px; text-align: right; }
+.pt-source { color: var(--dim); font-size: 11px; }
+.ghost.danger { border-color: #573036; color: #ff9b9b; }
+.ghost.danger:hover { border-color: #8a3b45; }
+.ghost.small { font-size: 11.5px; padding: 3px 8px; }
+
 /* ── 页签三：报告 ─────────────────────────────────────────────────── */
 .dist { display: flex; height: 26px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; background: #101318; }
 .dist-seg { display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: #0d0f12; font-weight: 600; }

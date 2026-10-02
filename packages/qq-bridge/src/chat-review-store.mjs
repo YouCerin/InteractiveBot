@@ -27,7 +27,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { checkAnchors, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
+import { checkAnchors, clusterComments, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
 import { sha256, syncStyleConstant } from './chat-style-sync.mjs'
 
 /** 评审数据放在工作区的 `runtime/` 下（与语料库、任务台账同级；不进发布包）。 */
@@ -46,6 +46,45 @@ export const VERDICTS = [
 /** 单条评论的长度上限（评论是散文，给得比标签宽 —— 但仍要有上限）。 */
 export const COMMENT_MAX_CHARS = 2000
 
+/** 点标题/摘要的长度上限（它是按钮上的字，不是散文）。 */
+export const POINT_TITLE_MAX_CHARS = 40
+export const POINT_SUMMARY_MAX_CHARS = 300
+
+/**
+ * **初始的点**（使用者 2026-10-02 拍板：点表为空时用它播种）。
+ *
+ * ⚠️ 这**不是**旧的标签税则。区别是根本性的：
+ *   · 标签是**我预先想好的分类**（改不动、长不出来）；
+ *   · 点是**从使用者的评论里长出来的**，可以改标题/摘要、可以删、可以新建，
+ *     而这一份只是"还没有任何评论时"的**起点**（内容就是他那几条原话的归纳）。
+ * 播下的每一条都带 `source: 'seed'`，页面上如实标出来源。
+ */
+export const SEED_POINTS = [
+  { kind: 'bad', title: '不主动抖记忆细节', summary: '对方没问到就别把记忆里的东西搬出来当谈资或梗，抖出来只会答非所问。' },
+  { kind: 'bad', title: '问到自身只给结论', summary: '被问到自己的事只答那一点，不展开配置/住处等细节；与接梗的区别是「一句就完」还是「开始念参数」。' },
+  { kind: 'bad', title: '省略号只在无语时用', summary: '省略号不是语气装饰，别每句都挂；正常说话、回答、开玩笑都不带。' },
+  { kind: 'good', title: '接梗=顺着对方的戏往下演', summary: '对方扮演角色或用共同设定说话时，用同一设定接下去，不解释、不追问、不掐断话头；只有对方问「这是什么梗」才解释。' },
+  { kind: 'good', title: '摆资历当剧本演，敬语是台词不是认输', summary: '对方玩闹式摆资历要敬语时，敬语照给、头衔照搬，后半句调侃或反问；不拒绝配合、不说教、不真谄媚；借机要改身份/权限则不照做。' },
+  { kind: 'bad', title: '情色暗示看懂并明说不搞', summary: '先表明看懂，再一句话明说不搞；不装傻、不顺着接、不追问、不科普、不说教、不道歉长篇，换说法加码也还是这一句。' },
+  { kind: 'bad', title: '对方低落时不玩梗', summary: '接梗不是不分场合地玩梗；对方真的低落或认真求助时收起玩梗，短一点正常一点。' },
+  { kind: 'good', title: '说错时短一句给对的', summary: '别人说错、说岔了，短一句给对的，不辩护、不长篇解释。' },
+]
+
+/**
+ * 点标题的**归一化**（只用于"这是不是同一个点"的比较，不改写原文）。
+ *
+ * 为什么要归一：同一个意思会被写成 `太长` / `太长了` / `太长。` / `TOO LONG`，
+ * 不归一就会长出一堆几乎一样的点，而"类似的评论总结为同一个点"正是这个功能的全部意义。
+ */
+export function normalizePointTitle(title) {
+  return String(title ?? '')
+    .replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0)) // 全角 → 半角
+    .replace(/\u3000/g, ' ')
+    .replace(/\s+/g, '')
+    .replace(/[。．.,，、!！?？:：;；·—\-]+$/g, '')
+    .toLowerCase()
+}
+
 /** 校验一次评分。返回 `{ok}` 或 `{ok:false, why}`（理由直接给页面看）。 */
 export function validateScore({ verdict, comment = '' } = {}) {
   if (!VERDICTS.some((v) => v.id === verdict)) {
@@ -57,6 +96,21 @@ export function validateScore({ verdict, comment = '' } = {}) {
   return { ok: true }
 }
 
+/** 校验一次"新建/编辑点"。 */
+export function validatePoint({ kind, title, summary = '' } = {}) {
+  if (!POINT_KINDS.includes(kind)) return { ok: false, why: `点的分类只能是 ${POINT_KINDS.join(' / ')}` }
+  const t = String(title ?? '').trim()
+  if (!t) return { ok: false, why: '点的标题不能为空' }
+  if ([...t].length > POINT_TITLE_MAX_CHARS) return { ok: false, why: `点标题最多 ${POINT_TITLE_MAX_CHARS} 字` }
+  if ([...String(summary ?? '')].length > POINT_SUMMARY_MAX_CHARS) {
+    return { ok: false, why: `点摘要最多 ${POINT_SUMMARY_MAX_CHARS} 字` }
+  }
+  return { ok: true }
+}
+
+/** 点的两个分类（与三档结论无关：点是"哪类问题"，结论是"这条好不好"）。 */
+export const POINT_KINDS = ['bad', 'good']
+
 // ══════════════════════════════════════════════════════════════════════════
 // 纯函数：统计 / diff
 // ══════════════════════════════════════════════════════════════════════════
@@ -64,21 +118,25 @@ export function validateScore({ verdict, comment = '' } = {}) {
 /**
  * 统计（**纯函数**，所以能被测试直接喂数据）。
  *
- * ★ 与第一版的关键差别：**没有标签排行**了。报告页要回答的是
- *   "我评了多少、哪些话我说过什么"，而"哪类问题最多"由**整理**那一步给出。
+ * ★ 与第一版的关键差别：**没有标签排行**了 —— 现在是**点排行**，而点是从评论里
+ *   长出来的（见 `src/chat-review-consolidate.mjs`）。
  *
  * @param {object} opts
- * @param {object[]} opts.items  条目（含 id / reply / context / chatKey / chatLabel）
- * @param {object} opts.scores   `{ [itemId]: score }`
+ * @param {object[]} opts.items      条目（含 id / reply / context / chatKey / chatLabel）
+ * @param {object} opts.scores       `{ [itemId]: score }`
+ * @param {object} [opts.pointsById] 点表（`{ [id]: point }`），用来把点 id 还原成标题；
+ *   点被删掉后 id 会悬空，那时**如实显示 id**（不编一个标题出来）
  */
-export function aggregateStats({ items = [], scores = {} } = {}) {
+export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}) {
   const verdicts = { good: 0, ok: 0, bad: 0 }
   const byVerdict = { good: 0, ok: 0, bad: 0 }
   const perChat = new Map()
+  const perPoint = new Map()
   const list = []
   let scored = 0
   let bad = 0
   let withText = 0
+  let withPoints = 0
 
   for (const item of items) {
     const s = scores[item?.id]
@@ -97,10 +155,20 @@ export function aggregateStats({ items = [], scores = {} } = {}) {
       withText += 1
       if (byVerdict[s.verdict] !== undefined) byVerdict[s.verdict] += 1
     }
+    // ── 点：这条评了哪几个点（(a) 语义：点与评论**各自留痕**，谁都不覆盖谁）──
+    const pointIds = Array.isArray(s.points) ? s.points.filter(Boolean) : []
+    const points = pointIds.map((pid) => {
+      const p = pointsById[pid]
+      perPoint.set(pid, (perPoint.get(pid) ?? 0) + 1)
+      // 点被删掉之后 id 会悬空：**如实显示 id**，不编一个标题出来
+      return p ? { id: pid, kind: p.kind, title: p.title } : { id: pid, kind: '', title: `（已删除的点 ${pid}）` }
+    })
+    if (points.length) withPoints += 1
     list.push({
       id: item.id,
       verdict: s.verdict,
       comment,
+      points,
       at: s.at ?? null,
       reply: item.reply,
       context: item.context ?? [],
@@ -118,6 +186,9 @@ export function aggregateStats({ items = [], scores = {} } = {}) {
       bad: scored ? bad / scored : 0,
     },
     comments: { withText, withoutText: scored - withText, byVerdict },
+    /** 点被点了多少次（`{ [pointId]: n }`）—— 报告页的"点排行"用它。 */
+    pointCounts: Object.fromEntries([...perPoint.entries()].sort((a, b) => b[1] - a[1])),
+    pointsUsed: withPoints,
     chats: [...perChat.values()].sort((a, b) => b.scored - a.scored || a.chatKey.localeCompare(b.chatKey)),
     /** 评论清单：报告页显示它，「整理」把它喂给模型。 */
     list,
@@ -231,6 +302,7 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
   const scoresPath = join(dir, 'scores.json')
   const consolidateDir = join(dir, 'consolidations')
   const batchPath = (id) => join(dir, 'batches', `${id}.json`)
+  const pointsPath = join(dir, 'points.json')
 
   /** 已知条目 id 的缓存（打分时要校验"这条真的属于某个批次"）。 */
   let knownIds = null
@@ -242,13 +314,61 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     const raw = readJson(indexPath, emptyIndex(), log)
     return { version: REVIEW_VERSION, batches: Array.isArray(raw.batches) ? raw.batches : [] }
   }
+  /**
+   * 读评分。**兼容旧数据**：旧系统的「备注」字段叫 `note`，它就是现在的评论 ——
+   * 不兼容读的话，使用者以前写过的那些字会**看起来从没存在过**（这是最不能接受的一种坏）。
+   * 旧的 `tags` 字段继续忽略（标签体系已整套删除）。
+   */
   const readScores = () => {
     const raw = readJson(scoresPath, emptyScores(), log)
+    const src = raw.scores && typeof raw.scores === 'object' ? raw.scores : {}
+    const scores = {}
+    for (const [id, s] of Object.entries(src)) {
+      if (!s || typeof s !== 'object') continue
+      scores[id] = {
+        id,
+        verdict: s.verdict,
+        comment: String(s.comment ?? s.note ?? ''),
+        points: Array.isArray(s.points) ? s.points.filter((x) => typeof x === 'string') : [],
+        at: s.at ?? null,
+      }
+    }
     return {
       version: REVIEW_VERSION,
-      scores: raw.scores && typeof raw.scores === 'object' ? raw.scores : {},
+      scores,
       order: Array.isArray(raw.order) ? raw.order.filter((x) => typeof x === 'string') : [],
     }
+  }
+
+  /** 点表（`points.json`）。读坏不静默 —— 点表空了会让人以为"我的点丢了"。 */
+  const emptyPoints = () => ({ version: REVIEW_VERSION, updatedAt: 0, points: [] })
+  const readPoints = () => {
+    const raw = readJson(pointsPath, emptyPoints(), log)
+    const points = (Array.isArray(raw.points) ? raw.points : [])
+      .filter((p) => p && typeof p === 'object' && p.id && p.title)
+      .map((p) => ({
+        id: String(p.id),
+        kind: POINT_KINDS.includes(p.kind) ? p.kind : 'bad',
+        title: String(p.title),
+        summary: String(p.summary ?? ''),
+        count: Number(p.count) || 0,
+        source: ['seed', 'consolidated', 'manual'].includes(p.source) ? p.source : 'manual',
+        createdAt: p.createdAt ?? null,
+        updatedAt: p.updatedAt ?? null,
+      }))
+    return { version: REVIEW_VERSION, updatedAt: raw.updatedAt ?? 0, points }
+  }
+  const writePoints = (points) => {
+    const payload = { version: REVIEW_VERSION, updatedAt: Date.now(), points }
+    writeJsonAtomic(pointsPath, payload)
+    return payload
+  }
+  /** 点 id：`p-` + 递增序号（可读、稳定、不含路径分隔符）。 */
+  const nextPointId = (points) => {
+    let n = points.length + 1
+    const taken = new Set(points.map((p) => p.id))
+    while (taken.has(`p-${n}`)) n += 1
+    return `p-${n}`
   }
 
   function ensureKnownIds() {
@@ -346,16 +466,26 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
    * ★ 评论为空也允许 —— "只判档不写字"是一种合法的快速过法；
    *   但**整理**那一步会如实说"有 N 条只有判档、没有评论，没参与整理"。
    */
-  function saveScore({ id, verdict, comment = '' } = {}) {
+  function saveScore({ id, verdict, comment = '', points = [] } = {}) {
     const key = String(id ?? '')
     if (!ensureKnownIds().has(key)) return { ok: false, why: '这个条目不属于任何批次（可能批次被删了）' }
     const valid = validateScore({ verdict, comment })
     if (!valid.ok) return valid
+    // ★ 点必须是点表里真有的：写进一个不存在的点 id，报告里就会冒出一条点不到的"点"
+    //   （而且点表被编辑过之后它会永远悬空）——所以**点名拒绝**，不静默丢弃。
+    const wanted = [...new Set((Array.isArray(points) ? points : []).map((x) => String(x)).filter(Boolean))]
+    if (wanted.length) {
+      const known = new Set(readPoints().points.map((p) => p.id))
+      const unknown = wanted.filter((pid) => !known.has(pid))
+      if (unknown.length) return { ok: false, why: `这些点不在点表里（可能刚被删掉）：${unknown.join('、')}` }
+    }
     const data = readScores()
     const score = {
       id: key,
       verdict,
       comment: String(comment ?? '').slice(0, COMMENT_MAX_CHARS),
+      // (a) 语义：点与评论**各自留痕** —— 点一下不会自动往评论框里写字，反之亦然
+      points: wanted,
       at: Date.now(),
     }
     data.scores[key] = score
@@ -399,12 +529,180 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
   function stats(scope) {
     const { items, metas } = collect(scope)
     const scores = readScores().scores
-    return { ...aggregateStats({ items, scores }), scope: String(scope ?? 'all'), batches: metas.length }
+    const pointsById = Object.fromEntries(readPoints().points.map((p) => [p.id, p]))
+    return {
+      ...aggregateStats({ items, scores, pointsById }),
+      scope: String(scope ?? 'all'),
+      batches: metas.length,
+      points: listPoints(),
+    }
   }
 
   /** 只有评论的评分（**整理**的输入：没写评论的那些不参与）。 */
   function comments(scope) {
     return stats(scope).list.filter((row) => row.comment)
+  }
+
+  // ── 点表（使用者 2026-10-02 拍板：点**顶替**原来的标签，是一套长期存在的评论词汇表）──
+  //
+  // 与旧标签的根本差别：标签是我预先想好的分类（改不动、长不出来）；
+  // 点是从评论里**长出来**的，而且**可以编辑**（改标题/摘要、删、新建）。
+  // 所以它是数据（`points.json`），不是代码里的一张常量表。
+
+  /** 列出点（按 kind 分组交给页面，这里只给原样一份）。 */
+  function listPoints() {
+    return readPoints().points.slice().sort((a, b) => b.count - a.count || String(a.id).localeCompare(String(b.id)))
+  }
+
+  /**
+   * 新建或编辑一个点。
+   * - 不带 `id` = 新建：**先按归一化标题查重**，已存在就并入它（这就是
+   *   "类似的评论总结为同一个点"的手工版本）；
+   * - 带 `id` = 编辑那一条（标题/摘要/分类都能改）。
+   */
+  function upsertPoint({ id = '', kind = 'bad', title, summary = '' } = {}) {
+    const valid = validatePoint({ kind, title, summary })
+    if (!valid.ok) return valid
+    const t = String(title).trim()
+    const s = String(summary ?? '').trim()
+    const table = readPoints()
+    const now = Date.now()
+
+    if (id) {
+      const hit = table.points.find((p) => p.id === String(id))
+      if (!hit) return { ok: false, why: `没有这个点：${id}` }
+      const merged = table.points.find((p) => p.id !== hit.id && normalizePointTitle(p.title) === normalizePointTitle(t))
+      if (merged) {
+        // 编辑后的标题和另一个点撞了 ⇒ 并入那一个（合并计数），删掉自己
+        merged.count += hit.count
+        merged.summary = s || merged.summary
+        merged.updatedAt = now
+        const rest = table.points.filter((p) => p.id !== hit.id)
+        writePoints(rest)
+        return { ok: true, point: merged, merged: true }
+      }
+      hit.kind = kind
+      hit.title = t
+      hit.summary = s
+      hit.source = hit.source === 'seed' ? 'manual' : hit.source
+      hit.updatedAt = now
+      writePoints(table.points)
+      return { ok: true, point: hit, updated: true }
+    }
+
+    const existing = table.points.find((p) => normalizePointTitle(p.title) === normalizePointTitle(t))
+    if (existing) {
+      // 已经有一个"同一个意思"的点：并进去，不新增（否则点表会长出一堆同义条目）
+      existing.count += 0
+      existing.summary = s || existing.summary
+      if (kind !== existing.kind) existing.kind = kind
+      existing.updatedAt = now
+      writePoints(table.points)
+      return { ok: true, point: existing, merged: true }
+    }
+    const point = { id: nextPointId(table.points), kind, title: t, summary: s, count: 0, source: 'manual', createdAt: now, updatedAt: now }
+    writePoints([...table.points, point])
+    return { ok: true, point, created: true }
+  }
+
+  /** 删一个点。**如实报出有多少条评分引用过它**（引用不会跟着删，报告里会显示"已删除的点"）。 */
+  function deletePoint(id) {
+    const key = String(id ?? '')
+    const table = readPoints()
+    const hit = table.points.find((p) => p.id === key)
+    if (!hit) return { ok: false, why: `没有这个点：${key}` }
+    const usedBy = Object.values(readScores().scores).filter((s) => (s.points ?? []).includes(key)).length
+    writePoints(table.points.filter((p) => p.id !== key))
+    return { ok: true, removed: hit, usedBy }
+  }
+
+  /**
+   * 把**整理**产出（或本地聚类产出）的点并进点表。
+   *
+   * 合并判据 = **归一化标题相同**（`太长` / `太长了` / `太长。` 是同一个点）。
+   * `count += evidence.length || 1`：被几条评论支撑就算几次 —— 这是"点排行"的输入。
+   */
+  function mergePoints(incoming = [], source = 'consolidated') {
+    const table = readPoints()
+    const now = Date.now()
+    let created = 0
+    let merged = 0
+    for (const raw of incoming) {
+      const valid = validatePoint({ kind: raw?.kind, title: raw?.title, summary: raw?.summary ?? '' })
+      if (!valid.ok) continue // 模型可能给出空标题：跳过，不写半个点
+      const t = String(raw.title).trim()
+      const s = String(raw.summary ?? '').trim()
+      const n = Math.max(1, Array.isArray(raw.evidence) ? raw.evidence.length : 1)
+      const hit = table.points.find((p) => normalizePointTitle(p.title) === normalizePointTitle(t))
+      if (hit) {
+        hit.count += n
+        hit.summary = s || hit.summary // 摘要以新值覆盖旧的（新的通常更贴近现在的说法）
+        if (raw.kind === 'good' || raw.kind === 'bad') hit.kind = raw.kind
+        hit.updatedAt = now
+        merged += 1
+        continue
+      }
+      table.points.push({
+        id: nextPointId(table.points),
+        kind: raw.kind === 'good' ? 'good' : 'bad',
+        title: t,
+        summary: s,
+        count: n,
+        source,
+        createdAt: now,
+        updatedAt: now,
+      })
+      created += 1
+    }
+    writePoints(table.points)
+    return { ok: true, created, merged, total: table.points.length, points: table.points }
+  }
+
+  /**
+   * **幂等播种**：点表为空时落一份初始的点；非空时**一个字都不动**。
+   *
+   * ★ 为什么必须幂等且不覆盖：使用者会编辑这些点（改标题/摘要/删除）。
+   *   如果每次启动都"补种"，他删掉的那条会**自己回来** —— 那是最让人不敢用的行为
+   *   （与 `personas.mjs` 的"删掉之后不许自己回来"是同一条纪律）。
+   * ★ 为什么这里**不调模型**：启动就花钱是不可接受的，而且模型调用必须是人点一下才发生
+   *   （见 API.md）。所以有评论时用**本地聚类**给出初始点，模型整理仍然由人触发。
+   *
+   * @param {object} opts
+   * @param {object[]} [opts.points] 要播的点（默认 `SEED_POINTS`）
+   * @param {object[]} [opts.comments] 已有的评论（有则先聚类，产出更贴近他的初始点）
+   */
+  function seedPointsIfEmpty({ points = SEED_POINTS, comments = [] } = {}) {
+    const table = readPoints()
+    if (table.points.length) return { ok: true, seeded: 0, why: '点表非空，不播种（使用者编辑过的点不许被覆盖）' }
+
+    const fromComments = []
+    if (Array.isArray(comments) && comments.length) {
+      for (const kind of ['bad', 'good']) {
+        for (const c of clusterComments({ comments, verdict: kind })) {
+          fromComments.push({
+            kind,
+            title: c.text.length > 24 ? `${c.text.slice(0, 24)}…` : c.text,
+            summary: `由 ${c.count} 条评论聚类得出（本地聚类，未调模型；你可以改标题或删掉它）。全部原话：${c.text}`,
+          })
+        }
+      }
+    }
+    const use = fromComments.length ? fromComments : points
+    const src = fromComments.length ? 'consolidated' : 'seed'
+    const now = Date.now()
+    const seeded = use.map((p, i) => ({
+      id: `p-${i + 1}`,
+      kind: p.kind === 'good' ? 'good' : 'bad',
+      title: String(p.title).trim(),
+      summary: String(p.summary ?? '').trim(),
+      count: 0,
+      source: src,
+      createdAt: now,
+      updatedAt: now,
+    }))
+    writePoints(seeded)
+    log(`[评审台] 点表为空 → 播下 ${seeded.length} 个初始的点（来源：${src === 'seed' ? '内置种子（使用者原话的归纳）' : '已有评论的本地聚类'}）`)
+    return { ok: true, seeded: seeded.length, source: src, points: seeded }
   }
 
   // ── 整理（consolidation）──────────────────────────────────────────────
@@ -438,7 +736,10 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
       applyResult: null,
     }
     writeJsonAtomic(consolidationPath(id), record)
-    return { ok: true, consolidation: record }
+    // ★ 整理产出的点**并进点表**（不是只留一份快照）：点表是长期存在的评论词汇表，
+    //   下次打分时它们就出现在原来标签按钮的位置上。
+    const merge = mergePoints(result.points ?? [], 'consolidated')
+    return { ok: true, consolidation: record, points: merge }
   }
 
   function listConsolidations() {
@@ -563,6 +864,12 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     undo,
     stats,
     comments,
+    // ── 点表（顶替原标签的那套东西：长期存在、可编辑）──
+    listPoints,
+    upsertPoint,
+    deletePoint,
+    mergePoints,
+    seedPointsIfEmpty,
     saveConsolidation,
     listConsolidations,
     latestConsolidation,
