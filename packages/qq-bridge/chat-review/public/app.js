@@ -676,6 +676,16 @@ async function togglePoint(pointId) {
   const was = [...d.points]
   d.points = d.points.includes(pointId) ? d.points.filter((x) => x !== pointId) : [...d.points, pointId]
   renderPointPicker(item)
+  // ★★ 点标签**本身就是一次判档**（使用者 2026-10-02 指出的）：从「不对」那一组里点，
+  //   就等于说这条不对。第一版没做这个推导，于是"没先按 1/2/3 就点标签"会直接撞上
+  //   服务端的「结论只能是 good / ok / bad」—— 人已经点出结论了，却被告知没给结论。
+  //   ⚠️ 只在**还没有结论**时推导：已经有结论时不覆盖（"这条整体不对、但接梗这点做对了"
+  //   是完全合法的判断，标签不该把它翻过来）。
+  const pickedKind = (state.points.items.find((x) => x.id === pointId) ?? {}).kind
+  if (!d.verdict && (pickedKind === 'good' || pickedKind === 'bad')) {
+    d.verdict = pickedKind
+    renderVerdicts(item)
+  }
   const data = await postScore(item, { verdict: d.verdict, comment: commentValue(), points: d.points })
   if (!data.ok) {
     d.points = was

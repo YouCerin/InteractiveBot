@@ -1116,6 +1116,16 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
       existsSync(join(PKG_ROOT, 'chat-review', 'public', 'style.css')))
   if (existsSync(appPath)) {
     const app = readFileSync(appPath, 'utf8')
+    // ★★ 点标签必须**自己推出结论**（2026-10-02 使用者报的：点标签却回「结论只能是 good / ok / bad」
+    //   —— 人已经在标签分组里做出了选择，页面却把空结论发给服务端）。这条静态断言钉住推导存在。
+    {
+      const body = /async function togglePoint[\s\S]*?\n\}/.exec(app)?.[0] ?? ''
+      check('★★ togglePoint 会从标签分组推出结论（点「不对」组的标签 = 判"不对"）',
+        /d\.verdict\s*=/.test(body) && /kind/.test(body) && /!\s*d\.verdict/.test(body),
+        body ? body.split('\n').filter((l) => /verdict|kind/.test(l)).slice(0, 3).join(' / ').trim() : '（没找到 togglePoint）')
+      check('★ 推导只在**还没有结论**时发生（不覆盖已有的明确判断）',
+        /if\s*\(!\s*d\.verdict/.test(body), '')
+    }
     // ★★ 防"接线断了"（2026-10-02 实测事故）：renderClusters 的**定义**在某次重构里被删了，
     //   调用点还留着 —— 一点「整理评论」就报 `renderClusters is not defined`，
     //   页面其它部分照常，只有那条异步路径炸。静态对账能当场抓住这一类。
