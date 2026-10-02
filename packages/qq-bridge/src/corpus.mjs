@@ -130,6 +130,28 @@ function ensureSchema(db) {
 }
 
 /**
+ * 数据库行 → 给调用方的形状。
+ *
+ * ★ 抽出来是因为现在有**两处**查询用它（`recent` 与评审台的 `transcript`）：
+ *   两个 `SELECT *` 的字段映射各写一遍，迟早只改一处 —— 那时"同一个字段在两个
+ *   功能里含义不同"会变成一个极难查的 bug。截断规则也在这一处，保证一致。
+ */
+function mapRow(row, perChar) {
+  const full = String(row.content ?? '')
+  return {
+    id: Number(row.id),
+    messageId: row.message_id,
+    chatKey: row.chat_key,
+    userId: row.user_id,
+    senderName: row.sender_name,
+    isBot: Number(row.is_bot) === 1,
+    createdAt: Number(row.created_at),
+    text: full.length > perChar ? `${full.slice(0, perChar)}…（本条被截断）` : full,
+    truncated: full.length > perChar,
+  }
+}
+
+/**
  * 造一个语料库句柄（**连接缓存在句柄里**，不是每次调用都开库）。
  *
  * @param {object} opts
@@ -475,20 +497,7 @@ export function createCorpus({ workspace, log = () => {}, readOnly = false } = {
         sql += ' ORDER BY id ASC LIMIT ?'
         params.push(max)
       }
-      const rows = d.prepare(sql).all(...params).map((row) => {
-        const full = String(row.content ?? '')
-        return {
-          id: Number(row.id),
-          messageId: row.message_id,
-          chatKey: row.chat_key,
-          userId: row.user_id,
-          senderName: row.sender_name,
-          isBot: Number(row.is_bot) === 1,
-          createdAt: Number(row.created_at),
-          text: full.length > perChar ? `${full.slice(0, perChar)}…（本条被截断）` : full,
-          truncated: full.length > perChar,
-        }
-      })
+      const rows = d.prepare(sql).all(...params).map((row) => mapRow(row, perChar))
       if (latest) rows.reverse() // 由旧到新（调用方不必猜顺序）
       return { ok: true, rows, lastId: rows.length ? rows[rows.length - 1].id : Number(afterId) || 0 }
     } catch (error) {
@@ -496,10 +505,82 @@ export function createCorpus({ workspace, log = () => {}, readOnly = false } = {
     }
   }
 
+  /**
+   * 给**聊天记录评审台**用：按会话取一段**完整消息**（含机器人自己的发言）。
+   *
+   * 与 `recent()` 只有两处不同，都是评审真需要的，不是"顺手放松"：
+   *   ① 条数上限 2000（`recent` 是 200）—— 评审一次要拿几百个回合，而回合之间
+   *      还夹着别人的话（实测群里机器人发言约占 1/6），200 条原始消息只够几十个回合；
+   *   ② 单条正文上限默认 4000（`recent` 默认 500）—— 评审要看全文，截断会把
+   *      **"这句话到底多长"这个被评的属性本身**改掉（而"太长"正是要评的标签之一）。
+   *
+   * 纪律与 `recent()` 保持一致：由旧到新、fail-closed（必须给会话）、跑完关连接。
+   * ⚠️ 它是**只读**的：调用方用 `createCorpus({ readOnly: true })` 时也照常能读。
+   */
+  function transcriptInner({ chatKey, limit = 600, maxChars = 4000 } = {}) {
+    const ck = String(chatKey ?? '').trim()
+    if (!ck) return { ok: false, why: '必须指定会话（fail-closed）', rows: [] }
+    const max = Math.min(Math.max(1, Number(limit) || 600), 2000)
+    const perChar = Math.min(Math.max(80, Number(maxChars) || 4000), 4000)
+    const d = open()
+    if (!d) return { ok: false, why: '语料库不可用', rows: [] }
+    try {
+      // DESC 取最近 N 条再翻回来：评审关心的是"最近的表现"，而 LIMIT 只能从一端数
+      const rows = d
+        .prepare('SELECT * FROM messages WHERE chat_key = ? ORDER BY id DESC LIMIT ?')
+        .all(ck, max)
+        .map((row) => mapRow(row, perChar))
+      rows.reverse()
+      return { ok: true, rows }
+    } catch (error) {
+      return { ok: false, why: error?.message ?? String(error), rows: [] }
+    }
+  }
+
+  /**
+   * 各会话的计数摘要（评审台的"数据源"列表要按**机器人发言数**排，而不是总条数）。
+   *
+   * 为什么单独一条 SQL：`stats().byChat` 只有总条数，而"这个群里机器人说过 412 句"
+   * 与"这个群一共 3598 条"是两个不同的问题 —— 后者会把最活跃的群排到最前面，
+   * 而那可能是一个机器人几乎不说话的群（评审它没有意义）。
+   */
+  function chatSummariesInner() {
+    const d = open()
+    if (!d) return { ok: false, why: '语料库不可用', chats: [] }
+    try {
+      const rows = d
+        .prepare(
+          `SELECT chat_key,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN is_bot = 1 THEN 1 ELSE 0 END) AS bot_replies,
+                  MAX(created_at) AS last_at
+             FROM messages
+            GROUP BY chat_key
+            ORDER BY bot_replies DESC, last_at DESC`,
+        )
+        .all()
+      return {
+        ok: true,
+        chats: rows.map((r) => ({
+          chatKey: String(r.chat_key),
+          total: Number(r.total),
+          botReplies: Number(r.bot_replies),
+          lastAt: r.last_at == null ? null : Number(r.last_at),
+        })),
+      }
+    } catch (error) {
+      return { ok: false, why: error?.message ?? String(error), chats: [] }
+    }
+  }
+
   return {
     record: wrap(recordInner),
     search: wrap(searchInner),
     recent: wrap(recentInner),
+    /** 评审台用：整段会话（含机器人发言、不截断正文）。 */
+    transcript: wrap(transcriptInner),
+    /** 评审台用：各会话的 总数 / 机器人发言数 / 最后一条时间。 */
+    chatSummaries: wrap(chatSummariesInner),
     stats: wrap(statsInner),
     prune: wrap(pruneInner),
     rebuild: wrap(rebuildInner),

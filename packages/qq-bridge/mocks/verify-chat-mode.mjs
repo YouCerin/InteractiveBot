@@ -51,6 +51,7 @@ import {
   ensureDefaultChatStyle,
   listChatStyles,
   readChatStyle,
+  resolveChatStyleName,
   validateChatStyleName,
 } from '../src/styles.mjs'
 
@@ -528,6 +529,18 @@ section('⑥ 风格文件：读得到 / 读不到 / 空 / 超长')
       /仍然照旧|照旧/.test(shippedText))
     check('★ 文件里写了"想分条就用换行"（桥接按换行分条，得说清）',
       /用换行分开/.test(shippedText) && /splitReplyForSend/.test(shippedText))
+
+    // ★★ 空名字必须解析成默认那份的**名字**，而不是拼出 `<styles>/.md`
+    //    （2026-10-02 实测踩到：评审台自己拼路径，配置留空时把草稿写进了一个假文件，
+    //     而它**看起来成功了** —— 读到的是内置默认、写入的却是 `.md`）。
+    check('★★ 空名字 → 默认那份的名字（`chatStylePath` 只拼路径，不认"空 = 默认"）',
+      resolveChatStyleName('') === DEFAULT_CHAT_STYLE_NAME &&
+        resolveChatStyleName('   ') === DEFAULT_CHAT_STYLE_NAME &&
+        resolveChatStyleName('我的风格') === '我的风格',
+      `${JSON.stringify(resolveChatStyleName(''))} / ${JSON.stringify(resolveChatStyleName('我的风格'))}`)
+    check('★★ 用它拼出来的路径是 `闲聊.md`（不是 `.md`）',
+      chatStylePath({ dir: 'styles', name: resolveChatStyleName('') }).endsWith(`${DEFAULT_CHAT_STYLE_NAME}.md`),
+      chatStylePath({ dir: 'styles', name: resolveChatStyleName('') }))
 
     // 默认常量与文件**同源**（落盘用的就是这份，不该抄第二份）
     check('★ 出厂文件与 DEFAULT_CHAT_STYLE 逐字一致（不许两份）',

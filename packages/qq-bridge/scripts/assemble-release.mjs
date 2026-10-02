@@ -62,7 +62,12 @@ const OUT = resolve(value('--out') ?? DEFAULT_OUT)
 //   （零依赖、只监听 127.0.0.1）。漏了它的后果是"用户拿到包以后没法标注" ——
 //   而它**不属于控制台**（用户明确要求分开），所以不会被 config-ui/dist 顺带带上。
 //   有断言盯着这一项：`mocks/verify-sticker-skill.mjs` 第 ⑦ 节。
-const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', 'sticker-label', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
+// ★ `chat-review` 必须在清单里（2026-10-02）：它是**独立的聊天记录评审台**
+//   （零依赖、只监听 127.0.0.1、带自己的 `public/` 页面）。漏了它的后果是
+//   "用户拿到包以后没法评审聊天记录" —— 而它**不属于控制台**（使用者明确要求
+//   与表情包标注台一样独立），所以不会被 config-ui/dist 顺带带上。
+//   有断言盯着这一项：`mocks/verify-chat-review.mjs` 第 ⑦ 节。
+const COPY_DIRS = ['src', 'mcp', 'assets', 'skills', 'personas', 'sticker-label', 'chat-review', join('config-ui', 'dist'), join('vendor', 'node'), join('vendor', 'node_modules', 'ws')]
 /** 要单文件拷贝的（相对包根）。 */
 const COPY_FILES = [
   'package.json',

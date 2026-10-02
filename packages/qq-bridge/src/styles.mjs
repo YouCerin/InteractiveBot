@@ -49,6 +49,21 @@ export function validateChatStyleName(name) {
   return { ok: true, value }
 }
 
+/**
+ * 空名字 → 默认那份的**名字**（`''` → `闲聊`）。
+ *
+ * ★★ 为什么单独抽成一个函数（2026-10-02 踩到）：`chatStylePath()` 是**纯粹拼路径**的，
+ *   它不认"空名字"这回事；而"空 = 用默认那份"这条规则原先只写在 `readChatStyle()` 里。
+ *   于是任何**自己拼路径**的调用方（聊天记录评审台就是这么干的）在配置留空时
+ *   会拼出 `<styles>/.md` —— 一个不存在的文件。表现出来是：
+ *   "读到的是内置默认那份（看起来正常）"，而**应用草稿时把内容写进了那个假文件**，
+ *   使用者的 `闲聊.md` 一个字都没变（评审台自己的测试抓到了它）。
+ *   ∴ 这条规则只能有一处实现，谁要拼风格文件路径都得先过这里。
+ */
+export function resolveChatStyleName(name) {
+  return String(name ?? '').trim() || DEFAULT_CHAT_STYLE_NAME
+}
+
 /** 风格文件路径（**唯一**拼路径的地方 —— 各处手拼迟早会分叉）。 */
 export function chatStylePath({ dir, name }) {
   return join(dir, `${name}.md`)
@@ -64,7 +79,7 @@ export function chatStylePath({ dir, name }) {
  *     `source` 如实说明这份文本是哪来的，日志与界面靠它区分"用了文件"与"回落了"。
  */
 export function readChatStyle({ dir, name } = {}) {
-  const wanted = String(name ?? '').trim() || DEFAULT_CHAT_STYLE_NAME
+  const wanted = resolveChatStyleName(name)
   if (!dir) {
     return { ok: false, name: wanted, text: DEFAULT_CHAT_STYLE, source: 'default', why: '没有配置风格目录' }
   }
