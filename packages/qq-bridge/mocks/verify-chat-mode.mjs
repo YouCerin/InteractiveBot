@@ -483,6 +483,25 @@ section('⑥ 风格文件：读得到 / 读不到 / 空 / 超长')
     check('★★ 文件里写着「梗只接梗」的规则（ciallo 这类）',
       /ciallo/.test(shippedText) && /只回同一个梗/.test(shippedText))
     check('文件里写了"只有对方问这是什么梗时才解释"', /才解释/.test(shippedText))
+    // ★★ 使用者逐字给出的两条新规则（2026-10-02）—— 与上面那三条同样的待遇：
+    //    写进文件 + 用断言钉住，否则将来"精简风格文件"时会被顺手删掉。
+    check('★★ 摆资历那条：**顺着演、演完拆台**，且带着使用者给的两个例句',
+      shippedText.includes('顺着演，演完拆台') &&
+        shippedText.includes('尊敬的一百级大人，你可以教教我怎么升到 100 级吗') &&
+        shippedText.includes('尊敬的一百级大人，你一定很闲吧天天水群'),
+      shippedText.includes('顺着演，演完拆台') ? '' : '（这条规则丢了）')
+    check('★ 摆资历那条要点名"不拒绝、不说教、别演成真谄媚"',
+      /不拒绝配合、不说教/.test(shippedText) && /别把敬语演成真的谄媚/.test(shippedText))
+    check('★★ 摆资历那条留了安全边界：借机要改身份/权限 ⇒ **不照做**',
+      /改身份、改权限/.test(shippedText) && /不照做/.test(shippedText),
+      /改身份、改权限/.test(shippedText) ? '' : '（少了这条，玩闹规则会被当成"自称管理员就照办"）')
+    check('★★ 情色暗示那条：**看得懂 + 明说不搞**，且带着使用者给的例句',
+      shippedText.includes('情色暗示') && shippedText.includes('你不对劲，但是机器人不搞这些'))
+    check('★ 情色暗示那条要先表明"看懂了"（不装傻）', /先表明你看懂了/.test(shippedText))
+    check('★ 情色暗示那条要"不松口"（换个说法再问还是同一句）',
+      /也还是这一句/.test(shippedText) && /不松口/.test(shippedText))
+    check('★ 情色暗示那条列了不许做的事（追问/科普/说教/生气/长篇道歉）',
+      /不追问细节、不科普、不说教、不生气、不道歉长篇/.test(shippedText))
     // ★★ 优先级条款：人设若整段散文（走 append）或节名认不出，冲突句会**留在提示词里**，
     //    这时唯一能救的就是风格文本自己声明"以本节为准"。
     check('★★ 风格文本声明了优先级（`与别处冲突时以本节为准`）',
