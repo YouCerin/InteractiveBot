@@ -76,7 +76,7 @@ function freshWorkspace() {
  * 这是本套件能做到确定性的关键 —— 我们控制"模型说了什么"，
  * 于是可以精确断言"桥接拿它做了什么"。
  */
-function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = [], turnTimeoutMs = 5000, access = {}, memoryEnabled = true, prewake = 'off', affectGate = null, persona = { preset: 'none' } } = {}) {
+function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = [], turnTimeoutMs = 5000, access = {}, memoryEnabled = true, prewake = 'off', affectGate = null, persona = { preset: 'none' }, humanize = { enabled: false, chunkChars: 300 } } = {}) {
   const WS = freshWorkspace()
   const router = new SessionRouter({ log: () => {} })
   const logs = []
@@ -89,7 +89,7 @@ function makeBridge({ replies = [], toolsPerTurn = [], delays = [], endDelays = 
     trigger: { private: true, mention: true, keyword: true, groupEnabled: true, keywords: ['小鲸鱼'] },
     send: { minGapMs: 0, maxGapMs: 0, maxPerMinute: 100, maxPerHour: 1000, dedupeWindowMs: 0, maxCharsPerMessage: 1500 },
     turn: { timeoutMs: turnTimeoutMs },
-    humanize: { enabled: false, chunkChars: 300 },
+    humanize,
     persona,
     memory: { enabled: memoryEnabled, affect: { prewake } },
     image: { enabled: false },
@@ -568,6 +568,83 @@ async function main() {
       check('★★ 回执里说明"上一轮没跑完、你提议的没被处理"（否则它会以为记上了）',
         /没跑完/.test(prompt2) && /没有被处理/.test(prompt2),
         (prompt2.match(/【上一条消息的记忆回执】[\s\S]{0,200}/) ?? ['(提示词里没有回执段)'])[0])
+    }
+
+    // ── ⑦-5 ★★★ 作废的三条边界（2026-10-02 使用者报"偶尔不回答"）───────────
+    //
+    // 真机日志（群 860771987，`logs/bridge.log`）：
+    //   06:10:24 猫 @ 它「发一张载物照片」→ 被接受，回合开始
+    //   06:10:25 店长KEEPER @ 它「不可以插你吗」→ **旧回合作废**
+    //   06:10:27 `旧回合已作废，不发送回复（2796ms）` ⇒ **猫的问题永远不会被回答**
+    // 根因：`chatKey` 是 `群:<群号>`，**一个群只有一个槽位**，新消息一来就把旧回合顶掉。
+    // 下面四条把边界钉死（并保护原有语义：同一个人连发仍然作废）。
+    {
+      // ① 不同发言人：不再互相顶掉，两条都要有回答
+      {
+        const { bridge, sent, logs } = makeBridge({ replies: ['给猫的答复', '给店长的答复'], delays: [200, 0] })
+        const p1 = bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 发一张载物照片'))
+        await sleep(30)
+        const p2 = bridge.handleEvent(groupMsg(GROUP, ADMIN, '小鲸鱼 在吗'))
+        await Promise.all([p1, p2])
+        const texts = sent.map((s) => s.text)
+        check('★★★ 群里两个不同发言人先后唤醒 → **两条都答**（不再把前一个人的问题整条吞掉）',
+          texts.some((t) => t.includes('给猫的答复')) && texts.some((t) => t.includes('给店长的答复')),
+          JSON.stringify(texts))
+        check('★★ 日志说明"为什么没有作废"（不是静默跳过）',
+          logs.some((l) => /不作废旧回合/.test(l) && /不同发言人/.test(l)),
+          logs.filter((l) => l.includes('作废')).join('｜') || '（没有）')
+      }
+
+      // ② 不同的人说**同一句话** ≠ 重复发送
+      {
+        const { bridge, sent } = makeBridge({ replies: ['给第一个人的答复', '给第二个人的答复'], delays: [200, 0] })
+        const p1 = bridge.handleEvent(groupMsg(GROUP, NON_ADMIN, '小鲸鱼 在吗'))
+        await sleep(30)
+        const p2 = bridge.handleEvent(groupMsg(GROUP, ADMIN, '小鲸鱼 在吗'))
+        await Promise.all([p1, p2])
+        const texts = sent.map((s) => s.text)
+        check('★★ 两个人碰巧说同一句话：**两个人都要拿到回答**（原来只比内容，第二个被当重复丢掉）',
+          texts.some((t) => t.includes('给第一个人的答复')) && texts.some((t) => t.includes('给第二个人的答复')),
+          JSON.stringify(texts))
+      }
+
+      // ③ 同一个发言人连发：**仍然作废**（原有语义不许被改掉），且日志带会话号
+      {
+        const { bridge, sent, logs } = makeBridge({ replies: ['第一条的答复', '第二条的答复'], delays: [200, 0] })
+        const p1 = bridge.handleEvent(privateMsg(ADMIN, '第一句话'))
+        await sleep(30)
+        const p2 = bridge.handleEvent(privateMsg(ADMIN, '第二句话'))
+        await Promise.all([p1, p2])
+        const texts = sent.map((s) => s.text)
+        check('★★ 同一个人连发两条 → 旧回合**仍然作废**（这是这套机制本来的用途，不许改掉）',
+          texts.some((t) => t.includes('第二条的答复')) && !texts.some((t) => t.includes('第一条的答复')),
+          JSON.stringify(texts))
+        check('★★ 作废那一行**带会话号**（否则只能靠上下文猜是哪条会话被丢 —— 真机排查就卡在这）',
+          logs.some((l) => /旧回合已作废/.test(l) && l.includes(`private:${ADMIN}`)),
+          logs.filter((l) => l.includes('旧回合已作废')).join('｜') || '（没有）')
+      }
+
+      // ④ 已经发过「先应一声」：不作废 —— 答应了就答完
+      {
+        const { bridge, sent, logs } = makeBridge({
+          replies: ['答应了就要给的答复', '第二条的答复'],
+          delays: [300, 0],
+          humanize: { enabled: false, chunkChars: 300, interim: { enabled: true, afterMs: 40 } },
+        })
+        // 必须是**工作态**的文本：「先应一声」只在工作态发（闲聊态刻意不发，见 bridge 里的注释）
+        const p1 = bridge.handleEvent(privateMsg(ADMIN, '把 config.json 里的端口改成 4410'))
+        await sleep(140) // 让 40ms 的「先应一声」真的发出去
+        const p2 = bridge.handleEvent(privateMsg(ADMIN, '在吗'))
+        await Promise.all([p1, p2])
+        const texts = sent.map((s) => s.text)
+        check('前提：这一轮真的先应了一声（否则这条断言是空的）',
+          logs.some((l) => l.includes('先发一条')), logs.filter((l) => l.includes('先发一条')).join('｜') || '（没有）')
+        check('★★★ 发过「先应一声」的那一轮**不许再被作废**（原来会：说了"稍等"然后永远没正文）',
+          texts.some((t) => t.includes('答应了就要给的答复')), JSON.stringify(texts))
+        check('★★ 日志写明原因是"已发过「先应一声」"',
+          logs.some((l) => /不作废旧回合/.test(l) && /先应一声/.test(l)),
+          logs.filter((l) => l.includes('不作废旧回合')).join('｜') || '（没有）')
+      }
     }
   }
 

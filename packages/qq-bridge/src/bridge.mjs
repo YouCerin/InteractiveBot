@@ -1905,8 +1905,13 @@ export class Bridge extends EventTarget {
     //    否则同一条消息会在两处得到不同结论。
     const normalized = String(rendered.text ?? '').trim()
     const prior = this.#pending.get(chatKey) ?? null
-    if (prior && (prior.text === normalized || this.#lastDelivered.get(chatKey) === normalized)) {
-      this.log('[wake] 重复内容：在判定之前就短路（不白烧一次判定）')
+    // ★★ 2026-10-02：**重复内容必须是同一个人发的**才算重复（原来只比内容）。
+    //    理由与 `#runTurn` 里那段同源（群里两个人碰巧说同一句话时，后说的那个也该拿到回答，
+    //    按内容跳过他就等于"没回答"）。条件必须与那段**逐字对齐**，否则同一条消息
+    //    会在两处得到不同结论 —— 这正是上面那条注释在防的事。
+    const sameSpeaker = Boolean(prior) && prior.senderId === senderId
+    if (prior && sameSpeaker && (prior.text === normalized || this.#lastDelivered.get(chatKey) === normalized)) {
+      this.log(`[wake] 重复内容：在判定之前就短路（${chatKey}｜同一个人又发了同一条）`)
       return { pass: false, reason: 'duplicate' }
     }
 
@@ -2464,21 +2469,42 @@ export class Bridge extends EventTarget {
     const normalized = String(rendered.text ?? '').trim()
 
     if (prior) {
+      const sameSpeaker = prior.senderId === senderId
       const sameAsInFlight = prior.text === normalized
       const sameAsLastReplied = this.#lastDelivered.get(chatKey) === normalized
-      if (sameAsInFlight || sameAsLastReplied) {
+      // ★★ 三条边界（2026-10-02 修「偶尔不回答」，每条都有真机日志依据）──────────
+      //
+      // ① **重复内容必须同一个人**才算重复：原来只比内容，于是群里两个人碰巧说同一句话时
+      //    后说的那个被当成"重复"直接不回 —— 那也是"没回答"。
+      // ② **作废只在同一个发言人时生效**：这套机制的真实来由是"他等不及又发了一条"
+      //    （见上面那段注释）。而 `chatKey` 是 `群:<群号>` —— **一个群只有一个槽位**，
+      //    所以原来 A、B 两个人先后 @ 它时，B 一到就把 A 那一轮作废 ⇒
+      //    **A 的问题永远不会被回答**（实测 2026-10-02 06:10:24：猫问的那条被店长KEEPER 顶掉，
+      //    日志里 `旧回合已作废，不发送回复（2796ms）`，此后只答了后一条）。
+      // ③ **已经发过「先应一声」就不作废**：答应了就答完。否则使用者看到的是
+      //    "稍等，我想想"然后**永远没有正文** —— 比静默更伤（实测 12 次作废里 6 次如此）。
+      //
+      // 不满足作废条件时**什么都不做**：这一条照常排队（在 `#withLock` 里等前面那轮让出锁），
+      // 代价是多人同时叫它会**依次**回答 —— 慢，但谁都答。
+      if (sameSpeaker && (sameAsInFlight || sameAsLastReplied)) {
         this.log(
-          `[bridge] 跳过重复内容（与${sameAsInFlight ? '正在处理的' : '刚回复过的'}那条相同）：` +
+          `[bridge] 跳过重复内容（${chatKey}｜与${sameAsInFlight ? '正在处理的' : '刚回复过的'}那条相同）：` +
             normalized.slice(0, 30),
         )
         return { handled: false, reason: 'duplicate' }
       }
-      // 不同内容 → 让旧回合"作废"：仍在跑，但不再等它、也不再发它的回复
-      prior.superseded = true
-      this.log(`[bridge] 收到更新的消息，旧回合作废（它仍会跑完，但不再等它）`)
+      const noSupersedeWhy = !sameSpeaker ? '不同发言人' : prior.interimSent ? '已发过「先应一声」' : ''
+      if (noSupersedeWhy) {
+        this.log(`[bridge] 不作废旧回合（${chatKey}｜${noSupersedeWhy}）⇒ 这一条排队，等前面那轮让出锁`)
+      } else {
+        // 不同内容 + 同一个人 + 还没应声 → 让旧回合"作废"：仍在跑，但不再等它、也不再发它的回复
+        prior.superseded = true
+        this.log(`[bridge] 收到更新的消息，旧回合作废（${chatKey}｜同一个发言人又发了一条；它仍会跑完，但不再等它）`)
+      }
     }
 
-    const token = { text: normalized, superseded: false }
+    // ★ token 带上**发言人**与"有没有应过声"：上面那三条判据要用（2026-10-02）。
+    const token = { text: normalized, superseded: false, senderId, interimSent: false }
     this.#pending.set(chatKey, token)
 
     // ── ★★ 这一轮是闲聊态还是工作态（2026-10-01）────────────────────────
@@ -2599,7 +2625,11 @@ export class Bridge extends EventTarget {
           }
           const text = this.interimPicker.pick(collector)
           if (!text) return
-          this.log(`[bridge] 回合仍在进行，先发一条：${text}`)
+          // ★★ 既然已经答应了，这一轮就**不许再被作废**（判据在 `#runTurn` 的作废那段）。
+          //   否则使用者看到的是"稍等，我想想"然后永远没有正文 —— 比静默更伤
+          //   （实测 12 次作废里 6 次是这种）。标记在**真要发之前**打，不是挂定时器时打。
+          token.interimSent = true
+          this.log(`[bridge] 回合仍在进行，先发一条：${text}（${chatKey}）`)
           // 用 safeSend：这条只是"应一声"，发失败不该影响主流程。
           // 也**不走拟人延迟** —— 它的价值就在于"立刻让使用者知道没坏"。
           // （safeSend 内部会把它记进会话镜像，并标成 notice 类。）
@@ -2751,7 +2781,7 @@ export class Bridge extends EventTarget {
       if (token.superseded) {
         settle()
         this.log(
-          `[bridge] 旧回合已作废，不发送回复（${result.durationMs}ms）` +
+          `[bridge] 旧回合已作废，不发送回复（${chatKey}｜${result.durationMs}ms）` +
             (settled.applied > 0 ? `；但已结算记忆 ${settled.applied} 条` : ''),
         )
         return { handled: false, reason: 'superseded', result }
