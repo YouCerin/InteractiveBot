@@ -38,18 +38,30 @@ import {
   segmentsToText,
 } from '../src/chat-review-import.mjs'
 import {
+  COMMENT_MAX_CHARS,
   REVIEW_REL,
-  TAGS,
   VERDICTS,
   aggregateStats,
-  appendBlock,
   createReviewStore,
-  renderProposedBlock,
-  sha256,
-  taxonomyDrift,
   unifiedDiff,
   validateScore,
 } from '../src/chat-review-store.mjs'
+import {
+  CONSOLIDATE_LIMITS,
+  STYLE_ANCHORS,
+  buildConsolidatePrompt,
+  checkAnchors,
+  clusterComments,
+  consolidateComments,
+  parseConsolidation,
+} from '../src/chat-review-consolidate.mjs'
+import {
+  constantMatches,
+  extractStyleConstant,
+  replaceStyleConstant,
+  sha256,
+  syncStyleConstant,
+} from '../src/chat-style-sync.mjs'
 import { createReviewServer, probeReviewHealth, stopRunningReviewServer } from '../src/chat-review-server.mjs'
 import { createCorpus } from '../src/corpus.mjs'
 
@@ -237,40 +249,54 @@ section('③ 仓库：批次 / 评分 / 撤销 / 删除 / 进度')
   check('★★ 不许给不存在的条目打分（进不了任何批次的 id）',
     store.saveScore({ id: 'nope', verdict: 'good' }).ok === false)
   check('★★ 结论只能是三档', store.saveScore({ id: items[0].id, verdict: 'excellent' }).ok === false)
-  check('★★ 标签必须是税则里的 id（打错的会被点名）',
-    store.saveScore({ id: items[0].id, verdict: 'bad', tags: ['too_long', '不存在'] }).why.includes('不存在'))
+  check('★★ 评论有长度上限（2000 字）',
+    store.saveScore({ id: items[0].id, verdict: 'bad', comment: 'x'.repeat(COMMENT_MAX_CHARS + 1) }).ok === false,
+    String(COMMENT_MAX_CHARS))
 
-  const s1 = store.saveScore({ id: items[0].id, verdict: 'bad', tags: ['too_long', 'memory_detail'], note: '太长' })
-  check('★ 打一条分', s1.ok && s1.score.verdict === 'bad' && s1.score.tags.length === 2)
+  const s1 = store.saveScore({ id: items[0].id, verdict: 'bad', comment: '问手机就答手机，别交代机箱' })
+  check('★ 打一条分：判档 + 评论', s1.ok && s1.score.verdict === 'bad' && s1.score.comment.includes('机箱'))
   check('★ 立刻落盘（没有"保存"按钮，进程被杀也不丢）',
-    existsSync(join(ws, REVIEW_REL, 'scores.json')) && JSON.parse(readFileSync(join(ws, REVIEW_REL, 'scores.json'), 'utf8')).scores[items[0].id]?.verdict === 'bad')
-  store.saveScore({ id: items[1].id, verdict: 'good', tags: ['good_brief'] })
-  check('★ 进度（已评/总数）', store.progress('b1').scored === 2 && store.progress('b1').total === 3,
+    existsSync(join(ws, REVIEW_REL, 'scores.json')) &&
+      JSON.parse(readFileSync(join(ws, REVIEW_REL, 'scores.json'), 'utf8')).scores[items[0].id]?.comment.includes('机箱'))
+  check('★ 只判档不写字也允许（快速过法），但统计里分得清',
+    store.saveScore({ id: items[1].id, verdict: 'good' }).ok && store.stats('b1').comments.withoutText === 1,
+    JSON.stringify(store.stats('b1').comments))
+  check('★ 进度（已评/总数/有评论）',
+    store.progress('b1').scored === 2 && store.progress('b1').total === 3 && store.progress('b1').commented === 1,
     JSON.stringify(store.progress('b1')))
   check('★ 找得到条目属于哪个批次（打分响应要用它回进度）', store.findBatchOf(items[1].id) === 'b1')
 
-  check('★ 重复提交 = 覆盖（评错了就是重评，不需要先删）',
-    store.saveScore({ id: items[0].id, verdict: 'ok', tags: [] }).ok && store.scores()[items[0].id].verdict === 'ok')
+  check('★ 重复提交 = 覆盖（评错了就是改字，不需要先删）',
+    store.saveScore({ id: items[0].id, verdict: 'ok', comment: '改主意了' }).ok && store.scores()[items[0].id].comment === '改主意了')
   check('★ 覆盖之后进度不翻倍', store.progress('b1').scored === 2, JSON.stringify(store.progress('b1')))
+  check('★★ 旧数据里的 tags 字段不再被写进去（标签体系已删）',
+    !('tags' in store.scores()[items[0].id]), JSON.stringify(store.scores()[items[0].id]))
 
   const u = store.undo('b1')
   check('★ 撤销的是**这个批次里最后打的那条**', u.ok && u.undone?.id === items[0].id, JSON.stringify(u.undone))
   check('★ 撤销之后进度跟着掉', store.progress('b1').scored === 1)
-  store.saveScore({ id: items[0].id, verdict: 'bad', tags: ['too_long'] })
-  store.saveScore({ id: items[2].id, verdict: 'good', tags: [] })
+  store.saveScore({ id: items[0].id, verdict: 'bad', comment: '别抖记忆里的显卡' })
+  store.saveScore({ id: items[2].id, verdict: 'good', comment: '这句极短，很好' })
   const u2 = store.undo('b1')
   check('★ 再撤一次撤掉刚打的那条', u2.undone?.id === items[2].id, JSON.stringify(u2.undone))
 
   // 批次列表与统计
   const list = store.listBatches()
-  check('★ 批次列表带实时进度', list.length === 1 && list[0].id === 'b1' && list[0].scored === 2, JSON.stringify(list))
+  check('★ 批次列表带实时进度（已评 + 有评论）',
+    list.length === 1 && list[0].id === 'b1' && list[0].scored === 2 && list[0].commented === 1, JSON.stringify(list))
   const st = store.stats('b1')
-  // 走到这里的历史：items[1]=good；items[0]=bad（中间被覆盖成 ok 又撤销，最后重打 bad）；
+  // 走到这里的历史：items[1]=good（无评论）；items[0]=bad（中间被覆盖成 ok 又撤销，最后重打 bad，有评论）；
   // items[2]=good 之后又被撤销 —— 所以此刻是 1 good + 1 bad。
   check('★ 统计：三档计数 + 每档比例', st.verdicts.bad === 1 && st.verdicts.good === 1 && st.rate.scored === 2, JSON.stringify(st.verdicts))
-  check('★ 统计：标签命中排行带证据原文', st.tags.some((t) => t.id === 'too_long' && t.count === 1 && t.examples.length === 1),
-    JSON.stringify(st.tags.map((t) => [t.id, t.count])))
+  check('★★ 统计里**没有标签排行**了（标签体系整套删掉）', st.tags === undefined, JSON.stringify(Object.keys(st)))
+  check('★★ 统计给的是**评论清单**（报告页与整理都吃它）',
+    st.list.length === 2 && st.list[0].comment && st.list[0].reply && Array.isArray(st.list[0].context),
+    JSON.stringify(st.list.map((r) => r.comment)))
+  check('★ 清单按时间**新→旧**', (st.list[0].at ?? 0) >= (st.list[1].at ?? 0), JSON.stringify(st.list.map((r) => r.at)))
   check('★ 统计：按会话拆开', st.chats[0].chatKey === 'g' && st.chats[0].bad === 1, JSON.stringify(st.chats))
+  check('★ 只有评论的那些才是**整理**的输入（没写评论的不参与）',
+    store.comments('b1').length === 1 && store.comments('b1').every((c) => c.comment) && store.progress('b1').scored === 2,
+    `comments=${store.comments('b1').length} / scored=${store.progress('b1').scored}`)
 
   // 删除
   const del = store.deleteBatch('b1')
@@ -280,92 +306,236 @@ section('③ 仓库：批次 / 评分 / 撤销 / 删除 / 进度')
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-section('④ 税则 / 草稿 / diff / 追加（唯一会碰风格文件的那条路）')
+section('④ 整理：评论 → 点 → 整篇重写（含锚点保护与出厂常量同步）')
 // ══════════════════════════════════════════════════════════════════════════
+// 这一节测的是 2026-10-02 改版的核心：**素材是评论，点从评论里长出来，草稿是整篇重写**。
+// 模型调用一律**注入假模型**（`callModel`）—— 测试绝不真花钱，也绝不依赖网络。
 {
-  check('★ 每个标签都有 id/label/kind/hint', TAGS.every((t) => t.id && t.label && t.kind && t.hint))
-  check('★ 标签 id 不重复', new Set(TAGS.map((t) => t.id)).size === TAGS.length)
-  check('★ bad 与 good 两类都有', TAGS.some((t) => t.kind === 'bad') && TAGS.some((t) => t.kind === 'good'))
-  check('★ 三档结论与键位', VERDICTS.length === 3 && VERDICTS.map((v) => v.key).join('') === '123')
-  check('★ 校验函数：未知标签被点名', validateScore({ verdict: 'bad', tags: ['nope'] }).why.includes('nope'))
-
-  // 漂移：标签挂的规则原文必须在真实的风格文件里找得到
   const styleText = readFileSync(join(PKG_ROOT, 'styles', '闲聊.md'), 'utf8')
-  const drift = taxonomyDrift({ styleText })
-  check('★★ 每个标签挂的规则原文**都还在** styles/闲聊.md 里（改了风格文件就会在这里红）',
-    drift.ok, drift.drift.map((d) => `${d.label}→「${d.ruleQuote}」`).join(' | ') || '（全部对得上）')
-  const drifted = taxonomyDrift({ styleText: '这里什么都没有' })
-  check('★★ 风格文件被改空时必须报漂移（不是"看起来没事"）', drifted.ok === false && drifted.drift.length > 0,
-    `${drifted.drift.length} 条漂移`)
 
-  // 草稿文本
-  const fakeItems = [
-    { id: 'x1', reply: '原主人估计也不认，他连显卡都没挑好呢', context: [{ name: '甲', text: '坏了就让你的主人负责' }], chatKey: 'g', chatLabel: '群 g' },
-    { id: 'x2', reply: '手机？我住在一台 X99 主板的机箱里面，没有手机', context: [{ name: '甲', text: '鱼头用的什么手机' }], chatKey: 'g', chatLabel: '群 g' },
+  // ── 4a. 提示词：该说的话必须都在（否则模型只会瞎写）────────────────────
+  const comments = [
+    { id: 'x1', verdict: 'bad', comment: '问手机就答手机，别交代机箱', reply: '手机？我住在一台 X99 主板的机箱里面', context: [{ name: '甲', text: '鱼头用的什么手机', isBot: false }] },
+    { id: 'x2', verdict: 'bad', comment: '这句还是太长，而且上来就解释', reply: '这个问题可以从三个角度看…', context: [] },
+    { id: 'x3', verdict: 'good', comment: '这句极短，接得干净', reply: 'ciallo~', context: [] },
+    { id: 'x4', verdict: 'ok', comment: '   ', reply: '（没写评论）', context: [] },
   ]
-  const scores = {
-    x1: { verdict: 'bad', tags: ['memory_detail'], note: '别抖记忆' },
-    x2: { verdict: 'bad', tags: ['self_intro'], note: '' },
-  }
-  const agg = aggregateStats({ items: fakeItems, scores })
-  const { block } = renderProposedBlock({ stats: agg, now: Date.UTC(2026, 9, 2, 4, 0) })
-  check('★★ 草稿把**真实反例**写进去（这是它唯一的产出）', block.includes('原主人估计也不认') && block.includes('X99'), block.slice(0, 60))
-  check('★ 草稿按"哪条规则"归类', block.includes('「主动抖记忆」') && block.includes('「顺势自述」'))
-  check('★ 草稿带上下文（不然看不出它错在哪）', block.includes('坏了就让你的主人负责'))
-  check('★ 草稿带评审备注', block.includes('别抖记忆'))
-  check('★ 草稿标题说明来源与生成时间', block.includes('人工评审') && block.includes('2026'))
-  check('★ 没有证据时草稿为空（不许编）', renderProposedBlock({ stats: aggregateStats({ items: fakeItems, scores: {} }) }).block === '')
-  const long = renderProposedBlock({
-    stats: { tags: TAGS.filter((t) => t.kind === 'bad').map((t) => ({ ...t, count: 1, examples: [{ id: 'z', reply: 'r', context: 'c' }] })), rate: { scored: 99 } },
-    maxLines: 12,
+  const built = buildConsolidatePrompt({ comments, styleText })
+  check('★ 提示词带上了现有风格文件全文（不然它不是"重写"，是"另写一份"）',
+    built.prompt.includes(styleText.slice(0, 40)), '')
+  check('★★ 评论按编号进提示词（模型要用编号回指证据）',
+    built.prompt.includes('[1] 不对') && built.prompt.includes('[3] 对') && built.prompt.includes('问手机就答手机'))
+  check('★ 评论里带被评的那句话与上下文（只说"太长了"模型不知道什么太长）',
+    built.prompt.includes('机器人当时说：') && built.prompt.includes('当时对方说：'))
+  check('★★ 只有空白的评论**不进**提示词（没写评论的不能算证据）',
+    !built.prompt.includes('（没写评论）') && built.kept === 3 && built.droppedForNoText === 1,
+    `kept=${built.kept} dropped=${built.droppedForNoText}`)
+  check('★★ 提示词明说"归纳不是照抄"（否则它会把评论抄成 20 个点）', /归纳，不是照抄/.test(built.prompt))
+  check('★★ 提示词明说"在精不在多"并给了条数范围', /3~8 条/.test(built.prompt))
+  check('★ 提示词明说"按需精简"（使用者要的就是这个）', /按需精简/.test(built.prompt))
+  check('★★ 底线要点逐条列进提示词（10 条）',
+    built.prompt.includes('不泄露记忆') && built.prompt.includes('接梗不是屈服') &&
+      STYLE_ANCHORS.every((a) => built.prompt.includes(a.label)),
+    `${STYLE_ANCHORS.length} 条`)
+  check('★ 提示词要求**只输出 JSON**（解析器不猜散文）', /只输出 JSON/.test(built.prompt))
+
+  // ── 4b. 锚点核对 ───────────────────────────────────────────────────────
+  const okAnchors = checkAnchors({ text: styleText })
+  check('★★ 现有风格文件本身**通过全部锚点**（锚点表是照着它定的）', okAnchors.ok, JSON.stringify(okAnchors.missing.map((m) => m.label)))
+  const badAnchors = checkAnchors({ text: '【闲聊】\n- 短一点。\n' })
+  check('★★ 一份"把底线全删了"的改写会被逐条抓出来',
+    badAnchors.ok === false && badAnchors.missing.length === STYLE_ANCHORS.length, `${badAnchors.missing.length} 条`)
+  check('★ 同义写法也算过（改写本来就会换措辞）',
+    checkAnchors({ text: styleText.replace('不泄露记忆', '不外泄记忆') }).ok === true)
+  check('★ 锚点表每条都有 id/label/any（可核对、可显示给人看）',
+    STYLE_ANCHORS.every((a) => a.id && a.label && Array.isArray(a.any) && a.any.length))
+
+  // ── 4c. 解析模型输出（容错，但不猜）─────────────────────────────────────
+  const good = parseConsolidation('```json\n{"points":[{"kind":"bad","title":"省略号滥用","summary":"每句都挂","evidence":["2"],"where":"说话方式"}],"rewritten":"【x】\\n- 短。","dropped":[]}\n```')
+  check('★ 解析带 ``` 围栏的 JSON（模型很爱加）', good.ok && good.via === 'fence' && good.points.length === 1)
+  check('★ 点的字段齐全（kind/title/summary/evidence/where）',
+    good.points[0].title === '省略号滥用' && good.points[0].evidence[0] === '2' && good.points[0].kind === 'bad')
+  check('★ kind 只认 good/bad（别的值一律按 bad，不发明第三类）',
+    parseConsolidation('{"points":[{"kind":"weird","title":"t"}],"rewritten":"x"}').points[0].kind === 'bad')
+  check('★★ 没有 rewritten ⇒ 失败（没正文就等于没草稿，不许编一份出来）',
+    parseConsolidation('{"points":[]}').ok === false)
+  check('★ 空回复 → 失败并说明', parseConsolidation('').ok === false)
+  check('★ 不是 JSON 的散文 → 失败并说明', parseConsolidation('我觉得可以这样改…').ok === false)
+
+  // ── 4d. 本地确定性聚类（模型不可用时的退路）────────────────────────────
+  const clusters = clusterComments({
+    comments: [
+      { id: 'a', verdict: 'bad', comment: '太长了，一句话能说完' },
+      { id: 'b', verdict: 'bad', comment: '太长了，一句能说完就别写这么多' },
+      { id: 'c', verdict: 'bad', comment: '别主动说显卡的事' },
+    ],
   })
-  check('★ 行数上限生效并如实说明截断（草稿是要进提示词的）',
-    long.truncated === true && long.block.split('\n').length <= 14, `${long.block.split('\n').length} 行`)
+  check('★★ 说法相近的评论被聚成一组并计数（至少让人看见"同一件事说了几遍"）',
+    clusters.length === 2 && clusters[0].count === 2, JSON.stringify(clusters.map((c) => [c.text, c.count])))
+  check('★ 聚类只收有评论的，且能按判档分开（good 那一组只有 1 条）',
+    clusterComments({ comments: [{ id: 'x', verdict: 'bad', comment: '  ' }] }).length === 0 &&
+      clusterComments({ comments, verdict: 'good' }).length === 1 &&
+      clusterComments({ comments, verdict: 'good' })[0].text.includes('极短'),
+    String(clusterComments({ comments, verdict: 'good' }).length))
 
-  // diff
-  const before = 'a\nb\nc\n'
-  const after = 'a\nb\nc\nd\n'
-  const diff = unifiedDiff(before, after, { aName: 'x', bName: 'x' })
-  check('★ diff 有文件头与 hunk 头', diff.startsWith('--- x') && diff.includes('+++ x') && /@@ -\d+,\d+ \+\d+,\d+ @@/.test(diff), diff.split('\n')[2])
-  check('★ 新增行以 + 开头', diff.split('\n').some((l) => l === '+d'))
-  const diff2 = unifiedDiff('a\nb\n', 'a\nB\n')
-  check('★ 改一行时同时出现 - 与 +', diff2.includes('-b') && diff2.includes('+B'), diff2)
+  // ── 4e. consolidateComments：注入假模型（成功 / 三种失败）───────────────
+  const fakeModel = (payload) => async () => ({ ok: true, text: JSON.stringify(payload), ms: 12 })
+  const target = { ok: true, baseUrl: 'https://example.invalid', apiKey: 'k', model: 'fake-model' }
 
-  // 追加
-  const ok = appendBlock(before, 'NEW')
-  check('★ 追加保留原内容并留一空行', ok.ok && ok.text === 'a\nb\nc\n\nNEW\n', JSON.stringify(ok.text))
-  check('★★ 同一份草稿不许写第二遍（否则提示词里两段一样的反例，白烧 token）',
-    appendBlock(ok.text, 'NEW').ok === false && appendBlock(ok.text, 'NEW').why.includes('已经在'))
-  check('★ 空草稿被拒', appendBlock(before, '   ').ok === false)
-  check('★ sha256 稳定', sha256('x') === sha256('x') && sha256('x').length === 64)
+  const okRun = await consolidateComments({
+    comments, styleText, target,
+    callModel: fakeModel({ points: [{ kind: 'bad', title: '省略号滥用', summary: '每句都挂', evidence: ['1'] }], rewritten: styleText, dropped: [] }),
+  })
+  check('★ 整理成功：给出点 + 改写 + 锚点核对', okRun.ok && okRun.points.length === 1 && okRun.anchors.ok, JSON.stringify(okRun.why ?? ''))
+  check('★ 顺带回模型名与耗时（钱花在明处）', okRun.model === 'fake-model' && typeof okRun.ms === 'number')
 
-  // 端到端：draft → apply（**带备份**）
+  const driftRun = await consolidateComments({
+    comments, styleText, target,
+    callModel: fakeModel({ points: [], rewritten: '【闲聊】\n- 短一点。', dropped: ['不泄露记忆'] }),
+  })
+  check('★★ 改写丢了底线要点 ⇒ 标记出来（后面 apply 会拒绝）',
+    driftRun.ok === true && driftRun.anchors.ok === false && driftRun.anchors.missing.length === STYLE_ANCHORS.length)
+  check('★ 模型自报丢掉的要点也一起回（给人看，不当作判据）',
+    driftRun.dropped.includes('不泄露记忆'))
+
+  const noComments = await consolidateComments({ comments: [{ id: 'z', verdict: 'bad', comment: '' }], styleText, target, callModel: fakeModel({}) })
+  check('★★ 一条带评论的评分都没有 ⇒ 明说"没什么可整理"（不是调模型碰运气）',
+    noComments.ok === false && /没什么可整理/.test(noComments.why), noComments.why)
+
+  const noTarget = await consolidateComments({ comments, styleText, target: { ok: false, why: '没有 key' }, callModel: fakeModel({}) })
+  check('★★ 模型通路不可用 ⇒ 明说为什么，并附上本地聚类（评论不能跟着消失）',
+    noTarget.ok === false && /没有 key/.test(noTarget.why) && noTarget.clusters && Array.isArray(noTarget.clusters.bad),
+    noTarget.why)
+
+  const badJson = await consolidateComments({ comments, styleText, target, callModel: async () => ({ ok: true, text: '我觉得吧…', ms: 5 }) })
+  check('★★ 模型没按 JSON 回答 ⇒ 失败 + 本地聚类（不把散文当草稿）',
+    badJson.ok === false && /JSON/.test(badJson.why) && badJson.clusters, badJson.why)
+
+  const timeout = await consolidateComments({ comments, styleText, target, callModel: async () => ({ ok: false, why: '超时', ms: 900 }) })
+  check('★ 模型调用失败（超时/网络）⇒ 失败 + 本地聚类', timeout.ok === false && /超时/.test(timeout.why))
+
+  check('★ 一次整理的输入上限是明说的常数（超了截断并报数，不静默）',
+    CONSOLIDATE_LIMITS.comments > 0 && CONSOLIDATE_LIMITS.chars > 0 && CONSOLIDATE_LIMITS.styleChars > 0,
+    JSON.stringify(CONSOLIDATE_LIMITS))
+
+  // ── 4f. 风格文件 ↔ 出厂常量 同步 ────────────────────────────────────────
+  const chatModeSrc = readFileSync(join(PKG_ROOT, 'src', 'chat-mode.mjs'), 'utf8')
+  const found = extractStyleConstant(chatModeSrc)
+  check('★ 能从 chat-mode.mjs 里抠出常量', found && found.body.length > 100, String(found?.body.length))
+  check('★★ 抠出来的就是 styles/闲聊.md 的内容（两边同源，有断言钉着）',
+    constantMatches(chatModeSrc, styleText.trim()) || found.body.trim() === styleText.trim(),
+    `常量 ${found?.body.length} 字 / 文件 ${styleText.length} 字`)
+  const replaced = replaceStyleConstant(chatModeSrc, '新内容\n')
+  check('★ 替换是纯函数：返回新源码、原源码没变',
+    replaced.ok && replaced.changed && replaced.text.includes('export const DEFAULT_CHAT_STYLE = `新内容\n`') &&
+      chatModeSrc.includes(found.body))
+  check('★ 文本没变时 `changed: false`（不做无意义的写）',
+    replaceStyleConstant(chatModeSrc, found.body).changed === false)
+  check('★★ 文本里有反引号 / ${ / 反斜杠 ⇒ **拒绝同步**（硬写会把 chat-mode.mjs 弄崩）',
+    ['含 ` 反引号', '含 ${ 插值', '含 \\ 反斜杠'].every((t, i) =>
+      replaceStyleConstant(chatModeSrc, t).ok === false))
+  check('★ 找不到常量声明 ⇒ 拒绝（不猜位置）',
+    replaceStyleConstant('// 什么都没有\n', 'x').ok === false)
+
+  // 真落盘一次（拿一份 chat-mode.mjs 的**副本**，绝不碰真源码）
+  const syncDir = freshDir('sync')
+  const copyPath = join(syncDir, 'chat-mode.mjs')
+  writeFileSync(copyPath, chatModeSrc, 'utf8')
+  const sync = syncStyleConstant({ chatModePath: copyPath, styleText: '【测试用】\n- 极短。\n' })
+  check('★★ 同步真的写进去了', sync.ok && sync.changed, String(sync.why ?? ''))
+  check('★★ 写完**复核**一致（只信"写进去了"等于把漂移交给运气）',
+    constantMatches(readFileSync(copyPath, 'utf8'), '【测试用】\n- 极短。\n'))
+  check('★ 同步会先备份', sync.backup && existsSync(sync.backup) && readFileSync(sync.backup, 'utf8') === chatModeSrc)
+  check('★ 再同步一次同样的内容：不重复写', syncStyleConstant({ chatModePath: copyPath, styleText: '【测试用】\n- 极短。\n' }).changed === false)
+  check('★★ 同步失败时**不写坏文件**（反引号那条路）',
+    syncStyleConstant({ chatModePath: copyPath, styleText: '带 ` 反引号' }).ok === false &&
+      readFileSync(copyPath, 'utf8') === readFileSync(copyPath, 'utf8'))
+
+  // ── 4g. 整篇改写落地（apply）：确认 / 锚点拦截 / 备份 / 常量同步 ─────────
   const ws = freshDir('ws2')
   const styleDir = freshDir('style2')
   const stylePath = join(styleDir, '闲聊.md')
   writeFileSync(stylePath, styleText, 'utf8')
-  const store = createReviewStore({ workspace: ws, styleFile: stylePath })
-  const items = fakeItems.map((it) => ({ ...it, batch: 'b2', source: 'import', at: 1 }))
+  const cmPath = join(styleDir, 'chat-mode.mjs')
+  writeFileSync(cmPath, chatModeSrc, 'utf8')
+  const store = createReviewStore({ workspace: ws, styleFile: stylePath, chatModePath: cmPath })
+  const items = [
+    { id: 'q1', batch: 'b2', source: 'import', chatKey: 'g', chatLabel: '群 g', at: 1, context: [], reply: '手机？我住在一台 X99 主板的机箱里面' },
+    { id: 'q2', batch: 'b2', source: 'import', chatKey: 'g', chatLabel: '群 g', at: 2, context: [], reply: '这个问题可以从三个角度看' },
+  ]
   store.createBatch({ label: 'b2', source: 'import', items })
-  for (const [id, s] of Object.entries(scores)) store.saveScore({ id, ...s })
+  store.saveScore({ id: 'q1', verdict: 'bad', comment: '问手机就答手机' })
+  store.saveScore({ id: 'q2', verdict: 'bad', comment: '太长，别解释自己' })
 
-  const d = store.draft('b2')
-  check('★ draft 给出建议清单 + 待追加文本 + diff', d.suggestions.length === 2 && d.proposedBlock && d.diff, `${d.suggestions.length} 条建议`)
-  check('★ 建议里带"这条规则被违反了几次"与它挂的规则原文',
-    d.suggestions[0].count === 1 && d.suggestions[0].ruleQuote === '别主动抖记忆里的细节', JSON.stringify(d.suggestions[0].ruleQuote))
-  check('★ diff 指向真实文件路径', d.diff.includes(stylePath))
+  check('★ 还没整理过时 latestConsolidation 是 null（页面据此显示"还没整理"）',
+    store.latestConsolidation('b2') === null)
 
-  check('★★ 没确认就想应用 → 拒绝（没有"默认应用"这件事）', store.applyDraft({ scope: 'b2' }).ok === false)
+  const rewritten = styleText
+    .replace('- **极短。** 一句话能说完就一句话。', '- **极短。** 一句话能说完就一句话，别交代自己的参数。')
+  const saved = store.saveConsolidation({
+    scope: 'b2',
+    styleBefore: styleText,
+    result: {
+      points: [{ kind: 'bad', title: '别交代自己的参数', summary: '问什么答什么', evidence: ['q1'], where: '说话方式' }],
+      rewritten,
+      dropped: [],
+      anchors: checkAnchors({ text: rewritten }),
+      model: 'fake-model',
+      ms: 42,
+    },
+  })
+  check('★ 存下一份整理（点 + 改写 + diff + 锚点）',
+    saved.ok && saved.consolidation.points.length === 1 && saved.consolidation.diff.includes('---'), JSON.stringify(saved.why ?? ''))
+  check('★★ diff 是**整篇**的（+/- 行都在），不是"追加一段"',
+    saved.consolidation.diff.includes('+') && saved.consolidation.diff.includes('-') &&
+      /@@ -\d+,\d+ \+\d+,\d+ @@/.test(saved.consolidation.diff))
+  check('★ 带上改写前后的字数（页面要显示"精简了多少"）',
+    saved.consolidation.styleBeforeChars === styleText.length && saved.consolidation.chars === rewritten.length)
+  check('★ latestConsolidation 取得到（页面刷新后还在）', store.latestConsolidation('b2')?.id === saved.consolidation.id)
+
+  check('★★ 没确认就想应用 → 拒绝（没有"默认应用"这件事）',
+    store.applyDraft({ scope: 'b2' }).ok === false && store.applyDraft({ scope: 'b2' }).code === 400)
   const applied = store.applyDraft({ scope: 'b2', confirm: true })
   check('★★ 应用成功并返回备份路径', applied.ok && existsSync(applied.backup), String(applied.why ?? applied.backup))
   const styleAfter = readFileSync(stylePath, 'utf8')
-  check('★ 文件真的变了，且原内容一字未动', styleAfter.startsWith(styleText.replace(/\s+$/, '')) && styleAfter.includes('原主人估计也不认'))
-  check('★ 备份里是**改动前**的内容', readFileSync(applied.backup, 'utf8') === styleText)
-  check('★ 返回新的 sha256（页面上用来确认"我看到的和写进去的是同一份"）', applied.sha256 === sha256(styleAfter))
-  check('★★ 同一份草稿再应用一次 → 409（不重复写）',
-    store.applyDraft({ scope: 'b2', confirm: true }).code === 409, String(store.applyDraft({ scope: 'b2', confirm: true }).why))
-}
+  check('★ 风格文件真的被**整篇替换**成改写后的内容', styleAfter === rewritten && styleAfter !== styleText)
+  check('★ 备份里是**改动前**的完整内容', readFileSync(applied.backup, 'utf8') === styleText)
+  check('★★ 顺带同步了出厂常量（否则两份开始漂，测试会红）',
+    applied.constantSync.ok && constantMatches(readFileSync(cmPath, 'utf8'), rewritten),
+    JSON.stringify(applied.constantSync))
+  check('★ 返回新 sha256 与前后字数', applied.sha256 === sha256(styleAfter) && applied.beforeChars === styleText.length)
+  check('★★ 同一份改写再应用一次 → 409（不重复写）',
+    store.applyDraft({ scope: 'b2', confirm: true }).code === 409,
+    String(store.applyDraft({ scope: 'b2', confirm: true }).why))
+  check('★ 整理记录里标了"已应用"与备份路径',
+    store.latestConsolidation('b2').appliedAt > 0 && store.latestConsolidation('b2').applyResult.backup.includes('.bak'))
 
+  // ── 4h. 锚点拦截：丢了底线要点就不许应用（除非人明确覆盖）──────────────
+  const ws3 = freshDir('ws3')
+  const styleDir3 = freshDir('style3')
+  const stylePath3 = join(styleDir3, '闲聊.md')
+  writeFileSync(stylePath3, styleText, 'utf8')
+  const store3 = createReviewStore({ workspace: ws3, styleFile: stylePath3 })
+  store3.createBatch({ label: 'b3', source: 'import', items: [{ ...items[0], id: 'z1', batch: 'b3' }] })
+  store3.saveScore({ id: 'z1', verdict: 'bad', comment: '太长了' })
+  const risky = '【闲聊】\n- 短一点。\n- 别像客服。\n' // 故意把底线全删了
+  store3.saveConsolidation({ scope: 'b3', styleBefore: styleText, result: { points: [], rewritten: risky, dropped: [], anchors: checkAnchors({ text: risky }) } })
+  const blocked = store3.applyDraft({ scope: 'b3', confirm: true })
+  check('★★ 改写丢了底线要点 ⇒ **拒绝应用**，并逐条说清丢了哪几条',
+    blocked.ok === false && blocked.code === 409 && blocked.anchorsMissing.length === STYLE_ANCHORS.length,
+    JSON.stringify(blocked.anchorsMissing?.map((m) => m.label)))
+  check('★★ 被拒绝时文件**一个字都没动**（拒绝必须是拒绝，不是"写了再说"）',
+    readFileSync(stylePath3, 'utf8') === styleText)
+  const forced = store3.applyDraft({ scope: 'b3', confirm: true, confirmAnchors: true })
+  check('★★ 人明确覆盖后可以应用（并且标记成"覆盖过锚点"）',
+    forced.ok && forced.anchorsOverridden === true, JSON.stringify(forced.why ?? ''))
+  check('★ 覆盖也是"先备份再写"', readFileSync(forced.backup, 'utf8') === styleText)
+
+  // diff 纯函数仍然可用（整篇重写靠它给人看）
+  const diff = unifiedDiff('a\nb\nc\n', 'a\nB\nc\nd\n', { aName: 'x', bName: 'x' })
+  check('★ diff 有文件头与 hunk 头', diff.startsWith('--- x') && diff.includes('+++ x') && /@@ -\d+,\d+ \+\d+,\d+ @@/.test(diff))
+  check('★ 改一行时同时出现 - 与 +', diff.includes('-b') && diff.includes('+B'))
+}
 // ══════════════════════════════════════════════════════════════════════════
 section('⑤ 语料库新增的两个只读方法（评审台的数据源）')
 // ══════════════════════════════════════════════════════════════════════════
@@ -421,7 +591,29 @@ async function withServer(tag, fn, { log = () => {} } = {}) {
   c.record({ kind: 'group', peerId: '700001', senderName: '小鲸鱼', text: '原主人估计也不认', isBot: true, at })
   c.close()
 
-  const app = createReviewServer({ workspace: ws, styleDir, log })
+  // ★★ 出厂常量的同步对象必须是**临时副本**：`createReviewServer` 默认指向真的
+  //   `src/chat-mode.mjs`，测试里要是指向它，跑一次测试就会改掉真源码（第一版差点这么干）。
+  const chatModePath = join(styleDir, 'chat-mode.mjs')
+  writeFileSync(chatModePath, readFileSync(join(PKG_ROOT, 'src', 'chat-mode.mjs'), 'utf8'), 'utf8')
+
+  const app = createReviewServer({
+    workspace: ws,
+    styleDir,
+    log,
+    chatModePath,
+    // ★★ 测试**绝不真调模型**：注入假模型与假通路（也不碰 resolveDirectTarget 的真实解析）
+    resolveTarget: () => ({ ok: true, baseUrl: 'https://example.invalid', apiKey: 'test', model: 'fake-model' }),
+    callModel: async () => ({
+      ok: true,
+      ms: 7,
+      text: JSON.stringify({
+        points: [{ kind: 'bad', title: '别交代机箱', summary: '问什么答什么', evidence: ['1'], where: '说话方式' }],
+        // 在**当前文件内容**后面追加一行：既保证"和原来不同"，也保证底线锚点一条不丢
+        rewritten: `${readFileSync(join(styleDir, '闲聊.md'), 'utf8').trimEnd()}\n- 新增：问手机就答手机，别交代机箱。\n`,
+        dropped: [],
+      }),
+    }),
+  })
   await new Promise((r) => app.server.listen(0, '127.0.0.1', r))
   const port = app.server.address().port
   const base = `http://127.0.0.1:${port}`
@@ -455,9 +647,9 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
   check('★ health 里带风格文件 sha256（确认"看到的就是写进去的"）', /^[0-9a-f]{64}$/.test(health.body.styleFile.sha256))
 
   const tax = await api('/api/taxonomy')
-  check('★ GET /api/taxonomy 给三档 + 标签 + 漂移（此处应为空）',
-    tax.body.ok && tax.body.verdicts.length === 3 && tax.body.tags.length === TAGS.length && tax.body.drift.length === 0,
-    `${tax.body.tags?.length} 标签 / ${tax.body.drift?.length} 漂移`)
+  check('★★ GET /api/taxonomy 只回"已经删掉了"（保留路由是为了让旧页面拿到人话，不是 404）',
+    tax.body.ok && tax.body.removed === true && tax.body.verdicts.length === 3 && !tax.body.tags,
+    JSON.stringify(tax.body))
 
   const sources = await api('/api/sources')
   check('★ GET /api/sources 列语料库会话（带机器人发言数）',
@@ -484,44 +676,82 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
   check('★ GET /api/items 不认识 filter 时按"未评"处理（不是 500）',
     (await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=乱写`)).body.total === 2)
 
-  const scored = await post('/api/score', { id: firstId, verdict: 'bad', tags: ['memory_detail'], note: '别抖记忆' })
-  check('★ POST /api/score 落盘并回进度', scored.body.ok && scored.body.progress.scored === 1 && scored.body.batchId === batchId,
+  const scored = await post('/api/score', { id: firstId, verdict: 'bad', comment: '问手机就答手机，别交代机箱' })
+  check('★ POST /api/score 落盘并回进度（含"有评论"计数）',
+    scored.body.ok && scored.body.progress.scored === 1 && scored.body.progress.commented === 1 && scored.body.batchId === batchId,
     JSON.stringify(scored.body.progress))
   check('★ 打分后"未评"少了一条', (await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=unrated`)).body.total === 1)
   check('★ 打分后"已评"能查到它', (await api(`/api/items?batch=${encodeURIComponent(batchId)}&filter=rated`)).body.total === 1)
   const badScore = await post('/api/score', { id: firstId, verdict: '乱写' })
   check('★ 结论不合法 → 400 且说明只能是哪三档', badScore.status === 400 && /good \/ ok \/ bad/.test(badScore.body.error), badScore.body.error)
+  const longComment = await post('/api/score', { id: firstId, verdict: 'bad', comment: 'x'.repeat(COMMENT_MAX_CHARS + 1) })
+  check('★ 评论超长 → 400（有上限，不是无底洞）', longComment.status === 400, longComment.body.error)
   const unknownId = await post('/api/score', { id: 'i:x:y:z', verdict: 'bad' })
   check('★ 不存在的条目 → 400（不许悄悄写进一个孤儿分数）', unknownId.status === 400, unknownId.body.error)
 
   const undone = await post('/api/undo', { batch: batchId })
   check('★ POST /api/undo 撤销刚打的那条', undone.body.ok && undone.body.undone?.id === firstId && undone.body.progress.scored === 0)
-  await post('/api/score', { id: firstId, verdict: 'bad', tags: ['memory_detail'] })
-  await post('/api/score', { id: secondId, verdict: 'bad', tags: ['self_intro'] })
+  await post('/api/score', { id: firstId, verdict: 'bad', comment: '别把记忆里的显卡当谈资' })
+  await post('/api/score', { id: secondId, verdict: 'bad', comment: '这句可以更短' })
 
   const stats = await api(`/api/stats?batch=${encodeURIComponent(batchId)}`)
-  check('★ GET /api/stats 给分布 + 标签排行 + 证据', stats.body.ok && stats.body.verdicts.bad === 2 && stats.body.tags.length >= 2,
-    JSON.stringify(stats.body.verdicts))
-  check('★ stats 的证据里带被评原文（报告页要能点开看）', stats.body.tags[0].examples[0].reply.length > 0)
+  check('★★ GET /api/stats 给分布 + **评论清单**（没有标签排行了）',
+    stats.body.ok && stats.body.verdicts.bad === 2 && stats.body.list.length === 2 && stats.body.tags === undefined,
+    JSON.stringify(Object.keys(stats.body)))
+  check('★ 评论清单带被评原文与上下文（报告页要能逐条读）',
+    stats.body.list[0].reply.length > 0 && Array.isArray(stats.body.list[0].context))
 
-  const draft = await api(`/api/draft?batch=${encodeURIComponent(batchId)}`)
-  check('★ GET /api/draft 生成草稿 + diff', draft.body.ok && draft.body.draft.proposedBlock && draft.body.draft.diff,
-    `${draft.body.draft.suggestions.length} 条建议`)
-  check('★ 草稿里的反例是**真实被评的那两句**',
-    draft.body.draft.proposedBlock.includes('X99') && draft.body.draft.proposedBlock.includes('原主人估计也不认'))
+  // ④ 整理：**注入假模型**（测试绝不真调模型）
+  const notConsolidated = await api(`/api/consolidate?scope=${encodeURIComponent(batchId)}`)
+  check('★ GET /api/consolidate 一开始 latest 是 null，但评论清单在（素材不会看不见）',
+    notConsolidated.body.ok && notConsolidated.body.latest === null && notConsolidated.body.comments.length === 2,
+    JSON.stringify(notConsolidated.body.counts))
+  check('★ GET 里带上"模型通路可用不可用"与锚点表（页面据此禁用按钮 / 显示底线）',
+    typeof notConsolidated.body.model.ok === 'boolean' && notConsolidated.body.anchors.length === STYLE_ANCHORS.length)
 
-  const noConfirm = await post('/api/apply', { batch: batchId })
+  const consolidated = await post('/api/consolidate', { scope: batchId })
+  check('★★ POST /api/consolidate 调一次（假）模型，回来「点」+ 整篇改写 + diff',
+    consolidated.body.ok && consolidated.body.consolidation.points.length === 1 &&
+      consolidated.body.consolidation.diff.includes('@@'),
+    String(consolidated.body.error ?? ''))
+  check('★ 点是**从评论里长出来的**（假模型只回我给的那一条，页面照原样显示）',
+    consolidated.body.consolidation.points[0].title === '别交代机箱')
+  check('★ 顺带回本地聚类（成功时也回，页面可折叠对照）',
+    consolidated.body.clusters && Array.isArray(consolidated.body.clusters.bad))
+  const consolidationId = consolidated.body.consolidation.id
+
+  const noConfirm = await post('/api/apply', { consolidation: consolidationId })
   check('★★ POST /api/apply 不带 confirm → 400（唯一改人格的操作必须有确认）', noConfirm.status === 400, noConfirm.body.error)
   const styleBefore = readFileSync(join(styleDir, '闲聊.md'), 'utf8')
-  const applied = await post('/api/apply', { batch: batchId, confirm: true })
+  const applied = await post('/api/apply', { consolidation: consolidationId, confirm: true })
   check('★★ POST /api/apply 成功并留下备份', applied.status === 200 && existsSync(applied.body.backup), String(applied.body.error ?? applied.body.backup))
   check('★★ 备份与改动前**逐字相同**', readFileSync(applied.body.backup, 'utf8') === styleBefore)
   const styleAfter = readFileSync(join(styleDir, '闲聊.md'), 'utf8')
-  check('★ 风格文件被追加了草稿（且原内容一字未动）',
-    styleAfter.length > styleBefore.length && styleAfter.startsWith(styleBefore.replace(/\s+$/, '')), `${styleBefore.length} → ${styleAfter.length}`)
-  check('★ 应用后再取 diff 会说"已经在文件里了"（不重复写）',
-    (await api(`/api/draft?batch=${encodeURIComponent(batchId)}`)).body.draft.alreadyApplied === true)
-  check('★★ 再应用一次 → 409', (await post('/api/apply', { batch: batchId, confirm: true })).status === 409)
+  check('★★ 风格文件被**整篇替换**（不是追加），且字数如实回报',
+    styleAfter !== styleBefore && applied.body.beforeChars === styleBefore.length && applied.body.chars === styleAfter.length,
+    `${styleBefore.length} → ${styleAfter.length}`)
+  check('★★ 应用时顺带同步了出厂常量（假模型给的是同一份文本）',
+    applied.body.constantSync.ok === true || applied.body.constantSync.why.includes('没传'),
+    JSON.stringify(applied.body.constantSync))
+  check('★★ 再应用一次 → 409（不重复写）', (await post('/api/apply', { consolidation: consolidationId, confirm: true })).status === 409)
+
+  // 锚点拦截：造一份"把底线全删了"的整理结果，直接落盘（绕过模型），再试应用
+  const riskyText = '【闲聊】\n- 短一点。\n'
+  app.store.invalidate()
+  const riskySaved = app.store.saveConsolidation({
+    scope: batchId,
+    styleBefore: readFileSync(join(styleDir, '闲聊.md'), 'utf8'),
+    result: { points: [], rewritten: riskyText, dropped: [], anchors: checkAnchors({ text: riskyText }) },
+  })
+  const blocked = await post('/api/apply', { consolidation: riskySaved.consolidation.id, confirm: true })
+  check('★★ 改写丢了底线要点 → 409 + **逐条列出丢了什么**（页面要显示给人看）',
+    blocked.status === 409 && Array.isArray(blocked.body.anchorsMissing) && blocked.body.anchorsMissing.length === STYLE_ANCHORS.length,
+    String(blocked.body.anchorsMissing?.length))
+  check('★ 被拒绝时文件没动', readFileSync(join(styleDir, '闲聊.md'), 'utf8') === styleAfter)
+  const forced = await post('/api/apply', { consolidation: riskySaved.consolidation.id, confirm: true, confirmAnchors: true })
+  check('★★ 明确覆盖后才应用（并如实标记 anchorsOverridden）',
+    forced.status === 200 && forced.body.anchorsOverridden === true, String(forced.body.error ?? ''))
+  check('★ 覆盖也是先备份再写', readFileSync(forced.body.backup, 'utf8') === styleAfter)
 
   // 导入路
   const forward = {
@@ -567,8 +797,10 @@ await withServer('http', async ({ api, post, base, styleDir, app }) => {
   check('★ DELETE /api/batch 删掉批次', del.body.ok && del.body.removed === 2, JSON.stringify(del.body))
   check('★ 删过之后条目也查不到了（404，不是空列表）', (await api(`/api/items?batch=${encodeURIComponent(batchId)}`)).status === 404)
   check('★ 删不存在的批次 → 404', (await api('/api/batch?id=nope', { method: 'DELETE' })).status === 404)
-  check('★★ 删批次**不动风格文件**（那是应用草稿的结果，批次的生死与它无关）',
-    readFileSync(join(styleDir, '闲聊.md'), 'utf8') === styleAfter)
+  check('★★ 删批次**不动风格文件**（那是应用改写的结果，批次的生死与它无关）',
+    readFileSync(join(styleDir, '闲聊.md'), 'utf8') === readFileSync(forced.body.backup, 'utf8') ||
+      readFileSync(join(styleDir, '闲聊.md'), 'utf8') === riskyText,
+    '')
 })
 
 // 语料库不可用时：不许假装有数据
@@ -765,7 +997,11 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
     check('★ 页面把"没有保存按钮"这件事做对了：打分走 POST /api/score',
       called.has('/api/score'))
     check('★ 页面用了撤销接口', called.has('/api/undo'))
-    check('★ 页面用了草稿与应用接口', called.has('/api/draft') && called.has('/api/apply'))
+    check('★ 页面用了「整理 + 应用」两个接口（改版后的核心动作）',
+      called.has('/api/consolidate') && called.has('/api/apply'),
+      [...called].join(' '))
+    check('★★ 页面**不再**调用已经删掉的 /api/draft（旧的"草稿=追加一段"那条路）',
+      !called.has('/api/draft'), [...called].join(' '))
 
     // 反例：把一条不存在的路由塞进去必须能被抓住（否则上面那条断言是空的）
     const bogus = new Set([...`${app}\nfetch('/api/definitely-not-real')`.matchAll(/['"`](\/api\/[\w/-]+)/g)].map((m) => m[1]))

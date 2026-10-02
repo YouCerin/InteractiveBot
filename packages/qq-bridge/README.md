@@ -468,7 +468,7 @@ qq-bridge/
 ├── styles/                ★ 对话风格（闲聊态说什么话；**改了下一轮就生效**）
 ├── config-ui/             ★ 控制台界面（React/Vite，构建产物 dist/ 由桥接伺服）
 ├── sticker-label/         ★ 表情包人工标注台（独立小工具，零依赖，自带页面）
-├── chat-review/           ★ 聊天记录评审台（独立小工具：导入记录 → 人工打分 → 生成风格修订草稿）
+├── chat-review/           ★ 聊天记录评审台（独立小工具：导入记录 → 判档+评论 → 整理成「点」→ 整篇重写风格文件）
 ├── mocks/                 测试替身（不需要 QQ，不花钱）
 ├── vendor/                包内自带：node/ + node_modules/ws
 ├── logs/                  运行日志 + usage.jsonl

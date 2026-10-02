@@ -1,64 +1,69 @@
 /**
  * 聊天记录评审台 —— 前端（零依赖、无构建、**经典脚本**）。
  *
- * 三个页签：导入 → 打分 → 报告。四条纪律，改代码时不要绕开：
- * ① **不编数据**：请求失败就把服务端给的 `error` 显示出来，绝不用 0 或空占位冒充"测出来的
- *    数"。典型例子：`corpus.ok === false` 时顶栏显示 `corpus.why`，而不是一个看着正常的行数。
+ * 三个页签：导入 → 打分 → 报告。改版后的形状（先读 chat-review/API.md 的〇节）：
+ *   导入真实聊天记录 → 一条条「判档 + 写评论」→ 把评论**整理成「点」**→ 据此**整篇重写** styles/闲聊.md
+ *
+ * ★ 旧版那套**手写标签**（太长 / 像客服 …）整套删掉了，别再往回加：标签是"我预先想好的分类"，
+ *   人没想到的问题就永远进不了统计；现在的素材是**评论**，「点」是从评论里**整理**出来的产物，
+ *   草稿是**整篇重写**（不是往文件尾追加），而应用必须"人点确认 + 先备份 + 过锚点核对"。
+ *
+ * 四条纪律，改代码时不要绕开：
+ * ① **不编数据**：请求失败就把服务端给的 `error` 显示出来，字段没给就显示 —，绝不用 0 或
+ *    空占位冒充"测出来的数"（典型：`corpus.ok===false` 时顶栏说 why，不画一个像真的行数）。
  * ② **打分不能被网络卡住**：判档后立刻换下一条（乐观推进），失败再把那条**放回原位**并报错。
- *    人一次要评几百条，"每点一下等一个往返"就是全部的时间浪费。
- * ③ **聊天原文只走 textContent**：reply / context / examples 都是真人聊天内容，可能带恶意
- *    标签。本文件从不把字符串当 HTML 塞进页面：那不是显示问题，是 XSS。
- * ④ **契约就是契约**：`/api/...` 路径与字段名都按 `chat-review/API.md`。页面调一个不存在
- *    的接口时服务端日志是干净的，症状只会是"点了没反应"，所以路径一个字都不许改。
+ * ③ **聊天原文只走 textContent**：reply / context / comment / 证据原文都是真人输入，可能带
+ *    恶意标签。本文件从不把字符串当 HTML 塞进页面：那不是显示问题，是 XSS。
+ * ④ **契约就是契约**：`/api/...` 路径与字段名都按 API.md。页面调一个不存在的接口时服务端
+ *    日志是干净的，症状只会是"点了没反应"，所以路径一个字都不许改。
  */
 const $ = (id) => document.getElementById(id)
 
-/** 一次取多少条（契约默认 20）。 */
-const PAGE_SIZE = 20
-/** 队列里剩这么少就续取下一页：让"下一条"永远是本地就有的，不用等网络。 */
-const PREFETCH_MIN = 6
-/** 数字键 4–9 / 0 绑给**前七个**标签（契约键位）。 */
-const TAG_KEYS = ['4', '5', '6', '7', '8', '9', '0']
-/** 三档判档的键位是契约固定的；税则取不到时用它兜住键盘，不让人"按了没反应"。 */
+const PAGE_SIZE = 20 // 一次取多少条（契约默认 20）
+const PREFETCH_MIN = 6 // 队列里剩这么少就续取下一页，让"下一条"永远是本地就有的
+// 三档结论（契约固定）。`/api/taxonomy` 取不到时用这个兜住键盘，不让人"按了没反应"。
 const FALLBACK_VERDICTS = [
-  { id: 'good', label: '就该这么说', key: '1' },
+  { id: 'good', label: '对', key: '1' },
   { id: 'ok', label: '还行', key: '2' },
-  { id: 'bad', label: '不该这么说', key: '3' },
+  { id: 'bad', label: '不对', key: '3' },
 ]
+const VERDICT_IDS = ['good', 'ok', 'bad']
 
 const state = {
   page: 'import',
   health: null,
   // ★ 取不到时要能区分"还没取到"和"服务端说不可用"，否则页面会显示成"0 个会话"
   sources: { corpus: { ok: false, why: '还没取到数据源', chats: [] }, batches: [] },
-  taxonomy: { ok: false, verdicts: [], tags: [], drift: [] },
+  taxonomy: { ok: false, verdicts: [], why: '' }, // 只留三档结论：标签体系已删除
   importFormat: 'forward-json',
   score: {
     batch: '', filter: 'unrated',
-    queue: [], // 本地待过队列：评过的条目离开队列（撤销会插回来）
-    index: 0,
+    queue: [], index: 0, // 本地待过队列：评过的条目离开队列（撤销会插回来）
     offset: 0, // 服务端分页游标，与队列长度无关（队列会因为评分变短）
     exhausted: false, fetching: false, fetchError: '',
-    scored: null, total: null, // 一律先 null：没拿到真实进度就显示"—"，不显示 0
+    scored: null, total: null, commented: null, // 一律先 null：没拿到真进度就显示 —，不显示 0
     loadedFor: '', ctxOpen: true,
   },
-  reportBatch: 'all', reportTag: '',
-  stats: null, draft: null,
+  reportBatch: 'all', reportVerdict: '', reportSearch: '',
+  stats: null,
+  // 整理那一块的全部状态：GET 一进报告页就拉（不花钱），POST 只在人点击时发生
+  cons: {
+    loaded: false, latest: null, comments: [], counts: null, model: null,
+    limits: null, anchors: [], clusters: null, error: '', busy: false, armed: false,
+  },
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   通用小工具
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 通用小工具 ─────────────────────────────────────────────────────── */
 
 /** 建元素；`text` 一律走 textContent —— 这是本文件唯一允许塞文本的路子。 */
-function el(tag, className, text) {
+function el(tag, cls, text) {
   const n = document.createElement(tag)
-  if (className) n.className = className
+  if (cls) n.className = cls
   if (text != null) n.textContent = String(text)
   return n
 }
+const td = (text, cls) => el('td', cls, text)
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild) }
-
 /** 毫秒 → 本地时间：服务端给时间戳，页面显示的是**看表的人**的时间。 */
 function fmtTime(ms) {
   if (ms == null || ms === '' || Number.isNaN(Number(ms))) return '—'
@@ -66,8 +71,8 @@ function fmtTime(ms) {
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
-/** 缺字段一律"—"：把"服务端没给"和"真的是 0"分开，是这份页面最基本的诚实。 */
-function numOrDash(n) { return Number.isFinite(n) ? String(n) : '—' }
+/** 缺字段一律 —：把"服务端没给"和"真的是 0"分开，是这份页面最基本的诚实。 */
+const numOrDash = (n) => (Number.isFinite(n) ? String(n) : '—')
 function pctOf(count, total) {
   if (!Number.isFinite(count) || !Number.isFinite(total) || total <= 0) return '—'
   return `${Math.round((count / total) * 1000) / 10}%`
@@ -76,19 +81,23 @@ function clamp(n, lo, hi) {
   const v = Number(n)
   return Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : lo
 }
-function truncate(s, n) { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t }
+const truncate = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n)}…` : String(s ?? ''))
+const hasCommentText = (s) => String(s ?? '').trim() !== '' // 空评论是合法的：只判档也能用，只是不进整理
 function verdictLabel(id) {
   return [...state.taxonomy.verdicts, ...FALLBACK_VERDICTS].find((v) => v.id === id)?.label ?? id ?? '—'
 }
-/** `/api/stats` 的 `examples[].context` 是**字符串**，`/api/items` 的 `context` 是**数组**。 */
+/** 按契约固定的键位取结论；税则里的 `key` 对得上就优先用它。 */
+function verdictForKey(key) {
+  const list = state.taxonomy.verdicts.length ? state.taxonomy.verdicts : FALLBACK_VERDICTS
+  return list.find((v) => String(v.key) === String(key))?.id ?? { 1: 'good', 2: 'ok', 3: 'bad' }[key] ?? null
+}
+/** `context` 在契约里是数组（`[{name,text,isBot}]`）；不是数组就如实返回空串，不猜。 */
 function contextText(ctx) {
   if (Array.isArray(ctx)) return ctx.map((l) => `${l?.name ?? '?'}：${l?.text ?? ''}${l?.isBot ? '（机器人）' : ''}`).join('\n')
   return typeof ctx === 'string' ? ctx : ''
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   提示：toast / 全局错误横幅 / 兜底错误条
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 提示：toast / 全局错误横幅 / 兜底错误条 ─────────────────────────── */
 
 let toastTimer = null
 function toast(msg, kind = '') {
@@ -119,39 +128,30 @@ function showPageError(what, error) {
 window.addEventListener('error', (e) => showPageError('页面脚本出错', e.error ?? e.message))
 window.addEventListener('unhandledrejection', (e) => showPageError('异步操作失败', e.reason))
 
-/* ══════════════════════════════════════════════════════════════════════
-   请求封装：失败**永不抛异常**，一律返回 `{ok:false, error}`，
-   好让每个调用点都能"看到错误就什么都不做"，而不是把异常漏进渲染里。
-   ══════════════════════════════════════════════════════════════════════ */
-
+/* ── 请求封装 ───────────────────────────────────────────────────────── */
+// 失败**永不抛异常**，一律回 `{ok:false, error}`，好让每个调用点都能"看到错误就什么都不做"。
 async function api(path, { method = 'GET', body = null } = {}) {
   const fail = (msg) => { showError(msg); return { ok: false, error: msg } }
   let res
   try {
-    res = await fetch(path, {
-      method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-    })
+    res = await fetch(path, { method, headers: body ? { 'content-type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })
   } catch (e) { return fail(`连不上本地服务（${method} ${path}）：${e?.message ?? e}`) }
   let data
   try { data = await res.json() } catch { return fail(`${method} ${path} 返回的不是 JSON（HTTP ${res.status}）`) }
   if (!data || typeof data !== 'object') return fail(`${method} ${path} 返回了意外的内容`)
   // ok:false 时把服务端的 error 原样亮出来 —— 静默失败是这类工具最糟的坏法
   if (data.ok !== true) showError(data.error ?? `${method} ${path} 失败（HTTP ${res.status}，服务端没给 error）`)
-  return data
+  // 状态码也带上：409 那类"不是网络错、是状态冲突"要靠它才说得清（还有结构化字段如 anchorsMissing）
+  return { ...data, httpStatus: res.status }
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   顶栏：环境事实（工作区 / 语料库 / 风格文件 / 启动时间）
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 顶栏：环境事实 ─────────────────────────────────────────────────── */
 
 async function loadHealth() {
   const data = await api('/api/health')
   state.health = data.ok ? data : null
   renderHealth()
 }
-
 function renderHealth() {
   const box = $('health')
   if (!box) return
@@ -162,10 +162,10 @@ function renderHealth() {
   const ws = el('span', 'hv', `工作区 ${h.workspace ?? '（未给）'}`)
   ws.title = String(h.workspace ?? '')
   box.appendChild(ws)
-  // ★ 语料库读不出来时**说为什么**，绝不显示一个像真的行数
-  const c = h.corpus
+  const c = h.corpus // ★ 语料库读不出来时**说为什么**，绝不显示一个像真的行数
   if (c && c.ok === true) box.appendChild(el('span', 'hv', `语料库 ${numOrDash(c.rows)} 行`))
   else box.appendChild(el('span', 'hv bad', `语料库不可用：${c?.why ?? '服务端没说原因'}`))
+  // ★ 这一格就是"改写到底写进去没有"的唯一凭据：应用之后必须重新拉一次（见 applyConsolidation）
   const sf = h.styleFile
   if (sf && sf.exists === true) {
     const sha = String(sf.sha256 ?? '')
@@ -178,48 +178,24 @@ function renderHealth() {
   box.appendChild(started)
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   税则与漂移
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 三档结论（`/api/taxonomy` 已废弃，只回一句人话 + verdicts）───────── */
 
 async function loadTaxonomy() {
+  // ★ 只读 `verdicts`，不读也不渲染任何标签：标签体系已整套删除。
+  //   保留这次请求是因为"三档按钮的中文名"由服务端给；拿不到就用契约里的兜底三档。
   const data = await api('/api/taxonomy')
-  // 税则没了仍然可以判档（三档是契约固定的），但标签只能诚实地说"没有"
   state.taxonomy = data.ok
-    ? {
-        ok: true,
-        verdicts: Array.isArray(data.verdicts) ? data.verdicts : [],
-        tags: Array.isArray(data.tags) ? data.tags : [],
-        drift: Array.isArray(data.drift) ? data.drift : [],
-      }
-    : { ok: false, verdicts: [], tags: [], drift: [] }
+    ? { ok: true, verdicts: Array.isArray(data.verdicts) ? data.verdicts : [], why: String(data.why ?? '') }
+    : { ok: false, verdicts: [], why: String(data.error ?? '接口失败') }
   const note = $('taxonomy-note')
-  note.hidden = state.taxonomy.ok
-  note.textContent = state.taxonomy.ok
-    ? ''
-    : '拿不到标签税则（/api/taxonomy 失败）：判档按钮用的是契约里固定的三档，标签这一块暂时不可用。'
-  renderDrift()
+  if (note) {
+    note.hidden = state.taxonomy.ok
+    note.textContent = state.taxonomy.ok ? '' : `拿不到 /api/taxonomy（${state.taxonomy.why}）：判档用的是契约里固定的三档（对 / 还行 / 不对）。`
+  }
   if (state.page === 'score') renderCard()
 }
 
-function renderDrift() {
-  const box = $('drift-banner')
-  if (!box) return
-  clear(box)
-  const list = state.taxonomy.drift ?? []
-  if (!list.length) return (box.hidden = true)
-  // ★ 漂移 = 风格文件改过、税则没跟上。**提示但不拦着打分**（真人的判断比规则准）
-  box.hidden = false
-  box.appendChild(el('strong', '', `⚠️ 标签税则与风格文件对不上（${list.length} 条）：`))
-  box.appendChild(el('span', '', '风格文件改过、标签挂的"规则原文"已经找不到了。可以照常打分，但这些标签的规则原文不可信。'))
-  const ul = el('ul', 'drift-list')
-  for (const d of list) ul.appendChild(el('li', '', `${d?.id ?? '（无 id）'}：${d?.why ?? '（服务端没给原因）'}`))
-  box.appendChild(ul)
-}
-
-/* ══════════════════════════════════════════════════════════════════════
-   页签切换
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 页签切换 ───────────────────────────────────────────────────────── */
 
 async function switchTab(page) {
   state.page = page
@@ -232,9 +208,7 @@ async function switchTab(page) {
   if (page === 'report') await enterReport()
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   页签一：导入
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 页签一：导入 ───────────────────────────────────────────────────── */
 
 async function refreshSources() {
   const data = await api('/api/sources')
@@ -271,11 +245,7 @@ function renderCorpusSelect() {
   $('corpus-note').textContent = `共 ${chats.length} 个会话；只取机器人自己的发言当"被评的那句话"。`
 }
 
-function sourceLabel(src) {
-  if (src === 'corpus') return '语料库'
-  if (src === 'import') return '粘贴导入'
-  return src ? String(src) : '未知'
-}
+const sourceLabel = (src) => (src === 'corpus' ? '语料库' : src === 'import' ? '粘贴导入' : src ? String(src) : '未知')
 
 function renderBatches() {
   const tbody = $('batch-rows')
@@ -283,13 +253,16 @@ function renderBatches() {
   const list = state.sources.batches
   $('batch-table').hidden = list.length === 0
   $('batch-empty').hidden = list.length > 0
+  let missingCommented = false
   for (const b of list) {
+    if (!Number.isFinite(b?.commented)) missingCommented = true
     const tr = document.createElement('tr')
     tr.appendChild(el('td', 'b-label', b?.label ?? b?.id ?? '（无标签）'))
-    tr.appendChild(el('td', '', sourceLabel(b?.source)))
-    tr.appendChild(el('td', '', numOrDash(b?.items)))
-    tr.appendChild(el('td', '', `${numOrDash(b?.scored)} / ${numOrDash(b?.items)}`))
-    tr.appendChild(el('td', '', fmtTime(b?.createdAt)))
+    tr.appendChild(td(sourceLabel(b?.source)))
+    tr.appendChild(td(numOrDash(b?.items)))
+    tr.appendChild(td(`${numOrDash(b?.scored)} / ${numOrDash(b?.items)}`))
+    tr.appendChild(td(numOrDash(b?.commented)))
+    tr.appendChild(td(fmtTime(b?.createdAt)))
     const ops = el('td', 'ops')
     const go = el('button', 'primary small', '开始打分')
     go.onclick = () => {
@@ -305,6 +278,12 @@ function renderBatches() {
     tr.appendChild(ops)
     tbody.appendChild(tr)
   }
+  // 「有评论」是"整理还有多少素材"的直接答案，所以服务端没给时必须说明白，不能靠估
+  $('batch-note').textContent = !list.length
+    ? ''
+    : missingCommented
+      ? '「有评论」= 这一批里写了评论的条数（整理「点」只吃这些）；标 — 的是服务端这次没给 commented 字段。'
+      : '「有评论」= 这一批里写了评论的条数 —— 整理「点」只吃带评论的评分。'
 }
 
 async function pullFromCorpus() {
@@ -312,27 +291,25 @@ async function pullFromCorpus() {
   if (!chatKey) return toast('先选一个会话', 'err')
   // 输入框被清空时按**契约默认值**走（100 / 1），不能悄悄发一个 limit=1 过去
   const rawLimit = $('pull-limit').value.trim()
-  const rawCtx = $('pull-context').value.trim()
   const limit = clamp(rawLimit === '' ? 100 : rawLimit, 1, 500)
-  const contextBefore = clamp(rawCtx === '' ? 1 : rawCtx, 0, 3)
+  const contextBefore = clamp($('pull-context').value.trim() || 1, 0, 3)
   $('pull-limit').value = String(limit) // 越界当场纠正：静默截断会让人以为"拉了 800 条"
   const btn = $('btn-pull')
   btn.disabled = true
   let data
   try {
-    data = await api('/api/pull', {
-      method: 'POST',
-      body: { chatKey, limit, contextBefore, batchLabel: $('pull-label').value.trim() },
-    })
+    data = await api('/api/pull', { method: 'POST', body: { chatKey, limit, contextBefore, batchLabel: $('pull-label').value.trim() } })
   } finally { btn.disabled = false }
   if (!data?.ok) return
   const b = data.batch ?? {}
-  toast(`拉取完成：新增 ${numOrDash(data.added)} 条`, 'ok')
   await refreshSources()
   // ★ 这句必须写在 refreshSources **之后**：刷新会重画会话下拉，顺序反了这句话就被冲掉，
-  //   表现是"拉完了但页面上什么都没说"（拉了多少条、跳过多少条都看不到）。
+  //   表现是"拉完了但页面上什么都没说"（拉了多少条、扫描了多少条都看不到）。
   $('pull-result').textContent =
-    `已建批次「${b.label ?? b.id ?? '（无标签）'}」：新增 ${numOrDash(data.added)} 条，跳过 ${numOrDash(data.skipped)} 条。`
+    `已建批次「${b.label ?? b.id ?? '（无标签）'}」：可评回合 ${numOrDash(data.items)} 条，` +
+    `扫描 ${numOrDash(data.scanned)} 条消息，跳过标记 ${numOrDash(data.skippedMarkers)} 条。`
+  renderWarnings('pull-warnings', data.warnings, '没有需要说明的行。')
+  toast(`拉取完成：可评回合 ${numOrDash(data.items)} 条`, 'ok')
 }
 
 async function importPasted() {
@@ -342,20 +319,23 @@ async function importPasted() {
     method: 'POST',
     body: { format: state.importFormat, text, batchLabel: $('import-label').value.trim() },
   })
-  if (!data.ok) return
+  // 失败时响应里也可能带 warnings（例如"一条机器人都没认出来"）—— 照样列出来
+  if (!data.ok) return renderWarnings('import-warnings', data.warnings, '没有跳过的行。')
   const b = data.batch ?? {}
-  $('import-result').textContent = `已建批次「${b.label ?? b.id ?? '（无标签）'}」：${numOrDash(b.items ?? data.items?.length)} 条。`
-  renderWarnings(data.warnings)
+  $('import-result').textContent =
+    `已建批次「${b.label ?? b.id ?? '（无标签）'}」：可评回合 ${numOrDash(data.items)} 条（解析出 ${numOrDash(data.entries)} 条消息）。`
+  renderWarnings('import-warnings', data.warnings, '没有跳过的行（全部解析成功）。')
   toast('导入完成', 'ok')
   await refreshSources()
 }
 
 /** 跳过的行必须**原样列出来**：它们是"导入少了几条"的唯一解释，不许藏。 */
-function renderWarnings(warnings) {
-  const box = $('import-warnings')
+function renderWarnings(targetId, warnings, emptyText) {
+  const box = $(targetId)
+  if (!box) return
   clear(box)
   if (!Array.isArray(warnings)) return void box.appendChild(el('li', '', '服务端没有返回 warnings 字段 —— 无法确认有没有跳过的行。'))
-  if (!warnings.length) return void box.appendChild(el('li', '', '没有跳过的行（全部解析成功）。'))
+  if (!warnings.length) return void box.appendChild(el('li', '', String(emptyText ?? '没有需要说明的行。')))
   for (const w of warnings) box.appendChild(el('li', '', String(w)))
 }
 
@@ -380,9 +360,7 @@ async function removeBatch(b) {
   if (state.page === 'score') renderCard()
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   页签二：打分（主战场）
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 页签二：打分（主战场） ─────────────────────────────────────────── */
 
 function renderScoreBatchSelect() {
   const sel = $('score-batch')
@@ -393,8 +371,7 @@ function renderScoreBatchSelect() {
     return void (state.score.batch = '')
   }
   for (const b of state.sources.batches) {
-    const label = `${b?.label ?? b?.id ?? '（无标签）'}（${numOrDash(b?.scored)} / ${numOrDash(b?.items)}）`
-    sel.appendChild(new Option(label, String(b?.id ?? '')))
+    sel.appendChild(new Option(`${b?.label ?? b?.id ?? '（无标签）'}（${numOrDash(b?.scored)} / ${numOrDash(b?.items)}）`, String(b?.id ?? '')))
   }
   sel.value = state.sources.batches.some((b) => b?.id === keep) ? keep : String(state.sources.batches[0]?.id ?? '')
   state.score.batch = sel.value
@@ -404,12 +381,7 @@ function renderScoreBatchSelect() {
 }
 
 function resetQueue() {
-  const s = state.score
-  s.queue = []
-  s.index = 0
-  s.loadedFor = ''
-  s.scored = null
-  s.total = null
+  Object.assign(state.score, { queue: [], index: 0, loadedFor: '', scored: null, total: null, commented: null })
 }
 
 async function enterScore() {
@@ -429,18 +401,14 @@ async function enterScore() {
 
 async function loadBatch(batch, filter, { focusId = '' } = {}) {
   const s = state.score
-  s.batch = String(batch ?? '')
-  s.filter = filter
-  s.offset = 0
-  s.exhausted = false
-  s.fetching = false
-  s.fetchError = ''
+  Object.assign(s, { batch: String(batch ?? ''), filter, offset: 0, exhausted: false, fetching: false, fetchError: '' })
   resetQueue()
   s.loadedFor = `${s.batch}|${s.filter}`
   renderProgress()
   renderCard()
   if (!s.batch) return
   await fetchPage()
+  await loadProgressTruth()
   if (focusId) {
     const at = s.queue.findIndex((it) => it?.id === focusId)
     if (at >= 0) s.index = at
@@ -469,18 +437,41 @@ async function fetchPage() {
   } finally { s.fetching = false }
 }
 
+// 进度真值：`/api/items` 的 batch 只有 scored/items（**没有 commented**），而进度行要显示
+// "有评论 Z"。`/api/stats` 的 `comments.withText` 就是它 —— 多一次请求换一个不编的数字，值得。
+async function loadProgressTruth() {
+  const s = state.score
+  if (!s.batch) return
+  const data = await api(`/api/stats?batch=${encodeURIComponent(s.batch)}`)
+  if (!data.ok) return
+  const rate = data.rate ?? {}
+  applyProgress({ scored: rate.scored, total: rate.total, commented: Number.isFinite(data.comments?.withText) ? data.comments.withText : null })
+}
+
 function applyProgress(p) {
   const s = state.score
   if (!p) return
   if (Number.isFinite(p.scored)) s.scored = p.scored
   if (Number.isFinite(p.total)) s.total = p.total
+  if (Number.isFinite(p.commented)) s.commented = p.commented
+  renderProgress()
+}
+
+/** 乐观推进用的加减：服务端一回来就被真值覆盖，所以这里只求"立刻动起来"。 */
+function addProgress({ scored = 0, commented = 0 } = {}) {
+  const s = state.score
+  if (Number.isFinite(s.scored)) s.scored = Math.max(0, s.scored + scored)
+  if (Number.isFinite(s.commented)) s.commented = Math.max(0, s.commented + commented)
   renderProgress()
 }
 
 function renderProgress() {
   const s = state.score
   const known = Number.isFinite(s.scored) && Number.isFinite(s.total) && s.total >= 0
-  $('progress-text').textContent = known ? `已评 ${s.scored} / 共 ${s.total}` : '已评 — / 共 —（还没拿到进度）'
+  const commented = Number.isFinite(s.commented) ? String(s.commented) : '—'
+  $('progress-text').textContent = known
+    ? `已评 ${s.scored} / 共 ${s.total}（有评论 ${commented}）`
+    : `已评 — / 共 —（有评论 ${commented}）（还没拿到进度）`
   const fill = $('progress-fill')
   fill.style.width = known && s.total > 0 ? `${Math.max(0, Math.min(100, (s.scored / s.total) * 100))}%` : '0%'
   fill.classList.toggle('unknown', !(known && s.total > 0))
@@ -494,7 +485,7 @@ function maybePrefetch() {
   void fetchPage().then(() => { if (state.page === 'score') renderCard() })
 }
 
-function currentItem() { return state.score.queue[state.score.index] ?? null }
+const currentItem = () => state.score.queue[state.score.index] ?? null
 
 function renderCard() {
   const s = state.score
@@ -512,7 +503,7 @@ function renderCard() {
         : s.fetching
           ? '正在取这一批…'
           : s.exhausted && s.filter === 'unrated'
-            ? '这个批次的「未评」已经清空了 🎉\n想看评过的就切到「已评」/「全部」，或者去「③ 报告」页出修订草稿。'
+            ? '这个批次的「未评」已经清空了 🎉\n想看评过的就切到「已评」/「全部」，或者去「③ 报告」页整理评论。'
             : s.exhausted ? '这个过滤下没有条目。' : '正在准备…'
     return
   }
@@ -522,8 +513,7 @@ function renderCard() {
   $('reply').textContent = String(item.reply ?? '')
   renderItemMeta(item)
   renderVerdicts(item)
-  renderTags(item)
-  renderNote(item)
+  renderComment(item)
   maybePrefetch()
 }
 
@@ -554,16 +544,18 @@ function renderItemMeta(item) {
   idEl.title = '排查问题时把这个 id 一起发出来'
   box.appendChild(idEl)
   if (item.score?.verdict) box.appendChild(el('span', 'pill done', `已评：${verdictLabel(item.score.verdict)}`))
+  const saved = String(item.score?.comment ?? '')
+  if (hasCommentText(saved)) box.appendChild(el('span', 'pill done', `已写评论 ${saved.length} 字`))
 }
 
-/** 每张卡的编辑态：判档前的标签/备注先攒在这里，判档时一起落盘。 */
+/**
+ * 每张卡的编辑态：判档前的评论先攒在这里，判档时一起落盘。
+ * ★ 已评过的条目再遇到时 `comment` 从 `item.score.comment` 回填 —— 重评 = 改字，不是重打。
+ * （旧数据里的 `tags` 读得进来但**不参与任何逻辑**：契约明说不丢历史。）
+ */
 function ensureDraft(item) {
   if (!item._draft) {
-    item._draft = {
-      verdict: item.score?.verdict ?? null,
-      tags: Array.isArray(item.score?.tags) ? [...item.score.tags] : [],
-      note: typeof item.score?.note === 'string' ? item.score.note : '',
-    }
+    item._draft = { verdict: item.score?.verdict ?? null, comment: typeof item.score?.comment === 'string' ? item.score.comment : '' }
   }
   return item._draft
 }
@@ -581,47 +573,37 @@ function renderVerdicts(item) {
   }
 }
 
-function renderTags(item) {
-  const bad = $('tags-bad')
-  const good = $('tags-good')
-  clear(bad)
-  clear(good)
-  const tags = state.taxonomy.tags
-  const d = ensureDraft(item)
-  const keyOf = new Map()
-  tags.forEach((t, i) => { if (i < TAG_KEYS.length) keyOf.set(t.id, TAG_KEYS[i]) })
-  $('tag-note').textContent = tags.length
-    ? '点一下切换选中（多选）；数字键 4–9 / 0 对应**前七个**标签；鼠标悬停看这个标签的判据。'
-    : '这一轮没有可用标签（税则没取到或确实是空的）。'
-  for (const t of tags) {
-    const b = el('button', `tag${d.tags.includes(t.id) ? ' active' : ''}`)
-    const k = keyOf.get(t.id)
-    if (k) b.appendChild(el('span', 'tk', k))
-    b.appendChild(el('span', 'tl', t.label ?? t.id))
-    b.title = [t.hint, t.ruleQuote ? `规则原文：${t.ruleQuote}` : ''].filter(Boolean).join('\n')
-    b.onclick = () => void toggleTag(t.id)
-    ;(t.kind === 'good' ? good : bad).appendChild(b)
-  }
+/**
+ * 评论框（这一版的主输入）。只在"换了条目"或"程序改过评论"时才回写 value：
+ * ★ 正在这个框里打字时**绝不赋值** —— 给 `value` 赋值会把光标顶到末尾，表现是
+ *   "打字打到一半光标乱跳"，而 prefetch 触发的重画随时都可能发生。
+ */
+function renderComment(item, { force = false } = {}) {
+  const box = $('comment')
+  if (!box) return
+  const sig = `${item.id}|${ensureDraft(item).comment}`
+  const sameItem = box.dataset.item === String(item.id)
+  if (!force && sameItem && document.activeElement === box) { box.dataset.sig = sig; return }
+  if (!force && box.dataset.sig === sig) return
+  box.value = ensureDraft(item).comment
+  box.dataset.sig = sig
+  box.dataset.item = String(item.id)
 }
 
-function renderNote(item) {
-  const box = $('note')
-  const d = ensureDraft(item)
-  const sig = `${item.id}|${d.note}`
-  // 只在"换了一条"或"备注被程序改过"时回写：正在打字时被 prefetch 触发的重画不该清空输入
-  if (box.dataset.sig === sig) return
-  box.value = d.note
-  box.dataset.sig = sig
+/** 读评论框的**当前**内容（人可能刚打完字还没失焦，"所见即所存"）。 */
+const commentValue = () => String($('comment')?.value ?? '')
+
+/** Enter 连续评时把焦点留在评论框里；卡片藏起来（评完了/取数失败）时不要去抢焦点。 */
+function focusComment() {
+  const box = $('comment')
+  if (box && !$('score-card').hidden && state.page === 'score') box.focus()
 }
 
 /** 落盘一条评分；返回值给调用方决定"要不要把这条放回来"。 */
 async function postScore(item, snapshot) {
-  const data = await api('/api/score', {
-    method: 'POST',
-    body: { id: item.id, verdict: snapshot.verdict, tags: [...snapshot.tags], note: snapshot.note },
-  })
+  const data = await api('/api/score', { method: 'POST', body: { id: item.id, verdict: snapshot.verdict, comment: snapshot.comment } })
   if (data.ok) {
-    item.score = data.score ?? { verdict: snapshot.verdict, tags: [...snapshot.tags], note: snapshot.note }
+    item.score = data.score ?? { id: item.id, verdict: snapshot.verdict, comment: snapshot.comment }
     applyProgress(data.progress)
   }
   return data
@@ -633,87 +615,74 @@ function consumeCurrent() {
   s.queue.splice(s.index, 1)
   if (s.index > s.queue.length) s.index = s.queue.length
 }
-
 function restoreCurrent(item, at) {
   const s = state.score
   s.queue.splice(Math.min(Math.max(0, at), s.queue.length), 0, item)
   s.index = Math.min(Math.max(0, at), Math.max(0, s.queue.length - 1))
 }
 
-async function applyVerdict(verdict) {
+/**
+ * 判档（+ 把评论框里已有的字一起落盘）并推进下一条。
+ * ★ 乐观推进：先换卡，不等网络 —— 人评几百条时"每点一次等一个往返"就是全部的时间浪费；
+ *   失败必须把这张**放回原位**，否则人会以为已经评过了，而它其实一条都没落盘。
+ */
+async function applyVerdict(verdict, { refocus = false } = {}) {
   const s = state.score
   const at = s.index
   const item = s.queue[at]
   if (!item || !verdict) return
   const d = ensureDraft(item)
-  const prev = { verdict: d.verdict, tags: [...d.tags], note: d.note, score: item.score ?? null }
+  const typed = commentValue()
+  const prev = { verdict: d.verdict, comment: d.comment, score: item.score ?? null }
+  const delta = {
+    scored: prev.score ? 0 : 1,
+    commented: (hasCommentText(typed) ? 1 : 0) - (hasCommentText(prev.score?.comment) ? 1 : 0),
+  }
   d.verdict = verdict
-  const snapshot = { verdict, tags: [...d.tags], note: d.note }
-  // ★ 乐观推进：先换卡，不等网络。人评几百条时，"每点一次等一个往返"就是全部的时间浪费。
-  item.score = { verdict, tags: [...snapshot.tags], note: snapshot.note, at: Date.now() }
+  d.comment = typed
+  const snapshot = { verdict, comment: typed }
+  item.score = { id: item.id, verdict, comment: typed, at: Date.now() }
+  addProgress(delta)
   consumeCurrent()
   renderCard()
+  if (refocus) focusComment()
   const res = await postScore(item, snapshot)
   if (res.ok) return
-  // ★ 失败必须把这张**放回原位**：否则人会以为已经评过了，而它其实一条都没落盘。
   d.verdict = prev.verdict
-  d.tags = prev.tags
-  d.note = prev.note
+  d.comment = prev.comment
   item.score = prev.score
+  addProgress({ scored: -delta.scored, commented: -delta.commented })
   restoreCurrent(item, at)
   renderCard()
+  renderComment(item, { force: true }) // 评论框退回"已落盘的那一版"，别让页面演一个没存上的状态
   toast(`这一条没存上（${res.error ?? '未知原因'}），已经放回来了`, 'err')
 }
 
-async function toggleTag(tagId) {
+/**
+ * 评论失焦即存（**没有保存按钮**）：评分是每条几十秒的小动作，攒着必丢。
+ * 还没判档时只把字攒在本地草稿里 —— 契约要求 `POST /api/score` 必须带 verdict，
+ * 页面**绝不替人编一个**。
+ */
+async function saveComment() {
   const item = currentItem()
   if (!item) return
   const d = ensureDraft(item)
-  const at = d.tags.indexOf(tagId)
-  if (at >= 0) d.tags.splice(at, 1)
-  else d.tags.push(tagId)
-  renderTags(item)
-  // 契约里 `POST /api/score` 必须带 verdict —— 还没判档就先攒着，判档时一起落盘
-  // （**不替用户编一个 verdict**）
-  if (!d.verdict) return toast('这条还没判档：标签先记着，判档时一起落盘')
-  const res = await postScore(item, { verdict: d.verdict, tags: [...d.tags], note: d.note })
-  if (res.ok) return
-  // 存不上就把选中态改回去：页面不显示"其实没存上"的状态
-  const back = d.tags.indexOf(tagId)
-  if (back >= 0) d.tags.splice(back, 1)
-  else d.tags.push(tagId)
-  renderTags(item)
-  toast(`标签没存上（${res.error ?? '未知原因'}），已经改回去了`, 'err')
+  const value = commentValue()
+  if (value === d.comment) return
+  d.comment = value
+  if (!d.verdict) return toast('评论先记着：判档时一起落盘（按 1 / 2 / 3 或点上面的按钮）')
+  const res = await postScore(item, { verdict: d.verdict, comment: d.comment })
+  if (!res.ok) toast(`评论没存上（${res.error ?? '未知原因'}）`, 'err')
 }
 
-async function saveNote() {
+/** `Enter`：保存并下一条（评论框里也是这个键；`Shift+Enter` 换行不拦）。 */
+async function submitAndNext() {
   const item = currentItem()
   if (!item) return
   const d = ensureDraft(item)
-  const value = $('note').value
-  if (value === d.note) return
-  d.note = value
-  if (!d.verdict) return toast('备注先记着，判档时一起落盘') // 同 toggleTag：不替用户编 verdict
-  const res = await postScore(item, { verdict: d.verdict, tags: [...d.tags], note: d.note })
-  if (!res.ok) toast(`备注没存上（${res.error ?? '未知原因'}）`, 'err')
-}
-
-function moveNext() {
-  const s = state.score
-  if (!s.queue.length) return
-  if (s.index + 1 < s.queue.length) {
-    s.index += 1
-    return renderCard()
-  }
-  if (!s.exhausted) {
-    void fetchPage().then(() => {
-      if (s.index + 1 < s.queue.length) s.index += 1
-      else toast('后面没有更多了')
-      renderCard()
-    })
-    return
-  }
-  toast('这个过滤下已经看到最后一条了')
+  d.comment = commentValue()
+  if (!d.verdict) return toast('这条还没判档：先按 1 / 2 / 3（或点上面的三个按钮），Enter 才是"保存并下一条"', 'err')
+  await applyVerdict(d.verdict, { refocus: true })
 }
 
 /** 跳过 = **只在本地跳过，一个字都不写**（服务端根本不知道这件事）。 */
@@ -721,6 +690,8 @@ function skipCurrent() {
   const s = state.score
   const item = currentItem()
   if (!item) return
+  // 打了字还没落盘的评论一旦跳过就没了 —— 先问一句，别让它悄悄消失
+  if (!item.score && hasCommentText(commentValue()) && !window.confirm('这条评论还没落盘（还没判档），跳过就等于丢掉它。确认跳过？')) return
   if (s.queue.length <= 1) return toast('队列里只有这一条，跳不过去（可以先评了它，或换个过滤/批次）')
   s.queue.splice(s.index, 1)
   s.queue.push(item) // 排到队尾：这一轮看完还能回来
@@ -742,9 +713,7 @@ async function undoLast() {
   toast(`已撤销上一条评分：${truncate(data.undone.id ?? '', 48)}`, 'ok')
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   页签三：报告
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 页签三：报告（统计 + 评论清单 + 整理 + 应用） ──────────────────── */
 
 function renderReportBatchSelect() {
   const sel = $('report-batch')
@@ -762,32 +731,37 @@ function renderReportBatchSelect() {
 async function enterReport() {
   if (!state.sources.batches.length) await refreshSources()
   renderReportBatchSelect()
-  await loadStats()
+  await reloadReport()
 }
+async function reloadReport() { await Promise.all([loadStats(), loadConsolidate()]) }
 
 async function loadStats() {
   const box = $('stats-body')
   clear(box)
   const data = await api(`/api/stats?batch=${encodeURIComponent(state.reportBatch || 'all')}`)
-  if (!data.ok) return void box.appendChild(el('div', 'empty', `拉不到统计：${data.error ?? '未知原因'}`))
+  if (!data.ok) {
+    // 拉不到就**什么都不画**（评论清单也一起空掉），绝不显示一排像真的 0
+    state.stats = null
+    box.appendChild(el('div', 'empty', `拉不到统计：${data.error ?? '未知原因'}`))
+    renderCommentList()
+    return
+  }
   state.stats = data
   renderStats(data)
+  renderCommentList()
 }
 
 function renderStats(data) {
   const box = $('stats-body')
   const counts = data.verdicts && typeof data.verdicts === 'object' ? data.verdicts : null
   if (!counts) return void box.appendChild(el('div', 'empty', '服务端没给 verdicts 字段 —— 这里不显示任何数字（不猜）。'))
-  const ids = ['good', 'ok', 'bad']
-  const vals = ids.map((id) => (Number.isFinite(counts[id]) ? counts[id] : 0))
+  const vals = VERDICT_IDS.map((id) => (Number.isFinite(counts[id]) ? counts[id] : 0))
   const sum = vals.reduce((a, v) => a + v, 0)
   const rate = data.rate ?? {}
-  const scored = Number.isFinite(rate.scored) ? rate.scored : sum
-  const totalAll = Number.isFinite(rate.total) ? rate.total : null
   // 分布条：宽度按**已评条数**算；一条都没评时直接说明，不画空条
   const dist = el('div', 'dist')
   if (sum > 0) {
-    for (const [i, id] of ids.entries()) {
+    for (const [i, id] of VERDICT_IDS.entries()) {
       if (!vals[i]) continue
       const seg = el('div', `dist-seg dist-${id}`, `${verdictLabel(id)} ${pctOf(vals[i], sum)}`)
       seg.style.width = `${(vals[i] / sum) * 100}%`
@@ -797,133 +771,258 @@ function renderStats(data) {
   }
   box.appendChild(dist)
   const legend = el('div', 'dist-legend')
-  for (const [i, id] of ids.entries()) {
+  for (const [i, id] of VERDICT_IDS.entries()) {
     const one = el('span')
     one.appendChild(el('b', '', String(vals[i])))
     one.appendChild(document.createTextNode(` 条 ${verdictLabel(id)}（${pctOf(vals[i], sum)}）`))
     legend.appendChild(one)
   }
-  legend.appendChild(el('span', '', `合计已评 ${numOrDash(scored)}${totalAll == null ? '' : ` / 共 ${totalAll}`}`))
+  legend.appendChild(el('span', '', `合计已评 ${numOrDash(rate.scored)}${Number.isFinite(rate.total) ? ` / 共 ${rate.total}` : ''}`))
   box.appendChild(legend)
   if (sum === 0) box.appendChild(el('div', 'note', '还没有评分 —— 去「② 打分」页评几条，这里的分布才有意义。'))
-  // 分会话：一眼看出"哪个人群里最容易说错话"
-  const chats = Array.isArray(data.chats) ? data.chats : []
-  box.appendChild(el('h3', 'sug-head', '按会话看'))
-  if (!chats.length) {
-    box.appendChild(el('div', 'note', '服务端没给 chats（或还没评过任何一条）。'))
-  } else {
-    const table = el('table', 'table')
-    const hr = document.createElement('tr')
-    for (const t of ['会话', '已评', '不该这么说', '不该这么说占比']) hr.appendChild(el('th', '', t))
-    const thead = document.createElement('thead')
-    thead.appendChild(hr)
-    table.appendChild(thead)
-    const tbody = document.createElement('tbody')
-    for (const c of chats) {
-      const tr = document.createElement('tr')
-      tr.appendChild(el('td', 'b-label', c?.label ?? c?.chatKey ?? '（无标签）'))
-      tr.appendChild(el('td', '', numOrDash(c?.scored)))
-      tr.appendChild(el('td', '', numOrDash(c?.bad)))
-      tr.appendChild(el('td', '', pctOf(c?.bad, c?.scored)))
-      tbody.appendChild(tr)
-    }
-    table.appendChild(tbody)
-    box.appendChild(table)
-  }
-  renderTagRank(Array.isArray(data.tags) ? data.tags : [])
+  // ★ 评论是整理的**唯一素材**：只判档不写字的那些会被排除，所以这个数字必须露出来
+  const c = data.comments ?? {}
+  box.appendChild(el('div', 'stats-line', Number.isFinite(c.withText)
+    ? `带评论 ${c.withText} 条 / 只判档没写评论 ${numOrDash(c.withoutText)} 条 —— 整理「点」只吃带评论的那些。`
+    : '服务端没给 comments.withText —— "有多少条带评论"这个数字不知道（不猜）。'))
 }
 
-function renderTagRank(tags) {
-  const box = $('stats-body')
-  box.appendChild(el('h3', 'sug-head', `标签命中排行（${tags.length} 个）`))
-  if (!tags.length) return void box.appendChild(el('div', 'note', '还没有标签命中 —— 打分时点几个标签，这里就会按次数排出来。'))
-  const rank = el('div', 'rank')
-  for (const t of tags) {
-    const b = el('button', state.reportTag === t?.id ? 'active' : '')
-    b.appendChild(el('span', t?.kind === 'good' ? 'rk-good' : 'rk-bad', t?.label ?? t?.id ?? '（无标签）'))
-    b.appendChild(el('span', 'rc', `${numOrDash(t?.count)} 次`))
-    b.title = t?.ruleQuote ? `规则原文：${t.ruleQuote}` : `标签 id：${t?.id ?? '（无）'}`
-    b.onclick = () => {
-      state.reportTag = state.reportTag === t?.id ? '' : String(t?.id ?? '')
-      for (const other of rank.children) other.classList.remove('active')
-      if (state.reportTag) b.classList.add('active')
-      renderTagEvidence(state.reportTag ? t : null)
-    }
-    rank.appendChild(b)
-  }
-  box.appendChild(rank)
-  const ev = el('div', 'evidence-box')
-  ev.id = 'tag-examples'
-  box.appendChild(ev)
-  // 重画排行后把之前选中的证据也放回来，不让人以为"点了没反应"
-  renderTagEvidence(tags.find((t) => t?.id === state.reportTag) ?? null)
-}
-
-/** 点标签看证据：把**真实原话**原样列出来 —— 这是报告页存在的理由。 */
-function renderTagEvidence(tag) {
-  const box = $('tag-examples')
+/** 评论清单：新 → 旧，可按判档筛选、可按文字搜索。这是"素材"本身，永远显示。 */
+function renderCommentList() {
+  const box = $('comment-list')
   if (!box) return
   clear(box)
-  if (!tag) return void (box.hidden = true)
-  box.hidden = false
-  box.appendChild(el('div', 'evidence-title', `「${tag.label ?? tag.id}」的证据：命中 ${numOrDash(tag.count)} 次，下面是最多 3 条真实原话`))
-  if (tag.ruleQuote) box.appendChild(el('div', 'sug-quote', `挂的规则原文：${tag.ruleQuote}`))
-  const list = Array.isArray(tag.examples) ? tag.examples : []
-  if (!list.length) return void box.appendChild(el('div', 'note', '服务端没给这一条的 examples —— 看不到原文就不编。'))
-  for (const e of list) {
-    const card = el('div', 'evidence')
-    const ctx = contextText(e?.context)
-    if (ctx) card.appendChild(el('div', 'ev-ctx', ctx))
-    card.appendChild(el('div', 'ev-reply', String(e?.reply ?? '（原文为空）')))
-    card.appendChild(el('div', 'ev-id', `id ${e?.id ?? '—'}`))
+  const data = state.stats
+  const all = Array.isArray(data?.list) ? data.list : []
+  const q = state.reportSearch.trim().toLowerCase()
+  const rows = all.filter((r) => {
+    if (state.reportVerdict && r?.verdict !== state.reportVerdict) return false
+    return !q || `${r?.comment ?? ''}\n${r?.reply ?? ''}`.toLowerCase().includes(q)
+  })
+  $('comment-list-note').textContent = data
+    ? `共 ${all.length} 条评分（带评论 ${all.filter((r) => hasCommentText(r?.comment)).length} 条），当前显示 ${rows.length} 条｜新 → 旧`
+    : '还没有统计数据 —— 清单不可用（原因见上方红条）。'
+  if (!data) return void box.appendChild(el('div', 'empty', '拉不到统计 —— 评论清单也一起不可用；不会显示一个空的"看起来没评过"的清单。'))
+  if (!all.length) return void box.appendChild(el('div', 'empty', '还没有任何评分 —— 去「② 打分」页评几条，这里就有清单了。'))
+  if (!rows.length) return void box.appendChild(el('div', 'empty', '当前筛选/搜索下没有条目（换个判档或清空搜索看看）。'))
+  for (const r of rows) box.appendChild(commentRow(r))
+}
+
+/** 一条评论 = 判档 + 评论（主角）+ 被评的那句话与上下文。全部走 textContent。 */
+function commentRow(r) {
+  const card = el('div', 'cm-item')
+  const head = el('div', 'cm-head')
+  head.appendChild(el('span', `pill v-${r?.verdict ?? 'none'}`, verdictLabel(r?.verdict)))
+  head.appendChild(el('span', 'cm-time', fmtTime(r?.at)))
+  if (r?.chatLabel) head.appendChild(el('span', 'cm-time', String(r.chatLabel)))
+  card.appendChild(head)
+  const comment = String(r?.comment ?? '').trim()
+  card.appendChild(el('div', comment ? 'cm-comment' : 'cm-comment empty-comment', comment || '（只判了档，没写评论 —— 它不参与整理）'))
+  card.appendChild(el('div', 'cm-reply-label', '被评的那句话：'))
+  card.appendChild(el('div', 'cm-reply', String(r?.reply ?? '（服务端没给 reply）')))
+  const ctx = contextText(r?.context)
+  if (ctx) card.appendChild(el('div', 'cm-ctx', ctx))
+  card.appendChild(el('div', 'cm-id', `id ${r?.id ?? '—'}`))
+  return card
+}
+
+// `GET /api/consolidate`：取这个范围**最近一次**整理 + 评论 + 模型可用性 + 锚点清单。
+// 它**不调模型**（不花钱），所以一进报告页就拉。
+async function loadConsolidate({ keepLocal = false } = {}) {
+  const data = await api(`/api/consolidate?scope=${encodeURIComponent(state.reportBatch || 'all')}`)
+  const c = state.cons
+  c.loaded = true
+  if (!data.ok) {
+    c.model = { ok: false, why: data.error ?? '取整理状态失败' }
+    c.error = `取整理状态失败：${data.error ?? '未知原因'}`
+    return renderConsolidate()
+  }
+  Object.assign(c, {
+    latest: data.latest ?? null,
+    comments: Array.isArray(data.comments) ? data.comments : [],
+    counts: data.counts ?? null,
+    model: data.model ?? null,
+    limits: data.limits ?? null,
+    anchors: Array.isArray(data.anchors) ? data.anchors : [],
+  })
+  // 换了范围时，上一次的失败信息/本地聚类/"仍然应用"的武装状态都作废
+  if (!keepLocal) Object.assign(c, { clusters: null, error: '', armed: false })
+  renderConsolidate()
+}
+
+/** 真的调一次模型整理（人点一下才发生，钱花在明处）。 */
+async function runConsolidate() {
+  const c = state.cons
+  if (c.busy) return
+  if (c.model?.ok !== true) return toast('整理不可用（原因见按钮旁的那句话）', 'err')
+  c.busy = true
+  c.error = ''
+  renderConsolidate()
+  toast('正在调模型整理评论…（几十秒都算正常，别刷新页面）')
+  const res = await api('/api/consolidate', { method: 'POST', body: { scope: state.reportBatch || 'all' } })
+  c.busy = false
+  if (res.ok === true && res.consolidation) {
+    Object.assign(c, { latest: res.consolidation, clusters: res.clusters ?? null, error: '', armed: false })
+    renderConsolidate()
+    toast(`整理完成：${numOrDash(res.consolidation.points?.length)} 个点，${numOrDash(res.ms)} ms`, 'ok')
+    return void loadConsolidate({ keepLocal: true })
+  }
+  // ★ 失败仍是 HTTP 200：error 原样显示，本地聚类与评论原文都要在 —— 素材不能跟着"看不见"
+  Object.assign(c, { error: String(res.error ?? '服务端没给 error'), clusters: res.clusters ?? null })
+  if (Array.isArray(res.comments) && res.comments.length) c.comments = res.comments
+  renderConsolidate()
+  toast('整理没成 —— 评论原文与本地聚类都在页面上，没有丢', 'err')
+}
+
+function renderConsolidate() {
+  const c = state.cons
+  const card = $('consolidate-card')
+  if (!card) return
+  card.hidden = !c.loaded
+
+  // ── 「整理评论」按钮：不可用时**禁用并说明原因**（绝不给一个点了没反应的按钮）──
+  const modelOk = c.model?.ok === true
+  const noMaterial = Number.isFinite(c.counts?.withText) && c.counts.withText === 0
+  $('btn-consolidate').disabled = c.busy || !modelOk || noMaterial
+  const lim = c.limits ?? {}
+  $('consolidate-why').textContent = !c.loaded
+    ? '正在取整理状态…'
+    : c.busy
+      ? '正在整理…'
+      : !modelOk
+        ? `整理不可用：${c.model?.why ?? '服务端没说原因'}`
+        : noMaterial
+          ? '还没有带评论的评分 —— 整理没有素材（去「② 打分」页写几条评论）。'
+          : `模型：${c.model.model ?? '（未给）'}${c.model.baseUrl ? `（${c.model.baseUrl}）` : ''}` +
+            `｜一次最多喂 ${numOrDash(lim.comments)} 条评论 / ${numOrDash(lim.chars)} 字`
+
+  // ── 底线要点（锚点）清单：GET 就给了，先让人知道"改写必须留住哪些东西" ──
+  const anchorBox = $('anchor-list')
+  clear(anchorBox)
+  if (c.anchors.length) {
+    anchorBox.appendChild(el('span', 'anchor-box-title', `底线要点（${c.anchors.length} 条，改写一条都不许丢）：`))
+    anchorBox.appendChild(el('span', '', c.anchors.map((a) => a?.label ?? a?.id).filter(Boolean).join('、')))
+  }
+
+  // ── 失败：error + 本地聚类；评论原文在上面那份「评论清单」里，一条都不会消失 ──
+  const errBox = $('consolidate-error')
+  errBox.hidden = !c.error
+  errBox.textContent = c.error
+    ? `整理没成：${c.error}\n（评论原文见上面的「评论清单」，素材没丢；下面的本地聚类是"哪些评论在说同一件事"）`
+    : ''
+
+  const l = c.latest
+  const hasLatest = Boolean(l?.id)
+  if (hasLatest) {
+    const ps = l.promptStats ?? {}
+    const trunc = Number.isFinite(ps.truncatedComments) && ps.truncatedComments > 0 ? `（另有 ${ps.truncatedComments} 条因长度没喂进去）` : ''
+    $('consolidate-meta').textContent =
+      `整理 ${l.id}｜${fmtTime(l.createdAt)}｜模型 ${l.model ?? '（未给）'}｜${numOrDash(l.ms)} ms\n` +
+      `点 ${Array.isArray(l.points) ? l.points.length : '—'} 条｜改写 ${numOrDash(l.chars)} 字（原 ${numOrDash(l.styleBeforeChars)} 字）｜` +
+      `喂进去 ${numOrDash(ps.kept)} 条评论${trunc}` +
+      (l.appliedAt ? `\n已于 ${fmtTime(l.appliedAt)} 应用到 styles/闲聊.md` : '\n还没应用到文件')
+  } else {
+    $('consolidate-meta').textContent = c.loaded
+      ? (c.error ? '还没有成功的整理结果。' : '这个范围还没整理过 —— 点上面的「整理评论」把评论归纳成「点」并整篇重写。')
+      : '正在取整理状态…'
+  }
+  renderPoints(hasLatest ? l : null)
+  renderClusters(c.clusters)
+  const diff = hasLatest && typeof l.diff === 'string' ? l.diff : ''
+  $('diff-head').hidden = !diff
+  renderDiff($('consolidate-diff'), diff)
+  renderAnchorCheck(hasLatest ? l : null)
+  renderApplyRow()
+}
+
+/** 「点」+ 可展开的证据原文（证据是提示词里的**评论编号**，能换回原文就换回来）。 */
+function renderPoints(l) {
+  const box = $('points')
+  clear(box)
+  if (!l) return
+  const points = Array.isArray(l.points) ? l.points : []
+  box.appendChild(el('h3', 'sug-head', `整理出来的「点」（${points.length} 条）`))
+  if (!points.length) return void box.appendChild(el('div', 'note', '这次整理一个点都没给出 —— 别据此改文件，先看看评论写得够不够具体。'))
+  for (const p of points) {
+    const kind = p?.kind === 'good' ? 'good' : 'bad'
+    const card = el('div', `point point-${kind}`)
+    const head = el('div', 'point-head')
+    head.appendChild(el('span', 'point-kind', kind === 'good' ? '要保留 / 写清楚' : '要改掉'))
+    head.appendChild(el('span', 'point-title', String(p?.title ?? '（没写标题）')))
+    if (p?.where) head.appendChild(el('span', 'point-where', `位置：${p.where}`))
+    card.appendChild(head)
+    if (p?.summary) card.appendChild(el('div', 'point-summary', String(p.summary)))
+    const ev = Array.isArray(p?.evidence) ? p.evidence : []
+    card.appendChild(el('div', 'point-ev', `证据 ${ev.length} 条`))
+    if (ev.length) {
+      // `<details>` 是浏览器原生的折叠：零依赖，且证据原文默认不占版面
+      const det = document.createElement('details')
+      det.appendChild(el('summary', '', `展开证据原文（${ev.length} 条）`))
+      for (const n of ev) det.appendChild(el('div', 'ev-line', evidenceText(n)))
+      card.appendChild(det)
+    }
     box.appendChild(card)
   }
 }
 
-async function loadDraft() {
-  const data = await api(`/api/draft?batch=${encodeURIComponent(state.reportBatch || 'all')}`)
-  $('draft-card').hidden = false
-  if (!data.ok) {
-    state.draft = null
-    $('draft-empty').hidden = false
-    $('draft-empty').textContent = `生成草稿失败：${data.error ?? '未知原因'}`
-    $('btn-apply').disabled = true
-    $('apply-why').textContent = '草稿没有生成成功，不能应用。'
-    return
-  }
-  state.draft = data.draft ?? null
-  renderDraft()
+// 证据是提示词里的**评论编号**（1 起，见 chat-review-consolidate.mjs 的 commentLine）：
+// 编号对得上 `state.cons.comments`（同范围、新→旧、只含带评论的）就换回原文；
+// 换不回来就如实显示编号 —— 不编一段看起来像原文的话。
+function evidenceText(n) {
+  const at = Number(n) - 1
+  const row = Number.isInteger(at) && at >= 0 ? state.cons.comments[at] : null
+  if (!row) return `第 ${n} 条评论（这次没取到它的原文）`
+  const reply = truncate(String(row.reply ?? '').replace(/\s+/g, ' '), 60)
+  return `[${n}] 评论：${String(row.comment ?? '').trim()}${reply ? `\n      当时它说：「${reply}」` : ''}`
 }
 
-function renderDraft() {
-  const d = state.draft
-  const has = typeof d?.proposedBlock === 'string' && d.proposedBlock.trim() !== ''
-  $('draft-target').textContent = d?.target
-    ? `目标文件：${d.target}｜用到证据 ${numOrDash(d?.evidenceCount)} 条`
-    : '服务端没给 target —— 应用前请先确认改的是哪个文件。'
-  const empty = $('draft-empty')
-  empty.hidden = has
-  empty.textContent = '还没有足够证据 —— 先去「② 打分」页把「不该这么说」和对应标签评出来，这里才会给出可应用的修订块。'
-  const sugBox = $('draft-suggestions')
-  clear(sugBox)
-  const suggestions = Array.isArray(d?.suggestions) ? d.suggestions : []
-  if (suggestions.length) {
-    sugBox.appendChild(el('h3', 'sug-head', `建议（${suggestions.length} 条）`))
-    for (const s of suggestions) {
-      const card = el('div', 'sug')
-      card.appendChild(el('div', 'sug-head', `${s?.label ?? s?.tagId ?? '（无标签）'}：被标出 ${numOrDash(s?.count)} 次`))
-      card.appendChild(el('div', 'sug-advice', String(s?.advice ?? '（服务端没给建议文本）')))
-      if (s?.ruleQuote) card.appendChild(el('div', 'sug-quote', `挂的规则原文：${s.ruleQuote}（${s?.tagId ?? ''}）`))
-      sugBox.appendChild(card)
+/** 本地确定性聚类（不调模型）：让人看见"哪些评论在说同一件事、说了几遍"。 */
+function renderClusters(clusters) {
+  const box = $('clusters')
+  clear(box)
+  if (!clusters || typeof clusters !== 'object') return
+  const groups = [['bad', '不对'], ['ok', '还行'], ['good', '对']]
+  const total = groups.reduce((n, [k]) => n + (Array.isArray(clusters[k]) ? clusters[k].length : 0), 0)
+  if (!total) return
+  const det = document.createElement('details')
+  det.appendChild(el('summary', '', `本地聚类（相似评论分组，共 ${total} 组；不调模型，随时能看）`))
+  for (const [k, label] of groups) {
+    const rows = Array.isArray(clusters[k]) ? clusters[k] : []
+    if (!rows.length) continue
+    det.appendChild(el('div', 'cluster-head', `${label}（${rows.length} 组）`))
+    for (const one of rows) {
+      const row = el('div', 'cluster')
+      row.appendChild(el('span', 'cluster-count', `×${numOrDash(one?.count)}`))
+      row.appendChild(el('span', 'cluster-text', String(one?.text ?? '')))
+      det.appendChild(row)
     }
-  } else if (has) {
-    sugBox.appendChild(el('div', 'note', '服务端没给 suggestions，但给了可应用的草稿块（下面就是）。'))
   }
-  renderDiff($('draft-diff'), typeof d?.diff === 'string' ? d.diff : '')
-  $('btn-apply').disabled = !has
-  $('apply-why').textContent = has
-    ? '点下去会先弹确认框，说明会先备份哪个文件、再追加什么。'
-    : '没有草稿内容（proposedBlock 是空的），这个按钮不能点：没有证据就不该改风格文件。'
+  det.appendChild(el('div', 'note', '聚类只是"把说得像的评论堆在一起并计数"，不是结论 —— 结论是上面的「点」。'))
+  box.appendChild(det)
+}
+
+/** 锚点核对结果：守住了就说守住了；没守住就把丢失的底线要点**逐条**列出来。 */
+function renderAnchorCheck(l) {
+  const box = $('anchor-check')
+  clear(box)
+  if (!l) return
+  const a = l.anchors
+  if (!a || typeof a !== 'object') {
+    return void box.appendChild(el('div', 'callout warn', '服务端没给 anchors —— 无法确认底线要点有没有守住，应用前请自己把改写读一遍。'))
+  }
+  if (a.ok === true) {
+    return void box.appendChild(el('div', 'callout ok', `锚点核对通过：${numOrDash(a.checked)} 条底线要点都还在。`))
+  }
+  const missing = Array.isArray(a.missing) ? a.missing : []
+  const warn = el('div', 'callout err')
+  warn.appendChild(el('div', '', `⚠️ 锚点没守住：丢了 ${missing.length} 条底线要点（共核对 ${numOrDash(a.checked)} 条）：`))
+  const ul = el('ul', 'anchor-missing')
+  for (const m of missing) {
+    const any = Array.isArray(m?.any) && m.any.length ? `（文件里应有：${m.any.join(' / ')}）` : ''
+    ul.appendChild(el('li', '', `${m?.label ?? m?.id ?? '（服务端没给名字）'}${any}`))
+  }
+  warn.appendChild(ul)
+  box.appendChild(warn)
 }
 
 /** 不引 diff 库：按行分，`+` 绿 `-` 红。 */
@@ -937,34 +1036,118 @@ function renderDiff(pre, diff) {
   }
 }
 
-async function applyDraft() {
-  const d = state.draft
-  if (!d?.proposedBlock) return toast('没有草稿内容，不能应用', 'err')
-  const target = d.target ?? 'styles/闲聊.md'
+const anchorMissingOf = (l) => (Array.isArray(l?.anchors?.missing) ? l.anchors.missing : []).map((m) => String(m?.label ?? m?.id ?? '（没给名字）'))
+
+function renderApplyRow() {
+  const c = state.cons
+  const btn = $('btn-apply')
+  const why = $('apply-why')
+  if (!btn || !why) return
+  const l = c.latest
+  if (!l?.id || !String(l.rewritten ?? '').trim()) {
+    btn.disabled = true
+    btn.textContent = '应用到 styles/闲聊.md'
+    why.textContent = l?.id ? '这份整理结果里没有正文（rewritten 是空的）—— 不能应用。' : '还没有整理结果可应用 —— 先点「整理评论」。'
+    return
+  }
+  const anchorsOk = l.anchors?.ok !== false
+  btn.disabled = false
+  const n = anchorMissingOf(l).length
+  if (anchorsOk) {
+    btn.textContent = '应用到 styles/闲聊.md'
+    why.textContent = '点下去会弹确认框：写清楚会先备份 styles/闲聊.md、再整篇替换、并同步出厂常量。'
+  } else if (c.armed) {
+    btn.textContent = '我知道，仍然应用'
+    why.textContent = `锚点没守住（丢了 ${n} 条）。再点这一次才会写文件（先备份；会记为"覆盖应用"）。`
+  } else {
+    btn.textContent = '应用到 styles/闲聊.md'
+    // ★ 锚点没守住时，第一次点击**不发请求、不写文件**：只把丢失清单摆出来等人确认
+    why.textContent = `⚠️ 锚点没守住（丢了 ${n} 条）：第一次点击不会写文件，只会把丢失清单摆出来让你确认。`
+  }
+}
+
+/**
+ * 应用改写：**唯一会碰风格文件与出厂常量的写操作**，所以两段确认一个都不能少 ——
+ * ① 弹窗写清"先备份、整篇替换、同步出厂常量"；② 锚点没守住时还要一次明确的"仍然应用"。
+ */
+async function applyConsolidation() {
+  const c = state.cons
+  const l = c.latest
+  if (!l?.id) return toast('还没有整理结果可应用', 'err')
+  if (!String(l.rewritten ?? '').trim()) return toast('这份整理结果里没有正文，不能应用', 'err')
+  const anchorsOk = l.anchors?.ok !== false
+  if (!anchorsOk && !c.armed) {
+    // ★ 第一次点击**什么都不发**：只是把"丢了哪几条"摆到台面上，等一个明确的第二次点击
+    c.armed = true
+    renderConsolidate()
+    return toast('锚点没守住：丢失清单在上面，确认后再点「我知道，仍然应用」', 'err')
+  }
+  const missing = anchorMissingOf(l)
   const ok = window.confirm(
     // ⚠️ `window.confirm` 是**纯文本**，别在这里写 Markdown（星号会原样显示出来）
-    `确认把这份草稿写进 ${target} 吗？\n\n· 会【先备份】到 ${target} 同目录下的 .backups/ 里（带时间戳的 .bak）；\n` +
-      '· 然后把草稿块【追加到文件末尾】，原有内容一个字都不改；\n' +
-      '· 同一份草稿不能应用两次（第二次会被拒绝，报 409）。\n\n' +
-      `这次用到证据 ${numOrDash(d.evidenceCount)} 条。`,
+    '确认把这份改写写进 styles/闲聊.md 吗？\n\n' +
+      '· 会先把现在的文件备份到 styles/.backups/（闲聊.md.<时间戳>.bak）；\n' +
+      `· 然后把整份文件替换成这次整理出来的正文（现在 ${numOrDash(l.styleBeforeChars)} 字 → 改写 ${numOrDash(l.chars)} 字）；\n` +
+      '· 并同步 src/chat-mode.mjs 里的出厂默认常量（不同步的话两份会漂，测试会红）；\n' +
+      (anchorsOk ? '' : `· ⚠️ 这份改写丢了 ${missing.length} 条底线要点：${missing.join('、')} —— 你选择了仍然应用。\n`) +
+      `\n整理记录：${l.id}`,
   )
   if (!ok) return
   $('btn-apply').disabled = true
-  const res = await api('/api/apply', { method: 'POST', body: { confirm: true } })
-  if (!res.ok) return void ($('btn-apply').disabled = false)
-  $('apply-result').textContent =
-    `已应用：备份 ${res.backup ?? '（未返回）'}｜新 sha256 ${res.sha256 ?? '（未返回）'}｜` +
-    `文件现在 ${numOrDash(res.chars)} 字（本次追加 ${numOrDash(res.appended)} 字）`
-  toast('已应用到风格文件（备份已生成）', 'ok')
-  await loadHealth() // 顶栏的字数/指纹必须跟着变，否则人会以为没写进去
-  $('btn-apply').disabled = true
-  $('apply-why').textContent = '这份草稿已经应用过了；再点一次会被服务端拒绝（409）。'
+  const res = await api('/api/apply', {
+    method: 'POST',
+    // ★ 只有"武装过的第二次点击"才带 confirmAnchors:true；确认框首点永远不带
+    body: { consolidation: l.id, scope: state.reportBatch || 'all', confirm: true, confirmAnchors: !anchorsOk },
+  })
+  if (!res.ok) {
+    $('btn-apply').disabled = false
+    return renderApplyFailure(res)
+  }
+  renderApplyResult(res)
+  toast('已应用到 styles/闲聊.md（备份已生成）', 'ok')
+  await loadHealth() // ★ 顶栏的字数与指纹必须跟着变，否则人会以为没写进去
+  await loadConsolidate({ keepLocal: true }) // latest.appliedAt 也要更新
 }
 
-/* ══════════════════════════════════════════════════════════════════════
-   事件绑定：**逐个 try/catch** —— 一个绑不上不影响其余的
-   （"页面画得出来但每个按钮都没反应"就是这么来的）
-   ══════════════════════════════════════════════════════════════════════ */
+function renderApplyFailure(res) {
+  const lines = [`没能应用（HTTP ${numOrDash(res.httpStatus)}）：${res.error ?? '服务端没给 error'}`]
+  const missing = Array.isArray(res.anchorsMissing) ? res.anchorsMissing : []
+  if (missing.length) {
+    // 服务端在 409 里回了"丢了哪几条" —— 逐条显示，并把按钮切成"仍然应用"
+    lines.push(`丢了 ${missing.length} 条底线要点：${missing.map((m) => m?.label ?? m?.id ?? '（没给名字）').join('、')}`)
+    state.cons.armed = true
+    renderConsolidate()
+  }
+  $('apply-result').textContent = lines.join('\n')
+  if (missing.length) toast('锚点没守住：再点一次「我知道，仍然应用」才会写文件', 'err')
+}
+
+function renderApplyResult(res) {
+  const before = Number.isFinite(res.beforeChars) ? res.beforeChars : null
+  const after = Number.isFinite(res.chars) ? res.chars : null
+  const delta = before != null && after != null ? after - before : null
+  const parts = [
+    `已应用：${numOrDash(before)} → ${numOrDash(after)} 字` +
+      (delta == null ? '（服务端没给全字数，算不出精简/增加）' : delta === 0 ? '（字数没变）' : `（${delta < 0 ? '精简' : '增加'} ${Math.abs(delta)} 字）`),
+    `备份：${res.backup ?? '（服务端没给备份路径 —— 请自己去 styles/.backups/ 确认）'}`,
+    `新 sha256：${res.sha256 ? String(res.sha256).slice(0, 16) : '（未给）'}`,
+    `整理记录：${res.consolidationId ?? '（未给）'}`,
+    res.anchorsOverridden ? '⚠️ 锚点是被覆盖应用的（这份改写丢了底线要点）' : '锚点核对通过',
+  ]
+  const cs = res.constantSync
+  if (cs?.ok === true) {
+    parts.push(`出厂常量已同步${cs.changed === false ? '（内容本来就一致，没改）' : '（src/chat-mode.mjs 已更新）'}`)
+  } else if (cs?.ok === false) {
+    // ★ 这句必须响：风格文件改了、出厂常量没跟上 —— 两份会漂，而且只有测试会告诉你
+    parts.push(`⚠️ 出厂常量没同步成功：${cs.why ?? '服务端没说原因'}\n   （styles/闲聊.md 已经改好了，但 src/chat-mode.mjs 里的默认常量还是旧的 —— 两份会漂，verify-chat-mode 会红。）`)
+  } else {
+    parts.push('⚠️ 服务端没给 constantSync —— 无法确认出厂常量有没有同步成功。')
+  }
+  $('apply-result').textContent = parts.join('\n')
+}
+
+/* ── 事件绑定：**逐个 try/catch** —— 一个绑不上不影响其余的 ─────────── */
+// （"页面画得出来但每个按钮都没反应"就是这么来的）
 
 function bind(id, prop, handler) {
   try {
@@ -980,8 +1163,8 @@ function bindEvents() {
   bind('tab-report', 'onclick', () => void switchTab('report'))
   bind('btn-reload', 'onclick', async () => {
     await Promise.all([loadHealth(), loadTaxonomy(), refreshSources()])
-    if (state.page === 'score') renderCard()
-    if (state.page === 'report') await loadStats()
+    if (state.page === 'score') { renderCard(); void loadProgressTruth() }
+    if (state.page === 'report') await reloadReport()
     toast('已重载数据')
   })
   bind('error-close', 'onclick', () => { $('error-banner').hidden = true })
@@ -1002,35 +1185,59 @@ function bindEvents() {
     state.score.ctxOpen = !state.score.ctxOpen
     renderContext(currentItem() ?? {})
   })
-  bind('note', 'onblur', () => void saveNote())
+  // 评论：**失焦即存**（没有保存按钮）。打字时不发请求，所以每次击键都不打扰服务端。
+  bind('comment', 'onblur', () => void saveComment())
   // 报告页
   bind('report-batch', 'change', (e) => {
     state.reportBatch = e.target.value || 'all'
-    state.reportTag = ''
-    void loadStats()
+    state.reportVerdict = ''
+    state.reportSearch = ''
+    $('comment-search').value = ''
+    for (const other of $('comment-filter').children) other.classList.toggle('active', (other.dataset.verdict ?? '') === '')
+    $('apply-result').textContent = ''
+    void reloadReport()
   })
-  bind('btn-draft', 'onclick', () => void loadDraft())
-  bind('btn-apply', 'onclick', () => void applyDraft())
+  bind('comment-filter', 'onclick', (e) => {
+    const btn = e.target?.closest?.('button[data-verdict]')
+    if (!btn) return
+    state.reportVerdict = btn.dataset.verdict ?? ''
+    for (const other of $('comment-filter').children) other.classList.toggle('active', other === btn)
+    renderCommentList() // 纯本地筛选，不重新请求
+  })
+  bind('comment-search', 'oninput', (e) => {
+    state.reportSearch = String(e.target.value ?? '')
+    renderCommentList()
+  })
+  bind('btn-consolidate', 'onclick', () => void runConsolidate())
+  bind('btn-apply', 'onclick', () => void applyConsolidation())
 }
 
-/* ── 键盘：打分页不该用鼠标 ────────────────────────────────────────── */
+// ── 键盘：打分页不该用鼠标 ──────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   const tagName = (e.target?.tagName ?? '').toLowerCase()
-  // 在输入框里打字时，数字键/回车都是"文字"，不是快捷键
-  if (tagName === 'input' || tagName === 'select' || tagName === 'textarea') return
+  const typing = tagName === 'input' || tagName === 'select' || tagName === 'textarea'
   if (e.ctrlKey || e.metaKey || e.altKey) return
-  if (e.key === 'Escape') return void ($('error-banner').hidden = true)
+  if (e.key === 'Escape') {
+    if (typing) return void e.target.blur() // 失焦即存；也顺手把 1/2/3 还给快捷键
+    return void ($('error-banner').hidden = true)
+  }
   if (state.page !== 'score') return
+  // ★ 评论框里的 Enter 就是"保存并下一条"（Shift+Enter 换行）—— 这是评几百条的主路径
+  if (typing && tagName === 'textarea' && e.key === 'Enter') {
+    if (e.shiftKey) return
+    e.preventDefault()
+    return void submitAndNext()
+  }
+  // ★ 在输入框里打字时，数字键/回车都是**文字**，不是快捷键：
+  //   评论里写个"2"就跳条目，是比"少一个快捷键"严重得多的坏法
+  if (typing) return
   if (e.key === '1' || e.key === '2' || e.key === '3') {
     e.preventDefault()
-    const list = state.taxonomy.verdicts.length ? state.taxonomy.verdicts : FALLBACK_VERDICTS
-    // 税则里 `key` 与数字键对得上就用它；对不上就按契约固定的三档（1/2/3）
-    void applyVerdict(list.find((x) => String(x.key) === e.key)?.id ?? { 1: 'good', 2: 'ok', 3: 'bad' }[e.key])
-    return
+    return void applyVerdict(verdictForKey(e.key))
   }
   if (e.key === 'Enter') {
     e.preventDefault()
-    return moveNext()
+    return void submitAndNext()
   }
   if (e.key === 'u' || e.key === 'U') {
     e.preventDefault()
@@ -1040,16 +1247,9 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault()
     return skipCurrent()
   }
-  const at = TAG_KEYS.indexOf(e.key)
-  if (at >= 0 && state.taxonomy.tags[at]) {
-    e.preventDefault()
-    void toggleTag(state.taxonomy.tags[at].id)
-  }
 })
 
-/* ══════════════════════════════════════════════════════════════════════
-   启动
-   ══════════════════════════════════════════════════════════════════════ */
+/* ── 启动 ───────────────────────────────────────────────────────────── */
 
 async function boot() {
   bindEvents()

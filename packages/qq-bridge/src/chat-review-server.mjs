@@ -41,12 +41,18 @@ import {
   rowToEntry,
 } from './chat-review-import.mjs'
 import {
-  TAGS,
   VERDICTS,
   createReviewStore,
-  sha256,
-  taxonomyDrift,
 } from './chat-review-store.mjs'
+import {
+  CONSOLIDATE_LIMITS,
+  STYLE_ANCHORS,
+  checkAnchors,
+  clusterComments,
+  consolidateComments,
+} from './chat-review-consolidate.mjs'
+import { sha256 } from './chat-style-sync.mjs'
+import { chatOnce, resolveDirectTarget } from './model-direct.mjs'
 import { createCorpus, silenceSqliteWarning } from './corpus.mjs'
 import { PKG_ROOT } from './local.mjs'
 import { chatStylePath, readChatStyle, resolveChatStyleName } from './styles.mjs'
@@ -81,7 +87,13 @@ function json(res, status, body) {
   res.end(text)
 }
 
-const fail = (res, status, why) => json(res, status, { ok: false, error: String(why ?? '未知错误') })
+/** 失败响应（`extra` 用来带结构化信息，例如"丢了哪几条底线要点"）。 */
+const fail = (res, status, why, extra = null) =>
+  json(res, status, {
+    ok: false,
+    error: String(why ?? '未知错误'),
+    ...(extra && typeof extra === 'object' ? extra : {}),
+  })
 
 function readBody(req) {
   return new Promise((resolvePromise) => {
@@ -258,6 +270,10 @@ export async function stopRunningReviewServer({
  * @param {string} [opts.styleDir]          风格文件所在目录（默认包根的 `styles/`；测试指向临时目录）
  * @param {Function} [opts.onShutdown]      `POST /api/shutdown` 时干什么（默认 = 关监听并退出进程）
  * @param {number} [opts.shutdownDelayMs]   先回响应再退出的缓冲（默认 150ms）
+ * @param {string} [opts.chatModePath]      `src/chat-mode.mjs` 的路径（应用改写时同步出厂常量）
+ * @param {object} [opts.config]            归一化配置（解析模型通路用；不传 = 整理功能不可用）
+ * @param {Function} [opts.resolveTarget]   测试注入：`() => ({ok, baseUrl, apiKey, model})`
+ * @param {Function} [opts.callModel]       测试注入：`chatOnce`（**测试绝不真调模型**）
  */
 export function createReviewServer({
   workspace,
@@ -268,6 +284,10 @@ export function createReviewServer({
   styleDir = join(PKG_ROOT, 'styles'),
   onShutdown = null,
   shutdownDelayMs = 150,
+  chatModePath = join(PKG_ROOT, 'src', 'chat-mode.mjs'),
+  config = null,
+  resolveTarget = null,
+  callModel = null,
 } = {}) {
   const root = String(workspace ?? '')
   if (!root) throw new Error('没有工作区，读不到语料库与评审数据')
@@ -293,7 +313,14 @@ export function createReviewServer({
   //    `<styles>/.md`（一个不存在的文件）—— 那会让"应用草稿"写错地方而**看起来成功了**。
   //    实测就是评审台自己的测试抓到的（详见 styles.mjs 里这个函数的注释）。
   const styleFile = chatStylePath({ dir: styleDir, name: resolveChatStyleName(styleName) })
-  const store = createReviewStore({ workspace: root, styleFile, log: say })
+  const store = createReviewStore({ workspace: root, styleFile, chatModePath, log: say })
+  /** 模型通路：默认按配置解析（与桥接共用 `resolveDirectTarget`），测试可注入。 */
+  const target = () => {
+    if (typeof resolveTarget === 'function') return resolveTarget()
+    if (!config) return { ok: false, why: '这个实例没有拿到配置（config 没传），整理功能不可用' }
+    return resolveDirectTarget({ config })
+  }
+  const doCallModel = typeof callModel === 'function' ? callModel : chatOnce
   // ★ 只读：这个工具**绝不往语料库里写**（它是"过去发生了什么"的证据，不是它的地盘）
   const corpus = createCorpus({ workspace: root, log, readOnly: true })
 
@@ -357,11 +384,17 @@ export function createReviewServer({
         })
       }
 
-      // ── ② 标签税则（+ 漂移检查）──────────────────────────────────────
+      // ── ② 三档结论（标签体系已整套删除，见 chat-review-store.mjs 文件头）──
       if (req.method === 'GET' && path === '/api/taxonomy') {
-        const style = styleFacts()
-        const drift = taxonomyDrift({ styleText: String(style.text ?? '') })
-        return json(res, 200, { ok: true, verdicts: VERDICTS, tags: TAGS, drift: drift.drift })
+        // ⚠️ 这条路由**故意保留**，但只回一句"已经没有了"：
+        //   删掉它会让旧页面拿到一个 404，而 404 在浏览器里只表现为"点了没反应"；
+        //   回一句人话，人就知道该刷新页面了（页面版本串本来也会强制刷新）。
+        return json(res, 200, {
+          ok: true,
+          removed: true,
+          verdicts: VERDICTS,
+          why: '标签体系已删除：现在评的是「对 / 还行 / 不对 + 评论」，点从评论里整理出来',
+        })
       }
 
       // ── ③ 数据源：语料库有哪些会话 + 已有批次 ─────────────────────────
@@ -510,15 +543,14 @@ export function createReviewServer({
         })
       }
 
-      // ── ⑦ 打分（每条立刻落盘）─────────────────────────────────────────
+      // ── ⑦ 打分（每条立刻落盘；**素材是评论**，不是标签）─────────────────
       if (req.method === 'POST' && path === '/api/score') {
         const body = await readBody(req)
         if (!body) return fail(res, 400, '请求体不是合法 JSON')
         const saved = store.saveScore({
           id: body.id,
           verdict: body.verdict,
-          tags: Array.isArray(body.tags) ? body.tags : [],
-          note: body.note ?? '',
+          comment: body.comment ?? '',
         })
         if (!saved.ok) return fail(res, 400, saved.why)
         // 进度用**条目所属的那个批次**算：页面靠它画进度条
@@ -542,33 +574,104 @@ export function createReviewServer({
         return json(res, 200, { ok: true, undone: r.undone, progress: store.progress(batchId) })
       }
 
-      // ── ⑨ 统计 ───────────────────────────────────────────────────────
+      // ── ⑨ 统计 + 评论清单 ─────────────────────────────────────────────
       if (req.method === 'GET' && path === '/api/stats') {
         const scope = url.searchParams.get('batch') || 'all'
         const st = store.stats(scope)
         return json(res, 200, { ok: true, ...st })
       }
 
-      // ── ⑩ 修订草稿（只算不写）────────────────────────────────────────
-      if (req.method === 'GET' && path === '/api/draft') {
-        const scope = url.searchParams.get('batch') || 'all'
-        const d = store.draft(scope)
-        return json(res, 200, { ok: true, scope, draft: d })
+      // ── ⑩ 整理：把评论归纳成「点」并整篇重写（**唯一一次模型调用**）─────
+      //
+      // 两个方法共用一条路径：
+      //   · GET  —— 取这个范围**最近一次**整理的结果（页面刷新后还在），
+      //             顺带附上"没调模型时的本地聚类"，让人先看见评论都在；
+      //   · POST —— 真的去调模型整理一次（人点一下才发生，钱花在明处）。
+      if (path === '/api/consolidate') {
+        if (req.method === 'GET') {
+          const scope = url.searchParams.get('scope') || url.searchParams.get('batch') || 'all'
+          const latest = store.latestConsolidation(scope)
+          const cs = store.comments(scope)
+          const t = target()
+          return json(res, 200, {
+            ok: true,
+            scope,
+            latest,
+            history: store.listConsolidations()
+              .filter((c) => String(scope) === 'all' || String(c.scope) === String(scope))
+              .map((c) => ({ id: c.id, createdAt: c.createdAt, chars: c.chars, points: (c.points ?? []).length, appliedAt: c.appliedAt })),
+            // 评论都在这里：整理没跑成时，页面至少能让人逐条读
+            comments: cs,
+            counts: { comments: cs.length, withText: cs.filter((c) => c.comment).length },
+            model: t.ok ? { ok: true, model: t.model, baseUrl: t.baseUrl } : { ok: false, why: t.why },
+            limits: CONSOLIDATE_LIMITS,
+            anchors: STYLE_ANCHORS.map((a) => ({ id: a.id, label: a.label })),
+          })
+        }
+        if (req.method === 'POST') {
+          const body = await readBody(req)
+          if (!body) return fail(res, 400, '请求体不是合法 JSON')
+          const postScope = String(body.scope ?? body.batch ?? 'all') || 'all'
+          const style = styleFacts()
+          const cs = store.comments(postScope)
+          const started = Date.now()
+          const result = await consolidateComments({
+            comments: cs,
+            styleText: String(style.text ?? ''),
+            target: target(),
+            callModel: doCallModel,
+          })
+          if (!result.ok) {
+            // ★ 失败也要把**评论原文**一起回给页面：整理没成，素材不能跟着"消失"
+            return json(res, 200, {
+              ok: false,
+              error: result.why,
+              clusters: result.clusters ?? null,
+              comments: cs,
+              ms: result.ms ?? Date.now() - started,
+            })
+          }
+          const saved = store.saveConsolidation({ scope: postScope, result, styleBefore: String(style.text ?? '') })
+          if (!saved.ok) return fail(res, 500, saved.why)
+          say(
+            `[评审台] 整理完成：${result.points.length} 个点，改写 ${String(result.rewritten).length} 字` +
+              `${result.anchors?.ok ? '' : `（⚠️ 丢了 ${result.anchors.missing.length} 条底线要点）`}`,
+          )
+          return json(res, 200, {
+            ok: true,
+            consolidation: saved.consolidation,
+            // ★ 成功时也回本地聚类：页面可以把它折叠起来给人对照
+            //   （"模型归纳成的点" vs "相似评论的原始分组"，两者不一致时人一眼能看出来）
+            clusters: result.clusters ?? {
+              bad: clusterComments({ comments: cs, verdict: 'bad' }),
+              good: clusterComments({ comments: cs, verdict: 'good' }),
+            },
+            ms: Date.now() - started,
+          })
+        }
+        return fail(res, 405, '只支持 GET（取最近一次）与 POST（真的整理一次）')
       }
 
-      // ── ⑪ 应用草稿（**唯一会碰风格文件的写操作**）─────────────────────
+      // ── ⑪ 应用改写（**唯一会碰风格文件（和出厂常量）的写操作**）────────
       if (req.method === 'POST' && path === '/api/apply') {
         const body = await readBody(req)
         if (!body) return fail(res, 400, '请求体不是合法 JSON')
-        const scope = String(body.batch ?? 'all') || 'all'
-        const r = store.applyDraft({ scope, confirm: body.confirm === true })
-        if (!r.ok) return fail(res, r.code ?? 400, r.why)
+        const r = store.applyDraft({
+          consolidationId: String(body.consolidation ?? '') || '',
+          scope: String(body.scope ?? body.batch ?? 'all') || 'all',
+          confirm: body.confirm === true,
+          confirmAnchors: body.confirmAnchors === true,
+        })
+        if (!r.ok) return fail(res, r.code ?? 400, r.why, { anchorsMissing: r.anchorsMissing ?? null })
         return json(res, 200, {
           ok: true,
+          consolidationId: r.consolidationId,
           backup: r.backup,
           sha256: r.sha256,
+          beforeChars: r.beforeChars,
           chars: r.chars,
-          appended: r.appended,
+          anchorsOverridden: r.anchorsOverridden,
+          constantSync: r.constantSync,
         })
       }
 

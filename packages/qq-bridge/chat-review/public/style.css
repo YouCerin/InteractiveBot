@@ -1,7 +1,6 @@
-/* 聊天记录评审台 —— 样式。
-   取向：**打分页要能连续评几百条**，所以字号偏大、点击目标偏大、页面不滚动就能看到
-   上下文 + 那句话 + 判档按钮；导入/报告页是"偶尔看一眼"，信息密度优先。
-   主题跟着兄弟工具（sticker-label）走，一眼能认出是同一套本地工具。 */
+/* 聊天记录评审台 —— 样式。取向：**打分页要能连续评几百条**，所以字号偏大、点击目标偏大，
+   不滚动就能看到 上下文 + 那句话 + 三个判档按钮；评论框是这一版的主角，给足高度与焦点样式。
+   导入/报告页是"偶尔看一眼"，信息密度优先。主题跟着兄弟工具（sticker-label）走。 */
 
 :root {
   --bg: #14161a;
@@ -17,9 +16,8 @@
 
 * { box-sizing: border-box; }
 
-/* ★ `[hidden]` 必须真的能藏住东西。HTML 的 `hidden` 只是浏览器默认样式里的
-   `display: none`，任何组件的一条 `display: flex/grid` 都能盖掉它 ——
-   于是"设了 hidden 但还显示"，现象是"点了没反应"。用 !important 兜住。 */
+/* ★ `[hidden]` 必须真的能藏住东西：HTML 的 `hidden` 只是默认样式里的 `display: none`，
+   任何一条 `display: flex/grid` 都能盖掉它 —— 于是"设了 hidden 但还显示"，看着像"点了没反应"。 */
 [hidden] { display: none !important; }
 
 body {
@@ -75,7 +73,7 @@ button.danger, button.ghost.danger { border-color: #5a2a2a; color: #ffb3b3; }
 button.ghost.danger:hover { background: #3a1f1f; }
 button.small { padding: 4px 9px; font-size: 12px; }
 
-/* ── 错误横幅 / 警告横幅 ──────────────────────────────────────────── */
+/* ── 错误横幅 ─────────────────────────────────────────────────────── */
 .error-banner {
   display: flex; align-items: center; gap: 10px;
   background: #3a1f1f; border-bottom: 2px solid var(--danger); color: #ffd9d9;
@@ -83,13 +81,15 @@ button.small { padding: 4px 9px; font-size: 12px; }
 }
 .error-banner .eb-icon { flex: none; }
 .error-banner .eb-text { flex: 1; word-break: break-word; }
-.banner {
-  margin: 12px 16px 0; padding: 10px 14px; border-radius: 8px;
-  font-size: 13px; line-height: 1.7;
+
+/* 页内提示块（比横幅"轻"一级：留在原地，跟着内容走） */
+.callout {
+  border-radius: 8px; padding: 9px 12px; margin: 10px 0;
+  font-size: 12.5px; line-height: 1.7; word-break: break-word;
 }
-.banner.warn { background: #3a3020; border: 1px solid var(--warn); color: #ffe6bd; }
-.drift-list { margin: 6px 0 0; padding-left: 20px; }
-.drift-list li { font-size: 12.5px; }
+.callout.err { background: #3a1f1f; border: 1px solid var(--danger); color: #ffd9d9; }
+.callout.warn { background: #3a3020; border: 1px solid var(--warn); color: #ffe6bd; }
+.callout.ok { background: #17322a; border: 1px solid #2f5c4c; color: #b9f0da; }
 
 /* ── 通用块 ───────────────────────────────────────────────────────── */
 main { padding: 14px 16px 40px; max-width: 1180px; }
@@ -109,11 +109,11 @@ input, select, textarea {
 }
 textarea { width: 100%; resize: vertical; line-height: 1.6; }
 select { min-width: 120px; max-width: 460px; }
-.note { color: var(--dim); font-size: 12px; line-height: 1.6; }
+.note { color: var(--dim); font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
 .empty { color: var(--dim); font-size: 13px; padding: 18px 4px; text-align: center; }
 .empty.big { padding: 60px 20px; font-size: 14px; line-height: 1.9; }
 
-/* ── 表格（批次 / 分会话统计） ────────────────────────────────────── */
+/* ── 表格（批次） ─────────────────────────────────────────────────── */
 .table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .table th {
   text-align: left; color: var(--dim); font-weight: 500; font-size: 11.5px;
@@ -188,19 +188,16 @@ select { min-width: 120px; max-width: 460px; }
 .verdict-bad { border-color: #5a2a2a; }
 .verdict-bad.active { background: #3a1f1f; border-color: var(--danger); }
 
-.tag-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.tag-group { min-width: 0; }
-.tag-title { font-size: 12px; margin-bottom: 6px; }
-.tag-title.bad { color: #ffb3b3; }
-.tag-title.good { color: #9ff0d3; }
-.tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.tag { padding: 6px 10px; font-size: 12.5px; }
-.tag .tk { color: var(--dim); font-size: 11px; margin-right: 5px; }
-.tag.active { background: #223055; border-color: var(--accent); color: #fff; }
-.note-label { display: block; margin-top: 14px; color: var(--dim); font-size: 11.5px; }
-.note-label textarea { margin-top: 4px; }
+/* ★ 评论框是这一版的主输入：给足高度、加粗边框、明确的焦点环 —— 键盘 1/2/3 只在
+   "不在输入框里"时生效，人得一眼看出焦点在哪。 */
+.comment-label { display: block; color: var(--fg); font-size: 13px; font-weight: 600; }
+.comment-label .hint { color: var(--dim); font-weight: 400; font-size: 11.5px; margin-left: 8px; }
+.comment-box { min-height: 122px; margin-top: 6px; font-size: 15px; line-height: 1.7; border-color: #3a4353; }
+.comment-box:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.2); }
 .keys { margin-top: 12px; color: var(--dim); font-size: 12px; }
 .keys b { color: var(--fg); }
+.keys-sub { margin-top: 4px; font-size: 11.5px; }
+.keys-sub b { color: var(--fg); }
 
 /* ── 页签三：报告 ─────────────────────────────────────────────────── */
 .dist { display: flex; height: 26px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; background: #101318; }
@@ -210,22 +207,49 @@ select { min-width: 120px; max-width: 460px; }
 .dist-bad { background: var(--danger); }
 .dist-legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--dim); font-size: 12.5px; }
 .dist-legend b { color: var(--fg); font-variant-numeric: tabular-nums; }
-.rank { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.rank button { padding: 5px 10px; font-size: 12.5px; }
-.rank button.active { background: #223055; border-color: var(--accent); }
-.rank .rc { color: var(--dim); font-variant-numeric: tabular-nums; margin-left: 6px; }
-.rank .rk-bad { color: #ffb3b3; }
-.rank .rk-good { color: #9ff0d3; }
-.evidence-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
-.evidence-title { font-size: 12.5px; color: var(--fg); margin-bottom: 8px; }
-.evidence { background: #101318; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
-.ev-ctx { color: var(--dim); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-.ev-reply { font-size: 16px; font-weight: 600; margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
-.ev-id { color: var(--dim); font-size: 11px; font-family: Consolas, monospace; word-break: break-all; }
-.sug { border-left: 3px solid var(--warn); padding: 4px 0 4px 10px; margin-bottom: 10px; }
-.sug-head { font-size: 13px; font-weight: 600; }
-.sug-advice { color: var(--dim); font-size: 12.5px; }
-.sug-quote { color: #cfe0ff; font-size: 12px; margin-top: 2px; }
+.stats-line { margin-top: 8px; color: var(--dim); font-size: 12.5px; }
+.sug-head { font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+
+/* 评论清单：一条 = 判档 + 评论（主角）+ 被评的那句话与上下文 */
+.cm-item { background: #101318; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.cm-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.cm-head .pill {
+  background: #14161a; border: 1px solid var(--line); border-radius: 999px;
+  font-size: 11px; padding: 1px 9px; color: var(--dim);
+}
+.cm-head .pill.v-good { color: #9ff0d3; border-color: #2f5c4c; }
+.cm-head .pill.v-ok { color: #ffe6bd; border-color: #4a4a2f; }
+.cm-head .pill.v-bad { color: #ffb3b3; border-color: #5a2a2a; }
+.cm-time { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.cm-comment { font-size: 14px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.cm-comment.empty-comment { color: var(--dim); font-style: italic; }
+.cm-reply-label { color: var(--dim); font-size: 11px; margin-top: 6px; }
+.cm-reply { font-size: 14px; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
+.cm-ctx { color: var(--dim); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; margin-top: 2px; }
+.cm-id { color: #6b7383; font-size: 10.5px; font-family: Consolas, monospace; word-break: break-all; margin-top: 4px; }
+
+/* 整理出来的「点」 */
+.point { border-left: 3px solid var(--line); padding: 4px 0 4px 10px; margin-bottom: 12px; }
+.point-bad { border-left-color: var(--danger); }
+.point-good { border-left-color: var(--ok); }
+.point-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.point-kind { font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+.point-title { font-size: 13.5px; font-weight: 600; }
+.point-where { color: var(--dim); font-size: 11.5px; }
+.point-summary { color: var(--dim); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+.point-ev { color: #6b7383; font-size: 11px; margin-top: 2px; }
+details { margin: 6px 0; }
+details > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.ev-line {
+  color: var(--dim); font-size: 12px; padding: 3px 0 3px 10px; border-left: 2px solid var(--line);
+  white-space: pre-wrap; word-break: break-word;
+}
+.anchor-box-title { color: var(--fg); font-weight: 600; }
+.anchor-missing { margin: 4px 0 0; padding-left: 20px; font-size: 12.5px; }
+.cluster-head { color: var(--fg); font-size: 12.5px; font-weight: 600; margin-top: 6px; }
+.cluster { display: flex; gap: 8px; padding: 3px 0 3px 10px; border-left: 2px solid var(--line); }
+.cluster-count { color: var(--warn); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+.cluster-text { color: var(--dim); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .diff {
   background: #101318; border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px; margin: 10px 0; max-height: 420px; overflow: auto;

@@ -3,29 +3,37 @@
 > 这份文件是**契约**：`chat-review/public/app.js`（页面）与 `src/chat-review-server.mjs`（服务）
 > 都按它来。改任何一边都必须同步改这里。
 >
-> ⚠️ 有一条断言盯着它：`mocks/verify-chat-review.mjs` 会把 `app.js` 里出现的
-> 每个 `/api/...` 字符串抽出来，逐个核对服务端**真的有这条路由** —— 因为
-> "页面调了一个不存在的接口" 是这类小工具最常见的坏法，而它只会在浏览器里表现为
-> "点了没反应"（服务端日志干干净净）。
+> ⚠️ 有一条断言盯着它：`mocks/verify-chat-review.mjs` 会把 `app.js` 里出现的每个
+> `/api/...` 字符串抽出来，逐个核对服务端**真的有这条路由** —— 因为"页面调了一个
+> 不存在的接口"是这类小工具最常见的坏法，而它只会在浏览器里表现为"点了没反应"。
 
-约定与仓库其它接口一致：
+约定与仓库其它接口一致：只监听 `127.0.0.1`；响应一律 JSON、`cache-control: no-store`；
+成功 `{ok:true, ...}`，失败 `{ok:false, error:'中文的、给人看的理由'}`（400 输入不对 /
+404 没有这东西 / 409 状态冲突 / 500 真炸了）；路径穿越 403。
 
-- 只监听 `127.0.0.1`；
-- 响应一律 JSON（`content-type: application/json; charset=utf-8`），`cache-control: no-store`；
-- 成功 `{ ok: true, ... }`，失败 `{ ok: false, error: '中文、给人看的理由' }`，
-  状态码用 400（输入不对）/ 404（没有这东西）/ 409（状态冲突）/ 500（真炸了）；
-- 路径穿越一律 403；
-- **写操作只有三件事**：写评分（`POST /api/score`）、删批次、应用草稿（`POST /api/apply`）。
-  前两件只动工作区里的评审数据；第三件动 `styles/闲聊.md`，**必须先备份、必须显式确认**。
+---
+
+## 〇、这个工具现在的形状（2026-10-02 改版，**先读这段**）
+
+```
+导入真实聊天记录  →  一条条「判档 + 写评论」  →  把评论**整理成「点」**  →  据此**整篇重写** styles/闲聊.md
+```
+
+三件事必须清楚：
+
+1. **素材是评论，不是标签。** 第一版让人从一张手写标签表里选（太长 / 像客服 …），
+   使用者判定「标签系统并不合理」—— 标签是**我预先想好的分类**，他没想到的问题就永远
+   进不了统计。现在只判三档（对 / 还行 / 不对）**加一句自由评论**。
+2. **「点」是整理出来的产物，不是输入。** 由模型把评论归纳成若干条"点"（3~8 条最好），
+   使用者原话是「从我的评论中整理新的点放上去」。
+3. **草稿是整篇重写**（可按需精简），不是"往文件尾追加一段"。改写必须过**锚点核对**
+   （底线要点一条都不许丢），且永远是"人点确认 + 先备份"。
 
 ---
 
 ## 一、数据模型
 
-### 1. 回合（item）—— 被评分的单位
-
-一个回合 = **机器人当时那句话** + **它前面的一小段上下文**。风格是"接话"的质量，
-脱离上下文没法判断（单看「没有手机」没问题，结合"你用什么手机"才知道它答得好不好）。
+### 1. 回合（item）—— 被评的单位
 
 ```json
 {
@@ -35,47 +43,23 @@
   "chatKey": "group:860771987",
   "chatLabel": "群 860771987",
   "at": 1759384800000,
-  "context": [
-    { "name": "店长Keeper", "text": "鱼头用的什么手机", "isBot": false }
-  ],
+  "context": [{ "name": "店长Keeper", "text": "鱼头用的什么手机", "isBot": false }],
   "reply": "手机？我住在一台 X99 主板的机箱里面，没有手机"
 }
 ```
 
-- `id` **稳定且可重建**：同一批数据重复导入不会产生重复条目（去重靠它）。
-- `context` 最多 3 条（默认 1 条），按时间正序；`isBot: true` 表示那也是机器人说的。
-- `reply` 是**纯文本**（图片/表情包等非文字段已在导入时折叠成 `[图片]` 这类标记）。
+`id` 稳定（重复导入不产生重复条目）；`context` 最多 3 条、按时间正序；`reply` 是纯文本。
 
-### 2. 评分（score）—— 人工打的
+### 2. 评分（score）
 
 ```json
-{
-  "id": "c:group:860771987:13579",
-  "verdict": "bad",
-  "tags": ["memory_detail", "self_intro"],
-  "note": "问手机就答手机",
-  "at": 1759384900000
-}
+{ "id": "c:…", "verdict": "bad", "comment": "问手机就答手机，别交代机箱", "at": 1759384900000 }
 ```
 
-- `verdict` 三档：`good`（就该这么说）/ `ok`（不算错，但可以更好）/ `bad`（不该这么说）。
-- `tags` 是税则里的 id（见下），可以多选、可以空。
-- **一条 item 只有一个 score**；重复提交 = 覆盖（评错了就是重评，不需要先删）。
-- 评分**每一条立刻落盘**（没有"保存"按钮 —— 评几百条时攒着必丢）。
-
-### 3. 标签税则（taxonomy）—— 打分时点的那些标签
-
-每个标签都**挂在一句现有规则上**（`ruleQuote` 是 `styles/闲聊.md` 里的原文片段）。
-这条链子是有意的：标签是"哪条规则没被遵守"的可数证据，而"没有证据的规则"
-和"没有规则的证据"都会漂。
-
-```json
-{ "id": "memory_detail", "label": "主动抖记忆", "kind": "bad",
-  "hint": "把记忆里的细节当谈资（显卡/机箱/主板这种）",
-  "ruleQuote": "别主动抖记忆里的细节" }
-```
-
-`kind: "good"` 的标签是用来**表扬**的（例如"接住了对方的戏"），报告里分开统计。
+- `verdict`：`good`（对）/ `ok`（还行）/ `bad`（不对）。
+- `comment`：**自由评论**，最多 2000 字；**可以为空**（只判档也能用），但整理时只收带评论的。
+- 一条 item 只有一个 score；**每条立刻落盘**（没有保存按钮）。
+- 旧数据里的 `tags` 字段**读得进来但不参与任何逻辑**（不丢历史）。
 
 ---
 
@@ -84,164 +68,183 @@
 ### `GET /api/health`
 
 ```json
-{ "ok": true, "startedAt": 1759384800000, "tool": "chat-review",
-  "workspace": "C:\\...\\workspace-qq",
-  "corpus": { "ok": true, "rows": 3598 },
-  "styleFile": { "path": "C:\\...\\styles\\闲聊.md", "exists": true, "chars": 1948, "sha256": "ab12…" } }
+{ "ok": true, "tool": "chat-review", "startedAt": 1759384800000, "workspace": "C:\\…",
+  "corpus": { "ok": true, "rows": 29030, "botMessages": 405, "chats": 9 },
+  "styleFile": { "path": "…\\styles\\闲聊.md", "exists": true, "chars": 2388, "sha256": "ab12…", "source": "file", "why": null } }
 ```
 
-`startedAt` 用来分辨"页面跑的是不是新起的进程"（页面右上角显示它）。
-
-### `GET /api/taxonomy`
+### `GET /api/taxonomy` —— **已废弃，只回一句说明**
 
 ```json
-{ "ok": true,
-  "verdicts": [ { "id": "good", "label": "就该这么说", "key": "1" },
-                { "id": "ok",   "label": "还行",       "key": "2" },
-                { "id": "bad",  "label": "不该这么说", "key": "3" } ],
-  "tags": [ { "id": "too_long", "label": "太长", "kind": "bad", "hint": "…", "ruleQuote": "极短" } ],
-  "drift": [ { "id": "xxx", "why": "这条标签挂的规则原文在 styles/闲聊.md 里找不到了" } ] }
+{ "ok": true, "removed": true, "verdicts": [ { "id": "good", "label": "对", "key": "1" }, … ],
+  "why": "标签体系已删除：现在评的是「对 / 还行 / 不对 + 评论」，点从评论里整理出来" }
 ```
 
-`drift` 非空 = 风格文件改了、税则没跟上（页面要显眼地提示，但**不拦着用**）。
+保留这条路由（而不是删掉）是为了让旧页面拿到**一句人话**而不是一个 404
+（404 在浏览器里只表现为"点了没反应"）。页面只需读 `verdicts`。
 
 ### `GET /api/sources`
 
 ```json
 { "ok": true,
-  "corpus": { "ok": true, "why": null,
-    "chats": [ { "chatKey": "group:860771987", "label": "群 860771987",
-                 "botReplies": 412, "total": 3598, "lastAt": 1759384800000 } ] },
-  "batches": [ { "id": "corpus-2026-10-02T06-40", "label": "群 860771987 · 语料库",
-                 "source": "corpus", "items": 120, "scored": 34, "createdAt": 1759384800000 } ] }
+  "corpus": { "ok": true, "why": null, "chats": [ { "chatKey": "group:860771987", "label": "群 860771987",
+              "botReplies": 412, "total": 3598, "lastAt": 1759384800000 } ] },
+  "batches": [ { "id": "…", "label": "…", "source": "corpus", "chatKey": "…", "chatLabel": "…",
+                 "items": 120, "scored": 34, "commented": 28, "createdAt": 1759384800000 } ] }
 ```
 
 ### `POST /api/pull` —— 从语料库拉一个批次
 
-请求：`{ "chatKey": "group:860771987", "limit": 120, "contextBefore": 1, "batchLabel": "第一天" }`
-
-- `limit` 上限 500（默认 100）；`contextBefore` 0~3（默认 1）。
-- 只取 `is_bot = 1` 的消息当 `reply`；跳过空的/纯标记的回复。
-- 响应：`{ "ok": true, "batch": {...}, "items": [...], "added": 118, "skipped": 2 }`
+请求 `{ "chatKey": "group:860771987", "limit": 120, "contextBefore": 1, "batchLabel": "第一天" }`；
+响应 `{ "ok": true, "batch": {…}, "items": 118, "scanned": 620, "skippedMarkers": 0, "warnings": [] }`。
+`limit` ≤ 500，`contextBefore` 0~3；只把机器人自己的发言当 `reply`。
 
 ### `POST /api/import` —— 从粘贴/文件导入
 
-请求：`{ "format": "forward-json" | "text", "text": "…", "batchLabel": "老王发的记录" }`
-
-- `forward-json`：QQ「合并转发」导出的 JSON（既接受 `get_forward_msg` 的
-  `{messages:[{sender:{nickname},message:[{type:'text',data:{text}}]}]}` 形状，
-  也接受只带 `nickname`/`content` 的扁平形状）；也接受 **OneBot 事件数组**。
-- `text`：纯文本聊天记录，一行一条，`昵称: 内容`（中文冒号也行）。无法识别的行进 `warnings`。
-- **只有机器人自己的发言才能当 `reply`**：机器人昵称从 `config.json` 的
-  `onebot.selfId`/登录昵称拿不到时，用 `POST` 里的 `selfNames`（默认 `["小鲸鱼","小鱼","D指导"]`）判断。
-- 响应：`{ "ok": true, "batch": {...}, "items": [...], "warnings": ["第 12 行认不出昵称，已跳过"] }`
+请求 `{ "format": "forward-json" | "text", "text": "…", "batchLabel": "老王发的记录" }`；
+响应 `{ "ok": true, "batch": {…}, "items": 12, "entries": 40, "warnings": ["第 3 行…"] }`。
+认不出来的行**原样进 warnings**，绝不静默丢；`forward-json` 坏 JSON → 400 并说明。
 
 ### `GET /api/items?batch=<id>&filter=unrated|rated|all&limit=&offset=`
 
 ```json
-{ "ok": true, "batch": { "id": "…", "label": "…", "items": 120, "scored": 34 },
-  "total": 120, "offset": 0,
-  "items": [ { "…item…": "…", "score": { "verdict": "bad", "tags": [], "note": "", "at": 0 } } ] }
+{ "ok": true, "batch": { "id": "…", "label": "…", "items": 120, "scored": 34, "commented": 28 },
+  "filter": "unrated", "total": 86, "offset": 0,
+  "items": [ { "…item…": "…", "score": { "verdict": "bad", "comment": "…", "at": 0 } } ] }
 ```
 
-`unrated` 是打分页的默认过滤（**永远先推没评的**）。`limit` 默认 20，上限 200。
+### `POST /api/score` —— 判档 + 评论（**每条立刻落盘**）
 
-### `POST /api/score`
-
-请求：`{ "id": "…", "verdict": "good|ok|bad", "tags": ["…"], "note": "…" }`
-响应：`{ "ok": true, "score": {...}, "progress": { "scored": 35, "total": 120 } }`
-
-- `verdict` 不在三档里 / `id` 不属于任何批次 → 400；`tags` 里有未知 id → 400 并逐个点名。
+请求 `{ "id": "…", "verdict": "good|ok|bad", "comment": "为什么这么评" }`
+响应 `{ "ok": true, "score": {…}, "batchId": "…", "progress": { "scored": 35, "total": 120, "commented": 29 } }`
+`verdict` 不在三档里 → 400；`comment` > 2000 字 → 400；`id` 不属于任何批次 → 400。
 
 ### `POST /api/undo`
 
-请求：`{ "batch": "…" }` → `{ "ok": true, "undone": {…}|null, "progress": {…} }`
-（撤销该批次**最后一次**评分；没有可撤的时 `undone: null`，仍然 200。）
+请求 `{ "batch": "…" }` → `{ "ok": true, "undone": {…}|null, "progress": {…} }`（撤销该批次最后一次评分）。
 
 ### `GET /api/stats?batch=<id|all>`
 
 ```json
 { "ok": true, "scope": "all",
   "verdicts": { "good": 20, "ok": 9, "bad": 41 },
-  "rate": { "good": 0.29, "bad": 0.59, "scored": 70, "total": 200 },
-  "tags": [ { "id": "too_long", "label": "太长", "kind": "bad", "count": 12,
-              "examples": [ { "id": "…", "reply": "…", "context": "…" } ] } ],
-  "chats": [ { "chatKey": "group:860771987", "label": "群 860771987", "scored": 40, "bad": 22 } ] }
+  "rate": { "scored": 70, "total": 200, "good": 0.29, "bad": 0.59 },
+  "comments": { "withText": 66, "withoutText": 4, "byVerdict": { "good": 19, "ok": 8, "bad": 39 } },
+  "chats": [ { "chatKey": "group:860771987", "label": "群 860771987", "scored": 40, "bad": 22 } ],
+  "list": [ { "id": "…", "verdict": "bad", "comment": "…", "at": 1759…,
+              "reply": "…", "context": [ { "name": "…", "text": "…", "isBot": false } ], "chatLabel": "群 860771987" } ] }
 ```
 
-`examples` 最多 3 条（报告页要看"到底哪几条"）。
+`list` 就是**评论清单**（新→旧）：报告页显示它、整理把它喂给模型。**没有标签排行了。**
 
-### `GET /api/draft?batch=<id|all>`
+### `GET /api/consolidate?scope=<id|all>` —— 取最近一次整理（**不调模型**）
 
 ```json
-{ "ok": true,
-  "draft": {
-    "target": "styles/闲聊.md",
-    "suggestions": [ { "tagId": "memory_detail", "label": "主动抖记忆", "count": 6,
-                       "advice": "这条规则已经被真人标出 6 次，考虑把它写得更具体",
-                       "ruleQuote": "别主动抖记忆里的细节" } ],
-    "proposedBlock": "【评审台：真人标过"不对"的原话（别再说成这样）】\n- ❌「…」← 主动抖记忆\n…",
-    "diff": "--- a/styles/闲聊.md\n+++ b/styles/闲聊.md\n@@ …",
-    "evidenceCount": 14
-  } }
+{ "ok": true, "scope": "all",
+  "latest": { "id": "c-2026-10-02T…", "createdAt": 1759…, "scope": "all",
+              "points": [ { "kind": "bad", "title": "省略号滥用", "summary": "…", "evidence": ["3","7"], "where": "说话方式" } ],
+              "rewritten": "完整的新版 styles/闲聊.md 正文",
+              "dropped": [], "anchors": { "ok": true, "missing": [], "checked": 10 },
+              "model": "deepseek-flash", "ms": 8421, "usage": null,
+              "promptStats": { "kept": 42, "truncatedComments": 0, "chars": 5120 },
+              "styleBeforeSha": "…", "styleBeforeChars": 2388, "chars": 2100,
+              "diff": "--- styles/闲聊.md\n+++ …", "appliedAt": null, "applyResult": null } ,
+  "history": [ { "id": "…", "createdAt": 1759…, "chars": 2100, "points": 5, "appliedAt": null } ],
+  "comments": [ { "id": "…", "verdict": "bad", "comment": "…", "reply": "…", "context": [], "chatLabel": "…" } ],
+  "counts": { "comments": 42, "withText": 42 },
+  "model": { "ok": true, "model": "deepseek-flash", "baseUrl": "https://api.deepseek.com" },
+  "limits": { "comments": 150, "chars": 14000, "styleChars": 9000 },
+  "anchors": [ { "id": "not_submit", "label": "接梗不是屈服" } ] }
 ```
 
-- `proposedBlock` 是**确定性生成**的（无模型调用）：每个 `bad` 标签取最多 2 条真实反例，
-  连同它挂的规则名，写成一段可读的清单。
-- `diff` 是**统一 diff 文本**（页面用 `<pre>` 上色显示 `+`/`-` 行），不是自动改写。
-- 一条 `bad` 都没有时 `proposedBlock: ""`、`diff: ""`（页面显示"还没有足够证据"）。
+`latest` 可以是 `null`（还没整理过）。`model.ok === false` 时页面要**明说整理不可用**
+（并给出 `model.why`），不要给一个点了没反应的按钮。
 
-### `POST /api/apply`
+### `POST /api/consolidate` —— **真的调一次模型整理**
 
-请求：`{ "confirm": true }`
+请求 `{ "scope": "all" }`（或 `{"batch": "…"}`）
 
-- 把 `GET /api/draft` 算出来的 `proposedBlock` **追加**到 `styles/闲聊.md` 末尾。
-- 先备份到 `styles/.backups/闲聊.md.<时间戳>.bak`，再写；返回
-  `{ "ok": true, "backup": "…bak", "sha256": "…", "chars": 2100, "appended": 260 }`。
+成功：
+
+```json
+{ "ok": true, "ms": 8421,
+  "consolidation": { "…同上面的 latest…" },
+  "clusters": { "bad": [ { "text": "…", "count": 3, "ids": [] } ], "good": [] } }
+```
+
+失败（**仍然 200**，因为这不是"请求错了"，而是"整理没成"）：
+
+```json
+{ "ok": false, "error": "模型调用失败：…", "clusters": { "bad": [], "good": [] },
+  "comments": [ {…} ], "ms": 1200 }
+```
+
+失败时**必须把评论原文一起回**（`comments`）—— 整理没成，素材不能跟着"看不见"。
+`clusters` 是**本地确定性聚类**（相似评论分组 + 计数），成功时也一并回，页面可折叠展示。
+
+### `POST /api/apply` —— 应用改写（**唯一会碰风格文件与出厂常量的写操作**）
+
+请求 `{ "consolidation": "c-…"（可省，省略=用最近一次）, "scope": "all", "confirm": true, "confirmAnchors": false }`
+
 - `confirm !== true` → 400（**没有默认应用这件事**）。
-- 没有草稿内容 → 400。
-- 重复应用同一份草稿 → 409（`proposedBlock` 已经在文件里了，不许写第二遍）。
+- 没有可用的整理结果 → 400；改写内容与文件当前内容相同 → 409（不重复写）。
+- **锚点没守住**（`latest.anchors.ok === false`）且 `confirmAnchors !== true` → **409**，
+  并带 `anchorsMissing: [{id,label,any}]`；页面要把"丢了哪几条底线要点"逐条显示，
+  并给一个明确的"我知道，仍然应用"按钮（**只有人点它才带 `confirmAnchors:true`**）。
+- 成功：先备份到 `styles/.backups/闲聊.md.<时间戳>.bak`，再原子写风格文件，
+  然后**同步 `src/chat-mode.mjs` 里的出厂默认常量**（否则那两份会漂）：
+
+```json
+{ "ok": true, "consolidationId": "c-…", "backup": "…bak", "sha256": "…",
+  "beforeChars": 2388, "chars": 2100, "anchorsOverridden": false,
+  "constantSync": { "ok": true, "changed": true } }
+```
+
+`constantSync.ok === false` 时页面要**明说**（风格文件已经改了，但出厂常量没同步成功，
+`verify-chat-mode` 会红）并给出 `constantSync.why`。
 
 ### `POST /api/shutdown`
 
-**请这个实例自己退出**（给"启动时先接管端口"用，2026-10-02 用户要求）。
-
-请求：空 body。响应：`{ "ok": true, "stopping": true, "hint": "正在退出；新的实例会接管这个端口。" }`
-
-- 用途：新实例启动时若发现端口上已经有一份评审台，**先调它**，让旧的让位 ——
-  否则使用者双击 `启动评审.bat` 只会看到"窗口自己关了"（EADDRINUSE）。
-  完整判定树见 `src/chat-review-server.mjs` 的 `stopRunningReviewServer`。
-- **没接 `onShutdown` 的实例回 501**（测试里随手起的那些），**绝不假装退出**。
-- ⚠️ 它不是远程关机后门：只监听 127.0.0.1、只关自己，而且要显式 `POST`。
+请这个实例自己退出（启动时"接管端口"用）。空 body。`{ "ok": true, "stopping": true }`；
+没接 `onShutdown` 的实例回 501。只监听 127.0.0.1、只关自己。
 
 ### `DELETE /api/batch?id=<id>`
 
-删除批次与它的全部评分（只删工作区里的评审数据，**不动语料库、不动风格文件**）。
+删除批次与它的全部评分（只删工作区里的评审数据，不动语料库、不动风格文件）。
 
 ---
 
-## 三、页面要有哪些东西（`public/`，无构建）
+## 三、页面要有哪些东西（`public/`，无构建、零依赖、不许引 CDN）
 
-三个页签，全部中文，零依赖（**不许引 CDN**，离线也要能用）：
+### 页签一：导入
 
-1. **导入**
-   - 数据源一：语料库 → 会话下拉（显示"机器人发言 N 条 / 共 M 条"）+ 条数 + 「拉取」；
-   - 数据源二：粘贴框（合并转发 JSON / 纯文本二选一）+ 「解析预览」→ 显示认出了几条、
-     哪些行没认出来（`warnings` 原样列出来）；
-   - 已有批次列表（条数/已评/来源）+ 删除。
-2. **打分**（主战场 —— 要能连续评几百条而不累）
-   - 进度条 + `已评 / 总数`；
-   - 卡片：上面是上下文（淡色、可折叠），下面是**机器人那句话**（大字）；
-   - 三个大按钮：`1 就该这么说` / `2 还行` / `3 不该这么说`（键盘同样可用）；
-   - 标签按钮（bad 一组、good 一组），数字键 `4`~`9`/`0` 绑定前几个，多选，点一下即落盘；
-   - 备注框（失焦即存）；
-   - `Enter` 下一条、`U` 撤销上一条、`S` 跳过这条（只跳过，不写分）；
-   - 评分后**立刻**显示下一条（不等网络往返把人晾着）。
-3. **报告**
-   - 好/还行/不该这么说 的分布（含百分比）；
-   - 标签命中排行（按次数），点一个标签能看它的**证据原文**；
-   - 「生成修订草稿」→ diff 预览（`+` 绿 `-` 红）+ 「应用到 styles/闲聊.md」
-     （二次确认弹窗里要写清"会先备份"）+ 应用后显示备份路径与新的 sha256。
+- **语料库**：会话下拉（显示"机器人发言 N 条 / 共 M 条"）+ 条数 + 上下文条数 + 批次名 → 「从语料库拉取」。
+- **粘贴导入**：`合并转发 JSON` / `纯文本` 二选一 + 粘贴框 + 批次名 → 「解析并建批次」；
+  `warnings` **逐条原样列出**（它们是"少了几条"的唯一解释）。
+- **已有批次**表：批次 / 来源 / 条数 / 已评 / **有评论** / 建立时间 + 「开始打分」「删除」。
 
-页面顶部常驻：`[评审台] 工作区 … ｜ 语料库 N 条 ｜ 风格文件 1948 字 ｜ 启动于 …`（来自 `/api/health`），
-以及一个错误横幅（任何 `ok:false` 都把 `error` 显示出来，**不许静默失败**）。
+### 页签二：打分（主战场，要能连续评几百条）
+
+- 顶部：进度条 + `已评 X / 共 Y`（有评论 Z）+ 批次/过滤选择 + 「撤销上一条」。
+- 卡片：上下文（淡色、可折叠）→ **机器人那句话**（大字）→ 三个判档按钮
+  `1 对` / `2 还行` / `3 不对` → **评论框（主角，给足高度）**。
+- 键盘：`1/2/3` 判档并下一条；`Enter` 保存并下一条（`Shift+Enter` 换行）；`U` 撤销；
+  `S` 跳过（不写分）。判档后**立刻**换下一张（乐观推进，失败把这张插回来并报错）。
+- 评论**失焦即存**；没有保存按钮。
+- 已评过的条目再遇到时，要把**原来那条评论**填回框里（重评 = 改字，不是重打）。
+- **不再有任何标签按钮**。
+
+### 页签三：报告
+
+- 统计：三档分布 + 百分比；**评论清单**（新→旧，可按判档筛选、可按文字搜索，
+  每条显示判档、评论、被评的那句话与上下文）。
+- 「整理评论」按钮：
+  - `model.ok === false` → 按钮禁用并显示原因（不要点了没反应）；
+  - 点了 → `POST /api/consolidate` → 成功显示**点**（kind / 标题 / 摘要 / 证据条数 /
+    可展开看证据原文）+ **整文件 diff**（`+` 绿 `-` 红）+ 锚点核对结果；
+    失败 → 显示 `error` + **本地聚类**（相似评论分组）+ 评论原文。
+- 「应用到 styles/闲聊.md」：二次确认弹窗写清"会先备份、会同步出厂常量"；
+  锚点没守住时先显示丢失清单，且**只有再点一次明确的"仍然应用"**才带 `confirmAnchors:true`。
+  应用后显示：备份路径、新 sha256、`2388 → 2100 字（精简 288）`、常量是否同步成功。
+- 页面上常驻显示**当前风格文件**的字数与 sha256 前 8 位（`/api/health`），
+  应用后要重新拉一次 —— 否则人会以为没写进去。

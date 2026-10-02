@@ -4,12 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>聊天记录评审台</title>
-    <!-- ★ 下面两处引用的**属性值**必须一字不差（`/style.css` 与 `/app.js`）：
-         服务端按**标签**匹配它们，再挂上缓存指纹 `?v=<进程启动时间>`。
-         换个写法（加 ./、改成别的路径）就再也拿不到新版本，而症状是
-         "我明明改了页面还是老样子"——最难查的那一类。
-         ⚠️ 这段注释里**刻意不写完整的属性写法**：服务端的替换虽然锚定在标签上，
-         但注释里再抄一遍那两个字符串只会让人误以为注释也被改过。 -->
+    <!-- ★ 下面两处引用的**属性值**必须一字不差（`/style.css` 与 `/app.js`）：服务端按**标签**
+         匹配它们再挂上缓存指纹 `?v=<进程启动时间>`；换个写法（加 ./、改路径）就再也拿不到新
+         版本，症状是"我明明改了页面还是老样子"。
+         ⚠️ 这段注释里**刻意不写完整的属性写法**：注释里再抄一遍那两个字符串，只会让人误以为
+         注释也被服务端改过。 -->
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -20,23 +19,23 @@
         <button id="tab-score" class="tab">② 打分</button>
         <button id="tab-report" class="tab">③ 报告</button>
       </nav>
-      <!-- 顶栏是"环境事实"，不是装饰：工作区、语料库行数、风格文件指纹、进程启动时间。
-           排查"我看的和你看的不是同一份数据"时，第一眼就靠这一行。 -->
+      <!-- 顶栏是"环境事实"，不是装饰：工作区、语料库行数、风格文件指纹、进程启动时间 ——
+           排查"我看的和你看的不是同一份数据"时第一眼就靠这一行。
+           ★ 应用改写后必须重新拉一次：这里的字数与 sha256 前 8 位是"到底写进去没有"的唯一凭据。 -->
       <div class="health" id="health">加载中…</div>
       <div class="head-right">
-        <button id="btn-reload" class="ghost" title="重新取健康状态 / 税则 / 批次列表">↻ 重载数据</button>
+        <button id="btn-reload" class="ghost" title="重新取健康状态 / 结论三档 / 批次列表">↻ 重载数据</button>
       </div>
     </header>
 
-    <!-- 全局错误横幅：任何 `ok:false` 都把 `error` 原样显示在这里。
-         关掉只是"这一条我知道了"；下一次失败还会重新亮出来。 -->
+    <!-- 全局错误横幅：任何 `ok:false` 都把 `error` 原样显示在这里；关掉只是"这一条我知道了" -->
     <div id="error-banner" class="error-banner" hidden>
       <span class="eb-icon">⚠️</span>
       <span class="eb-text" id="error-text"></span>
       <button id="error-close" class="ghost">知道了</button>
     </div>
 
-    <!-- ══════════════ 页签一：导入 ══════════════ -->
+    <!-- ══════════ 页签一：导入 ══════════ -->
     <main id="page-import">
       <section class="card">
         <h2>数据源一：语料库</h2>
@@ -58,6 +57,8 @@
           <span class="note" id="corpus-note"></span>
         </div>
         <div class="note" id="pull-result"></div>
+        <!-- 拉取时"有些消息在库里本身就是截断的"这类话也要原样列出来，不许吞 -->
+        <ul class="warn-list" id="pull-warnings"></ul>
       </section>
 
       <section class="card">
@@ -67,9 +68,7 @@
             <button type="button" data-format="forward-json" class="active">合并转发 JSON</button>
             <button type="button" data-format="text">纯文本（昵称: 内容）</button>
           </div>
-          <label class="grow">批次名（可留空自动起名）
-            <input id="import-label" placeholder="例如：老王发的记录" />
-          </label>
+          <label class="grow">批次名（可留空自动起名） <input id="import-label" placeholder="例如：老王发的记录" /></label>
           <button id="btn-import" class="primary">解析并建批次</button>
         </div>
         <textarea id="import-text" rows="9"
@@ -83,15 +82,16 @@
         <h2>已有批次</h2>
         <table class="table" id="batch-table">
           <thead>
-            <tr><th>批次</th><th>来源</th><th>条数</th><th>已评</th><th>建立时间</th><th class="ops"></th></tr>
+            <tr><th>批次</th><th>来源</th><th>条数</th><th>已评</th><th>有评论</th><th>建立时间</th><th class="ops"></th></tr>
           </thead>
           <tbody id="batch-rows"></tbody>
         </table>
         <div class="empty" id="batch-empty" hidden>还没有批次 —— 用上面任意一种方式导入一批吧。</div>
+        <div class="note" id="batch-note"></div>
       </section>
     </main>
 
-    <!-- ══════════════ 页签二：打分（主战场，要能连续评几百条） ══════════════ -->
+    <!-- ══════════ 页签二：打分（主战场，要能连续评几百条） ══════════ -->
     <main id="page-score" hidden>
       <div class="score-bar">
         <label>批次 <select id="score-batch"></select></label>
@@ -103,18 +103,13 @@
           </select>
         </label>
         <div class="progress" title="本批次的评分进度"><div class="progress-fill" id="progress-fill"></div></div>
-        <div class="progress-text" id="progress-text">已评 — / 共 —</div>
+        <div class="progress-text" id="progress-text">已评 — / 共 —（有评论 —）</div>
         <button id="btn-undo" class="ghost" title="快捷键 U">↶ 撤销上一条</button>
       </div>
 
-      <!-- 税则漂移：风格文件改过、标签没跟上。显眼但**不拦着用** -->
-      <div class="banner warn" id="drift-banner" hidden></div>
-
       <section class="card score-card" id="score-card">
         <div class="ctx-head">
-          <button id="btn-toggle-ctx" class="ghost">
-            <span id="ctx-label">上下文</span> <span id="ctx-count"></span> <span id="ctx-arrow">▾</span>
-          </button>
+          <button id="btn-toggle-ctx" class="ghost"><span id="ctx-label">上下文</span> <span id="ctx-count"></span> <span id="ctx-arrow">▾</span></button>
           <span class="note">评的是"机器人这句话在这个语境下接得怎么样"</span>
         </div>
         <div class="ctx" id="ctx"></div>
@@ -123,57 +118,75 @@
         <div class="reply" id="reply"></div>
         <div class="meta-line" id="item-meta"></div>
 
+        <!-- 三档结论是**唯一**的定量输入（契约固定）；标签按钮已整套删除 -->
         <div class="verdicts" id="verdicts"></div>
         <div class="note" id="taxonomy-note" hidden></div>
 
-        <div class="tag-groups">
-          <div class="tag-group">
-            <div class="tag-title bad">不该这么说的地方（bad）</div>
-            <div class="tag-list" id="tags-bad"></div>
-          </div>
-          <div class="tag-group">
-            <div class="tag-title good">值得表扬的地方（good）</div>
-            <div class="tag-list" id="tags-good"></div>
-          </div>
-        </div>
-        <div class="note" id="tag-note"></div>
-
-        <label class="note-label">备注（离开输入框即存；没判档时先记着，判档一起落盘）
-          <textarea id="note" rows="2" placeholder="为什么这么评（例如：问手机就答手机）"></textarea>
+        <!-- ★ 评论才是主角：它是「点」的唯一素材，所以给足高度、给足焦点样式。
+             没有保存按钮 —— 失焦即存（见 app.js 的 saveComment）。 -->
+        <label class="comment-label" for="comment">
+          评论 —— 说清"哪里对 / 哪里不对"（离开输入框即存，没有保存按钮）
+          <span class="hint">整理「点」只吃这里的评论；只判档不写字也能用，但那一档不进整理。</span>
         </label>
+        <textarea id="comment" class="comment-box" rows="5"
+          placeholder="例如：问手机就答手机，别交代机箱。对方要的是一句回答，不是自我介绍。"></textarea>
+
         <div class="keys">
-          键盘：<b>1 / 2 / 3</b> 判档 &nbsp;·&nbsp; <b>4–9 / 0</b> 切前七个标签 &nbsp;·&nbsp;
-          <b>Enter</b> 下一条 &nbsp;·&nbsp; <b>U</b> 撤销 &nbsp;·&nbsp; <b>S</b> 跳过（不写分）
+          键盘：<b>1 / 2 / 3</b> 判档并下一条 &nbsp;·&nbsp; 评论框里 <b>Enter</b> 保存并下一条、<b>Shift+Enter</b> 换行
+          &nbsp;·&nbsp; <b>U</b> 撤销 &nbsp;·&nbsp; <b>S</b> 跳过（不写分）
+          <div class="keys-sub">
+            在评论框里打字时 <b>1 / 2 / 3</b> 就是<b>文字</b>（不然评论里写个 2 就跳条目了）——
+            想用快捷键先按 <b>Esc</b> 离开评论框。
+          </div>
         </div>
       </section>
       <div class="empty big" id="score-empty" hidden></div>
     </main>
 
-    <!-- ══════════════ 页签三：报告 ══════════════ -->
+    <!-- ══════════ 页签三：报告 ══════════ -->
     <main id="page-report" hidden>
       <section class="card">
         <h2>评分统计</h2>
         <div class="row">
           <label>统计范围 <select id="report-batch"></select></label>
-          <button id="btn-draft" class="primary">生成修订草稿</button>
-          <span class="note">草稿是**确定性生成**的：每条 bad 标签取真实反例，不调用模型。</span>
+          <button id="btn-consolidate" class="primary">整理评论</button>
+          <span class="note" id="consolidate-why"></span>
         </div>
         <div id="stats-body"></div>
       </section>
 
-      <!-- 草稿区默认藏起来：没点「生成修订草稿」之前，一个空 diff 框只会让人以为坏了 -->
-      <section class="card" id="draft-card" hidden>
-        <h2>修订草稿</h2>
-        <div class="note" id="draft-target"></div>
-        <!-- 截断 / 已应用过这类"你必须知道"的话放这里，不许悄悄吞掉 -->
-        <div class="note warn" id="draft-note" hidden></div>
-        <div class="empty" id="draft-empty" hidden></div>
-        <div id="draft-suggestions"></div>
-        <pre class="diff" id="draft-diff"></pre>
+      <section class="card">
+        <h2>评论清单</h2>
+        <div class="row">
+          <div class="seg" id="comment-filter">
+            <button type="button" data-verdict="" class="active">全部</button>
+            <button type="button" data-verdict="good">对</button>
+            <button type="button" data-verdict="ok">还行</button>
+            <button type="button" data-verdict="bad">不对</button>
+          </div>
+          <label class="grow">搜评论 / 原话 <input id="comment-search" placeholder="输入一段文字，只看含它的评论或那句话" /></label>
+          <span class="note" id="comment-list-note"></span>
+        </div>
+        <div id="comment-list"></div>
+      </section>
+
+      <!-- 整理区：GET /api/consolidate 一进页就拉（最近一次 + 评论 + 模型可用性 + 锚点清单）。
+           整理没成时这里也是"素材不消失"的落点：error + 本地聚类，评论原文在上面那份清单里。 -->
+      <section class="card" id="consolidate-card" hidden>
+        <h2>整理结果：点 + 整篇改写</h2>
+        <div class="note" id="consolidate-meta"></div>
+        <div class="note" id="anchor-list"></div>
+        <div class="callout err" id="consolidate-error" hidden></div>
+        <div id="points"></div>
+        <div id="clusters"></div>
+        <h3 class="sug-head" id="diff-head" hidden>整篇改写（styles/闲聊.md 的前后对照）</h3>
+        <pre class="diff" id="consolidate-diff"></pre>
+        <div id="anchor-check"></div>
         <div class="row">
           <button id="btn-apply" class="primary" disabled>应用到 styles/闲聊.md</button>
           <span class="note" id="apply-why"></span>
         </div>
+        <!-- 应用结果（备份路径 / 新 sha256 / 字数变化 / 出厂常量有没有同步）常驻显示，不许只弹一下 -->
         <div class="note" id="apply-result"></div>
       </section>
     </main>
