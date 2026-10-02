@@ -33,10 +33,13 @@ import {
   MODE_SOURCE,
   buildModePrompt,
   classifyModeLocal,
+  canonicalStyleSection,
   composePersonaForMode,
+  composePersonaForModeDetailed,
   describeMode,
   detectMode,
   parseModeVerdict,
+  personaSectionTitle,
   renderPersonaSections,
   splitPersonaSections,
   stripDecorative,
@@ -369,9 +372,96 @@ section('⑤ 人设分节与按态拼装（★ 最容易把人格弄坏的地方
   check('split → render 不丢节', splitPersonaSections(round).sections.length === sections.length,
     `${splitPersonaSections(round).sections.length} vs ${sections.length}`)
   check('split → render 保住了正文', round.includes('不跟它们互相 @'))
+  // 互逆性（编号式）：**逐行**往返 —— 每一行（含 `一、性格` 这种标题行）都原样回去，
+  // 只允许压掉空行（渲染是给提示词用的，多余空行没必要占 token）。
+  const softPath = join(PKG_ROOT, 'personas', '软糯小鲸鱼（情绪）.md')
+  if (existsSync(softPath)) {
+    const softText = readFileSync(softPath, 'utf8')
+    const keep = (s) => s.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim())
+    const back = renderPersonaSections(splitPersonaSections(softText))
+    const a1 = keep(softText)
+    const b1 = keep(back)
+    const same = a1.length === b1.length && a1.every((l, i) => l === b1[i])
+    check('★★ 编号式人设 split → render **逐行往返**（一个字都没动，只压掉空行）',
+      same,
+      same ? `${a1.length} 行一字不差` : `行数 ${a1.length} → ${b1.length}；首个不同：${a1.find((l, i) => l !== b1[i]) ?? ''}`)
+  }
 
   check('describeMode 给的是人话', /闲聊态|工作态/.test(describeMode({ mode: MODE.CHAT, source: MODE_SOURCE.RULE })))
   check('describeMode 标出结论来源', describeMode({ mode: MODE.CHAT, source: MODE_SOURCE.MODEL }).includes('模型判定'))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('⑤b 编号式人设（`二、怎么说话`）也要走替换 —— 别名表')
+// ══════════════════════════════════════════════════════════════════════════
+// 缺陷现场（2026-10-01，用户当前启用的正是这一份）：
+//   分节器第一版只认 `【】`，`软糯小鲸鱼（情绪）.md`（`一、`…`八、` 编号散文）
+//   被当成"没分节的人设" → 走**追加** → 同一份提示词里同时有原人设的
+//   「长一点也完全可以」与闲聊风格的「极短」两套相反口吻。
+//   用户的问题原话：「你所替换的人设是小鲸鱼（完整带情绪），那么当前人设是其他人设时如何处理」
+//   —— 这就是那个"其他人设"的答案：**只要节名认得出，任何写法都会被替换**。
+{
+  const soft = join(PKG_ROOT, 'personas', '软糯小鲸鱼（情绪）.md')
+  check('★ 用户启用的那份编号式人设在仓库里', existsSync(soft), soft)
+
+  if (existsSync(soft)) {
+    const text = readFileSync(soft, 'utf8')
+    const { sections } = splitPersonaSections(text)
+    const titles = sections.map((s) => s.title)
+    check('★ 编号式人设切得出节（`一、`/`二、`…）', sections.length >= 5, `${sections.length} 节：${titles.join(' / ')}`)
+    check('★★ 编号式节名认得出来（`二、怎么说话` → 怎么说话）',
+      titles.some((t) => canonicalStyleSection(t) === '怎么说话'), titles.join(' / '))
+    check('★ 序号不算进节名', !titles.some((t) => /^[一二三四五六七八九十]+、/.test(t)), titles.join(' / '))
+
+    const d = composePersonaForModeDetailed({ personaText: text, mode: MODE.CHAT, style: '【闲聊时的说话方式】\n极短。' })
+    check('★★★ 编号式人设走的是 replace（曾经错走 append）', d.strategy === 'replace', d.strategy)
+    check('★★ 被替换的是"口吻"那一节', d.replaced.length >= 1 && /怎么说话/.test(d.replaced.join('/')), d.replaced.join('/'))
+    check('★★ 原人设里与闲聊冲突的长短句**已经不在了**（替换的意义所在）',
+      !d.text.includes('长一点也完全可以'), d.text.includes('长一点也完全可以') ? '（冲突句还在！）' : '')
+    const keptTitles = splitPersonaSections(d.text).sections.map((s) => s.title)
+    check('★★ 非口吻节逐字保留：性格 / 表情包 / 其他都还在',
+      keptTitles.includes('性格') && keptTitles.includes('表情包') && keptTitles.includes('其他'),
+      keptTitles.join(' / '))
+    check('★ 性格节的正文逐字还在', d.text.includes('温柔是底色'))
+    // ★ 编号式人设**没被顺手改写**：保留下来的节还是 `一、性格` 这种原样标题，
+    //   不许被渲染成【性格】（那等于我们改了使用者自己写的人设格式）。
+    check('★★ 保留下来的编号式标题**原样保留**（`一、性格` 不被改成【性格】）',
+      d.text.includes('一、性格') && !d.text.includes('【性格】'), d.text.slice(0, 80))
+    check('★★ 被换掉的那一节连标题一起没了', !d.text.includes('二、怎么说话') && !d.text.includes('长一点也完全可以'))
+    check('★ 名字块（机器可读）必须还在（否则"叫名字"会失效）',
+      d.text.includes('正式名: 小鲸鱼') && d.text.includes('别名: 小鱼'))
+    // 输出 = 原人设 9 节 − 怎么说话 + 追加的风格节
+    const ownKept = keptTitles.filter((t) => !/闲聊/.test(t))
+    check('★ 只少了"怎么说话"一节（没多删）',
+      ownKept.length === sections.length - 1, `${ownKept.length} vs ${sections.length - 1}`)
+    check('★ 闲聊风格文本进去了', d.text.includes('【闲聊时的说话方式】'))
+  }
+
+  // 别名表本身：同义写法都要归一化，别义写法不许误伤
+  check('别名：`说话方式` → 怎么说话', canonicalStyleSection('说话方式') === '怎么说话')
+  check('别名：`语气` → 怎么说话', canonicalStyleSection('语气') === '怎么说话')
+  check('别名：`不做客服` → 别变成客服', canonicalStyleSection('不做客服') === '别变成客服')
+  check('★ 别名不误伤：`别的机器人` 不动', canonicalStyleSection('别的机器人') === '别的机器人')
+  check('★ 别名不误伤：`被指出错了` 不动', canonicalStyleSection('被指出错了') === '被指出错了')
+
+  // 节标题识别：编号式要认，正文里的句子**不许**被当成标题
+  check('标题：`二、怎么说话`', personaSectionTitle('二、怎么说话') === '怎么说话')
+  check('标题：`2. 怎么说话`', personaSectionTitle('2. 怎么说话') === '怎么说话')
+  check('标题：`（三）守住的底线`', personaSectionTitle('（三）守住的底线') === '守住的底线')
+  check('标题：`【怎么说话】`（老写法照旧）', personaSectionTitle('【怎么说话】') === '怎么说话')
+  check('★★ 正文句子不算标题（否则整篇被切碎）', personaSectionTitle('一是要早点睡。') === null,
+    String(personaSectionTitle('一是要早点睡。')))
+  check('★★ 长句子不算标题', personaSectionTitle('1. 这是一句非常长的说明，长到不该被当成节标题') === null)
+  check('普通正文行不算标题', personaSectionTitle('你是一条会吐槽的鲸鱼。') === null)
+  check('空行不算标题', personaSectionTitle('') === null && personaSectionTitle('   ') === null)
+
+  // strategy 三种取值都要能被调用方看见（桥接要记日志）
+  const w = composePersonaForModeDetailed({ personaText: 'A', mode: MODE.WORK, style: 'S' })
+  check('工作态 strategy=none', w.strategy === 'none' && w.text === 'A', w.strategy)
+  const n = composePersonaForModeDetailed({ personaText: 'A', mode: MODE.CHAT, style: '' })
+  check('闲聊但无风格 ⇒ strategy=none（不拆一半）', n.strategy === 'none' && n.text === 'A', n.strategy)
+  const a = composePersonaForModeDetailed({ personaText: '整段散文，没有节。', mode: MODE.CHAT, style: 'S' })
+  check('★ 无口吻节 ⇒ strategy=append（看得见地退让）', a.strategy === 'append', a.strategy)
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -393,6 +483,16 @@ section('⑥ 风格文件：读得到 / 读不到 / 空 / 超长')
     check('★★ 文件里写着「梗只接梗」的规则（ciallo 这类）',
       /ciallo/.test(shippedText) && /只回同一个梗/.test(shippedText))
     check('文件里写了"只有对方问这是什么梗时才解释"', /才解释/.test(shippedText))
+    // ★★ 优先级条款：人设若整段散文（走 append）或节名认不出，冲突句会**留在提示词里**，
+    //    这时唯一能救的就是风格文本自己声明"以本节为准"。
+    check('★★ 风格文本声明了优先级（`与别处冲突时以本节为准`）',
+      /以本节为准/.test(shippedText), /以本节为准/.test(shippedText) ? '' : '（少这句时 append 路径会两套口吻打架）')
+    check('★ 优先级条款点名了容易冲突的那几件事（分条 / 说多长 / 先分类）',
+      /先分类/.test(shippedText) && /分条/.test(shippedText))
+    check('★ 优先级条款留了后门：硬约束（记忆/越权）仍然照旧',
+      /仍然照旧|照旧/.test(shippedText))
+    check('★ 文件里写了"想分条就用换行"（桥接按换行分条，得说清）',
+      /用换行分开/.test(shippedText) && /splitReplyForSend/.test(shippedText))
 
     // 默认常量与文件**同源**（落盘用的就是这份，不该抄第二份）
     check('★ 出厂文件与 DEFAULT_CHAT_STYLE 逐字一致（不许两份）',
@@ -585,6 +685,17 @@ try {
   check('★ 闲聊态：日志里留了"为什么是这个态"',
     a.logs.some((l) => l.includes('[chat-mode]') && l.includes('闲聊态')),
     a.logs.find((l) => l.includes('[chat-mode]')) ?? '（没有日志）')
+  // ★★ "这套人设到底换成功了没有"必须能从日志看出来 —— 两种情况在**提示词里**看不出来
+  //    （replace 与 append 的提示词都含那段风格文本），所以这条断言钉的是**可观测性**。
+  const strategyLogs = a.logs.filter((l) => l.includes('闲聊态人设'))
+  check('★★ 日志里能看出人设走的是"替换"（不是悄悄追加）',
+    strategyLogs.length === 1 && strategyLogs[0].includes('已替换'),
+    strategyLogs.join(' ｜ ') || '（没有这行日志）')
+  // 再来一轮同样的闲聊 ⇒ 结果没变，就不该多记一行（否则日志会被刷满）
+  await a.bridge.handleEvent(privateMsg(ADMIN, 'ciallo'))
+  check('★ 同一结果**只记一次**（不每轮刷屏）',
+    a.logs.filter((l) => l.includes('闲聊态人设')).length === 1,
+    String(a.logs.filter((l) => l.includes('闲聊态人设')).length))
 
   // ── 工作态：提示词里没有闲聊那一段 ─────────────────────────────────────
   const b = makeBridge({ chatStyleDir: styleDir })

@@ -384,6 +384,10 @@ export function parseModeVerdict(raw) {
 export const DEFAULT_CHAT_STYLE = `【闲聊时的说话方式（覆盖上面「怎么说话」与「别变成客服」两节）】
 现在是闲聊，不是干活。像真人在 QQ 里打字，不像在写回答。
 
+> **这一节与别处冲突时以本节为准。** 别处（无论在上文还是下文）任何关于"说多长"
+> "要不要分条""要不要解释""要不要先分类再回话"的要求，闲聊时一律作废 —— 口吻只看本节。
+> 除此之外的硬约束（不泄露记忆、不越权、不假装成功、别的 bot 不接力）**仍然照旧**。
+
 - **极短。** 一句话能说完就一句话。允许一条消息只有「？」「6」「啥」「啊？」「……」
 - **常拆两条**：第一条给反应，第二条补一句（补充或转折），**不要重复第一句的意思**。
   （**用换行分开**就是"分开说"的意思 —— 桥接会按空行/换行把 2~6 段短句**分成几条发出去**，
@@ -424,18 +428,75 @@ export const DEFAULT_CHAT_STYLE = `【闲聊时的说话方式（覆盖上面「
 // ∴ 闲聊态用风格文本**替换**这两节；其余各节（反注入 / 被指出错了 / 别的机器人 /
 //   表情包语境 / 名字块 …）**逐字保留** —— 它们是安全与硬约束，与口吻无关。
 
-/** 会被闲聊风格替换掉的节名（前缀匹配，允许「【怎么说话】」这种写法）。 */
+/** 会被闲聊风格替换掉的节名（**规范名**，见 `canonicalStyleSection` 的别名表）。 */
 export const STYLE_SECTIONS = ['怎么说话', '别变成客服']
 
 /**
- * 按【标题】把一篇人设切成若干节（**纯函数，不碰文件系统**）。
+ * 节名的**别名表** —— 同义写法归一化。
  *
- * 只在**行首**认标题：行内出现的「【名字】」这种引用不算新节，
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么需要它（2026-10-01 实测：自带人设就有两套写法）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 三份自带人设里，前两份用「【怎么说话】」这种方括号节，第三份
+ * （`软糯小鲸鱼（情绪）.md`）用的是 **`二、怎么说话`** 这种编号节 + 散文。
+ * 分节器第一版只认 `【】`，于是第三份被当成"没有分节的人设"走进**追加**那条路
+ * ⇒ 同一份提示词里同时有「需要说清楚就说够，**长一点也完全可以**」（原人设）
+ * 与闲聊风格的「**极短**」两套相反口吻。这正是"替换而不是追加"要避免的事。
+ *
+ * 所以节名先归一化：`二、怎么说话` / `怎么说话` / `说话方式` → `怎么说话`。
+ * 归一化只用于**判断"这一节要不要换掉"**，原样渲染时仍用原标题（不动用户的东西）。
+ */
+const STYLE_SECTION_ALIASES = [
+  { canonical: '怎么说话', re: /^(怎么说话|说话方式|说话的风格|怎么回话|语气)$/ },
+  { canonical: '别变成客服', re: /^(别变成客服|不要变成客服|别当客服|不做客服)$/ },
+]
+
+/**
+ * 中文章节序号前缀：`一、` / `十二、` / `1.` / `（三）` / `3）`。
+ *
+ * ⚠️ 只剥**序号本身**，剥完还得是个短标题（≤12 字）才算标题 ——
+ * 否则正文里一句「一是要早点睡。」会被当成新节，把整篇切碎。
+ */
+const SECTION_ORDINAL_RE = /^\s*(?:[（(]?\s*(?:[一二三四五六七八九十]+|\d{1,2})\s*[)）]?)\s*[、.．:：]?\s*/
+
+/** 从一行里认出"这一行是不是节标题"，返回标题文本；不是就返回 null。 */
+export function personaSectionTitle(line) {
+  const raw = String(line ?? '').trim()
+  if (!raw) return null
+  const bracket = /^【(.+?)】$/.exec(raw)
+  if (bracket) return bracket[1].trim()
+  // 编号式：剥掉序号后必须还是个**像标题的短句**（没有句末标点）
+  const stripped = raw.replace(SECTION_ORDINAL_RE, '').trim()
+  if (stripped === raw) return null
+  if (!stripped || stripped.length > 12) return null
+  if (/[。！？；，,]$/.test(stripped)) return null
+  if (stripped.includes('。')) return null
+  return stripped
+}
+
+/** 节名 → 规范名（不在表里就原样返回）。用于判断"这一节要不要被闲聊风格替换"。 */
+export function canonicalStyleSection(title) {
+  const t = String(title ?? '').trim()
+  for (const { canonical, re } of STYLE_SECTION_ALIASES) {
+    if (t.startsWith(canonical) || re.test(t)) return canonical
+  }
+  return t
+}
+
+/**
+ * 按标题把一篇人设切成若干节（**纯函数，不碰文件系统**）。
+ *
+ * 认两种标题写法（都为实测所必需）：
+ *   · 行首 `【怎么说话】`（前两份自带人设）
+ *   · 行首 `二、怎么说话` / `2. 怎么说话`（第三份自带人设，也是常见手写习惯）
+ *
+ * ⚠️ 只在**行首**认：行内出现的「【名字】」这种引用不算新节，
  * 否则一段正文里提一下别的节名就会把整篇切碎。
  *
  * @param {string} text
- * @returns {{pre: string, sections: Array<{title: string, body: string}>, post: string}}
+ * @returns {{pre: string, sections: Array<{title: string, header: string, body: string}>, post: string}}
  *   `pre` = 第一个标题之前的内容（通常是空行/说明），`post` = 最后没有归属的尾巴。
+ *   `header` = 标题的**原始那一行**（保留 `二、` 这种编号），渲染时优先用它。
  */
 export function splitPersonaSections(text) {
   const src = String(text ?? '')
@@ -444,15 +505,18 @@ export function splitPersonaSections(text) {
   const lines = src.split('\n')
   const marks = []
   for (let i = 0; i < lines.length; i += 1) {
-    const m = /^\s*【(.+?)】\s*$/.exec(lines[i])
-    if (m) marks.push({ index: i, title: m[1].trim() })
+    const title = personaSectionTitle(lines[i])
+    // `header` 存**原样的那一行**：编号式人设（`二、怎么说话`）保留下来的节渲染时
+    // 必须还是原来那一行 —— 否则"替换两节"会顺手把人设里的 `一、`…`八、` 全改成【】，
+    // 那不是我们该动的东西（也让"只换了口吻节"这句话在结果里真的成立）。
+    if (title) marks.push({ index: i, title, header: lines[i].trim() })
   }
   if (marks.length === 0) return { pre: src, sections: [], post: '' }
 
   const pre = lines.slice(0, marks[0].index).join('\n')
   const sections = marks.map((mk, k) => {
     const end = k + 1 < marks.length ? marks[k + 1].index : lines.length
-    return { title: mk.title, body: lines.slice(mk.index + 1, end).join('\n') }
+    return { title: mk.title, header: mk.header, body: lines.slice(mk.index + 1, end).join('\n') }
   })
   return { pre, sections, post: '' }
 }
@@ -464,7 +528,9 @@ export function renderPersonaSections({ pre = '', sections = [] } = {}) {
   if (head) out.push(head)
   for (const s of sections) {
     const body = String(s?.body ?? '').replace(/^\n+/, '').replace(/\s+$/, '')
-    out.push(`【${String(s?.title ?? '').trim()}】`)
+    // ★ 优先用**原始标题行**（编号式人设的 `二、怎么说话` 要原样回去）；
+    //   手工构造的 `{title, body}` 没有 header ⇒ 退回【标题】。
+    out.push(String(s?.header ?? '').trim() || `【${String(s?.title ?? '').trim()}】`)
     if (body) out.push(body)
   }
   return `${out.join('\n')}\n`
@@ -473,31 +539,65 @@ export function renderPersonaSections({ pre = '', sections = [] } = {}) {
 /**
  * 按状态拼装这一轮的人设文本。
  *
+ * ── 两条路（**哪条路要能被日志看见**）──────────────────────────────────
+ *   · `replace`：人设分得出节，且其中有"口吻节" ⇒ 换掉那几节（其余逐字保留）；
+ *   · `append` ：分不出节、或**没有口吻节**（例如整篇散文） ⇒ 追加在末尾。
+ *     ⚠️ 追加有已知代价：原人设里与闲聊风格冲突的句子**还在**（模型要自己取舍），
+ *     所以桥接会把 `strategy` 记进日志，让"这套人设没被真正换掉"看得见
+ *     （实测：`软糯小鲸鱼（情绪）.md` 第一版走的就是这条路，见
+ *      `STYLE_SECTION_ALIASES` 的注释）。
+ *
  * @param {object} opts
  * @param {string} opts.personaText 基座人设（构造期解析出来的那一份）
  * @param {'work'|'chat'} opts.mode
  * @param {string} [opts.style] 闲聊风格文本（`styles.mjs` 读出来的；空 = 不做任何替换）
- * @returns {string} 工作态**逐字返回** `personaText`（这是老行为的定义）
+ * @returns {{text: string, strategy: 'none'|'replace'|'append', replaced: string[]}}
+ *   工作态**逐字返回** `personaText`（这是老行为的定义），`strategy: 'none'`。
  */
-export function composePersonaForMode({ personaText = '', mode = MODE.WORK, style = '' } = {}) {
+export function composePersonaForModeDetailed({ personaText = '', mode = MODE.WORK, style = '' } = {}) {
   const base = String(personaText ?? '')
-  if (mode !== MODE.CHAT) return base
+  if (mode !== MODE.CHAT) return { text: base, strategy: 'none', replaced: [] }
   const chat = String(style ?? '').trim()
   // 风格读不到（文件删了、空了）⇒ 一个字都不改，并让调用方去日志里说清。
   // 宁可用老腔调，也不要把人设拆一半 —— 拆一半的结果是既没新风格又丢了旧约束。
-  if (!chat) return base
-  if (!base.trim()) return chat
+  if (!chat) return { text: base, strategy: 'none', replaced: [] }
+  if (!base.trim()) return { text: chat, strategy: 'replace', replaced: [] }
 
   const { pre, sections } = splitPersonaSections(base)
   if (sections.length === 0) {
     // 人设没有分节（用户自己写的一整段）⇒ **追加**而不是替换：
     // 我们没有"哪一节是口吻"这个信息，猜着删会删掉别的东西。
-    return `${base.replace(/\s+$/, '')}\n\n${chat}`
+    return { text: `${base.replace(/\s+$/, '')}\n\n${chat}`, strategy: 'append', replaced: [] }
   }
 
-  const kept = sections.filter((s) => !STYLE_SECTIONS.some((name) => s.title.startsWith(name)))
+  // ★ 用**规范名**判断（认别名：`二、怎么说话` 与 `【怎么说话】` 是同一节）
+  const replaced = []
+  const kept = sections.filter((s) => {
+    const canon = canonicalStyleSection(s.title)
+    if (STYLE_SECTIONS.includes(canon)) {
+      replaced.push(s.title)
+      return false
+    }
+    return true
+  })
+  // ① 一节都没换掉 ⇒ 这套人设里没有"口吻节"，追加是唯一能做的事（但要能被日志看见）
+  if (replaced.length === 0) {
+    return { text: `${base.replace(/\s+$/, '')}\n\n${chat}`, strategy: 'append', replaced: [] }
+  }
   const out = renderPersonaSections({ pre, sections: kept })
-  return `${out.replace(/\s+$/, '')}\n\n${chat}`
+  // ② 全被换光了（人设只有口吻节）⇒ 结果就是风格本身
+  if (kept.length === 0 && !String(pre).trim()) {
+    return { text: chat, strategy: 'replace', replaced }
+  }
+  return { text: `${out.replace(/\s+$/, '')}\n\n${chat}`, strategy: 'replace', replaced }
+}
+
+/**
+ * 只要文本的便捷包装（大多数调用点/测试用这个）。
+ * @returns {string}
+ */
+export function composePersonaForMode(opts = {}) {
+  return composePersonaForModeDetailed(opts).text
 }
 
 /**

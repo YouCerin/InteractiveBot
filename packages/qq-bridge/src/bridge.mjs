@@ -105,7 +105,7 @@ import { resolveActivePersona } from './personas.mjs'
 // ★★ 双态对话风格（2026-10-01）：闲聊态 / 工作态。
 //   · `chat-mode.mjs` 是纯函数（判定 + 人设分节替换）—— 零 I/O，可离线审阅；
 //   · `styles.mjs` 读 `styles/<名字>.md`（**每轮现读**：改完下一轮生效）。
-import { MODE, MODE_SOURCE, composePersonaForMode, describeMode, detectMode } from './chat-mode.mjs'
+import { MODE, MODE_SOURCE, composePersonaForModeDetailed, describeMode, detectMode } from './chat-mode.mjs'
 import { ensureDefaultChatStyle, readChatStyle } from './styles.mjs'
 // ★ 风格目录的默认值：`DIRS.chatStyles`（包根下的 `styles/`）。
 //   为什么给默认值而不是要求调用方必传：测试构造 Bridge 时不该关心"风格文件放哪"，
@@ -205,6 +205,21 @@ export class Bridge extends EventTarget {
 
   /** 已经喊过的风格文件问题（按理由去重，避免每轮刷一行）。 */
   #chatStyleWarned = new Set()
+
+  /**
+   * 上一次记过日志的"人设按态拼装结果"签名（`replace:怎么说话` / `append` / `none`）。
+   *
+   * 为什么要记：`composePersonaForModeDetailed` 有**两条**路 ——
+   *   · `replace`：人设分得出「口吻节」⇒ 真换掉了；
+   *   · `append` ：分不出节 / 没有口吻节（整篇散文）⇒ 只能追加，
+   *     **原人设里与闲聊风格冲突的句子还在提示词里**，模型要自己取舍。
+   * 这条差别决定了"这套人设到底换没换成功"，但它**在提示词里看不出来**
+   * （两种情况提示词里都有那段闲聊风格）。所以记一行日志，并且在结果**变化时**
+   * 再记一次（用户换人设要重启，但风格文件是每轮现读的，可能中途消失）。
+   * ⚠️ 只在闲聊态记 —— 工作态/功能关闭时一行都不多写（"与升级前逐字相同"）。
+   * @type {string}
+   */
+  #personaStrategyLogged = ''
 
   /**
    * 每个会话"正在飞的那次判定"的取消柄（chatKey → AbortController）。
@@ -1795,6 +1810,36 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * 把"这一轮人设是怎么拼出来的"记一行（**只在结果变化时记**，不每轮刷屏）。
+   *
+   * ── 为什么非要有这一行 ────────────────────────────────────────────────
+   * `composePersonaForModeDetailed` 对"人设里没有可识别的口吻节"是**退让**的：
+   * 它改成把闲聊风格**追加**在末尾，原人设里与它冲突的句子（例如
+   * 「需要说清楚就说够，**长一点也完全可以**」）**原样留在提示词里**。
+   * 两种情况在提示词里看起来都"有闲聊风格"，光看提示词分不出来 ——
+   * 用户当前启用的 `软糯小鲸鱼（情绪）.md` 第一版走的就是这条退让路
+   * （分节器当时只认 `【】`，而那份人设写的是 `二、怎么说话`）。
+   *
+   * 所以：`replace` 记一行"真的换掉了哪几节"，`append` 记一行⚠️并**给出怎么改**
+   * （把口吻那节命名成 `【怎么说话】` 或 `二、怎么说话`）。
+   * ⚠️ 只在闲聊态调用 —— 工作态与"功能关掉"的日志流一个字符都不多。
+   */
+  #notePersonaStrategy({ strategy, replaced = [] } = {}) {
+    const sig = `${strategy}:${replaced.join(',')}`
+    if (sig === this.#personaStrategyLogged) return
+    this.#personaStrategyLogged = sig
+    if (strategy === 'replace') {
+      this.log(`[chat-mode] 闲聊态人设：已替换 ${replaced.length} 节（${replaced.join('、')}），其余各节逐字保留`)
+    } else if (strategy === 'append') {
+      this.log(
+        '⚠️ [chat-mode] 这套人设里分不出「怎么说话」那一节，闲聊风格只能**追加**在末尾 —— ' +
+          '原人设里与它冲突的说法**仍然在提示词里**（靠风格文本的「以本节为准」压住）。' +
+          '要在提示词里真正替换掉，就把口吻那一节命名为「【怎么说话】」或「二、怎么说话」。',
+      )
+    }
+  }
+
+  /**
    * 判定器的上下文：**从已有的会话镜像里投影一份**，零新增状态。
    *
    * ★ 为什么是"投影"而不是把镜像数组直接递进去：镜像的用途是**给界面看**
@@ -3248,14 +3293,24 @@ export class Bridge extends EventTarget {
     // 闲聊态用 `styles/闲聊.md` **替换**基座人设里的【怎么说话】【别变成客服】
     // 两节，其余各节逐字保留（理由与"为什么必须替换而不是追加"写在 chat-mode.mjs）。
     //
-    // ★ 工作态走的是**同一个函数 + 同一个分支**：`composePersonaForMode` 对 work
-    //   直接原样返回 `personaText` —— 所以"关掉这个功能""工作态"两条路的提示词
-    //   与升级前**逐字相同**（`verify-memory-roundtrip` 的逐字基线钉着这一点）。
+    // ★ 工作态走的是**同一条** `this.personaText`（连函数都不调）—— 所以
+    //   "关掉这个功能""工作态"两条路的提示词与升级前**逐字相同**
+    //   （`verify-memory-roundtrip` 的逐字基线钉着这一点）。
+    // ★ 闲聊态用 `composePersonaForModeDetailed`：它除了文本还回一个 `strategy`，
+    //   而 `strategy` 正是"这套人设到底换成功了没有"的唯一可见证据 → 记日志
+    //   （`#notePersonaStrategy`，只在结果变化时记一行）。
     const turnMode = opts.turnMode === MODE.CHAT ? MODE.CHAT : MODE.WORK
-    const turnPersona =
-      turnMode === MODE.CHAT
-        ? composePersonaForMode({ personaText: this.personaText, mode: turnMode, style: this.#chatStyleForTurn() })
-        : this.personaText
+    // 闲聊态才走拼装（工作态直接 `this.personaText`，一个字都不经过这里）。
+    let turnPersona = this.personaText
+    if (turnMode === MODE.CHAT) {
+      const composed = composePersonaForModeDetailed({
+        personaText: this.personaText,
+        mode: turnMode,
+        style: this.#chatStyleForTurn(),
+      })
+      turnPersona = composed.text
+      this.#notePersonaStrategy(composed)
+    }
     return buildChannelPrompt({
       rendered,
       reason,
