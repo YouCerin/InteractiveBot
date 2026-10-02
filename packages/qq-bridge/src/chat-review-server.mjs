@@ -11,9 +11,12 @@
  *
  * ── 它连什么、不连什么（边界如实说）────────────────────────────────────
  * · **不连桥接**：它直接读工作区里的语料库（`runtime/corpus.sqlite`，只读）
- *   与 `styles/闲聊.md`。桥接在跑、甚至桥接没跑，它都能用。
- * · 写操作只有三件：写评分、删批次（都在 `runtime/chat-review/` 下）、
- *   **应用草稿**（唯一会碰风格文件的操作，必须先备份 + 显式确认）。
+ *   与 `src/voice.mjs` 里那份说话方式。桥接在跑、甚至桥接没跑，它都能用。
+ * · 写操作只有两件：写评分、删批次 —— **都在 `runtime/chat-review/` 下**。
+ *   ★ 0.3.0alpha：原先还有第三件「**应用草稿**」（唯一会碰文案文件的操作，
+ *   要备份 + 显式确认）—— **那条路已经删掉了**（`/api/apply` 是 404）。
+ *   现在的产物只有**修改意见**：由人/LLM 另外执行（使用者 2026-10-02 的原话是
+ *   「只要意见，修改内容由 LLM 另外执行」）。
  * · 只监听 **127.0.0.1**（里面是真实聊天记录，不该被局域网看到）。
  * · 语料库打不开时**不假装有数据**：`corpus.ok=false` 一路传到页面，
  *   由页面如实显示"语料库不可用 + 为什么"，导入与打分照常可用。
@@ -52,11 +55,10 @@ import {
   clusterComments,
   consolidateComments,
 } from './chat-review-consolidate.mjs'
-import { sha256 } from './chat-style-sync.mjs'
+import { readVoiceSource, sha256, voiceSourcePath } from './voice-source.mjs'
 import { chatOnce, resolveDirectTarget } from './model-direct.mjs'
 import { createCorpus, silenceSqliteWarning } from './corpus.mjs'
 import { PKG_ROOT } from './local.mjs'
-import { chatStylePath, readChatStyle, resolveChatStyleName } from './styles.mjs'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 /** 静态页在包根的 `chat-review/public/`（`src/` 的上一级）。 */
@@ -264,11 +266,10 @@ export async function stopRunningReviewServer({
  *
  * @param {object} opts
  * @param {string} opts.workspace           工作区（语料库与评审数据都在它下面）
- * @param {string} [opts.styleName]         用哪份风格文件（空 = 默认那份「闲聊」）
  * @param {string[]} [opts.selfNames]       导入时把哪些昵称当机器人（默认见 SELF_NAMES_DEFAULT）
  * @param {(m: string) => void} [opts.log]
  * @param {string} [opts.staticDir]         静态目录（测试可指向别处）
- * @param {string} [opts.styleDir]          风格文件所在目录（默认包根的 `styles/`；测试指向临时目录）
+ * @param {string} [opts.voicePath]         说话方式源码（默认包根的 `src/voice.mjs`；测试指向临时副本）
  * @param {Function} [opts.onShutdown]      `POST /api/shutdown` 时干什么（默认 = 关监听并退出进程）
  * @param {number} [opts.shutdownDelayMs]   先回响应再退出的缓冲（默认 150ms）
  * @param {object} [opts.config]            归一化配置（解析模型通路用；不传 = 整理功能不可用）
@@ -277,11 +278,10 @@ export async function stopRunningReviewServer({
  */
 export function createReviewServer({
   workspace,
-  styleName = '',
   selfNames = SELF_NAMES_DEFAULT,
   log = () => {},
   staticDir = STATIC,
-  styleDir = join(PKG_ROOT, 'styles'),
+  voicePath = '',
   onShutdown = null,
   shutdownDelayMs = 150,
   config = null,
@@ -308,11 +308,15 @@ export function createReviewServer({
       /* 管道断了/日志写不出去：服务照常 */
     }
   }
-  // ★★ 必须先过 `resolveChatStyleName`：`chatStylePath()` 只拼路径，空名字会拼出
-  //    `<styles>/.md`（一个不存在的文件）—— 实测就是评审台自己的测试抓到的
-  //    （详见 styles.mjs 里这个函数的注释）。这一版**不写风格文件**了，但仍然要读它：
-  //    修改意见必须指向它里面的具体条目。
-  const styleFile = chatStylePath({ dir: styleDir, name: resolveChatStyleName(styleName) })
+  // ── 0.3.0alpha：评审的目标从 `styles/闲聊.md` 换成 `src/voice.mjs` ──────────
+  //
+  // 原来这里要过 `resolveChatStyleName` 拼 `styles/<名字>.md`（那个"空名字会拼出
+  // `<styles>/.md`"的坑就是这么来的，详见 styles.mjs 的注释）。双态拆掉之后
+  // 说话方式**只有一份**、而且它就在 `src/voice.mjs` 的 `VOICE_STYLE` 常量里 ——
+  // 于是"拼路径 + 空名字回落 + 目录不存在回落内置默认"这一整条都没有对象了。
+  // ★ 但**评审台读它这件事本身没变**：修改意见必须指向那份文案里的具体条目，
+  //   而且每条意见都记着当时的 sha（"这份意见针对哪一版"永远查得到）。
+  const styleFile = String(voicePath ?? '') || voiceSourcePath()
   const store = createReviewStore({ workspace: root, log: say })
   // ⚠️ 这里**没有**"点表播种"了（2026-10-02 第三版）：使用者要求
   //   「标签系统改为人工写标签」，而自动播种正是上一版把长句子塞进按钮的元凶。
@@ -329,10 +333,9 @@ export function createReviewServer({
 
   const staticRoot = normalize(resolve(staticDir))
 
-  /** 风格文件的现状（`/api/health` 与整理共用；**每条请求现读**）。 */
+  /** 说话方式的现状（`/api/health` 与整理共用；**每条请求现读**）。 */
   function styleFacts() {
-    const r = readChatStyle({ dir: styleDir, name: styleName })
-    return { ...r, path: styleFile }
+    return readVoiceSource({ path: styleFile })
   }
 
   const server = createServer(async (req, res) => {

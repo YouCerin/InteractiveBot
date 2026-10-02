@@ -47,9 +47,11 @@ const SECRET_FIELDS = [
   //   所以界面必须能知道"配没配"却看不到值 —— 正是这一档存在的理由。
   //   `clearable`（允许 `null` 清空）在这里更要紧：清空它 = 从直连退回一次性 DSH 进程。
   { path: ['wake', 'judge', 'apiKey'], flag: 'hasJudgeKey', clearable: true },
-  // ★ 0.2.9/10-01：对话风格「拿不准问模型」的专用 key。留空 = 复用 wake.judge.*，
-  //   配了才独立计费/限流。与上面那把同规格：值不回显、null 可清除。
-  { path: ['chat', 'mode', 'ambiguous', 'apiKey'], flag: 'hasChatModeKey', clearable: true },
+  // ── 0.3.0alpha：对话风格判定那一把 key（`hasChatModeKey`）已删除 ──────────
+  //   它属于双态机制（"拿不准这条是闲聊还是干活"时问一次模型）。双态拆掉之后
+  //   没有任何代码再读 `chat.mode.ambiguous.apiKey`，所以这里也**不能再列它**：
+  //   列着会让界面显示一个"已配置"的勾，而那个值其实谁都不用 —— 那是
+  //   "界面在说谎"这一族失败里最难查的一种（值是真的，作用是没有）。
 ]
 
 const JSON_HEADERS = {

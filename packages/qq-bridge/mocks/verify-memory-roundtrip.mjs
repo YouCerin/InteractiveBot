@@ -1243,7 +1243,7 @@ async function main() {
   /* ══════════════════════════════════════════════════════════════════════
    * ⑱ ★★★ 提示词**逐字基线**（拆 `bridge.mjs` 的验收标准）
    * ══════════════════════════════════════════════════════════════════════ */
-  section('⑱ ★★★ 提示词逐字基线：搬代码之后必须一个字都没变')
+  section('⑱ ★★★ 提示词逐字基线')
   {
     // ★★ 这一节是"重构的验收标准"，不是"又一条断言"。
     //    把一段拼装逻辑从一个文件搬到另一个文件，**离线测试只能证明行为不变**；
@@ -1251,10 +1251,26 @@ async function main() {
     //    所以这里把一份固定场景下的提示词（去掉时间戳与消息 id 这类每轮都不同的部分）
     //    与 `mocks/fixtures/prompt-golden.txt` 对比。
     //
+    // ⚠️⚠️ 0.3.0alpha 换了这条基线的**含义**（读旧注释的人会误解，所以写在这里）：
+    //   0.3.0beta 时它跑的是**工作态**，用来证明"工作态 = 升级前的行为逐字不变"。
+    //   双态拆掉之后**没有第二个态了**：这条基线的场景里那三条消息（读文件 / 随口一句 /
+    //   读文件）现在**全都**走同一条路 —— 所以它现在钉的是"唯一那条路**本身**没漂"。
+    //   体量也涨了一截（老基线 5450 字 / 13757 字节）：说话方式那一段（`VOICE_STYLE`）
+    //   现在**每一轮**都进提示词，而不是只在闲聊态进。
+    //   ★ 这里**刻意不写"现在是多少字"**：那个数会随 `VOICE_STYLE` 的每次改动而变，
+    //     写在注释里必然过期（本注释的上一版就写着 8142，而文案一改就变成了 8236）。
+    //     真实数字由下面那条断言的 detail 每次实跑打出来 —— 那才是可复核的形式。
+    //
     // 用法：
     //   · 基线不存在时 → **生成它**并提示去检查（首跑不判失败，避免"基线没建就红"）
+    //     ★ 只有在包根存在 `.regenerate-golden` 这个标记文件时才允许生成。
+    //       为什么加这道闩：不带闩的话，**任何人删掉这个 fixture 再跑一次测试
+    //       就会把它"重新生成"成当前的样子**，于是"逐字相同"这条断言在任何改动下
+    //       都不会红 —— 一条能被自己重新生成的基线等于没有基线。
+    //       要换基线就得**显式**建这个标记（并在提交信息里说明为什么），换完删掉它。
     //   · 基线存在时   → 逐字比对；不一致就打印第一处差异的上下文
     const FIXTURE = join(PKG_ROOT_FOR_FIXTURE, 'mocks', 'fixtures', 'prompt-golden.txt')
+    const REGEN_MARK = join(PKG_ROOT_FOR_FIXTURE, '.regenerate-golden')
     const norm = (s) =>
       String(s)
         .replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/g, '<TS>') // 时间戳
@@ -1277,21 +1293,65 @@ async function main() {
     await bridge.handleEvent(privateMsg(ADMIN, '帮我读一下这个文件'))
 
     const golden = norm(String(rpc.prompts[2] ?? ''))
-    if (!existsSync(FIXTURE)) {
+    const mayRegenerate = existsSync(REGEN_MARK)
+    if (!existsSync(FIXTURE) && mayRegenerate) {
       mkdirSync(dirname(FIXTURE), { recursive: true })
       writeFileSync(FIXTURE, golden, 'utf8')
-      check('★ 基线不存在 → 已生成（请人工检查这份基线是否合理，然后重跑）', true, FIXTURE)
+      check('★ 基线不存在 + 有 `.regenerate-golden` 标记 → 已生成（请人工检查后重跑）', true, FIXTURE)
+    } else if (!existsSync(FIXTURE)) {
+      // ★★ 没标记又没基线 ⇒ **红**，而不是悄悄生成一份"当前的样子"当基线。
+      check('★★★ 基线不存在且**没有** `.regenerate-golden` 标记 ⇒ 拒绝自动生成（否则这条断言永远绿）',
+        false, `${FIXTURE} 缺失；确要重建就先建 ${REGEN_MARK}，并在提交信息里说明为什么`)
     } else {
       const want = norm(readFileSync(FIXTURE, 'utf8'))
-      const same = want === golden
-      check('★★★ 提示词与基线**逐字相同**（搬动拼装逻辑之后必须仍然相同）', same,
-        same ? `${golden.length} 字` : (() => {
-          const i = [...want].findIndex((c, k) => c !== golden[k])
-          return `第一处差异在第 ${i} 字：基线「${want.slice(Math.max(0, i - 30), i + 30)}」 vs 现在「${golden.slice(Math.max(0, i - 30), i + 30)}」`
+      // ── ★★★ 先把"说话方式"这一段从两边剥掉，再逐字比其余部分 ──────────────
+      //
+      // 为什么要剥（这一条是 0.3.0alpha 才想清楚的，前身是 §5④ 那条教训的同类）：
+      //   说话方式（`src/voice.mjs` 的 `VOICE_STYLE`，约 2900 字）**每一轮**都进提示词。
+      //   它是一段会被人反复改的文案 —— 而 fixture 是逐字快照。
+      //   不剥的话，**改文案里一个逗号**就会让"提示词结构没漂"这条断言变红，
+      //   而红的原因并不是结构问题（转交文档 §5④ 记的正是这一类误报：
+      //   当年拿一个自然语言词组当位置探针，风格文件里出现同样的词就误红）。
+      //   ∴ 剥掉它之后，这条断言只盯**其余各段的拼装与顺序** —— 那是它真正要保护的东西；
+      //   而"说话方式到底有没有进去、是不是当前那一份"由下面两条**定向**断言负责。
+      const voice = await import('../src/voice.mjs').then((m) => m.VOICE_STYLE.trim())
+      const stripVoice = (s) => String(s).split(voice).join('<VOICE>')
+      const wantBody = stripVoice(want)
+      const gotBody = stripVoice(golden)
+      const sameBody = wantBody === gotBody
+      check('★★★ 提示词**除说话方式之外**与基线逐字相同（结构没漂：段落、顺序、措辞）', sameBody,
+        sameBody ? `${gotBody.length} 字（已剥掉 ${voice.length} 字的说话方式）` : (() => {
+          const i = [...wantBody].findIndex((c, k) => c !== gotBody[k])
+          return `第一处差异在第 ${i} 字：基线「${wantBody.slice(Math.max(0, i - 30), i + 30)}」 vs 现在「${gotBody.slice(Math.max(0, i - 30), i + 30)}」`
         })())
-      // 顺便钉住体量：段被漏拼时长度会明显变化（比"逐字比"更快指向问题）
-      check('  长度也在同一量级（±2%）', Math.abs(golden.length - want.length) / Math.max(1, want.length) < 0.02,
-        `基线 ${want.length} / 现在 ${golden.length}`)
+      check('  长度也在同一量级（±2%）', Math.abs(gotBody.length - wantBody.length) / Math.max(1, wantBody.length) < 0.02,
+        `基线 ${wantBody.length} / 现在 ${gotBody.length}`)
+
+      // ── 定向断言①：说话方式**真的注入了**，而且是**当前那一份**（逐字）──
+      //   这一条把"文案改了没重生成基线"这件事**指出来**，而不是让它表现成
+      //   "结构漂了"那种误导人的红。
+      const voiceInPrompt = golden.includes(voice)
+      check('★★★ 说话方式**逐字**在提示词里（当前 `VOICE_STYLE` 那一份）', voiceInPrompt,
+        voiceInPrompt
+          ? `${voice.length} 字`
+          : '提示词里的说话方式与 src/voice.mjs 的 VOICE_STYLE 不一致 —— 若你刚刚有意改了文案，' +
+            '请建 `.regenerate-golden` 重建基线（并在提交信息里说明为什么）')
+      check('★ 而且只注入一次（拼接重复会让它吃两份 token）',
+        golden.split(voice).length - 1 === 1,
+        `出现 ${golden.split(voice).length - 1} 次`)
+
+      // ── 定向断言②：融合的那条开口子真的进了提示词 ──────────────────────
+      const allowance = await import('../src/voice.mjs').then((m) => m.WORK_ALLOWANCE.trim())
+      check('★★ 融合的开口子（真在干活时该说清就说清）在提示词里', golden.includes(allowance))
+
+      // ── 反向断言：被替换掉的那两节与那句冲突指令**不许**出现在提示词里 ──
+      //   （这是 0.3.0alpha 的核心承诺，由**结构标记**判，不用自然语言词组）
+      check('★★★ 基座的【怎么说话】【别变成客服】已被替换掉（提示词里没有这两个标题）',
+        !golden.includes('【怎么说话】') && !golden.includes('【别变成客服】'))
+      check('★★★ 基座那句相反指令（"认真问技术问题就认真答"）不在提示词里',
+        !golden.includes('但对方认真问事实、技术问题时，就认真答'))
+      check('★ 双态时代那句「这一轮是闲聊」也不在（没有第二个态可指）',
+        !golden.includes('【这一轮是**闲聊**】'))
     }
   }
 

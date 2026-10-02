@@ -19,7 +19,7 @@
         <button id="tab-score" class="tab">② 打分</button>
         <button id="tab-report" class="tab">③ 报告</button>
       </nav>
-      <!-- 顶栏是"环境事实"，不是装饰：工作区、语料库行数、风格文件指纹、进程启动时间 ——
+      <!-- 顶栏是"环境事实"，不是装饰：工作区、语料库行数、说话方式指纹、进程启动时间 ——
            排查"我看的和你看的不是同一份数据"时第一眼就靠这一行。
            ★ 应用改写后必须重新拉一次：这里的字数与 sha256 前 8 位是"到底写进去没有"的唯一凭据。 -->
       <div class="health" id="health">加载中…</div>
@@ -244,10 +244,10 @@
       </section>
 
       <!-- 整理区：GET /api/consolidate 一进页就拉（最近一次 + 评论 + 模型可用性 + 锚点清单）。
-           产物是**对 styles/闲聊.md 的修改意见** —— 评审台**不写**那个文件（改动由 LLM 另外执行）。
+           产物是**对说话方式的修改意见** —— 评审台**不写**那个文件（改动由 LLM 另外执行）。
            整理没成时这里也是"素材不消失"的落点：error + 本地聚类，评论原文在上面那份清单里。 -->
       <section class="card" id="consolidate-card" hidden>
-        <h2>整理结果：对 styles/闲聊.md 的修改意见</h2>
+        <h2>整理结果：对说话方式的修改意见</h2>
         <div class="note" id="consolidate-meta"></div>
         <div class="note" id="anchor-list"></div>
         <div class="callout err" id="consolidate-error" hidden></div>

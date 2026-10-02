@@ -60,7 +60,6 @@ import { discoverSkills, loadSkill, describeSkill, callSkillDiagnose, ensureSkil
 import { createExtensionService } from './extensions-service.mjs'
 import { listPlugins, BUILTIN_PLUGINS } from './plugins.mjs'
 import { describePersonaShelf, applyPersonaAction, ensureDefaultPersonas } from './personas.mjs'
-import { ensureDefaultChatStyle } from './styles.mjs'
 import { projectDocStatus } from './project-doc.mjs'
 import { readContacts, writeContacts, summarizeContacts, CONTACTS_REL } from './contacts.mjs'
 import { readPrivacyAudit, scanPrivacy, PRIVACY_CATEGORIES } from './privacy.mjs'
@@ -529,17 +528,15 @@ async function main() {
     else if (seeded.created.length > 0) log(`人设库：落下了默认的 ${seeded.created.join('、')}`)
   }
 
-  // ── 对话风格（2026-10-01）：首次使用时把出厂那份闲聊风格落成文件 ────────
+  // ── 0.3.0alpha：说话方式不再落成文件 ────────────────────────────────────
   //
-  // ★ 同样"**文件存在就不动**"（`ensureDefaultChatStyle` 内部就是这么写的），
-  //   所以"删掉"是真的删掉 —— 删了之后闲聊态会回落到内置默认那份，
-  //   并在日志里说清楚（**不会**把文件又变回来）。
-  // ★ 与"读"分开：读是每轮现读（`bridge.mjs` 的 `#chatStyleForTurn`），
-  //   这里只负责让新装机器人的 `styles/` 目录不是空的。
-  {
-    const seeded = ensureDefaultChatStyle({ dir: DIRS.chatStyles, log: (m) => log(m) })
-    if (seeded.created) log(`对话风格：落下了出厂默认的闲聊风格（${seeded.path}）`)
-  }
+  // 2026-10-01 起这里会把出厂那份「闲聊风格」落成 `styles/闲聊.md`（"文件存在就不动"，
+  // 所以删掉是真的删掉）。双态拆掉之后说话方式**只有 `src/voice.mjs` 的常量这一份**
+  // （而且 `styles/` 从未进过发布包，线上一直跑的就是那个常量），
+  // 于是"播种一份默认文件"这件事没有对象了 —— 删掉它，不留一个空目录。
+  // ⚠️ 连带影响：使用者若曾经改过 `styles/闲聊.md`，那份内容在升级后**不再生效**
+  //    （要改口吻现在改 `src/voice.mjs` 的 `VOICE_STYLE`）。这条写在发布说明里，
+  //    不能让它变成"我改了文件它没反应"这种最难查的沉默失败。
 
   // ── 人设库离线巡检（0.2.2，只读）──────────────────────────────────────
   //
@@ -2173,7 +2170,7 @@ async function main() {
   const onebot = new OneBotClient({ ...config.onebot, log })
   const sendQueue = new SendQueue({ ...config.send, log })
   const router = new SessionRouter({ log })
-  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey, chatStyleDir: DIRS.chatStyles })
+  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey })
   bridge.attach(onebot)
 
   // 记下登录信息，供配置接口的 /api/status 使用

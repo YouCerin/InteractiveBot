@@ -19,14 +19,18 @@
  *     `seedPointsIfEmpty` 都不在了 —— 留着"没人调但会写使用者数据"的函数是隐患）；
  *   · 整理**不再产出标签**，它产出的是**修改意见**。
  *
- * **第三版（本版）**：产物从"整篇重写 styles/闲聊.md"改成**逐条修改意见**。
+ * **第三版**：产物从"整篇重写 styles/闲聊.md"改成**逐条修改意见**。
  * 使用者：「最终基于评价过的消息记录和评论，生成闲聊.md 的修改意见」+
  * 「只要意见，修改内容由 LLM 另外执行」。所以：
- *   · 本模块**不再写 `styles/闲聊.md`**、**不再同步 `src/chat-mode.mjs`** ——
+ *   · 本模块**不再写那份文案**、**不再同步任何常量** ——
  *     应用/备份/常量同步那整条路都删了（`applyDraft` 不存在了）；
  *   · 意见以 `suggestions` 存在整理记录里（针对现有哪一条 → 建议怎么改 → 为什么）。
  *   · ★ 为什么这是对的：上一版实测跑出来 **2389 → 2388 字**，等于把原文件还给我 ——
  *     整篇重写在这个场景里没有产出价值，而"该改哪一条"才是人能直接用的东西。
+ *
+ * **0.3.0alpha 补注**：上述文案的位置从 `styles/闲聊.md` 换成了 `src/voice.mjs`
+ * 的 `VOICE_STYLE`（说话方式只剩这一份）。本模块的**行为一个字没变** ——
+ * 它本来就不关心那份文案在哪，只看调用方传进来的 `styleBefore`。
  *
  * ── 写操作只剩两件（都在工作区 `runtime/chat-review/` 下）─────────────────
  *   ① 评分；② 标签的增删改；③ 删批次。**再也不碰机器人的人格文件。**
@@ -36,7 +40,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
 import { dirname, join } from 'node:path'
 
 import { anchorCoverage, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
-import { sha256 } from './chat-style-sync.mjs'
+import { sha256 } from './voice-source.mjs'
 
 /** 评审数据放在工作区的 `runtime/` 下（与语料库、任务台账同级；不进发布包）。 */
 export const REVIEW_REL = 'runtime/chat-review'
@@ -311,9 +315,10 @@ function readJson(abs, fallback, log) {
 /**
  * 造一个评审数据仓库。
  *
- * ⚠️ 它**不需要**风格文件的路径 —— 这一版不写 `styles/闲聊.md`（产物是修改意见，
- * 由人拿去给 LLM 执行）。风格文件的正文由调用方读好后作为 `styleBefore` 传进
+ * ⚠️ 它**不需要**那份文案的路径 —— 这一版不写它（产物是修改意见，
+ * 由人拿去给 LLM 执行）。那份文案的正文由调用方读好后作为 `styleBefore` 传进
  * `saveConsolidation`，只用来记"这份意见是针对哪个版本提的"。
+ * （0.3.0alpha：那段正文现在由 `src/voice-source.mjs` 的 `readVoiceSource()` 读。）
  *
  * @param {object} opts
  * @param {string} opts.workspace 工作区（评审数据写在它下面）
@@ -676,15 +681,15 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
   }
 
   /**
-   * 存一份**修改意见**（针对 `styles/闲聊.md` 现有哪一条 → 建议怎么改 → 为什么）。
+   * 存一份**修改意见**（针对那份说话方式里现有哪一条 → 建议怎么改 → 为什么）。
    *
    * ★ 为什么不再存"改写后的整篇"：实测那一版的产出是 2389 → 2388 字（等于把原文件
    *   还回来），而使用者要的是**能直接执行的修改意见**（「只要意见，修改内容由 LLM
-   *   另外执行」）。所以这里存的是 `suggestions`，而且**本模块从此不写风格文件**。
+   *   另外执行」）。所以这里存的是 `suggestions`，而且**本模块从此不写那份文案**。
    *
    * @param {object} opts
    * @param {object[]} opts.result.suggestions 意见数组（`{action,target,advice,reason,evidence}`）
-   * @param {string} [opts.styleBefore] 这份意见是针对哪个版本的风格文件提的（存 sha 做对照）
+   * @param {string} [opts.styleBefore] 这份意见是针对哪个版本提的（存 sha 做对照）
    */
   function saveConsolidation({ scope = 'all', result, styleBefore = '' } = {}) {
     const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : []

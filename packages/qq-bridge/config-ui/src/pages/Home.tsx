@@ -94,7 +94,12 @@ function buildPatch(
   // ★ 0.2.3：判定专用 key 的标记。**必须一起删** —— 它是后端给界面看的标记，
   //   留着就会被当成配置永久写进 config.json（没有任何测试会拦住这种脏键）。
   delete clean.hasJudgeKey
-  // ★ 0.2.9/10-01：对话风格判定 key 的标记，同样是**后端给界面看的标记**，必须一起删。
+  // ── 0.3.0alpha：`hasChatModeKey` 这条 delete **刻意留着** ─────────────
+  //   它是双态时代"对话风格判定专用 key"的后端标记，而那个配置键与那个标记
+  //   一起下线了（`src/api.mjs` 的 SECRET_FIELDS 里不再有它，后端不会再发）。
+  //   ★ 留着的原因不是"它还在"，而是**老 config.json 里可能真存过这个键**：
+  //     界面把整份配置读进来再写回去，删掉这一行就等于让一个已经没人认的旧键
+  //     被永久写回。一行 delete 比"解释为什么这个键可以留着"便宜得多。
   delete clean.hasChatModeKey
   if (tokens.wsToken.trim()) {
     ;(clean.onebot as Record<string, unknown>).wsToken = tokens.wsToken.trim()

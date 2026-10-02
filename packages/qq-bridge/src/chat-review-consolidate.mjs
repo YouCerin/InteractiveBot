@@ -107,14 +107,14 @@ export function buildConsolidatePrompt({ comments = [], styleText = '', anchors 
 
   return {
     prompt: [
-      '你在帮人修订一个 QQ 机器人（「小鲸鱼」）的**闲聊说话风格**文件 `styles/闲聊.md`。',
+      '你在帮人修订一个 QQ 机器人（「小鲸鱼」）的**说话方式**（`src/voice.mjs` 里的 `VOICE_STYLE`）。',
       '人已经逐条评审过它的真实发言并写了评论。你要做的是：**基于"评过的发言 + 那些评论"，',
-      '给出针对这份风格文件的【修改意见】**。',
+      '给出针对这份说话方式的【修改意见】**。',
       '',
       '⚠️ 你**不需要**、也**不要**输出整份新文件 —— 使用者明确要求「只要意见，修改内容由 LLM 另外执行」。',
       '每条意见都必须是**可以照着动手的一处修改**。',
       '',
-      '【现有的风格文件 styles/闲聊.md 全文】',
+      '【现有的说话方式全文（src/voice.mjs 的 VOICE_STYLE）】',
       String(styleText ?? '').slice(0, Number(limits.styleChars) || 9000),
       '',
       `【人工评审意见（共 ${lines.length} 条）】`,
@@ -142,7 +142,7 @@ export function buildConsolidatePrompt({ comments = [], styleText = '', anchors 
       '⚠️ 再强调一次：**不要**给 `rewritten`（整份新文件），**只要** `suggestions`。',
       '',
       '🚨 **JSON 里的字符串有两条硬规矩**（违反了整份输出就作废，人那边只会看到"解析失败"）：',
-      '   · **字符串内部不许出现未转义的 ASCII 双引号 `"`**。你要引用风格文件里的原句时',
+      '   · **字符串内部不许出现未转义的 ASCII 双引号 `"`**。你要引用那份文案里的原句时',
       '     （它本身就含 `"说多长"` 这种引号），**一律改写成中文引号「」**，',
       '     例如把 `任何关于"说多长"的要求` 写成 `任何关于「说多长」的要求`。',
       '   · **值里不许出现裸换行**：要换行就写两个字符 `\\n`，不要真的回车。',
@@ -188,10 +188,12 @@ export function anchorCoverage({ suggestions = [], anchors = STYLE_ANCHORS } = {
  * 失败原文：`模型的 JSON 解析失败：Expected ',' or '}' after property value in JSON
  * at position 99 (line 1 column 100)`。
  *
- * 根因不是模型偶发失手，而是**设计缺陷**：`styles/闲聊.md` 本身含 ASCII 双引号
+ * 根因不是模型偶发失手，而是**设计缺陷**：那份说话方式本身含 ASCII 双引号
  * （例如 `…任何关于"说多长""要不要分条"…的要求…`），而我们要模型**引用现有文件的原文**
  * 来指认"改哪一条"。它把原句抄进 JSON 字符串时，那些 `"` 没有转义 ⇒ JSON 当场崩，
  * 位置正好落在第一处引用上。
+ * ★ 0.3.0alpha：文案从 `styles/闲聊.md` 搬到了 `src/voice.mjs` 的 `VOICE_STYLE`，
+ *   但**那些 ASCII 双引号照旧在**（整篇逐字保留）—— 所以这一层不能删。
  *
  * ── 判定一个 `"` 是"收尾"还是"正文里的引号" ───────────────────────────────
  * 在字符串内部遇到 `"` 时，**往后跳过空白**看下一个字符：
@@ -381,11 +383,13 @@ export function clusterComments({ comments = [], threshold = 0.34, verdict = '' 
 }
 
 /**
- * 整理一次（**唯一一次模型调用**）：评论 → 针对风格文件的**修改意见**。
+ * 整理一次（**唯一一次模型调用**）：评论 → 针对那份说话方式的**修改意见**。
  *
  * @param {object} opts
  * @param {object[]} opts.comments   评论（含 verdict / comment / reply / context）
- * @param {string} opts.styleText    当前风格文件全文（意见要指向它里面的具体条目）
+ * @param {string} opts.styleText    当前那份说话方式全文（意见要指向它里面的具体条目）
+ *   ★ 参数名保留 `styleText`（0.3.0beta 时代是"风格文件全文"）：改名的代价是
+ *     调用方、测试与评审台 store 三处一起动，而它的**语义没变** —— 就是"要改的那份文案"。
  * @param {object} [opts.target]     `resolveDirectTarget()` 的结果（ok/baseUrl/apiKey/model）
  * @param {Function} [opts.callModel] `chatOnce`（测试注入；默认由调用方传进来）
  * @returns {Promise<object>} 成功 `{ok:true, suggestions, notes, anchorCoverage, ...}`；

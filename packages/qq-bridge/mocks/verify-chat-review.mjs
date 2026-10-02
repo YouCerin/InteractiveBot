@@ -67,7 +67,7 @@ import {
   replaceStyleConstant,
   sha256,
   syncStyleConstant,
-} from '../src/chat-style-sync.mjs'
+} from '../src/voice-source.mjs'
 import { createReviewServer, probeReviewHealth, stopRunningReviewServer } from '../src/chat-review-server.mjs'
 import { createCorpus } from '../src/corpus.mjs'
 
@@ -466,18 +466,19 @@ section('③c ★★ 「点标签就等于评论」（使用者 2026-10-02 的�
     built.kept === 2 && !built.prompt.includes('第三句原话'), `kept=${built.kept}`)
 }
 
-section('④ 整理：评论 → **对 styles/闲聊.md 的修改意见**（★ 不写那个文件）')
+section('④ 整理：评论 → **对说话方式的修改意见**（★ 不写那个源码）')
 // ══════════════════════════════════════════════════════════════════════════
 // 使用者第三版要求：「最终基于评价过的消息记录和评论，生成闲聊.md 的修改意见」+
 //   「只要意见，修改内容由 LLM 另外执行」。
-// ★ 这一节的核心是那条**反向断言**：跑完整理之后，`styles/闲聊.md` 与 `src/chat-mode.mjs`
-//   必须**一个字节都没变**（上一版会整篇改写它们；这一版连"应用"这个动作都不存在了）。
+// ★ 这一节的核心是那条**反向断言**：跑完整理之后，被评审的那份文案源码
+//   必须**一个字节都没变**（上一版会整篇改写它；这一版连"应用"这个动作都不存在了）。
+// ★★ 0.3.0alpha 的目标换了：原来是 `styles/闲聊.md` + `src/chat-mode.mjs` 两份
+//    （双态时代的风格文件与出厂常量），现在是**唯一一份** `src/voice.mjs`。
 // 模型调用一律**注入假模型**（`callModel`）—— 测试绝不真花钱，也绝不依赖网络。
 {
-  const stylePath = join(PKG_ROOT, 'styles', '闲聊.md')
-  const chatModePath = join(PKG_ROOT, 'src', 'chat-mode.mjs')
+  const stylePath = join(PKG_ROOT, 'src', 'voice.mjs')
   const styleText = readFileSync(stylePath, 'utf8')
-  const chatModeBefore = readFileSync(chatModePath, 'utf8')
+  const chatModeBefore = styleText
 
   const comments = [
     { id: 'x1', verdict: 'bad', comment: '问手机就答手机，别交代机箱', reply: '手机？我住在一台 X99 主板的机箱里面', context: [{ name: '甲', text: '鱼头用的什么手机', isBot: false }] },
@@ -535,9 +536,11 @@ section('④ 整理：评论 → **对 styles/闲聊.md 的修改意见**（★ 
   //
   // 失败原文：`模型的 JSON 解析失败：Expected ',' or '}' after property value in JSON
   // at position 99 (line 1 column 100)`。
-  // 根因是**设计缺陷**不是模型失手：`styles/闲聊.md` 本身含 ASCII 双引号
+  // 根因是**设计缺陷**不是模型失手：那份文案本身含 ASCII 双引号
   // （`…任何关于"说多长""要不要分条"…的要求…`），而提示词要模型**引用原句**来指认改哪一条
   // ⇒ 它抄进 JSON 时那些 `"` 没转义 ⇒ 当场崩。
+  // ★ 0.3.0alpha：说话方式搬进了 `src/voice.mjs`，但**那 12 个 ASCII 双引号照旧** ——
+  //   所以这条修复仍然必须有（判据与文案位置无关，与"文案里有没有 ASCII 引号"有关）。
   {
     const styleSnippet = '任何关于"说多长""要不要分条"的要求，闲聊时一律作废'
     // 真实形状：把风格文件里那句**原样**塞进 target / advice，一个引号都不转义
@@ -661,46 +664,51 @@ section('④ 整理：评论 → **对 styles/闲聊.md 的修改意见**（★ 
   check('★★ 空意见不许存（不许留一份"什么都没说"的整理）',
     store.saveConsolidation({ scope: 'b2', result: { suggestions: [] } }).ok === false)
 
-  // ── 4g. ★★★ 反向断言：这一版**再也不会写**风格文件与出厂常量 ─────────────
+  // ── 4g. ★★★ 反向断言：这一版**再也不会写**那份文案源码 ──────────────────
   check('★★★ store 上没有 applyDraft（"应用"这条动作整个删掉了）', typeof store.applyDraft === 'undefined')
-  check('★★★ 跑完整轮之后 styles/闲聊.md **逐字未变**', readFileSync(stylePath, 'utf8') === styleText)
-  check('★★★ 也不动 src/chat-mode.mjs（出厂常量不再需要同步）',
-    readFileSync(chatModePath, 'utf8') === chatModeBefore)
+  check('★★★ 跑完整轮之后 src/voice.mjs **逐字未变**（说话方式只有这一份）',
+    readFileSync(stylePath, 'utf8') === styleText)
+  check('★★★ 也没有第二份文案可动（`styles/` 与旧模块都已下线）',
+    !existsSync(join(PKG_ROOT, 'styles')) &&
+      !existsSync(join(PKG_ROOT, 'src', 'chat-mode.mjs')) &&
+      !existsSync(join(PKG_ROOT, 'src', 'chat-style-sync.mjs')),
+    '')
   check('★★ 服务端路由表里没有 /api/apply',
     !readFileSync(join(PKG_ROOT, 'src', 'chat-review-server.mjs'), 'utf8').includes("'/api/apply'"))
   check('★★ 页面里也不调用 /api/apply',
     !readFileSync(join(PKG_ROOT, 'chat-review', 'public', 'app.js'), 'utf8').includes('/api/apply'))
 
-  // ── 4h. 风格文件 ↔ 常量同步模块**仍然可用**（人手工改文件时用它）─────────
-  // ⚠️ 用途变了：评审台不再自动调它，但"手工改完闲聊.md 要同步出厂常量"这件事还在
-  //    （`verify-chat-mode.mjs` 有断言盯着两份逐字一致）。
+  // ── 4h. 「改完文案要落回源码」的同步模块**仍然可用**（人/LLM 手工执行时用它）──
+  // ⚠️ 0.3.0alpha：目标从 `src/chat-mode.mjs` 的 `DEFAULT_CHAT_STYLE` 换成了
+  //    `src/voice.mjs` 的 `VOICE_STYLE`（两者是同一件事在新架构下的位置）。
+  //    评审台**仍然不自动调它** —— 产物只有意见，落盘由人/LLM 另外执行。
   const found = extractStyleConstant(chatModeBefore)
-  check('★ 能从 chat-mode.mjs 里抠出常量', found && found.body.length > 100, String(found?.body.length))
-  check('★★ 抠出来的就是 styles/闲聊.md 的内容（两边同源，有断言钉着）',
-    constantMatches(chatModeBefore, styleText.trim()) || found.body.trim() === styleText.trim(),
-    `常量 ${found?.body.length} 字 / 文件 ${styleText.length} 字`)
+  check('★ 能从 voice.mjs 里抠出常量', found && found.body.length > 100, String(found?.body.length))
+  check('★★ 抠出来的就是那份说话方式正文（同一份，不再有第二个文件要同步）',
+    constantMatches(chatModeBefore, found.body),
+    `常量 ${found?.body.length} 字 / 源码 ${styleText.length} 字`)
   const replaced = replaceStyleConstant(chatModeBefore, '新内容\n')
   check('★ 替换是纯函数：返回新源码、原源码没变',
-    replaced.ok && replaced.changed && replaced.text.includes('export const DEFAULT_CHAT_STYLE = `新内容\n`'))
+    replaced.ok && replaced.changed && replaced.text.includes('export const VOICE_STYLE = `新内容\n`'))
   check('★ 文本没变时 `changed: false`（不做无意义的写）',
     replaceStyleConstant(chatModeBefore, found.body).changed === false)
-  check('★★ 文本里有反引号 / ${ / 反斜杠 ⇒ **拒绝同步**（硬写会把 chat-mode.mjs 弄崩）',
+  check('★★ 文本里有反引号 / ${ / 反斜杠 ⇒ **拒绝同步**（硬写会把 voice.mjs 弄崩）',
     ['含 ` 反引号', '含 ${ 插值', '含 \\ 反斜杠'].every((t) => replaceStyleConstant(chatModeBefore, t).ok === false))
   check('★ 找不到常量声明 ⇒ 拒绝（不猜位置）',
     replaceStyleConstant('// 什么都没有\n', 'x').ok === false)
 
   const syncDir = freshDir('sync')
-  const copyPath = join(syncDir, 'chat-mode.mjs')
+  const copyPath = join(syncDir, 'voice.mjs')
   writeFileSync(copyPath, chatModeBefore, 'utf8')
-  const sync = syncStyleConstant({ chatModePath: copyPath, styleText: '【测试用】\n- 极短。\n' })
+  const sync = syncStyleConstant({ path: copyPath, styleText: '【测试用】\n- 极短。\n' })
   check('★★ 同步真的写进去了（拿的是副本，绝不碰真源码）', sync.ok && sync.changed, String(sync.why ?? ''))
   check('★★ 写完**复核**一致（只信"写进去了"等于把漂移交给运气）',
     constantMatches(readFileSync(copyPath, 'utf8'), '【测试用】\n- 极短。\n'))
   check('★ 同步会先备份', sync.backup && existsSync(sync.backup) && readFileSync(sync.backup, 'utf8') === chatModeBefore)
   check('★ 再同步一次同样的内容：不重复写',
-    syncStyleConstant({ chatModePath: copyPath, styleText: '【测试用】\n- 极短。\n' }).changed === false)
+    syncStyleConstant({ path: copyPath, styleText: '【测试用】\n- 极短。\n' }).changed === false)
   check('★★ 同步失败时**不写坏文件**（反引号那条路）',
-    syncStyleConstant({ chatModePath: copyPath, styleText: '带 ` 反引号' }).ok === false)
+    syncStyleConstant({ path: copyPath, styleText: '带 ` 反引号' }).ok === false)
 }
 // ══════════════════════════════════════════════════════════════════════════
 section('⑤ 语料库新增的两个只读方法（评审台的数据源）')
@@ -747,7 +755,11 @@ const live = []
 async function withServer(tag, fn, { log = () => {} } = {}) {
   const ws = freshDir(tag)
   const styleDir = freshDir(`${tag}-style`)
-  writeFileSync(join(styleDir, '闲聊.md'), readFileSync(join(PKG_ROOT, 'styles', '闲聊.md'), 'utf8'), 'utf8')
+  // ★★ 0.3.0alpha：评审的目标是**说话方式那份源码**（`src/voice.mjs` 的 `VOICE_STYLE`）。
+  //   这里把它拷成临时副本再指给服务端 —— 测试**绝不**指向真源码，
+  //   否则跑一次测试就会改掉它（上一版对着 `styles/闲聊.md` 踩过同一个坑）。
+  const voicePath = join(styleDir, 'voice.mjs')
+  writeFileSync(voicePath, readFileSync(join(PKG_ROOT, 'src', 'voice.mjs'), 'utf8'), 'utf8')
   // 先造一点语料：评审台的数据源
   const c = createCorpus({ workspace: ws, log: () => {} })
   const at = new Date('2026-10-01T10:00:00Z')
@@ -757,16 +769,13 @@ async function withServer(tag, fn, { log = () => {} } = {}) {
   c.record({ kind: 'group', peerId: '700001', senderName: '小鲸鱼', text: '原主人估计也不认', isBot: true, at })
   c.close()
 
-  // ★★ 出厂常量的同步对象必须是**临时副本**：`createReviewServer` 默认指向真的
-  //   `src/chat-mode.mjs`，测试里要是指向它，跑一次测试就会改掉真源码（第一版差点这么干）。
-  const chatModePath = join(styleDir, 'chat-mode.mjs')
-  writeFileSync(chatModePath, readFileSync(join(PKG_ROOT, 'src', 'chat-mode.mjs'), 'utf8'), 'utf8')
+  // ★★ 说话方式那份源码的同步对象同样是**临时副本**（理由见上）。
+  const chatModePath = voicePath
 
   const app = createReviewServer({
     workspace: ws,
-    styleDir,
+    voicePath,
     log,
-    chatModePath,
     // ★★ 测试**绝不真调模型**：注入假模型与假通路（也不碰 resolveDirectTarget 的真实解析）
     resolveTarget: () => ({ ok: true, baseUrl: 'https://example.invalid', apiKey: 'test', model: 'fake-model' }),
     callModel: async () => ({
@@ -805,19 +814,21 @@ async function withServer(tag, fn, { log = () => {} } = {}) {
   const post = (path, payload) =>
     api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload ?? {}) })
   try {
-    await fn({ api, post, base, ws, styleDir, app })
+    await fn({ api, post, base, ws, styleDir, voicePath, app })
   } finally {
     app.close()
   }
 }
 
-await withServer('http', async ({ api, post, base, ws, styleDir, app }) => {
+await withServer('http', async ({ api, post, base, ws, styleDir, voicePath, app }) => {
   const health = await api('/api/health')
-  check('★ GET /api/health 报环境事实（工作区/语料库/风格文件）',
+  check('★ GET /api/health 报环境事实（工作区/语料库/说话方式源码）',
     health.status === 200 && health.body.ok && health.body.corpus.ok && health.body.styleFile.exists,
     JSON.stringify(health.body.corpus))
   check('★ health 里带 startedAt（分辨页面跑的是不是新进程）', typeof health.body.startedAt === 'number')
-  check('★ health 里带风格文件 sha256（确认"看到的就是写进去的"）', /^[0-9a-f]{64}$/.test(health.body.styleFile.sha256))
+  check('★ health 里带那份文案的 sha256（确认"看到的就是要改的那一份"）', /^[0-9a-f]{64}$/.test(health.body.styleFile.sha256))
+  check('★★ health 里的路径指向的是**说话方式源码**（0.3.0alpha 的评审目标）',
+    String(health.body.styleFile.path).endsWith('voice.mjs'), String(health.body.styleFile.path))
 
   const tax = await api('/api/taxonomy')
   check('★★ GET /api/taxonomy 只回"已经删掉了"（保留路由是为了让旧页面拿到人话，不是 404）',
@@ -952,12 +963,12 @@ await withServer('http', async ({ api, post, base, ws, styleDir, app }) => {
   const consolidationId = consolidated.body.consolidation.id
 
   // ★★★ 反向断言：整轮整理之后，风格文件**一个字节都没变**，而且**没有** /api/apply 这条路
-  const styleBefore = readFileSync(join(styleDir, '闲聊.md'), 'utf8')
-  check('★★★ 整理不会写风格文件（这一版的产物只有意见）', styleBefore === readFileSync(join(styleDir, '闲聊.md'), 'utf8'))
+  const styleBefore = readFileSync(voicePath, 'utf8')
+  check('★★★ 整理不会写那份文案源码（这一版的产物只有意见）', styleBefore === readFileSync(voicePath, 'utf8'))
   const applyGone = await post('/api/apply', { consolidation: consolidationId, confirm: true })
   check('★★★ POST /api/apply 已经**不存在**（404，不是 400/409）', applyGone.status === 404, String(applyGone.status))
-  check('★★★ 调过 apply 之后文件仍然没变（它真的没有写文件那条路）',
-    readFileSync(join(styleDir, '闲聊.md'), 'utf8') === styleBefore)
+  check('★★★ 调过 apply 之后源码仍然没变（它真的没有写文件那条路）',
+    readFileSync(voicePath, 'utf8') === styleBefore)
   // 复制走的那份文本由页面拼（`suggestionsText`）——这里核对它的形状契约仍在
   check('★ GET /api/consolidate 的 history 报的是"意见条数"（不再是 chars/points）',
     Array.isArray(notConsolidated.body.history) && notConsolidated.body.history.every((h) => 'suggestions' in h))
@@ -1023,8 +1034,8 @@ await withServer('http', async ({ api, post, base, ws, styleDir, app }) => {
   check('★ DELETE /api/batch 删掉批次', del.body.ok && del.body.removed === 2, JSON.stringify(del.body))
   check('★ 删过之后条目也查不到了（404，不是空列表）', (await api(`/api/items?batch=${encodeURIComponent(batchId)}`)).status === 404)
   check('★ 删不存在的批次 → 404', (await api('/api/batch?id=nope', { method: 'DELETE' })).status === 404)
-  check('★★★ 到这里风格文件仍然**逐字没变**（整轮 HTTP 流程一个字节都没写过它）',
-    readFileSync(join(styleDir, '闲聊.md'), 'utf8') === styleBefore, '')
+  check('★★★ 到这里那份文案源码仍然**逐字没变**（整轮 HTTP 流程一个字节都没写过它）',
+    readFileSync(voicePath, 'utf8') === styleBefore, '')
 })
 
 // 语料库不可用时：不许假装有数据
@@ -1073,11 +1084,13 @@ section('⑥b 启动时**先接管端口**：请旧实例退，认不出就绝�
 {
   const ws = freshDir('takeover')
   const styleDir = freshDir('takeover-style')
-  writeFileSync(join(styleDir, '闲聊.md'), '【x】\n', 'utf8')
+  // ★ 0.3.0alpha：起服务时给的是**说话方式源码**的路径（拷贝，绝不动真源码）
+  const voicePath = join(styleDir, 'voice.mjs')
+  writeFileSync(voicePath, readFileSync(join(PKG_ROOT, 'src', 'voice.mjs'), 'utf8'), 'utf8')
 
   /** 起一个评审台并**真的监听**，返回 {app, port, close}。 */
   async function listenReview(opts = {}) {
-    const app = createReviewServer({ workspace: ws, styleDir, log: () => {}, ...opts })
+    const app = createReviewServer({ workspace: ws, voicePath, log: () => {}, ...opts })
     await new Promise((r) => app.server.listen(0, '127.0.0.1', r))
     return { app, port: app.server.address().port }
   }

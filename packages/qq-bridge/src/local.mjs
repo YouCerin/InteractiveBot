@@ -53,10 +53,10 @@ export const DIRS = {
   // ★ 同样**不放工作区**：人设是会被拼进系统提示词的高优先级位置（H12 的注入面），
   //   放进工作区等于让 agent 有权限改自己的"人格设定"。
   personas: join(PKG_ROOT, 'personas'),
-  // 对话风格（2026-10-01）：`styles/<名字>.md`，闲聊态用哪一套口吻。
-  // ★ 与 `personas/` 同级、同样不放工作区的理由完全一致 —— 它是提示词材料，
-  //   放工作区等于让 agent 能改自己的说话方式（那正是它被要求模仿的东西）。
-  chatStyles: join(PKG_ROOT, 'styles'),
+  // ── 0.3.0alpha：`chatStyles: join(PKG_ROOT, 'styles')` 已删除 ─────────────
+  //   它指向 `styles/<名字>.md`（0.3.0beta 的闲聊风格文件）。双态拆掉之后说话方式
+  //   只有 `src/voice.mjs` 的常量这一份，`styles/` 目录连文件带目录一起下线 ——
+  //   留一个指向已不存在目录的路径常量，只会让下一个人以为那里还有东西。
   /** agent 的工作区＝workspace-write 沙箱的根。 */
   defaultWorkspace: join(PKG_ROOT, 'workspace-qq'),
 }

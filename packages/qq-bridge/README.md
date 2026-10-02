@@ -59,9 +59,25 @@ node src/index.mjs --check
 npm test                         # 全部离线套件（实测：所有套件退出码 0）
 
 # 想单独跑某几套（下面括号里是**离线环境**下的断言条数；条目声明见 PROJECT.json）
-node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（33 项）
+#
+# ⚠️⚠️ 括号里的数字**不是同一时刻量的**，而且不少已经漂了。0.3.0alpha 收尾时用
+#   「逐个套件实跑、读它自己的收尾行」的方式复核过一部分（写明了量到的值）：
+#     · 已核过并改准：verify-manifest 37、verify-release-hygiene 35、
+#       verify-imports 9、verify-voice-style 131、verify-chat-review 288
+#     · 实测**对不上、但本次没改**（超出版本范围，留着是**已知漂移**）：
+#       verify-persona 实测 60、verify-corpus 58、verify-extract 85、
+#       verify-memory-consolidate 77、verify-privacy 67、verify-oplog 49、
+#       verify-tasks 125、verify-recipes 67、verify-memory-roundtrip 191、
+#       verify-mcp-tools 75、verify-delivery-ledger 34、verify-token-discovery 53、
+#       verify-delivery-gate 47、verify-memory-keyword 35、verify-transport 41、
+#       verify-session-state 48、verify-memory-supersede 50、verify-memory-stats 29、
+#       verify-memory-usage 54、verify-api-h13 29、verify-marker 46、verify-text-encoding 21
+#     · 复核方式（可复现）：在 `packages/qq-bridge` 下逐个 `node mocks/verify-*.mjs`，
+#       读它的收尾行（「…全部通过（N 项）」）。链上共 **67 套**。
+#   ∴ **不要**把这些数字当权威 —— 权威是 `node mocks/verify-*.mjs` 自己的输出。
+node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（37 项）
 node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）
-node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、接线断言（33 项）
+node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、接线断言（35 项）
 node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制（89 项）
 node mocks/verify-api-h13.mjs    # ★★ H13 四个接口（真起 HTTP 服务）：漏 await、token 泄露、跨会话检索、**畸形返回不拖垮进程**（29 项）
 node mocks/verify-config.mjs     # 配置解析与校验（42 项）
@@ -70,7 +86,7 @@ node mocks/verify-persona.mjs    # ★★ 人设加固：反注入拦得住、�
 node mocks/verify-images.mjs     # 看图：SSRF 防护 + 防 DoS（145 项）
 node mocks/verify-identity.mjs   # ★ 身份核实：谁在说话、会话名、"身份不得变成权限"、权限判据自解释（57 项）
 node mocks/verify-memory-store.mjs # 记忆存储层：分档、内容过滤、篡改回滚、**注入面规则**（97 项）
-node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线** + **段顺序快照 / 逐字基线**（130 项）
+node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线** + **段顺序快照 / 逐字基线**（0.3.0alpha 实测 191 项）
 node mocks/verify-session-state.mjs # ★★ 会话状态机：与任务台账**两条轴**、水位（旧回合作废的显式形式）、话头恰好活一轮（48 项）
 node mocks/verify-memory-stats.mjs # ★★ 记忆可观测性：计数、零写入告警、体检漏报修复（29 项）
 node mocks/verify-memory-supersede.mjs # ★★ 记忆更正：旧条目不删只标注、注入里不再出现、"换成/其实"不许误判（50 项）
@@ -89,8 +105,7 @@ node mocks/verify-oplog.mjs       # ★★ 操作日志：参数与结果都记�
 node mocks/verify-tasks.mjs       # ★★ 任务台账 + 回到第N步：零模型参与也完整、连续回退能恢复、闲置要降级（125 项）
 node mocks/verify-recipes.mjs     # ★★ 配方库：长尾匹配要命中、置信度用平滑、requiredActions 不自动执行（67 项）
 node mocks/verify-extract.mjs     # ★★ 抽取解析：真实 headless 输出（裸词 / 多两个 `}`）都要能解析（71 项）
-node mocks/verify-memory-roundtrip.mjs # ★★★ 走完整桥接：记忆全链路 + **注入接线**（任务段/配方段真的进提示词）
-node mocks/verify-chat-mode.mjs   # ★★★ 闲聊/工作两态：分类器、风格文件、端到端接线（★ 含"规则命中不花钱"）
+node mocks/verify-voice-style.mjs # ★★★ 说话方式（唯一口径）：常量 / 按节替换 / 每轮注入 / 端到端接线（131 项）
 node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）
 node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 需要能起子进程）
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
@@ -113,7 +128,9 @@ node mocks/session-grep.mjs --list        # 只列有哪些会话、多大、什
 start.bat --doctor
 
 # 📄 更新汇总（给人看的：这次改了什么、怎么验、刻意不做什么、还差什么）
-#   docs/0.2.3-release-notes.md        ← 先看这一份（插件化：二选一 / 唤醒策略 / QQ 工具档位 / 投递 / 语料库）
+#   docs/0.3.0alpha-release-notes.md   ← 最新（说话方式只剩一份：拆掉「闲聊/工作」双态）+ 升级须知
+#   docs/0.3.0beta-release-notes.md    ← 上一版的对应文档（双态 + 聊天记录评审台）
+#   docs/0.2.3-release-notes.md        ← 插件化：二选一 / 唤醒策略 / QQ 工具档位 / 投递 / 语料库
 #   docs/0.2.3-change-record.md        ← 逐条过程记录（含踩过的坑与两次"我错了"）
 #   docs/plugin-packaging-plan.md      ← 插件化怎么划分（哪些拆开、哪些合并、哪些二选一）
 #   docs/0.2.1-release-notes.md        ← 上一版的对应文档
@@ -424,7 +441,46 @@ async createSession(sessionId) {
 | 工具 | 用途 | 端口 | 文档 |
 |---|---|---|---|
 | `sticker-label/` | 给表情包贴语义标签 | 4399 | `sticker-label/README.md` |
-| `chat-review/` | 导入聊天记录 → 人工打分 → 生成 `styles/闲聊.md` 的修订草稿 | 4410 | `chat-review/README.md` |
+| `chat-review/` | 导入聊天记录 → 人工打分 + 写评论 → 整理成对 `src/voice.mjs` 那份说话方式的**修改意见** | 4410 | `chat-review/README.md` |
+
+---
+
+### 9. ★ 说话方式只有**一份**（0.3.0alpha）：改口吻改 `src/voice.mjs`，**改了要重启**
+
+0.3.0beta 试过按**每条消息**判「闲聊 / 工作」两态：闲聊时换成 `styles/闲聊.md` 的口吻，
+干活时维持老说法（"工作态 = 升级前的行为"是那一版的安全边界）。
+0.3.0alpha 把那条分界线**拆掉**了 —— 说话方式**只有一份**（`src/voice.mjs` 里的 `VOICE_STYLE`
+常量），**所有回合都用它**，闲聊如此，干活也如此。
+
+**为什么融合而不是留着两态**：分两态等于同一份提示词里两处对同一件事给**相反**指令 ——
+基座的「但对方认真问事实、技术问题时，就认真答」对上「**极短**、别把一句回答扩成一段」，
+模型只能自己挑一套听，两个方向都不稳定；而且判定本身要花一次模型调用、还会判错。
+融合后的口径是「**默认极短 + 真在干活时允许说清**」（`WORK_ALLOWANCE`，融合的**唯一新增条款**），
+**不是**把那两句都留下 —— 留下一对相反指令正是这次要消灭的东西本身。
+
+**使用者要知道的三件事**：
+
+1. **要改口吻就改 `src/voice.mjs` 的 `VOICE_STYLE`**。
+   原来那份 `styles/闲聊.md` **连目录一起下线了**，不再有任何代码读它。
+2. ★ **改完要重启**才生效。0.3.0beta 的风格文件是每轮现读；现在它和项目里其它源码一样，
+   启动时读一次 —— 这是为了"说话方式与其它所有源码同一种存在形式"。
+3. 如果你以前改过 `styles/闲聊.md`，**那份改动升级后不再生效**（要改就改上面那个常量）。
+   > 顺带说明为什么它以前"看起来"生效过：`styles/` 目录**从来没有进过发布包**
+   > （`scripts/assemble-release.mjs` 的 `COPY_DIRS` 里没有它），线上一直跑的就是内置常量，
+   > 那份文件只是开发期的一份镜像。
+
+**这一版保留不变的东西**（别读成"顺手改了"）：
+
+- 人设库 `personas/*.md` **一个字没改**；说话方式仍然只**替换**人设里的
+  【怎么说话】【别变成客服】两节（编号式 `二、怎么说话` 也认），其余各节逐字保留；
+- 长任务超过 8 秒的「先应一声」**保留并默认开启**（只去掉了"闲聊态不发"那条抑制，
+  因为它依赖已删除的分类器；**静默时段仍然不发**）；
+- 分条发送（`humanize` 的 `splitReplyForSend`）**没动**；
+- 唤醒判定器（`src/wake-judge.mjs`）**完全不受影响** —— 删掉的只是同一个文件里那个
+  「这一轮是闲聊还是干活」的判定器；
+- 聊天记录评审台（`chat-review/`）**仍在**，只是评审目标换成了 `src/voice.mjs`。
+
+> 完整清单、取证方式与已知边界见 `docs/0.3.0alpha-release-notes.md`。
 
 ---
 
@@ -458,17 +514,17 @@ qq-bridge/
 │   ├── persona.mjs        人设提示词
 │   ├── personas.mjs       ★ 人设库（personas/<名字>.md，一个文件一套）
 │   ├── speed.mjs          回应速度三档（快速/均衡/谨慎，均为等待下限）
-│   ├── chat-mode.mjs      ★★ 双态对话风格：闲聊还是干活（规则优先，拿不准才问一次模型）
-│   ├── styles.mjs         ★ 对话风格文件（styles/<名字>.md，每轮现读）
+│   ├── voice.mjs          ★★ 说话方式（**唯一**口径）：所有回合都用它（0.3.0alpha 拆掉了双态）
+│   ├── voice-source.mjs   ★ 说话方式的唯一来源：读常量正文 / 三条守卫写回
+│   ├── persona-sections.mjs ★ 人设分节与节名归一（认【怎么说话】与「二、怎么说话」两种写法）
 │   ├── memory.mjs         记忆约定（提示词那一段）
 │   ├── doctor.mjs         体检
 │   └── api.mjs            本地配置 HTTP 接口
 ├── mcp/mcp-qq-server.mjs  ★ QQ 工具服务器（戳一戳等，手写 MCP）
 ├── personas/              ★ 人设库（一个 .md 一套，控制台里切换；**改了要重启**）
-├── styles/                ★ 对话风格（闲聊态说什么话；**改了下一轮就生效**）
 ├── config-ui/             ★ 控制台界面（React/Vite，构建产物 dist/ 由桥接伺服）
 ├── sticker-label/         ★ 表情包人工标注台（独立小工具，零依赖，自带页面）
-├── chat-review/           ★ 聊天记录评审台（独立小工具：导入记录 → 判档+评论 → 整理成「点」→ 整篇重写风格文件）
+├── chat-review/           ★ 聊天记录评审台（独立小工具：导入记录 → 判档+评论 → 整理成对说话方式的**修改意见**，不写文件）
 ├── mocks/                 测试替身（不需要 QQ，不花钱）
 ├── vendor/                包内自带：node/ + node_modules/ws
 ├── logs/                  运行日志 + usage.jsonl

@@ -6,14 +6,12 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
 import { FieldRow, InlineNote, NumInput, type ConfirmRequest } from '@/components/common'
-import { Button } from '@/components/ui/button'
 import {
   SPEED_PRESETS,
   detectSpeedPreset,
   estimateDelayMs,
   getBool,
   getNum,
-  getPath,
   getStr,
   getStrArr,
 } from '@/lib/config'
@@ -25,9 +23,7 @@ import {
   SendHorizonal,
   Hourglass,
   MessageCircle,
-  MessagesSquare,
   Coins,
-  KeyRound,
 } from 'lucide-react'
 
 /**
@@ -132,11 +128,12 @@ export function PaceTab({
   }
 
   const quietEnabled = getBool(cfg, 'humanize.quietHours.enabled', true)
-  // §2.4.1 对话风格：「拿不准问模型」的专用 key 配没配（值不回显，与 wake.judge 同规格）
-  const hasChatModeKey =
-    getBool(cfg, 'hasChatModeKey', false) ||
-    Boolean(String(getPath(cfg, 'chat.mode.ambiguous.apiKey') ?? '').trim())
-  const hasJudgeKey = getBool(cfg, 'hasJudgeKey', false)
+  // ── 0.3.0alpha：这里原来还算一个 `hasChatModeKey` ─────────────────────
+  //   它是「对话风格判定」那把专用 key 的标记。双态判定整条下线之后，
+  //   `chat.mode.ambiguous.apiKey` 不再被任何代码读取，那张卡片也删掉了 ——
+  //   留着一个算不出来的标记只会让某处引用到一个已下线的东西。
+  //   （`wake.judge` 那把 key 与本页无关，它的界面在「扩展」页里，那里仍在用
+  //    `hasJudgeKey` —— 所以这里连 `hasJudgeKey` 也不必再算了。）
 
   return (
     <div className="space-y-4">
@@ -479,202 +476,6 @@ export function PaceTab({
           </div>
         </CardContent>
       </Card>
-
-      {/* ★ 对话风格：闲聊态 / 工作态（CONFIG-UI.md 2.4.1，2026-10-01） */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="flex items-center justify-between text-base">
-            <span className="flex items-center gap-2">
-              <MessagesSquare className="h-4 w-4" />
-              ★ 对话风格（闲聊态 / 工作态）
-            </span>
-            <Switch
-              checked={getBool(cfg, 'chat.mode.enabled', true)}
-              onCheckedChange={(v) => patch('chat.mode.enabled', v)}
-            />
-          </CardTitle>
-          <p className="text-xs text-muted-foreground">
-            对照真实聊天记录能看出：真人闲聊时回答<strong>极短、常拆两条、句尾不写句号</strong>，
-            而干活时这些特征反而是坏的（要的是结果，不是被敷衍）。开启后按消息分两态：
-            闲聊用「闲聊」风格文件的口吻，干活维持既有做法。
-            <br />
-            <strong>关掉 = 升级前的行为，逐字相同</strong>（不判态、不注入风格、零额外调用）。
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <InlineNote level="info">
-            <strong>三件事先说清：</strong>
-            ①<strong>规则优先</strong>——绝大多数消息一次模型调用都不产生，只有「像要干活但话没说死」
-            那种才会拿不准、问一次模型；
-            ②<strong>判错的代价只是口径</strong>——被判成闲聊的消息口吻变随意，但工具照常能用，
-            闲聊态<strong>不禁</strong>工具，不会把活干砸；
-            ③<strong>判定失败一律按工作态</strong>——超时、超每小时预算、模型输出认不出，
-            都按下面选的 fallback 走（默认工作态 = 退回升级前的行为）。
-          </InlineNote>
-
-          <FieldRow
-            label="闲聊用哪份风格"
-            hint={
-              <>
-                风格文件是 <code>styles/&lt;名字&gt;.md</code>（不带扩展名）。留空 = 默认那份「闲聊」。
-                <strong>每轮现读</strong>：改文件或换名字<strong>下一轮就生效</strong>——
-                人设改了要重启，风格不用。文件在包根下的 <code>styles/</code>（与{' '}
-                <code>personas/</code> 同级）；读不到时会自动回落内置默认口吻，
-                <strong>那是回落不是故障</strong>。
-              </>
-            }
-          >
-            <Input
-              value={getStr(cfg, 'chat.mode.style', '')}
-              onChange={(e) => patch('chat.mode.style', e.target.value)}
-              className="max-w-md font-mono text-sm"
-              placeholder="留空 = 闲聊"
-            />
-          </FieldRow>
-
-          {/* 二选一（与 wake.policy / affect.prewake 同一条理由：互斥档位不做成开关） */}
-          <FieldRow
-            label="拿不准按哪个态"
-            hint="规则拿不准、模型也没给出结论时按哪个态走。默认「工作态」= 退回升级前的行为（保守方向）。"
-          >
-            <div className="flex flex-wrap gap-2">
-              {[
-                { v: 'work', label: '工作态（默认）', desc: '退回升级前的行为。' },
-                { v: 'chat', label: '闲聊态', desc: '拿不准就当闲聊，口吻随意些。' },
-              ].map((o) => {
-                const active = getStr(cfg, 'chat.mode.fallback', 'work') === o.v
-                return (
-                  <button
-                    key={o.v}
-                    type="button"
-                    onClick={() => patch('chat.mode.fallback', o.v)}
-                    className={cn(
-                      'rounded-lg border-2 px-3 py-2 text-left text-sm transition-all',
-                      active
-                        ? 'border-primary bg-accent/60 shadow-sm'
-                        : 'border-border hover:border-primary/40',
-                    )}
-                  >
-                    <span className="font-medium">{o.label}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">{o.desc}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </FieldRow>
-
-          {/* 「拿不准问一次模型」子项（CONFIG-UI.md 2.4.1）：判定通路复用 wake.judge 的解析规则 */}
-          <FieldRow
-            label="拿不准时问一次模型"
-            hint="上面 ①里说的那一次额外调用就是它。关掉 = 纯规则判定，零额外调用（拿不准一律走 fallback）。"
-          >
-            <Switch
-              checked={getBool(cfg, 'chat.mode.ambiguous.enabled', true)}
-              onCheckedChange={(v) => patch('chat.mode.ambiguous.enabled', v)}
-            />
-          </FieldRow>
-
-          {getBool(cfg, 'chat.mode.ambiguous.enabled', true) && (
-            <div className="space-y-3 rounded-md border p-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <FieldRow label="单次判定超时" className="py-0 sm:grid-cols-[130px_1fr]">
-                  <NumInput
-                    value={getNum(cfg, 'chat.mode.ambiguous.timeoutMs', 6000)}
-                    onChange={(n) => patch('chat.mode.ambiguous.timeoutMs', n)}
-                    unit="毫秒"
-                    min={1000}
-                  />
-                </FieldRow>
-                <FieldRow label="每小时最多判几次" className="py-0 sm:grid-cols-[130px_1fr]">
-                  <NumInput
-                    value={getNum(cfg, 'chat.mode.ambiguous.maxPerHour', 30)}
-                    onChange={(n) => patch('chat.mode.ambiguous.maxPerHour', n)}
-                    unit="次"
-                    min={1}
-                  />
-                </FieldRow>
-              </div>
-              <p className="-mt-1 text-xs text-amber-700">
-                ★ 这两项改它要重启（判定器首次被用到时装配一次）。预算是<strong>独立</strong>的，
-                不占「唤醒策略」里 wake.judge 的那个每小时额度；超了一律按 fallback 走。
-              </p>
-
-              <FieldRow
-                label="判定专用 API key"
-                hint={
-                  <>
-                    <strong>留空 = 复用「唤醒策略」里 wake.judge 的那把 key</strong>
-                    （配过判定 key 的人不必再配一遍）；判定 key 也没配则走一次性 DSH 进程
-                    （约 3~5 秒）。<strong>填上</strong> = 这次判定独立计费/限流，
-                    只用这把 key，不碰主对话那把。
-                  </>
-                }
-              >
-                <div className="flex max-w-md items-center gap-2">
-                  <Input
-                    type="password"
-                    value={String(getPath(cfg, 'chat.mode.ambiguous.apiKey') ?? '')}
-                    onChange={(e) => patch('chat.mode.ambiguous.apiKey', e.target.value)}
-                    autoComplete="new-password"
-                    className="font-mono text-sm"
-                    placeholder={
-                      hasChatModeKey ? '已配置（留空即不修改）' : '留空 = 复用 wake.judge 那把 key'
-                    }
-                  />
-                  {hasChatModeKey && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-8 shrink-0 text-xs"
-                      onClick={() => patch('chat.mode.ambiguous.apiKey', null)}
-                    >
-                      <KeyRound className="mr-1 h-3.5 w-3.5" />
-                      清除
-                    </Button>
-                  )}
-                </div>
-                <InlineNote level="info">
-                  当前判定通路：
-                  <strong>
-                    {hasChatModeKey
-                      ? '直连（用上面这把专用 key，约 1 秒）'
-                      : hasJudgeKey
-                        ? '直连（复用 wake.judge 那把 key，约 1 秒）'
-                        : '一次性 DSH 进程（约 3~5 秒，用主对话那套凭据）'}
-                  </strong>
-                  。★ 改 key / 端点 / 模型要重启（判定器首次被用到时装配一次）。
-                </InlineNote>
-              </FieldRow>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <FieldRow
-                  label="判定模型"
-                  hint="留空 = 复用 wake.judge 的模型（它留空时再用主对话那个）。判定只要一个小 JSON，换便宜的小模型是省钱的主要手段。"
-                  className="py-0 sm:grid-cols-1"
-                >
-                  <Input
-                    value={getStr(cfg, 'chat.mode.ambiguous.model', '')}
-                    placeholder="留空 = 复用 wake.judge.model"
-                    onChange={(e) => patch('chat.mode.ambiguous.model', e.target.value)}
-                  />
-                </FieldRow>
-                <FieldRow
-                  label="判定端点"
-                  hint="留空 = 复用 wake.judge 的端点（默认 https://api.deepseek.com，没有 /v1）。只允许 https 或回环地址的 http——key 在请求头里，明文发出去等于裸奔。"
-                  className="py-0 sm:grid-cols-1"
-                >
-                  <Input
-                    value={getStr(cfg, 'chat.mode.ambiguous.baseUrl', '')}
-                    placeholder="留空 = 复用 wake.judge.baseUrl"
-                    onChange={(e) => patch('chat.mode.ambiguous.baseUrl', e.target.value)}
-                  />
-                </FieldRow>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
       {/* 发送节流 */}
       <Card>
         <CardHeader className="pb-2">

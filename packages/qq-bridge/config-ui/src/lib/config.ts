@@ -271,9 +271,9 @@ export const DEMO_CONFIG: Record<string, unknown> = {
   // ★ 0.2.3：判定专用 key 配没配（值不回显）。它同时是**通路开关** ——
   //   填了才走直连、而且只用这把；留空 ⇒ 一次性 DSH 进程。
   hasJudgeKey: false,
-  // ★ 0.2.9/10-01：对话风格「拿不准问模型」的专用 key 配没配（值不回显）。
-  //   留空 = 复用 wake.judge.*；都空则走一次性 DSH 进程。
-  hasChatModeKey: false,
+  // ── 0.3.0alpha：`hasChatModeKey` 已删除 ─────────────────────────────────
+  //   它是"对话风格判定专用 key 配没配"的假状态字段。后端不再发这个标记
+  //   （`src/api.mjs` 的 SECRET_FIELDS 里没有它了），界面也不再读它。
   access: { adminUsers: ['100000001'] },
   trigger: {
     private: true,
@@ -314,15 +314,10 @@ export const DEMO_CONFIG: Record<string, unknown> = {
       },
     },
   },
-  // §2.4.1 对话风格（闲聊态 / 工作态，2026-10-01）：按消息分两态。关掉 = 升级前行为逐字相同。
-  chat: {
-    mode: {
-      enabled: true,
-      style: '',
-      fallback: 'work',
-      ambiguous: { enabled: true, timeoutMs: 6000, maxPerHour: 30, apiKey: '', baseUrl: '', model: '' },
-    },
-  },
+  // ── 0.3.0alpha：DEMO_CONFIG 里的 `chat` 段已删除 ─────────────────────────
+  //   它是"演示模式"（后端连不上时页面用的假数据）。原来那一整组双态配置
+  //   （enabled / style / fallback / ambiguous）现在没有任何界面在读 ——
+  //   留着会让演示模式看起来还有那个功能，而真模式下那些键根本不存在。
   session: { salt: '', instance: '' },
   persona: { callerName: '', callUser: '', preset: 'mermaid-lite', custom: '' },
   memory: { enabled: true },

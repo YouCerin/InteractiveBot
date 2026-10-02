@@ -282,32 +282,6 @@ export const BUILTIN_PLUGINS = [
     uiTab: 'persona',
   },
   {
-    id: 'chat-mode',
-    name: '对话风格（闲聊/工作）',
-    icon: '💬',
-    enabledPath: 'chat.mode.enabled',
-    // ★ hot 的判据是"那段代码是不是每轮重读配置"，这里是**取证过的**：
-    //   `#detectTurnMode` 每轮现读 `this.config.chat.mode.*`，
-    //   `#chatStyleForTurn` 每轮现读 `styles/<名字>.md`（读文件，不缓存）。
-    //   所以开关、风格文件、fallback 都是**下一轮生效**。
-    //   ⚠️ 唯一的例外是判定器的**预算计数器**：它只建一次（懒建），
-    //   `maxPerHour` / `timeoutMs` 在首次装配时读一次 —— 改它们要重启。
-    //   这条如实写在这里，不假装全热。
-    hot: true,
-    why:
-      '每轮现读 this.config.chat.mode.*（bridge.mjs 的 #detectTurnMode / #chatStyleForTurn），' +
-      '风格文件也是每轮现读 ⇒ 改完下一轮生效。★ 例外：判定器的 maxPerHour / timeoutMs ' +
-      '在**首次装配时**读一次（预算计数器必须跨消息累积），改它们要重启',
-    what:
-      '按消息分两态说话：**闲聊**时用 `styles/闲聊.md` 的口吻（像真人打字：极短、常拆两条、' +
-      '接梗不解释），**干活**时维持既有的说话方式。判定规则优先，只有"像要干活但话没说死"' +
-      '的消息才问一次模型。闲聊态下「先应一声」不触发。',
-    offEffect:
-      '关掉后：**恒为工作态** —— 提示词与升级前逐字相同（风格文件、判定器都不会被用到，' +
-      '一次额外模型调用也不会产生）。',
-    uiTab: 'pace',
-  },
-  {
     id: 'access',
     name: '名单与权限',
     icon: '🔐',

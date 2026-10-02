@@ -19,7 +19,7 @@
  *   `src/chat-review-server.mjs` 的 `stopRunningReviewServer`。
  *
  * ★ 依赖：**零**（只用 Node 内置模块 + 本包自己的模块）。它不连桥接、不发消息、
- *   不改配置；读语料库（只读）与 `styles/闲聊.md`，写的是工作区里的评审数据。
+ *   不改配置；读语料库（只读）与 `src/voice.mjs` 里那份说话方式，写的是工作区里的评审数据。
  *
  * ⚠️ 整个主体都在 `isDirectRun` 里面：这个文件**只该被 node 直接执行**。
  *    第一版把 `server.listen()` 写在顶层、把"是不是直接执行"的判断放在文件末尾，
@@ -55,7 +55,6 @@ async function main() {
   }
 
   const port = Number(argOf('--port')) || 4410
-  const styleName = argOf('--style') || config.chat?.mode?.style || ''
   const open = argv.includes('--open')
   const waitPort = argv.includes('--wait-port')
   const replace = !argv.includes('--no-replace')
@@ -141,13 +140,15 @@ async function main() {
 
   const { server, styleFile, staticDir } = createReviewServer({
     workspace,
-    styleName,
     log,
     // ★ 整理（把评论归纳成**修改意见**）要调一次模型：通路与桥接**共用同一套解析**
     //   （`resolveDirectTarget`：key 从哪来、baseUrl、model），密钥不经过浏览器。
     config,
-    // ⚠️ 这里**不再**传 chatModePath：这一版不写 `styles/闲聊.md`、也不动
-    //   `src/chat-mode.mjs`（产物是修改意见，由人拿去给 LLM 执行）。
+    // ⚠️ 0.3.0alpha：这里**不再**传风格文件相关的选项 —— 评审的目标现在是
+    //   `src/voice.mjs` 的 `VOICE_STYLE`（**唯一**一份说话方式），而它就在包里、
+    //   路径由 `voiceSourcePath()` 算，不需要也不再允许从配置里挑一份。
+    //   所以 `--style` 这个开关一并删掉了（留着会让人以为还能换一份）。
+    //   仍然不传任何"写入"目标：产物是修改意见，由人拿去给 LLM 执行。
     // ★ 被 `/api/shutdown` 请退时干什么：走同一个退出路径（自然排空 + 2 秒兜底）。
     //   不在这里 `server.close()` 是因为 `server` 还没赋值 —— `exitSoon` 用的是
     //   外层的 `liveServer`（下面 listen 成功后赋值）。
@@ -202,7 +203,7 @@ async function main() {
     console.log('  聊天记录评审台（独立小工具，只监听本机）')
     console.log(`  ${url}`)
     console.log(`  工作区：${workspace}`)
-    console.log(`  风格文件：${styleFile}`)
+    console.log(`  说话方式：${styleFile}`)
     console.log(`  静态页：${staticDir}`)
     // ★ 只有**别的端口**上的评审台才值得提一句：同一端口那份刚刚已经被我们接管了，
     //   而不同端口的两个实例会**同时写同一份评审数据**（`runtime/chat-review/`），
