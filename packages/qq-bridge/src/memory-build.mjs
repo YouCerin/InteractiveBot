@@ -342,7 +342,18 @@ export async function buildMemoryFromMessages({
   const ignoredAll = [...ignored]
   // ① person：**按人分组**分别落盘（`applyMemoryItems` 一次只认一个发言人）
   for (const [uid, items] of byUser) {
-    const r = applyMemoryItems({ workspace: root, kind, peerId, senderId: uid, tier: 'user', items, log })
+    const r = applyMemoryItems({
+      workspace: root,
+      kind,
+      peerId,
+      senderId: uid,
+      tier: 'user',
+      // ★ 0.3.0alpha：条目要带「（昵称 QQ 号码）」身份前缀 —— 这里是**按人分组**，
+      //   所以名字取自**这个人**在 `speakers` 里的那一项（不是"第一个说话人"）。
+      speakerName: speakers.find((s) => String(s.userId) === String(uid))?.name ?? '',
+      items,
+      log,
+    })
     appliedAll.push(...r.applied.map((a) => ({ ...a, userId: uid })))
     // ★ 被拒的也带上归属：审计要能回答"这条本来是想记给谁的"
     ignoredAll.push(...r.ignored.map((i) => ({ ...i, userId: uid })))
@@ -356,6 +367,10 @@ export async function buildMemoryFromMessages({
       peerId,
       senderId: speakers[0]?.userId ?? String(peerId),
       tier: 'user',
+      // ★ 同上：group/global 这一类"与发言人无关"的条目也带前缀 ——
+      //   它回答的是"**谁把它讲出来的**"，那在群档案里恰恰是最该记的一件事
+      //   （原来的群档条目正是"据某人说…"却认不出是哪个号码）。
+      speakerName: speakers[0]?.name ?? '',
       items: plain,
       log,
     })

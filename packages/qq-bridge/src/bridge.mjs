@@ -947,7 +947,7 @@ export class Bridge extends EventTarget {
     return this.#corpus?.stats(opts) ?? { ok: false, why: '语料库未启用' }
   }
 
-  #settleMemory({ chatKey, kind, peerId, senderId, tier, chatName = '', userText = '', answer = '', complete = true, sent = true }) {
+  #settleMemory({ chatKey, kind, peerId, senderId, tier, chatName = '', speakerName = '', userText = '', answer = '', complete = true, sent = true }) {
     const workspace = this.config.dsh?.workspace
     // 标记**无条件剥离**（绝不能把内部协议发给用户），与"要不要落盘"是两件事
     const parsed = parseMemoryMarkers(answer)
@@ -1053,6 +1053,9 @@ export class Bridge extends EventTarget {
         tier,
         // ★ 群名（这一轮协议端核实过）—— 只用于"新建群记忆时把头写成群名"
         chatName,
+        // ★ 发言人昵称（0.3.0alpha）：记忆条目要带「（昵称 QQ 号码）」身份前缀。
+        //   核实不到就是空串，那时条目只写号码（不编名字）。
+        speakerName,
         items: all,
         log: this.log,
       })
@@ -2514,6 +2517,9 @@ export class Bridge extends EventTarget {
         // ★ 群名：`#verifyIdentity` 每轮从协议端核实（`get_group_list`），
         //   这里只用来把**新建的**群记忆文件头写成群名而不是光秃秃的号码。
         chatName: identity?.chatName ?? '',
+        // ★ 发言人昵称（0.3.0alpha）：记忆条目要带「（昵称 QQ 号码）」这个身份前缀，
+        //   来源见 `#speakerLabel`。核实不到时它回空串 —— 那时条目只写号码。
+        speakerName: this.#speakerLabel({ senderId, identity }),
         userText: rendered?.text ?? '',
         answer,
         complete: !(result.timedOut || result.aborted),
@@ -2794,6 +2800,25 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * 写进记忆条目的**发言人标签**（只取名字部分；号码由 `speakerPrefix` 自己拼）。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 两处名字源的优先级（顺序是有理由的，别调换）
+   * ══════════════════════════════════════════════════════════════════════════
+   *   ① `memory/contacts.md` 的**按人昵称**（`#nicknameFor`）：那是使用者**亲自设的**，
+   *      比协议端的花名更可能是他想在记忆里看到的名字（"忘忧"而不是"✨忘忧✨[忙碌]"）；
+   *   ② 本轮**协议端核实过的** `identity.name`：昵称表里没有这个人时的唯一来源。
+   * 两者都没有就返回空串 —— 那时条目只写号码（**不编名字**，与 `memoryFileTitle`
+   * 查不到群名就只写号码是同一条规矩）。
+   */
+  #speakerLabel({ senderId, identity = null } = {}) {
+    const fromContacts = this.#nicknameFor(senderId)
+    if (fromContacts) return fromContacts
+    if (identity?.ok && identity.name) return String(identity.name).trim()
+    return ''
+  }
+
+  /**
    * 「你被叫到之前，群里刚说了什么」（2026-09-30，用户拍板的方案①）。
    *
    * ── 它修的是什么（真机事故，不是设想）─────────────────────────────────────
@@ -2985,6 +3010,10 @@ export class Bridge extends EventTarget {
       senderId: String(senderId),
       tier: 'user',
       chatName,
+      // ★ 发言人昵称（0.3.0alpha）：这条通道的 `senderName` 是调用方核实过的那个
+      //   （见 `#maybePrewakeAffect` 的入参）。它可能与 `contacts.md` 里的按人昵称不同 ——
+      //   这里**优先按人昵称**（使用者亲自设的那份），与 `#speakerLabel` 同一条口径。
+      speakerName: this.#speakerLabel({ senderId: String(senderId), identity: senderName ? { ok: true, name: senderName } : null }),
       items: [{ scope: SCOPE.PERSON, text: entry, source: 'cue-gate' }],
       log: (m) => this.log(m),
     })

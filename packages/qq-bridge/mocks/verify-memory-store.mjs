@@ -37,11 +37,14 @@ import {
   parseMemoryMarkers,
   readMemoryForPrompt,
   screenEntry,
+  speakerPrefix,
+  stripSpeakerPrefix,
   takeReceipt,
   verifyAndRestoreMemory,
   writeReceipt,
 } from '../src/memory-store.mjs'
 import { inspectMemory, formatMemoryReport } from '../src/memory-inspect.mjs'
+import { similarity } from '../src/text-similarity.mjs'
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -337,8 +340,145 @@ function main() {
     }
     check('★ 超过条数上限后整条拒绝（不是截断句子）',
       lastIgnored !== null && /上限/.test(lastIgnored.why), JSON.stringify(lastIgnored))
-    check('已写入的条目没有被破坏（仍然是完整的一行）',
-      read('memory/groups/123456.md').includes('- 第 0 条记录'))
+    // ★ 0.3.0alpha：条目现在**带身份前缀**（`（昵称 QQ 号码）`），所以判据不能写死
+    //   `- 第 N 条记录` 那个字面形状 —— 要允许前缀，但仍然必须**一行一条、结尾完整**
+    //   （"写完只剩半行"才是这条断言真正盯的东西）。
+    check('已写入的条目没有被破坏（仍然是完整的一行，且带身份前缀）',
+      /^- （[^（）]*QQ \d{5,15}）第 0 条记录$/m.test(read('memory/groups/123456.md')),
+      JSON.stringify(read('memory/groups/123456.md').split('\n').find((l) => l.includes('第 0 条'))))
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('⑧b ★★ 身份前缀：每条记忆都带「谁说的」（用户 2026-10-02 要求）')
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // 要求原话：「记录记忆时，加上所记的人的 ID」。口径两问都问过：
+  //   ① **所有条目都加**（含个人档）；② 写法是「（昵称 QQ 号码）」，查不到昵称只写号码。
+  {
+    // ── 纯函数：`speakerPrefix` 的形状 ────────────────────────────────────
+    check('★ 有昵称 →「（昵称 QQ 号码）」', speakerPrefix('100000001', '忘忧') === '（忘忧 QQ 100000001）',
+      speakerPrefix('100000001', '忘忧'))
+    check('★★ 查不到昵称 → 只写号码（**不编名字**，与群名那条同规）',
+      speakerPrefix('100000001') === '（QQ 100000001）' && speakerPrefix('100000001', '   ') === '（QQ 100000001）')
+    check('拿不到号码 → 空串（宁可不带，也不写个假的）', speakerPrefix('') === '' && speakerPrefix(null) === '')
+    check('★ 昵称里的括号被去掉（否则前缀会提前闭合、把这一行写坏）',
+      speakerPrefix('123456789', '他（老板）') === '（他老板 QQ 123456789）', speakerPrefix('123456789', '他（老板）'))
+    check('★ 昵称里的换行被压掉（记忆文件是**一行一条**，换行等于写坏这条）',
+      !speakerPrefix('123456789', '上\n下').includes('\n'), JSON.stringify(speakerPrefix('123456789', '上\n下')))
+    check('剥离函数认得自己写的前缀', stripSpeakerPrefix('（忘忧 QQ 123456789）他说过 X') === '他说过 X')
+
+    // ── 三层落点都要带（含个人档 —— 用户明确选了"所有条目都加"）────────────
+    const d = mkdtempSync(join(tmpdir(), 'dsh-mem-identity-'))
+    const put = (opts) =>
+      applyMemoryItems({ workspace: d, kind: 'group', peerId: '555555', senderId: NON_ADMIN, tier: 'user', ...opts })
+    const at = (rel) => {
+      try {
+        return readFileSync(join(d, rel), 'utf8')
+      } catch {
+        return ''
+      }
+    }
+
+    put({ speakerName: '忘忧', items: [{ scope: SCOPE.FACT, text: '他喜欢钓鱼' }] })
+    check('★★ 群档条目带身份前缀', at('memory/groups/555555.md').includes('- （忘忧 QQ 100000002）他喜欢钓鱼'),
+      JSON.stringify(at('memory/groups/555555.md').split('\n').find((l) => l.includes('钓鱼'))))
+
+    put({ speakerName: '忘忧', items: [{ scope: SCOPE.PERSON, text: '他希望我别走' }] })
+    check('★★ 个人档条目也带（虽然文件名已有号码 —— 要的是"条目自身可查"）',
+      at('memory/people/100000002.md').includes('- （忘忧 QQ 100000002）他希望我别走'),
+      JSON.stringify(at('memory/people/100000002.md').split('\n').find((l) => l.includes('别走'))))
+
+    put({ speakerName: '忘忧', items: [{ scope: SCOPE.GLOBAL, text: '这家店周三休息' }] })
+    const global = at('MEMORY.md')
+    check('★★ 全局条目带身份前缀，且**分类前缀紧随其后**（一个说"谁说的"、一个说"算哪一类"）',
+      global.includes('- （忘忧 QQ 100000002）（全局）这家店周三休息'),
+      JSON.stringify(global.split('\n').find((l) => l.includes('周三'))))
+
+    put({ speakerName: '忘忧', items: [{ scope: SCOPE.SLANG, text: '“挖矿”指熬夜刷题' }] })
+    check('★ 黑话条目同理（身份在前、`（黑话）`在后）',
+      at('memory/groups/555555-slang.md').includes('- （忘忧 QQ 100000002）（黑话）'),
+      JSON.stringify(at('memory/groups/555555-slang.md').split('\n').find((l) => l.includes('挖矿'))))
+
+    // ── ★★ 去重：老条目（没有前缀）不该被重复记一遍 ────────────────────────
+    //
+    // 这条是**迁移**判据：0.3.0alpha 之前写下的条目没有前缀，而"同一句话再来一次"
+    // 仍然必须判成重复 —— 否则每轮都会往文件里塞一条一模一样的记忆。
+    {
+      const d2 = mkdtempSync(join(tmpdir(), 'dsh-mem-dedupe-'))
+      writeFileSync(join(d2, 'MEMORY.md'), '# 全局记忆\n\n- （全局）老的没前缀的一条\n', 'utf8')
+      const r = applyMemoryItems({
+        workspace: d2,
+        kind: 'group',
+        peerId: '555555',
+        senderId: NON_ADMIN,
+        tier: 'user',
+        speakerName: '忘忧',
+        items: [{ scope: SCOPE.GLOBAL, text: '老的没前缀的一条' }],
+      })
+      const text = readFileSync(join(d2, 'MEMORY.md'), 'utf8')
+      check('★★ 同一句话再来一次 → 判成重复（老条目没有前缀也要认得出来）',
+        r.applied[0]?.deduped === true && text.split('\n').filter((l) => l.includes('老的没前缀的一条')).length === 1,
+        `deduped=${r.applied[0]?.deduped}｜行数=${text.split('\n').filter((l) => l.includes('老的没前缀的一条')).length}`)
+    }
+
+    // ── ★★ 更正：身份前缀不许把"他改口了"的判定搅黄 ────────────────────────
+    //
+    // ⚠️ 措辞要用**自指式更正**（「我之前说错了…」）——`其实…`/`改成…` **刻意不在**
+    //    判据里（实测分不开"更正"与"同一主体的另一件事"，理由写在 memory-supersede.mjs
+    //    文件头）。第一版这条测试我写的就是「其实不对…」，于是它红在**判据本来的边界**上、
+    //    而不是红在身份前缀 —— 那是测试写错，不是代码错。
+    {
+      const d3 = mkdtempSync(join(tmpdir(), 'dsh-mem-supersede-'))
+      const put3 = (text) =>
+        applyMemoryItems({
+          workspace: d3,
+          kind: 'private',
+          peerId: NON_ADMIN,
+          senderId: NON_ADMIN,
+          tier: 'admin',
+          speakerName: '忘忧',
+          items: [{ scope: SCOPE.PERSON, text }],
+        })
+      const first = put3('他习惯每天早上八点起床')
+      const second = put3('我之前说错了，他习惯每天早上八点起床，其实是六点')
+      check('★★ 带前缀之后"他改口了"仍然认得出（前缀在比对时被剥掉）',
+        first.applied[0]?.superseded === null && second.applied[0]?.superseded !== null,
+        `第二条 superseded=${JSON.stringify(second.applied[0]?.superseded)}`)
+
+      // ★ 量出来再写结论（下面两条是**实测**，不是推断）：
+      //   · 前缀在两边都在时**抬高**相似度（17 字常量给两边贡献了同一串 token）：
+      //     中等长度 0.375 → 0.520、短正文 0.167 → 0.429、长正文 0.600 → 0.647；
+      //   · 但**没有实测到行为差别** —— 门槛 0.15，两种算法都过线，且候选只在
+      //     同一份文件里比（不会配错人）。
+      //   ∴ "剥掉再比"**不是必要条件**（变异测试证实：去掉剥前缀这条断言不会红），
+      //   它只是**别让无关常量污染分数**。这条注释的第一版把它写成"必要条件"，那是夸大。
+      const held = speakerPrefix(NON_ADMIN, '忘忧')
+      const oldText = '他习惯每天早上八点起床'
+      const newTextPlain = '我之前说错了，他习惯每天早上八点起床，其实是六点'
+      check('★ 实测：前缀会**抬高**相似度（所以剥掉是为了让分数只反映正文，不是为了"判得出来"）',
+        similarity(newTextPlain, oldText) < similarity(`${held}${newTextPlain}`, `${held}${oldText}`),
+        `剥掉 ${similarity(newTextPlain, oldText).toFixed(3)} vs 带前缀 ${similarity(`${held}${newTextPlain}`, `${held}${oldText}`).toFixed(3)}`)
+
+      // ★★ 真正的差异在这里：**老条目没有前缀**（0.3.0alpha 之前写下的），
+      //    新条目有前缀 —— 剥掉之后"他改口了"照样认得出。
+      //    （那条路就是被上面那个变异测试指出来的：把剥前缀去掉，这条也不该红，
+      //     所以它测的是"迁移态能用"，不是"剥前缀必要"。）
+      const d4 = mkdtempSync(join(tmpdir(), 'dsh-mem-migrate-'))
+      mkdirSync(join(d4, 'memory', 'people'), { recursive: true })
+      writeFileSync(join(d4, 'memory', 'people', `${NON_ADMIN}.md`), `# 记忆（桥接维护，勿手改）\n\n- ${oldText}\n`, 'utf8')
+      const r4 = applyMemoryItems({
+        workspace: d4,
+        kind: 'private',
+        peerId: NON_ADMIN,
+        senderId: NON_ADMIN,
+        tier: 'admin',
+        speakerName: '忘忧',
+        items: [{ scope: SCOPE.PERSON, text: newTextPlain }],
+      })
+      check('★★ 迁移态：老条目没前缀 + 新条目有前缀 → "他改口了"照样认得出',
+        r4.applied[0]?.superseded !== null,
+        `superseded=${JSON.stringify(r4.applied[0]?.superseded)}`)
+    }
   }
 
   section('⑨ 篡改检测：绕过桥接改记忆必须被回滚（提示词不是保证，这里才是）')

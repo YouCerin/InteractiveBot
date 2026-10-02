@@ -818,7 +818,16 @@ export function repairGroupMemoryTitle({ workspace, rel, chatName = '', log = ()
   }
 }
 
-function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatName = '' }) {
+/**
+ * 往一份记忆文件追加一条（含**身份前缀**、去重、更正标注、快照与账本）。
+ *
+ * @param {string} [opts.identity] 身份前缀 `（昵称 QQ 号码）`（见 `speakerPrefix`）。
+ *   ★ 2026-10-02 用户要求「记录记忆时加上所记的人的 ID」：**写进文件的是带前缀的那一行**，
+ *     于是它在**跨重启、跨会话**之后仍然答得出"这条是谁说的"。
+ * @param {string} [opts.prefix] 条目自身的分类前缀（`（全局）` / `（黑话）`），排在前面的
+ *   身份前缀**之后** —— 两个前缀的作用不同：一个说"谁说的"，一个说"算哪一类"。
+ */
+function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatName = '', identity = '', prefix = '' }) {
   const resolved = resolveMemoryPath(workspace, rel)
   if (!resolved.ok) return { ok: false, why: `路径不合法：${resolved.error}` }
   const abs = resolved.abs
@@ -827,8 +836,23 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatN
   // ⚠️ 读失败时这里也会**喊一次**（`log` 传下去）——写入侧读不到文件意味着
   //    去重与计数都不可信，那也必须让人看得见。
   const entries = readEntryLines(abs, { log, rel })
-  const line = `- ${entry}`
-  if (entries.includes(line)) return { ok: true, deduped: true, rel }
+  // ★★ 身份前缀加在**正文之前**，于是"这一条是谁说的"是文件内容的一部分（跨重启可查）。
+  const withIdentity = `${identity}${prefix}${entry}`
+  const line = `- ${withIdentity}`
+
+  // ── 去重：**先按整行，再按"同一句 + 同一人"** ────────────────────────────
+  //
+  // 第一判据（整行相等）负责"刚写过的一模一样再来一次"。
+  // 第二判据处理**老条目**（0.3.0alpha 之前写下的那些**没有**身份前缀）：
+  //   读者不该因为"以前记的那条少个前缀"就被塞进第二条一模一样的记忆 ——
+  //   那正是旧去重想避免的事。把两边各自剥掉身份前缀再比，就同时覆盖
+  //   带前缀与不带前缀两种存量。
+  // ⚠️ 剥离**只用于这个比较**，写进文件的仍是带前缀的那一行。
+  const canon = (l) => stripSpeakerPrefix(String(l).replace(/^-\s*/, '')).trim()
+  const wantCanon = canon(line)
+  if (entries.includes(line) || entries.some((l) => canon(l) === wantCanon)) {
+    return { ok: true, deduped: true, rel }
+  }
   if (entries.length >= MAX_ENTRIES) {
     return { ok: false, why: `该文件已有 ${entries.length} 条（上限 ${MAX_ENTRIES}），请先合并或删掉过时的` }
   }
@@ -840,11 +864,23 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatN
   // ★ 判据是确定性的（见 memory-supersede.mjs 文件头）：更正措辞 + 相似度门槛，
   //   或模型的显式 `fix` 档。**不带措辞的陈述式冲突认不出来**（那条边界如实写在文档里）。
   // ★ 旧条目**留着**，只加一行标注并**停止注入** —— 这样"我说错过什么"仍然查得到。
+  //
+  // ── 身份前缀要不要从两边剥掉？**量过再说**（别照抄"显然应该剥"这种直觉）──────
+  //   实测（bigram Jaccard，前缀 `（忘忧 QQ 100000002）` 17 字）：
+  //     · 前缀在两边都在时会**抬高**相似度（它给两边贡献了同一串 token）：
+  //       中等长度正文 0.375 → 0.520；短正文 0.167 → 0.429；长正文 0.600 → 0.647；
+  //     · 但**没有实测到任何行为差别**：门槛是 0.15，两种算法都过线；
+  //       而且候选只在**同一份文件**里比（个人档里只有他的条目；群档里两个人的
+  //       前缀不同），所以前缀也不会让"配错一条别人的"。
+  //   ∴ 剥前缀的理由**不是"不剥就判不出来"**（那是夸大），而是：
+  //     **别让一个与内容无关的常量污染相似度分数** —— 分数要能被读懂
+  //     （"0.52"里有多少来自内容、多少来自那 17 个字？），也要让将来调门槛有意义。
+  //   ⚠️ 这条边界如实写在这里：**把这两处 strip 去掉，现有断言不会红**（变异测试证实过）。
   let superseded = null
   try {
     const target = pickSupersedeTarget({
       lines: entries,
-      newEntry: entry,
+      newEntry: wantCanon,
       similarity,
       force: forceSupersede === true,
     })
@@ -878,12 +914,43 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatN
   // ★ H3：在**写入侧**登记"刚写下" —— 否则这条新记忆会被 25 条注入上限挤掉，
   //   而且**不会有任何地方报错**（用户听到的是"记住了"，磁盘上也有，但它再也不出现）。
   //   失败不影响写入本身，但要留证据（第 9 条）。
+  // ★ 登记的是**带身份前缀的那一行**（`withIdentity`）——账本是按条目文本
+  //   反查"这条进过上下文没有"的，登记成没前缀的正文就等于两条对不上，
+  //   表现是"刚写下的那条被判成从没用过，然后被上限挤掉"。
   try {
-    recordWrite({ workspace, entries: [entry], rel, log })
+    recordWrite({ workspace, entries: [withIdentity], rel, log })
   } catch (error) {
     log(`⚠️ [memory] 使用账本没记上"刚写下"（记忆本身已写好）：${error?.message ?? error}`)
   }
   return { ok: true, rel, added: line, superseded }
+}
+
+/**
+ * 「是谁说的/记给谁的」前缀（2026-10-02 用户要求：**记录记忆时带上所记的人的 ID**）。
+ *
+ * 格式 `（昵称 QQ 号码）`；**查不到昵称就只写号码** `（QQ 号码）` ——
+ * 与"发言人昵称查不到就不编名字"同一条规矩（桥接那边核实不到时 `#nicknameFor` 返回空）。
+ *
+ * ⚠️ 为什么写成"人话 + 号码"而不是只写号码：号码是**稳定键**（昵称会变、会有重名），
+ *    而昵称是打开文件时唯一能让人认出"这是谁"的东西。两者都要。
+ */
+export function speakerPrefix(senderId, speakerName = '') {
+  const id = String(senderId ?? '').trim()
+  if (!id) return ''
+  const name = String(speakerName ?? '').trim()
+  // ⚠️ 昵称里可能出现 `）`／换行之类的字符（它是从协议端来的、不一定是干净文本）：
+  //    统一压成单行并去掉会破坏"这一行"结构的字符，否则一条记忆会被拆成两行
+  //    （而记忆文件是**一行一条**的格式，拆行等于把这条记忆写坏）。
+  const safe = name.replace(/[\r\n]+/g, ' ').replace(/[（）()]/g, '').trim()
+  return safe ? `（${safe} QQ ${id}）` : `（QQ ${id}）`
+}
+
+/** 从一行里认出身份前缀（`（…QQ 号码）`），用于"同一句话"的比较。 */
+const SPEAKER_PREFIX_AT_START = /^（[^（）]*QQ\s*\d{5,15}）/
+
+/** 去掉一行开头的身份前缀（没有就原样返回）。 */
+export function stripSpeakerPrefix(entry) {
+  return String(entry ?? '').replace(SPEAKER_PREFIX_AT_START, '')
 }
 
 /**
@@ -898,10 +965,22 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatN
  * @param {string} [opts.chatName] 群名（协议端核实过的）。**只用于写文件头**：
  *   新建那份群记忆时把头写成「# 记忆·摸鱼群（群 700000001）…」而不是一个裸号码。
  *   查不到就留空 —— 那时只写号码，**不编名字**（与"昵称查不到就不编"同一条规矩）。
+ * @param {string} [opts.speakerName] 这一轮发言人的昵称（协议端核实过的）。
+ *   **只用于给记忆条目加身份前缀**（见 `speakerPrefix`）：查不到就只写号码。
  * @param {{scope: string, text: string}[]} opts.items
  * @returns {{applied: object[], ignored: object[], wroteFiles: string[]}}
  */
-export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, chatName = '', items, log = () => {} }) {
+export function applyMemoryItems({
+  workspace,
+  kind,
+  peerId,
+  senderId,
+  tier,
+  chatName = '',
+  speakerName = '',
+  items,
+  log = () => {},
+}) {
   // ★ 三层的读写落点由 `layoutFor` 一处产出（读/写分头写迟早分叉，
   //   而分叉的表现是"写进去了、下一轮却不注入" —— 等于没记）。
   //   `senderId` 就是**这一轮真实核实过的发言人**，个人层的落点由它决定（D20：代码裁定归属）。
@@ -909,6 +988,18 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, chat
   const applied = []
   const ignored = []
   const wroteFiles = []
+  /**
+   * ★★ 这一批条目统一的**身份前缀**（用户 2026-10-02：「记录记忆时加上所记的人的 ID」）。
+   *
+   * ★ 为什么在**写入侧**、而且写进文件：这是"这条记忆是谁说的"这个问题唯一
+   *   跨重启、跨会话、且能 grep 的答案。只在提示词里显示是不够的 ——
+   *   那只能回答"这一轮",而记忆文件是要被人（和下一轮的我）翻的。
+   * ★ 为什么整批共用一个：这一批条目的**归属由代码裁定**（`senderId` = 这一轮
+   *   真实核实过的发言人，见 `layoutFor`），所以不存在"这批里几条属于不同人"。
+   * ★ 拿不到号码时是**空串**：那时不加前缀、也不编一个 —— 与"查不到昵称就不编名字"同规。
+   *   （拿不到号码的条目本身在下面各自的分支里会被如实忽略，见 `personTarget` 那条。）
+   */
+  const identity = speakerPrefix(senderId, speakerName)
 
   for (const item of items ?? []) {
     const scope = item.scope
@@ -964,7 +1055,7 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, chat
     //        这一点靠提示词约束（"全局是共享的，别把某人的私事写进去"），
     //        属于"请求"而不是硬保证 —— 如实记在这里。
     if (scope === SCOPE.GLOBAL) {
-      const r = appendEntry({ workspace, rel: FILE.global, entry: `（全局）${entry}`, log })
+      const r = appendEntry({ workspace, rel: FILE.global, entry, log, identity, prefix: '（全局）' })
       if (r.ok) {
         applied.push({ scope, entry, source, rel: FILE.global, deduped: r.deduped })
         if (!r.deduped) wroteFiles.push(FILE.global)
@@ -978,13 +1069,16 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, chat
     //   也**没有**任何参数能指定"记给谁"。写第三方的条目要先把发言人列进
     //   编号清单（`#1`/`#2`）再由桥接映射，那是二期的设计。
     //   ⚠️ 这里的判据不是"提示词要求了"，而是**只有这一条落点可选**。
+    // ★ 0.3.0alpha：个人档里也**照加**身份前缀（用户 2026-10-02 明确要求"所有条目都加"）。
+    //   明知文件名与文件头已经带了号码，仍然加 —— 因为要的是**条目自身可查**：
+    //   把一条记忆从文件里贴到别处（回执、整理、审计）时，"这是谁"不该依赖它从哪个文件读出来。
     if (scope === SCOPE.PERSON) {
       const rel = L.personTarget
       if (!rel) {
         ignored.push({ scope, entry, source, why: '拿不到这一轮发言人的号码，写不了个人档' })
         continue
       }
-      const r = appendEntry({ workspace, rel, entry, log, forceSupersede: item.force === true })
+      const r = appendEntry({ workspace, rel, entry, log, forceSupersede: item.force === true, identity })
       if (r.ok) {
         applied.push({ scope, entry, source, rel, deduped: r.deduped, superseded: r.superseded ?? null })
         if (!r.deduped) wroteFiles.push(rel)
@@ -1002,7 +1096,7 @@ export function applyMemoryItems({ workspace, kind, peerId, senderId, tier, chat
     const prefix = scope === SCOPE.SLANG ? '（黑话）' : ''
     // ★ H4：模型显式写了 `fix` 档 → 它明确说了"这是在更正上面记错的某一条"，
     //   于是把相似度门槛降到 floor（不再要求自指式措辞 —— 那种措辞实测认不全）。
-    const r = appendEntry({ workspace, rel, entry: `${prefix}${entry}`, log, forceSupersede: item.force === true, chatName })
+    const r = appendEntry({ workspace, rel, entry, log, forceSupersede: item.force === true, chatName, identity, prefix })
     if (r.ok) {
       // ★ 顺手自愈群记忆的标题（补群名 / 清重复头）。**只在群聊层**做，
       //   而且它自己会判断"要不要改"（不需要改就一次盘都不写）。
@@ -1258,6 +1352,11 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   lines.push(
     '  <<<MEMORY fix 更正后的正确说法>>>        ← **更正**你之前记错的那条（旧条目会保留并标注"已被更正"，之后不再使用）',
   )
+  // ★ 0.3.0alpha：落盘时系统会**自动**在正文前加上「（昵称 QQ 号码）」这个身份前缀
+  //   （用户要求"记录记忆时加上所记的人的 ID"）。这一行是**告诉模型别自己加**：
+  //   它拿不到号码（见下面那条 `person` 的说明），自己乱写只会写进一个假号码，
+  //   而且会和系统那份叠成两层前缀。
+  lines.push('每条落盘后，系统会在正文前**自动加上**「（昵称 QQ 号码）」标明这条是谁说的 —— **你别自己写号码**。')
   lines.push(
     '',
     '**三层怎么选（选错会串场，这一节最重要）**：',
