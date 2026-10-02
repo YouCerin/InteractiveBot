@@ -1,34 +1,42 @@
 /**
- * 聊天记录评审台 —— **数据层**：评分怎么存、统计怎么算、改写草稿怎么落地。
+ * 聊天记录评审台 —— **数据层**：评分怎么存、统计怎么算、标签与修改意见怎么落。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 2026-10-02 的**形状变更**（使用者推翻了第一版）
+ * 2026-10-02 的三次形状变更（使用者每次都在页面上看到了问题）
  * ══════════════════════════════════════════════════════════════════════════
- * 第一版：人从一张**手写标签表**里选标签 → 按标签统计 → 生成"反例清单"追加到文件尾。
- * 使用者的原话：**「标签系统并不合理，我的习惯是对说得对与不对的地方进行评论，
- * 生成修订草稿应基于评论而不是标签，对评论进行整理之后再生成草稿，并且按需要
- * 精简整理已有的闲聊.md」**。
+ * **第一版**：我预先写好一张标签税则，人从里面选 → 按标签统计 → 反例清单追加到文件尾。
+ * 使用者：「标签系统并不合理，我的习惯是对说得对与不对的地方进行评论」。
+ * → 于是删掉税则、评论成为一等公民，"点"改由模型从评论里归纳。
  *
- * 于是现在：
- *   · **标签整套删掉**（税则、漂移检查、标签排行、"点"由人预先设定这件事本身都删了）。
- *     旧数据里的 `tags` 字段**读得进来但不参与任何逻辑**（不丢历史，也不再影响结论）。
- *   · **评论是一等公民**：`{verdict, comment}`，评论才是素材。
- *   · **"点"从评论里长出来**：由 `chat-review-consolidate.mjs` 调模型归纳，
- *     结果存成一份"整理"（consolidation），而不是我预先写好的分类。
- *   · **草稿 = 整篇重写**（可按需精简），不是"追加一段"。改写必须过**锚点核对**
- *     （底线要点一条都不许丢），且永远是"人点确认 + 先备份"。
+ * **第二版**：模型归纳出的"点"自动并进点表，并在启动时**播种**，页面上就出现了
+ * 一整排按钮。使用者看到的效果：**按钮名是长句子**（播种用的是聚类出来的原话，
+ * 一条 40 字的评论就成了一个"标签"），糊成一片没法点；而且他明确要求
+ * **「标签系统改为人工写标签」**、**「整理不再自动往标签表里塞东西」**。
+ * → 于是：
+ *   · **标签人工写**（新建 / 改名 / 改说明 / 删），标题**限 12 字**（它是按钮上的字，
+ *     不是一句话；40 字的标题在按钮上就是灾难 —— 这是实测出来的）；
+ *   · **取消自动并入与启动播种**（那条路已经整个删掉，`SEED_POINTS` / `mergePoints` /
+ *     `seedPointsIfEmpty` 都不在了 —— 留着"没人调但会写使用者数据"的函数是隐患）；
+ *   · 整理**不再产出标签**，它产出的是**修改意见**。
  *
- * ── 写操作仍然只有三件 ────────────────────────────────────────────────────
- *   ① 评分；② 删批次（都在工作区 `runtime/chat-review/` 下）；③ **应用改写**
- *   （唯一碰机器人人格的操作：先备份 → 原子写风格文件 → 顺带同步
- *   `src/chat-mode.mjs` 里的出厂默认常量，否则那两份会开始漂）。
+ * **第三版（本版）**：产物从"整篇重写 styles/闲聊.md"改成**逐条修改意见**。
+ * 使用者：「最终基于评价过的消息记录和评论，生成闲聊.md 的修改意见」+
+ * 「只要意见，修改内容由 LLM 另外执行」。所以：
+ *   · 本模块**不再写 `styles/闲聊.md`**、**不再同步 `src/chat-mode.mjs`** ——
+ *     应用/备份/常量同步那整条路都删了（`applyDraft` 不存在了）；
+ *   · 意见以 `suggestions` 存在整理记录里（针对现有哪一条 → 建议怎么改 → 为什么）。
+ *   · ★ 为什么这是对的：上一版实测跑出来 **2389 → 2388 字**，等于把原文件还给我 ——
+ *     整篇重写在这个场景里没有产出价值，而"该改哪一条"才是人能直接用的东西。
+ *
+ * ── 写操作只剩两件（都在工作区 `runtime/chat-review/` 下）─────────────────
+ *   ① 评分；② 标签的增删改；③ 删批次。**再也不碰机器人的人格文件。**
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { checkAnchors, clusterComments, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
-import { sha256, syncStyleConstant } from './chat-style-sync.mjs'
+import { anchorCoverage, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
+import { sha256 } from './chat-style-sync.mjs'
 
 /** 评审数据放在工作区的 `runtime/` 下（与语料库、任务台账同级；不进发布包）。 */
 export const REVIEW_REL = 'runtime/chat-review'
@@ -46,35 +54,34 @@ export const VERDICTS = [
 /** 单条评论的长度上限（评论是散文，给得比标签宽 —— 但仍要有上限）。 */
 export const COMMENT_MAX_CHARS = 2000
 
-/** 点标题/摘要的长度上限（它是按钮上的字，不是散文）。 */
-export const POINT_TITLE_MAX_CHARS = 40
+/**
+ * 标签标题/说明的长度上限。
+ *
+ * ★★ 标题 **12 字**是实测定的（2026-10-02，使用者看到截图后反馈）：
+ *   上一版是 40 字，而"自动播种"把一整句评论（「不合适打招呼逻辑，一句改成这个话
+ *   有点冗杂…」）塞成了标签名 —— 一排长句子糊在一起，**没法快速点**，
+ *   这个功能存在的意义（"方便我便捷评论"）当场就没了。
+ *   标题是**按钮上的字**，说明（可以长）放在 `summary` 里当 hover 提示。
+ */
+export const POINT_TITLE_MAX_CHARS = 12
 export const POINT_SUMMARY_MAX_CHARS = 300
 
 /**
- * **初始的点**（使用者 2026-10-02 拍板：点表为空时用它播种）。
- *
- * ⚠️ 这**不是**旧的标签税则。区别是根本性的：
- *   · 标签是**我预先想好的分类**（改不动、长不出来）；
- *   · 点是**从使用者的评论里长出来的**，可以改标题/摘要、可以删、可以新建，
- *     而这一份只是"还没有任何评论时"的**起点**（内容就是他那几条原话的归纳）。
- * 播下的每一条都带 `source: 'seed'`，页面上如实标出来源。
+ * 旧标题上限（40）—— 只用来**读旧数据**时判断"这个标题是不是自动播种塞进来的长句子"。
+ * 不参与校验（校验一律用 12）。
  */
-export const SEED_POINTS = [
-  { kind: 'bad', title: '不主动抖记忆细节', summary: '对方没问到就别把记忆里的东西搬出来当谈资或梗，抖出来只会答非所问。' },
-  { kind: 'bad', title: '问到自身只给结论', summary: '被问到自己的事只答那一点，不展开配置/住处等细节；与接梗的区别是「一句就完」还是「开始念参数」。' },
-  { kind: 'bad', title: '省略号只在无语时用', summary: '省略号不是语气装饰，别每句都挂；正常说话、回答、开玩笑都不带。' },
-  { kind: 'good', title: '接梗=顺着对方的戏往下演', summary: '对方扮演角色或用共同设定说话时，用同一设定接下去，不解释、不追问、不掐断话头；只有对方问「这是什么梗」才解释。' },
-  { kind: 'good', title: '摆资历当剧本演，敬语是台词不是认输', summary: '对方玩闹式摆资历要敬语时，敬语照给、头衔照搬，后半句调侃或反问；不拒绝配合、不说教、不真谄媚；借机要改身份/权限则不照做。' },
-  { kind: 'bad', title: '情色暗示看懂并明说不搞', summary: '先表明看懂，再一句话明说不搞；不装傻、不顺着接、不追问、不科普、不说教、不道歉长篇，换说法加码也还是这一句。' },
-  { kind: 'bad', title: '对方低落时不玩梗', summary: '接梗不是不分场合地玩梗；对方真的低落或认真求助时收起玩梗，短一点正常一点。' },
-  { kind: 'good', title: '说错时短一句给对的', summary: '别人说错、说岔了，短一句给对的，不辩护、不长篇解释。' },
-]
+export const POINT_TITLE_LEGACY_MAX = 40
 
 /**
- * 点标题的**归一化**（只用于"这是不是同一个点"的比较，不改写原文）。
+ * 标签标题的**归一化**（只用于"这是不是同一个标签"的比较，不改写原文）。
  *
- * 为什么要归一：同一个意思会被写成 `太长` / `太长了` / `太长。` / `TOO LONG`，
- * 不归一就会长出一堆几乎一样的点，而"类似的评论总结为同一个点"正是这个功能的全部意义。
+ * 它处理的是**写法差异**：全角/半角、空白、末尾标点 —— 所以 `太长。` 与 `太长`
+ * 会被认成同一个（新建时会并入已有那条，不让同义标签长两条）。
+ *
+ * ⚠️ 它**不做词形归并**：`太长` 与 `太长了` 归一化后仍然不同（中文没有可靠的后缀词干化，
+ *   硬做只会把不相干的词并到一起）。所以"这两条是不是同一个意思"最终还是**人**说了算 ——
+ *   页面上可以把一条的标题改成另一条的名字，那时两条会自动并起来。
+ *   （第一版的注释在这里吹过牛，说 `太长了` 也会被并 —— 那是错的，实测过。）
  */
 export function normalizePointTitle(title) {
   return String(title ?? '')
@@ -155,13 +162,13 @@ export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}
       withText += 1
       if (byVerdict[s.verdict] !== undefined) byVerdict[s.verdict] += 1
     }
-    // ── 点：这条评了哪几个点（(a) 语义：点与评论**各自留痕**，谁都不覆盖谁）──
+    // ── 标签：这条评了哪几个标签（(a) 语义：标签与评论**各自留痕**，谁都不覆盖谁）──
     const pointIds = Array.isArray(s.points) ? s.points.filter(Boolean) : []
     const points = pointIds.map((pid) => {
       const p = pointsById[pid]
       perPoint.set(pid, (perPoint.get(pid) ?? 0) + 1)
       // 点被删掉之后 id 会悬空：**如实显示 id**，不编一个标题出来
-      return p ? { id: pid, kind: p.kind, title: p.title } : { id: pid, kind: '', title: `（已删除的点 ${pid}）` }
+      return p ? { id: pid, kind: p.kind, title: p.title } : { id: pid, kind: '', title: `（已删除的标签 ${pid}）` }
     })
     if (points.length) withPoints += 1
     list.push({
@@ -287,14 +294,15 @@ function readJson(abs, fallback, log) {
 /**
  * 造一个评审数据仓库。
  *
+ * ⚠️ 它**不需要**风格文件的路径 —— 这一版不写 `styles/闲聊.md`（产物是修改意见，
+ * 由人拿去给 LLM 执行）。风格文件的正文由调用方读好后作为 `styleBefore` 传进
+ * `saveConsolidation`，只用来记"这份意见是针对哪个版本提的"。
+ *
  * @param {object} opts
- * @param {string} opts.workspace      工作区（评审数据写在它下面）
- * @param {string} opts.styleFile      `styles/闲聊.md` 的**绝对**路径（应用改写时用）
- * @param {string} [opts.chatModePath] `src/chat-mode.mjs` 的绝对路径（同步出厂常量用；
- *   不传 = 不同步，并在结果里如实说明）
+ * @param {string} opts.workspace 工作区（评审数据写在它下面）
  * @param {(m: string) => void} [opts.log]
  */
-export function createReviewStore({ workspace, styleFile, chatModePath = '', log = () => {} } = {}) {
+export function createReviewStore({ workspace, log = () => {} } = {}) {
   const root = String(workspace ?? '')
   if (!root) throw new Error('没有工作区，评审数据无处可放')
   const dir = join(root, REVIEW_REL)
@@ -340,7 +348,7 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     }
   }
 
-  /** 点表（`points.json`）。读坏不静默 —— 点表空了会让人以为"我的点丢了"。 */
+  /** 标签表（`points.json`）。读坏不静默 —— 表空了会让人以为"我的标签丢了"。 */
   const emptyPoints = () => ({ version: REVIEW_VERSION, updatedAt: 0, points: [] })
   const readPoints = () => {
     const raw = readJson(pointsPath, emptyPoints(), log)
@@ -471,7 +479,7 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     if (!ensureKnownIds().has(key)) return { ok: false, why: '这个条目不属于任何批次（可能批次被删了）' }
     const valid = validateScore({ verdict, comment })
     if (!valid.ok) return valid
-    // ★ 点必须是点表里真有的：写进一个不存在的点 id，报告里就会冒出一条点不到的"点"
+    // ★ 标签必须是标签表里真有的：写进一个不存在的 id，报告里就会冒出一条点不到的标签
     //   （而且点表被编辑过之后它会永远悬空）——所以**点名拒绝**，不静默丢弃。
     const wanted = [...new Set((Array.isArray(points) ? points : []).map((x) => String(x)).filter(Boolean))]
     if (wanted.length) {
@@ -555,10 +563,10 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
   }
 
   /**
-   * 新建或编辑一个点。
-   * - 不带 `id` = 新建：**先按归一化标题查重**，已存在就并入它（这就是
-   *   "类似的评论总结为同一个点"的手工版本）；
-   * - 带 `id` = 编辑那一条（标题/摘要/分类都能改）。
+   * 新建或编辑一个标签。
+   * - 不带 `id` = 新建：先按归一化标题查重（`太长。` 与 `太长` 算同一条，**词形不同不算**），
+   *   已存在就并入它、不新增（否则标签表会长出一堆同义条目）；
+   * - 带 `id` = 编辑那一条（标题/说明/分类都能改）。
    */
   function upsertPoint({ id = '', kind = 'bad', title, summary = '' } = {}) {
     const valid = validatePoint({ kind, title, summary })
@@ -570,10 +578,10 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
 
     if (id) {
       const hit = table.points.find((p) => p.id === String(id))
-      if (!hit) return { ok: false, why: `没有这个点：${id}` }
+      if (!hit) return { ok: false, why: `没有这个标签：${id}` }
       const merged = table.points.find((p) => p.id !== hit.id && normalizePointTitle(p.title) === normalizePointTitle(t))
       if (merged) {
-        // 编辑后的标题和另一个点撞了 ⇒ 并入那一个（合并计数），删掉自己
+        // 编辑后的名字和另一个标签撞了 ⇒ 并入那一个（合并计数），删掉自己
         merged.count += hit.count
         merged.summary = s || merged.summary
         merged.updatedAt = now
@@ -592,7 +600,7 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
 
     const existing = table.points.find((p) => normalizePointTitle(p.title) === normalizePointTitle(t))
     if (existing) {
-      // 已经有一个"同一个意思"的点：并进去，不新增（否则点表会长出一堆同义条目）
+      // 已经有一个"同一个意思"的标签：并进去，不新增（否则标签表会长出一堆同义条目）
       existing.count += 0
       existing.summary = s || existing.summary
       if (kind !== existing.kind) existing.kind = kind
@@ -605,104 +613,37 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     return { ok: true, point, created: true }
   }
 
-  /** 删一个点。**如实报出有多少条评分引用过它**（引用不会跟着删，报告里会显示"已删除的点"）。 */
+  /**
+   * 删一个标签。**如实报出有多少条评分引用过它**（引用不会跟着删，报告里会显示"已删除的标签"）。
+   */
   function deletePoint(id) {
     const key = String(id ?? '')
     const table = readPoints()
     const hit = table.points.find((p) => p.id === key)
-    if (!hit) return { ok: false, why: `没有这个点：${key}` }
+    if (!hit) return { ok: false, why: `没有这个标签：${key}` }
     const usedBy = Object.values(readScores().scores).filter((s) => (s.points ?? []).includes(key)).length
     writePoints(table.points.filter((p) => p.id !== key))
     return { ok: true, removed: hit, usedBy }
   }
 
   /**
-   * 把**整理**产出（或本地聚类产出）的点并进点表。
+   * **清掉"自动塞进来的长标题标签"**（一次性清理，给升级到 12 字上限之前的数据用）。
    *
-   * 合并判据 = **归一化标题相同**（`太长` / `太长了` / `太长。` 是同一个点）。
-   * `count += evidence.length || 1`：被几条评论支撑就算几次 —— 这是"点排行"的输入。
+   * ★ 为什么要有它：上一版会在启动时**自动播种**（用聚类出来的原话当标题），
+   *   使用者的点表里因此躺着一排长句子标签 —— 而这一版已经取消播种。
+   *   让人一条条手点删除不合理，所以给一个明确的清理动作：
+   *   **只删"来源不是手写"（source !== 'manual'）且标题超过 12 字**的那些，
+   *   手写的、短的一律不动（有断言）。
    */
-  function mergePoints(incoming = [], source = 'consolidated') {
+  function pruneLongAutoPoints() {
     const table = readPoints()
-    const now = Date.now()
-    let created = 0
-    let merged = 0
-    for (const raw of incoming) {
-      const valid = validatePoint({ kind: raw?.kind, title: raw?.title, summary: raw?.summary ?? '' })
-      if (!valid.ok) continue // 模型可能给出空标题：跳过，不写半个点
-      const t = String(raw.title).trim()
-      const s = String(raw.summary ?? '').trim()
-      const n = Math.max(1, Array.isArray(raw.evidence) ? raw.evidence.length : 1)
-      const hit = table.points.find((p) => normalizePointTitle(p.title) === normalizePointTitle(t))
-      if (hit) {
-        hit.count += n
-        hit.summary = s || hit.summary // 摘要以新值覆盖旧的（新的通常更贴近现在的说法）
-        if (raw.kind === 'good' || raw.kind === 'bad') hit.kind = raw.kind
-        hit.updatedAt = now
-        merged += 1
-        continue
-      }
-      table.points.push({
-        id: nextPointId(table.points),
-        kind: raw.kind === 'good' ? 'good' : 'bad',
-        title: t,
-        summary: s,
-        count: n,
-        source,
-        createdAt: now,
-        updatedAt: now,
-      })
-      created += 1
-    }
-    writePoints(table.points)
-    return { ok: true, created, merged, total: table.points.length, points: table.points }
-  }
-
-  /**
-   * **幂等播种**：点表为空时落一份初始的点；非空时**一个字都不动**。
-   *
-   * ★ 为什么必须幂等且不覆盖：使用者会编辑这些点（改标题/摘要/删除）。
-   *   如果每次启动都"补种"，他删掉的那条会**自己回来** —— 那是最让人不敢用的行为
-   *   （与 `personas.mjs` 的"删掉之后不许自己回来"是同一条纪律）。
-   * ★ 为什么这里**不调模型**：启动就花钱是不可接受的，而且模型调用必须是人点一下才发生
-   *   （见 API.md）。所以有评论时用**本地聚类**给出初始点，模型整理仍然由人触发。
-   *
-   * @param {object} opts
-   * @param {object[]} [opts.points] 要播的点（默认 `SEED_POINTS`）
-   * @param {object[]} [opts.comments] 已有的评论（有则先聚类，产出更贴近他的初始点）
-   */
-  function seedPointsIfEmpty({ points = SEED_POINTS, comments = [] } = {}) {
-    const table = readPoints()
-    if (table.points.length) return { ok: true, seeded: 0, why: '点表非空，不播种（使用者编辑过的点不许被覆盖）' }
-
-    const fromComments = []
-    if (Array.isArray(comments) && comments.length) {
-      for (const kind of ['bad', 'good']) {
-        for (const c of clusterComments({ comments, verdict: kind })) {
-          fromComments.push({
-            kind,
-            title: c.text.length > 24 ? `${c.text.slice(0, 24)}…` : c.text,
-            summary: `由 ${c.count} 条评论聚类得出（本地聚类，未调模型；你可以改标题或删掉它）。全部原话：${c.text}`,
-          })
-        }
-      }
-    }
-    const use = fromComments.length ? fromComments : points
-    const src = fromComments.length ? 'consolidated' : 'seed'
-    const now = Date.now()
-    const seeded = use.map((p, i) => ({
-      id: `p-${i + 1}`,
-      kind: p.kind === 'good' ? 'good' : 'bad',
-      title: String(p.title).trim(),
-      summary: String(p.summary ?? '').trim(),
-      count: 0,
-      source: src,
-      createdAt: now,
-      updatedAt: now,
-    }))
-    writePoints(seeded)
-    log(`[评审台] 点表为空 → 播下 ${seeded.length} 个初始的点（来源：${src === 'seed' ? '内置种子（使用者原话的归纳）' : '已有评论的本地聚类'}）`)
-    return { ok: true, seeded: seeded.length, source: src, points: seeded }
+    const doomed = table.points.filter(
+      (p) => p.source !== 'manual' && [...String(p.title ?? '')].length > POINT_TITLE_MAX_CHARS,
+    )
+    if (!doomed.length) return { ok: true, removed: 0, ids: [] }
+    const ids = new Set(doomed.map((p) => p.id))
+    writePoints(table.points.filter((p) => !ids.has(p.id)))
+    return { ok: true, removed: doomed.length, ids: [...ids] }
   }
 
   // ── 整理（consolidation）──────────────────────────────────────────────
@@ -710,36 +651,42 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     return join(consolidateDir, `${String(id)}.json`)
   }
 
-  /** 存一份整理结果（点 + 改写 + 锚点核对 + diff）。 */
+  /**
+   * 存一份**修改意见**（针对 `styles/闲聊.md` 现有哪一条 → 建议怎么改 → 为什么）。
+   *
+   * ★ 为什么不再存"改写后的整篇"：实测那一版的产出是 2389 → 2388 字（等于把原文件
+   *   还回来），而使用者要的是**能直接执行的修改意见**（「只要意见，修改内容由 LLM
+   *   另外执行」）。所以这里存的是 `suggestions`，而且**本模块从此不写风格文件**。
+   *
+   * @param {object} opts
+   * @param {object[]} opts.result.suggestions 意见数组（`{action,target,advice,reason,evidence}`）
+   * @param {string} [opts.styleBefore] 这份意见是针对哪个版本的风格文件提的（存 sha 做对照）
+   */
   function saveConsolidation({ scope = 'all', result, styleBefore = '' } = {}) {
-    if (!result?.rewritten) return { ok: false, why: '整理结果里没有改写后的正文' }
+    const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : []
+    if (!suggestions.length) return { ok: false, why: '整理结果里一条修改意见都没有' }
     const id = `c-${new Date().toISOString().replace(/[:.]/g, '-')}`
     const record = {
       version: REVIEW_VERSION,
       id,
       scope: String(scope),
       createdAt: Date.now(),
-      points: result.points ?? [],
-      rewritten: result.rewritten,
-      dropped: result.dropped ?? [],
-      anchors: result.anchors ?? checkAnchors({ text: result.rewritten, anchors: STYLE_ANCHORS }),
+      suggestions,
+      notes: String(result.notes ?? ''),
+      // ★ 锚点不再是"应用前的门禁"，而是**提示**：哪些底线要点这份意见覆盖到了、
+      //   哪些一条都没提（人自己判断"要不要动它们"）。
+      anchorCoverage: result.anchorCoverage ?? anchorCoverage({ suggestions, anchors: STYLE_ANCHORS }),
       model: result.model ?? null,
       ms: result.ms ?? null,
       usage: result.usage ?? null,
       promptStats: result.promptStats ?? null,
       via: result.via ?? null,
       styleBeforeSha: sha256(styleBefore),
-      styleBeforeChars: String(styleBefore ?? '').length,
-      chars: String(result.rewritten).length,
-      diff: unifiedDiff(styleBefore, result.rewritten, { aName: 'styles/闲聊.md', bName: 'styles/闲聊.md' }),
-      appliedAt: null,
-      applyResult: null,
+      styleBeforeChars: [...String(styleBefore ?? '')].length,
+      // ⚠️ 刻意**不留** `rewritten` / `diff` / `appliedAt` —— 这一版没有"应用"这件事了。
     }
     writeJsonAtomic(consolidationPath(id), record)
-    // ★ 整理产出的点**并进点表**（不是只留一份快照）：点表是长期存在的评论词汇表，
-    //   下次打分时它们就出现在原来标签按钮的位置上。
-    const merge = mergePoints(result.points ?? [], 'consolidated')
-    return { ok: true, consolidation: record, points: merge }
+    return { ok: true, consolidation: record }
   }
 
   function listConsolidations() {
@@ -759,99 +706,6 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
   const latestConsolidation = (scope) =>
     listConsolidations().find((c) => String(scope ?? 'all') === 'all' || String(c.scope) === String(scope)) ?? null
 
-  /**
-   * 应用改写草稿：**唯一的、会碰机器人人格的写操作**。
-   *
-   * 顺序不能换：读最新文件（别人可能刚改过）→ 判重（同一份不许写两遍）→
-   * **锚点核对**（丢了底线要点就拒绝，除非人明确覆盖）→ **先备份** → 原子写 →
-   * 再同步出厂常量（`src/chat-mode.mjs`）→ 标记已应用。
-   *
-   * @returns {{ok: boolean, why?: string, code?: number, ...}}
-   */
-  function applyDraft({ consolidationId = '', scope = 'all', confirm = false, confirmAnchors = false } = {}) {
-    if (confirm !== true) return { ok: false, why: '没有确认。应用会改写 styles/闲聊.md，必须显式确认', code: 400 }
-    const record = consolidationId
-      ? listConsolidations().find((c) => c.id === String(consolidationId))
-      : latestConsolidation(scope)
-    if (!record) return { ok: false, why: '还没有可应用的整理结果（先去报告页点「整理评论」）', code: 400 }
-    if (!String(record.rewritten ?? '').trim()) return { ok: false, why: '这份整理结果里没有正文', code: 400 }
-
-    let current = ''
-    try {
-      current = existsSync(styleFile) ? readFileSync(styleFile, 'utf8') : ''
-    } catch (error) {
-      return { ok: false, why: `读不出风格文件：${error?.message ?? error}`, code: 500 }
-    }
-    if (current.trim() === String(record.rewritten).trim()) {
-      return { ok: false, why: '这份改写已经在文件里了（内容和现在一模一样），不重复写', code: 409 }
-    }
-
-    const anchors = record.anchors ?? checkAnchors({ text: record.rewritten, anchors: STYLE_ANCHORS })
-    if (!anchors.ok && confirmAnchors !== true) {
-      return {
-        ok: false,
-        code: 409,
-        anchorsMissing: anchors.missing,
-        why:
-          `这份改写丢了 ${anchors.missing.length} 条底线要点：${anchors.missing.map((m) => m.label).join('、')}。` +
-          '改这份文件有风险，所以**拒绝应用** —— 你可以让模型重写一次，或者明确选择"仍然应用"（会先备份）。',
-      }
-    }
-
-    const backupDir = join(dirname(styleFile), '.backups')
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const backup = join(backupDir, `${styleFile.split(/[\\/]/).pop()}.${stamp}.bak`)
-    try {
-      mkdirSync(backupDir, { recursive: true })
-      writeFileSync(backup, current, 'utf8')
-      const tmp = `${styleFile}.${process.pid}.tmp`
-      writeFileSync(tmp, String(record.rewritten), 'utf8')
-      renameSync(tmp, styleFile)
-    } catch (error) {
-      return { ok: false, why: `写风格文件失败（备份在 ${backup}）：${error?.message ?? error}`, code: 500 }
-    }
-
-    // 出厂默认常量跟着走（否则 `styles/闲聊.md` 与它开始漂，测试会红）
-    let constantSync = { ok: false, why: '没有接 chat-mode.mjs 的路径（chatModePath 没传）' }
-    if (chatModePath) {
-      constantSync = syncStyleConstant({ chatModePath, styleText: String(record.rewritten), log })
-    }
-
-    const after = (() => {
-      try {
-        return readFileSync(styleFile, 'utf8')
-      } catch {
-        return ''
-      }
-    })()
-    const applyResult = {
-      at: Date.now(),
-      backup,
-      chars: after.length,
-      beforeChars: current.length,
-      anchors: anchors.ok ? 'ok' : 'overridden',
-      constantSync: constantSync.ok ? { ok: true, changed: constantSync.changed } : { ok: false, why: constantSync.why },
-    }
-    writeJsonAtomic(consolidationPath(record.id), { ...record, appliedAt: Date.now(), applyResult })
-    log(
-      `[评审台] 已应用改写：${current.length} → ${after.length} 字（${after.length <= current.length ? '精简' : '增加'} ` +
-        `${Math.abs(after.length - current.length)}），备份 ${backup}`,
-    )
-    if (!constantSync.ok) {
-      log(`⚠️ [评审台] 出厂默认常量没同步成功：${constantSync.why}`)
-    }
-    return {
-      ok: true,
-      consolidationId: record.id,
-      backup,
-      sha256: sha256(after),
-      beforeChars: current.length,
-      chars: after.length,
-      anchorsOverridden: !anchors.ok,
-      constantSync: applyResult.constantSync,
-    }
-  }
-
   return {
     dir,
     listBatches,
@@ -864,16 +718,14 @@ export function createReviewStore({ workspace, styleFile, chatModePath = '', log
     undo,
     stats,
     comments,
-    // ── 点表（顶替原标签的那套东西：长期存在、可编辑）──
+    // ── 标签表（人工写的：新建/改名/改说明/删）──
     listPoints,
     upsertPoint,
     deletePoint,
-    mergePoints,
-    seedPointsIfEmpty,
+    pruneLongAutoPoints,
     saveConsolidation,
     listConsolidations,
     latestConsolidation,
-    applyDraft,
     /** 给 `/api/items` 用：某批次的条目 + 评分（分页是 HTTP 层的事）。 */
     itemsWithScores(scope) {
       const { items, metas } = collect(scope)

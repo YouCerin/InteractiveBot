@@ -122,29 +122,49 @@
         <div class="verdicts" id="verdicts"></div>
         <div class="note" id="taxonomy-note" hidden></div>
 
-        <!-- ★★ 点按钮 —— 就是原来标签按钮待的位置。
-             点是**从评论里长出来的**评论词汇表（可编辑），点一下只记点、**不往评论框写字**。 -->
+        <!-- ★★ 标签按钮 —— 就是原来标签系统待的位置。**标签由人自己写**
+             （2026-10-02：上一版让模型自动播种，结果按钮名是一整句评论，糊成一片没法点）。
+             两条规矩：① 标题**≤12 字**（它是按钮上的字，说明放进 hover 提示）；
+             ② 点一下只记标签、**不往评论框写字**（评论与标签各自留痕）。 -->
         <div class="points-pick">
           <div class="pp-head">
-            <span class="pp-title">点一下记下这一类（原标签的位置）</span>
-            <button id="btn-points-reload" class="ghost small" title="重新取点表">↻ 刷新点</button>
+            <span class="pp-title">标签（点一下记下这一类；标签是你自己写的）</span>
+            <button id="btn-points-reload" class="ghost small" title="重新取标签表">↻ 刷新标签</button>
           </div>
           <div class="pp-group">
-            <div class="pp-kind bad">不该这样</div>
+            <div class="pp-kind bad">
+              <span>不该这样</span>
+              <button class="ghost small np-open" id="btn-new-bad" title="新建一个「不该这样」的标签">+ 新增标签</button>
+            </div>
             <div class="pp-list" id="points-bad"></div>
+            <form class="np-form" id="np-form-bad" hidden>
+              <input id="np-bad-title" maxlength="12" placeholder="标签名（≤12 字，例如：太长）" />
+              <input id="np-bad-summary" placeholder="说明（可选，鼠标悬停时显示）" />
+              <button class="primary small" id="np-bad-save" type="submit">建</button>
+              <button class="ghost small" id="np-bad-cancel" type="button">取消</button>
+            </form>
           </div>
           <div class="pp-group">
-            <div class="pp-kind good">这样很好</div>
+            <div class="pp-kind good">
+              <span>这样很好</span>
+              <button class="ghost small np-open" id="btn-new-good" title="新建一个「这样很好」的标签">+ 新增标签</button>
+            </div>
             <div class="pp-list" id="points-good"></div>
+            <form class="np-form" id="np-form-good" hidden>
+              <input id="np-good-title" maxlength="12" placeholder="标签名（≤12 字，例如：接梗顺着演）" />
+              <input id="np-good-summary" placeholder="说明（可选，鼠标悬停时显示）" />
+              <button class="primary small" id="np-good-save" type="submit">建</button>
+              <button class="ghost small" id="np-good-cancel" type="button">取消</button>
+            </form>
           </div>
           <div class="pp-empty" id="points-pick-empty" hidden></div>
         </div>
 
-        <!-- ★ 评论才是主角：它是「点」的唯一素材，所以给足高度、给足焦点样式。
+        <!-- ★ 评论才是主角：整理就是吃这里的评论。给足高度、给足焦点样式。
              没有保存按钮 —— 失焦即存（见 app.js 的 saveComment）。 -->
         <label class="comment-label" for="comment">
           评论 —— 说清"哪里对 / 哪里不对"（离开输入框即存，没有保存按钮）
-          <span class="hint">整理「点」只吃这里的评论；只判档不写字也能用，但那一档不进整理。</span>
+          <span class="hint">整理只吃这里的评论；只判档不写字也能用，但那一档不进整理。</span>
         </label>
         <div class="picked" id="picked-points" hidden></div>
         <textarea id="comment" class="comment-box" rows="5"
@@ -189,10 +209,10 @@
         <div id="comment-list"></div>
       </section>
 
-      <!-- ★★ 点管理：点表是**可编辑**的（改标题/摘要/删/新建）——
-           它是使用者的评论词汇表，不是代码里的常量，所以必须有地方改它。 -->
+      <!-- ★★ 标签管理：标签是**人工写**的（改名字/改说明/删/新建）——
+           它不是代码里的常量表，所以必须有地方改它。 -->
       <section class="card" id="points-admin-card">
-        <h2>点表（打分页那排按钮）</h2>
+        <h2>标签表（打分页那排按钮）</h2>
         <div class="note" id="points-admin-note"></div>
         <div class="row">
           <label>分类
@@ -201,33 +221,34 @@
               <option value="good">这样很好（good）</option>
             </select>
           </label>
-          <label class="grow">新建一个点（与已有的同义时会并进那一个） <input id="np-title" placeholder="例如：太长" /></label>
-          <button id="btn-point-new" class="primary">新建点</button>
+          <label class="grow">新建一个标签（标题 ≤12 字；与已有写法相同时会并进那一个）
+            <input id="np-title" maxlength="12" placeholder="例如：太长" /></label>
+          <button id="btn-point-new" class="primary">新建标签</button>
+          <button id="btn-point-prune" class="ghost" title="删掉上一版自动塞进来的长标题标签（手写的、短的一律不动）">清理自动生成的长标签</button>
         </div>
-        <label class="grow">摘要（可选，按钮的 title 提示里显示）
-          <input id="np-summary" placeholder="一句话说清这个点在说什么" />
+        <label class="grow">说明（可选，鼠标悬停在按钮上时显示）
+          <input id="np-summary" placeholder="一句话说清这个标签在说什么" />
         </label>
         <div id="points-admin"></div>
       </section>
 
       <!-- 整理区：GET /api/consolidate 一进页就拉（最近一次 + 评论 + 模型可用性 + 锚点清单）。
+           产物是**对 styles/闲聊.md 的修改意见** —— 评审台**不写**那个文件（改动由 LLM 另外执行）。
            整理没成时这里也是"素材不消失"的落点：error + 本地聚类，评论原文在上面那份清单里。 -->
       <section class="card" id="consolidate-card" hidden>
-        <h2>整理结果：点 + 整篇改写</h2>
+        <h2>整理结果：对 styles/闲聊.md 的修改意见</h2>
         <div class="note" id="consolidate-meta"></div>
         <div class="note" id="anchor-list"></div>
         <div class="callout err" id="consolidate-error" hidden></div>
-        <div id="points"></div>
+        <div id="suggestions"></div>
+        <div id="anchor-coverage"></div>
         <div id="clusters"></div>
-        <h3 class="sug-head" id="diff-head" hidden>整篇改写（styles/闲聊.md 的前后对照）</h3>
-        <pre class="diff" id="consolidate-diff"></pre>
-        <div id="anchor-check"></div>
         <div class="row">
-          <button id="btn-apply" class="primary" disabled>应用到 styles/闲聊.md</button>
-          <span class="note" id="apply-why"></span>
+          <button id="btn-copy-suggestions" class="primary" disabled>复制修改意见</button>
+          <span class="note" id="copy-why"></span>
         </div>
-        <!-- 应用结果（备份路径 / 新 sha256 / 字数变化 / 出厂常量有没有同步）常驻显示，不许只弹一下 -->
-        <div class="note" id="apply-result"></div>
+        <!-- 复制失败时的兜底：把全文摊在这里让人自己全选（不许出现"点了没反应"） -->
+        <textarea id="copy-fallback" class="copy-fallback" rows="8" readonly hidden></textarea>
       </section>
     </main>
 

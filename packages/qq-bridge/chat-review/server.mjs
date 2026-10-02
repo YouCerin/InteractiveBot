@@ -28,7 +28,6 @@
  */
 
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createReviewServer, loadConfig, stopRunningReviewServer } from '../src/chat-review-server.mjs'
@@ -144,12 +143,11 @@ async function main() {
     workspace,
     styleName,
     log,
-    // ★ 整理（把评论归纳成点）要调一次模型：通路与桥接**共用同一套解析**
+    // ★ 整理（把评论归纳成**修改意见**）要调一次模型：通路与桥接**共用同一套解析**
     //   （`resolveDirectTarget`：key 从哪来、baseUrl、model），密钥不经过浏览器。
     config,
-    // ★ 应用改写时要顺带同步 `src/chat-mode.mjs` 里的出厂默认常量 ——
-    //   否则 `styles/闲聊.md` 与那份常量会开始漂（有断言盯着它们逐字一致）。
-    chatModePath: join(PKG_ROOT, 'src', 'chat-mode.mjs'),
+    // ⚠️ 这里**不再**传 chatModePath：这一版不写 `styles/闲聊.md`、也不动
+    //   `src/chat-mode.mjs`（产物是修改意见，由人拿去给 LLM 执行）。
     // ★ 被 `/api/shutdown` 请退时干什么：走同一个退出路径（自然排空 + 2 秒兜底）。
     //   不在这里 `server.close()` 是因为 `server` 还没赋值 —— `exitSoon` 用的是
     //   外层的 `liveServer`（下面 listen 成功后赋值）。

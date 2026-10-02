@@ -96,8 +96,12 @@ export function buildConsolidatePrompt({ comments = [], styleText = '', anchors 
 
   return {
     prompt: [
-      '你在整理一个 QQ 机器人（「小鲸鱼」）的**闲聊说话风格**文件。人已经把评审意见写好了，',
-      '你要做两件事：①把这些意见**归纳成若干「点」**；②据此**重写整份风格文件**。',
+      '你在帮人修订一个 QQ 机器人（「小鲸鱼」）的**闲聊说话风格**文件 `styles/闲聊.md`。',
+      '人已经逐条评审过它的真实发言并写了评论。你要做的是：**基于"评过的发言 + 那些评论"，',
+      '给出针对这份风格文件的【修改意见】**。',
+      '',
+      '⚠️ 你**不需要**、也**不要**输出整份新文件 —— 使用者明确要求「只要意见，修改内容由 LLM 另外执行」。',
+      '每条意见都必须是**可以照着动手的一处修改**。',
       '',
       '【现有的风格文件 styles/闲聊.md 全文】',
       String(styleText ?? '').slice(0, Number(limits.styleChars) || 9000),
@@ -106,25 +110,56 @@ export function buildConsolidatePrompt({ comments = [], styleText = '', anchors 
       lines.join('\n'),
       '',
       '【要求】',
-      '1. **归纳，不是照抄**：同一个问题的多条评论算**一个点**；点要写成一句能执行的规则，',
-      '   而不是"某人说过 XX"。点在精不在多，3~8 条最好。',
-      '2. `kind` 取 `bad`（要改掉的）或 `good`（要保留、并且写得更清楚的）。',
-      '3. 然后**重写整份风格文件**：',
-      '   · 合并重复的说法、删掉被更好说法覆盖的、把评论里反复出现的要求写成明确规则；',
-      '   · **按需精简**：这是要进提示词的东西，越短越好 —— 但别把判据删模糊（"短"不能靠"含糊"换）；',
-      '   · 保留原有的分节结构（`【标题】`），小节可以增删或合并；',
-      '   · ⚠️ 下面这些**底线要点一个字都不许丢**（措辞可以改，要点必须在）：',
+      '1. **归纳，不是照抄**：同一个问题的多条评论算**一条意见**；意见要写成"这一条该改成什么"，',
+      '   而不是"某人说过 XX"。宁可少而准：1~6 条最好。',
+      '2. 每条意见四个字段，都要具体：',
+      '   · `action`：`rewrite`（改现有某条）/ `merge`（并进另一条）/ `delete`（删掉）/ `add`（新增一条）；',
+      '   · `target`：**指向现有文件的哪一条/哪一节** —— 尽量引用那一句的**原文片段**（几个字即可），',
+      '     并写出它所在的小节名（如 `说话方式` / `底线`）。`add` 时写建议放进哪一节。',
+      '   · `advice`：**建议改成什么** —— 直接给出可用的措辞（要短、要能直接抄进文件）；',
+      '   · `reason`：为什么这么改（引用评论里的依据，说明"谁在什么情况下说了什么、它答成了什么样"）。',
+      '3. `evidence`：这条意见依据的是哪几条评论，填它们的**编号**（数组，如 `["2","5"]`）。',
+      '4. 下面这些**底线要点必须继续被这份文件覆盖**（措辞可以改，要点不能丢）。',
+      '   如果你认为现有文件里某一条写得不够清楚，就**为它单独出一条意见**；',
+      '   如果它已经写得很好、这次不需要动，**不要在意见里提它**：',
       anchorList,
-      '4. **只输出 JSON**（不要解释、不要 markdown 代码块），形状严格如下：',
-      '{"points":[{"kind":"bad","title":"…","summary":"…","evidence":["2","5"],"where":"说话方式"}],',
-      ' "rewritten":"完整的新版文件正文，换行用 \\n 表示",',
-      ' "dropped":["如果你确实丢了上面某个要点，在这里老实写它的名字；没有就写空数组"]}',
+      '5. **只输出 JSON**（不要解释、不要 markdown 代码块），形状严格如下：',
+      '{"suggestions":[{"action":"rewrite","target":"说话方式 · 「省略号只在"无语"的时候用」",',
+      '  "advice":"……", "reason":"……", "evidence":["2","5"]}],',
+      ' "notes":"可选：一句话总体说明（没有就空串）"}',
+      '',
+      '⚠️ 再强调一次：**不要**给 `rewritten`（整份新文件），**只要** `suggestions`。',
     ].join('\n'),
     kept: lines.length,
     truncatedComments: withText.length - lines.length,
     chars: used,
     droppedForNoText: comments.length - withText.length,
   }
+}
+
+/** 意见的四种动作（写死，免得模型自创第五种）。 */
+export const SUGGESTION_ACTIONS = ['rewrite', 'merge', 'delete', 'add']
+
+/**
+ * 意见对**底线要点**的覆盖情况（**只提示，不拦**）。
+ *
+ * ★ 用途变了（2026-10-02 第三版）：上一版用它**拦应用**（丢了要点就 409）；
+ *   现在没有"应用"了，所以它只回答一个问题："这份意见里，哪些底线要点被提到了、
+ *   哪些一条都没提" —— 没提到不等于错（可能这次就是不用动它们），但值得让人看见。
+ * 判据与 `checkAnchors` 同一套（短词包含），只是把被查的文本从"重写后的整篇"
+ * 换成"这份意见的全部文字"。
+ */
+export function anchorCoverage({ suggestions = [], anchors = STYLE_ANCHORS } = {}) {
+  const text = suggestions
+    .map((s) => `${s?.action ?? ''} ${s?.target ?? ''} ${s?.advice ?? ''} ${s?.reason ?? ''}`)
+    .join('\n')
+  const covered = []
+  const uncovered = []
+  for (const a of anchors) {
+    const hit = (a.any ?? []).some((needle) => text.includes(needle))
+    ;(hit ? covered : uncovered).push({ id: a.id, label: a.label })
+  }
+  return { covered, uncovered, checked: anchors.length }
 }
 
 /** 从模型的回复里抠出 JSON（容错：剥 ``` 围栏、取第一个大括号块）。 */
@@ -146,22 +181,27 @@ export function parseConsolidation(raw) {
     return { ok: false, why: `模型的 JSON 解析失败：${error?.message ?? error}` }
   }
   if (!data || typeof data !== 'object') return { ok: false, why: '模型返回的 JSON 不是对象' }
-  const rewritten = String(data.rewritten ?? '').trim()
-  if (!rewritten) return { ok: false, why: '模型没有给出 rewritten（重写后的正文）' }
-  const points = Array.isArray(data.points) ? data.points : []
+  const incoming = Array.isArray(data.suggestions) ? data.suggestions : []
+  const suggestions = incoming
+    .filter((s) => s && typeof s === 'object')
+    .map((s) => ({
+      action: SUGGESTION_ACTIONS.includes(String(s.action ?? '')) ? String(s.action) : 'rewrite',
+      target: String(s.target ?? '').trim(),
+      advice: String(s.advice ?? '').trim(),
+      reason: String(s.reason ?? '').trim(),
+      evidence: Array.isArray(s.evidence) ? s.evidence.map((x) => String(x)) : [],
+    }))
+    // 没有"建议改成什么"的意见是没法执行的，丢掉它（并在下面如实报数）
+    .filter((s) => s.advice)
+  if (!suggestions.length) {
+    return { ok: false, why: '模型没有给出任何可执行的修改意见（suggestions 为空或都没有 advice）' }
+  }
   return {
     ok: true,
-    points: points
-      .filter((p) => p && typeof p === 'object')
-      .map((p) => ({
-        kind: p.kind === 'good' ? 'good' : 'bad',
-        title: String(p.title ?? '').trim() || '（没写标题）',
-        summary: String(p.summary ?? '').trim(),
-        evidence: Array.isArray(p.evidence) ? p.evidence.map((x) => String(x)) : [],
-        where: String(p.where ?? '').trim(),
-      })),
-    rewritten,
-    dropped: Array.isArray(data.dropped) ? data.dropped.map((x) => String(x)).filter(Boolean) : [],
+    suggestions,
+    notes: String(data.notes ?? '').trim(),
+    /** 被丢掉的条数（模型给了形状但没给建议正文）—— 如实报出来，不静默吞掉。 */
+    droppedEmpty: incoming.length - suggestions.length,
     via: fence ? 'fence' : 'raw',
   }
 }
@@ -191,14 +231,14 @@ export function clusterComments({ comments = [], threshold = 0.34, verdict = '' 
 }
 
 /**
- * 整理一次（**唯一一次模型调用**）。
+ * 整理一次（**唯一一次模型调用**）：评论 → 针对风格文件的**修改意见**。
  *
  * @param {object} opts
  * @param {object[]} opts.comments   评论（含 verdict / comment / reply / context）
- * @param {string} opts.styleText    当前风格文件全文
+ * @param {string} opts.styleText    当前风格文件全文（意见要指向它里面的具体条目）
  * @param {object} [opts.target]     `resolveDirectTarget()` 的结果（ok/baseUrl/apiKey/model）
  * @param {Function} [opts.callModel] `chatOnce`（测试注入；默认由调用方传进来）
- * @returns {Promise<object>} 成功 `{ok:true, points, rewritten, anchors, dropped, ...}`；
+ * @returns {Promise<object>} 成功 `{ok:true, suggestions, notes, anchorCoverage, ...}`；
  *   失败 `{ok:false, why, clusters?}`（**永远带 clusters**，让人看到评论没丢）
  */
 export async function consolidateComments({
@@ -245,13 +285,13 @@ export async function consolidateComments({
   if (!parsed.ok) {
     return { ok: false, why: parsed.why, clusters: fallback(), ms: r?.ms, raw: String(r.text ?? '').slice(0, 2000) }
   }
-  const anchorCheck = checkAnchors({ text: parsed.rewritten, anchors })
+  const coverage = anchorCoverage({ suggestions: parsed.suggestions, anchors })
   return {
     ok: true,
-    points: parsed.points,
-    rewritten: parsed.rewritten,
-    dropped: parsed.dropped,
-    anchors: anchorCheck,
+    suggestions: parsed.suggestions,
+    notes: parsed.notes,
+    droppedEmpty: parsed.droppedEmpty,
+    anchorCoverage: coverage,
     via: parsed.via,
     model: target.model,
     ms: r?.ms ?? null,

@@ -42,13 +42,13 @@ import {
 } from './chat-review-import.mjs'
 import {
   POINT_KINDS,
+  POINT_TITLE_MAX_CHARS,
   VERDICTS,
   createReviewStore,
 } from './chat-review-store.mjs'
 import {
   CONSOLIDATE_LIMITS,
   STYLE_ANCHORS,
-  checkAnchors,
   clusterComments,
   consolidateComments,
 } from './chat-review-consolidate.mjs'
@@ -271,7 +271,6 @@ export async function stopRunningReviewServer({
  * @param {string} [opts.styleDir]          风格文件所在目录（默认包根的 `styles/`；测试指向临时目录）
  * @param {Function} [opts.onShutdown]      `POST /api/shutdown` 时干什么（默认 = 关监听并退出进程）
  * @param {number} [opts.shutdownDelayMs]   先回响应再退出的缓冲（默认 150ms）
- * @param {string} [opts.chatModePath]      `src/chat-mode.mjs` 的路径（应用改写时同步出厂常量）
  * @param {object} [opts.config]            归一化配置（解析模型通路用；不传 = 整理功能不可用）
  * @param {Function} [opts.resolveTarget]   测试注入：`() => ({ok, baseUrl, apiKey, model})`
  * @param {Function} [opts.callModel]       测试注入：`chatOnce`（**测试绝不真调模型**）
@@ -285,7 +284,6 @@ export function createReviewServer({
   styleDir = join(PKG_ROOT, 'styles'),
   onShutdown = null,
   shutdownDelayMs = 150,
-  chatModePath = join(PKG_ROOT, 'src', 'chat-mode.mjs'),
   config = null,
   resolveTarget = null,
   callModel = null,
@@ -311,18 +309,14 @@ export function createReviewServer({
     }
   }
   // ★★ 必须先过 `resolveChatStyleName`：`chatStylePath()` 只拼路径，空名字会拼出
-  //    `<styles>/.md`（一个不存在的文件）—— 那会让"应用草稿"写错地方而**看起来成功了**。
-  //    实测就是评审台自己的测试抓到的（详见 styles.mjs 里这个函数的注释）。
+  //    `<styles>/.md`（一个不存在的文件）—— 实测就是评审台自己的测试抓到的
+  //    （详见 styles.mjs 里这个函数的注释）。这一版**不写风格文件**了，但仍然要读它：
+  //    修改意见必须指向它里面的具体条目。
   const styleFile = chatStylePath({ dir: styleDir, name: resolveChatStyleName(styleName) })
-  const store = createReviewStore({ workspace: root, styleFile, chatModePath, log: say })
-  /**
-   * 点表**播种**（幂等：非空时一个字都不动，见 store 的 `seedPointsIfEmpty`）。
-   *
-   * ★ 为什么在启动时做、而且**只本地**：点是打分页上的按钮，第一次打开就该有东西可点
-   *   （原标签系统留下的位置不能空着）。但有评论时"整理成点"需要模型 —— 那必须由人点一下
-   *   才发生（见 API.md），**启动就花钱是不可接受的**。所以这里只用本地聚类/静态种子。
-   */
-  const seedResult = store.seedPointsIfEmpty({ comments: store.comments('all') })
+  const store = createReviewStore({ workspace: root, log: say })
+  // ⚠️ 这里**没有**"点表播种"了（2026-10-02 第三版）：使用者要求
+  //   「标签系统改为人工写标签」，而自动播种正是上一版把长句子塞进按钮的元凶。
+  //   标签现在只能由人在页面上建（有断言盯着这条）。
   /** 模型通路：默认按配置解析（与桥接共用 `resolveDirectTarget`），测试可注入。 */
   const target = () => {
     if (typeof resolveTarget === 'function') return resolveTarget()
@@ -335,7 +329,7 @@ export function createReviewServer({
 
   const staticRoot = normalize(resolve(staticDir))
 
-  /** 风格文件的现状（`/api/health` 与税则漂移检查共用；**每条请求现读**）。 */
+  /** 风格文件的现状（`/api/health` 与整理共用；**每条请求现读**）。 */
   function styleFacts() {
     const r = readChatStyle({ dir: styleDir, name: styleName })
     return { ...r, path: styleFile }
@@ -612,7 +606,12 @@ export function createReviewServer({
             latest,
             history: store.listConsolidations()
               .filter((c) => String(scope) === 'all' || String(c.scope) === String(scope))
-              .map((c) => ({ id: c.id, createdAt: c.createdAt, chars: c.chars, points: (c.points ?? []).length, appliedAt: c.appliedAt })),
+              .map((c) => ({
+                id: c.id,
+                createdAt: c.createdAt,
+                suggestions: (c.suggestions ?? []).length,
+                uncovered: (c.anchorCoverage?.uncovered ?? []).length,
+              })),
             // 评论都在这里：整理没跑成时，页面至少能让人逐条读
             comments: cs,
             counts: { comments: cs.length, withText: cs.filter((c) => c.comment).length },
@@ -646,18 +645,16 @@ export function createReviewServer({
           }
           const saved = store.saveConsolidation({ scope: postScope, result, styleBefore: String(style.text ?? '') })
           if (!saved.ok) return fail(res, 500, saved.why)
+          const cov = result.anchorCoverage ?? { covered: [], uncovered: [] }
           say(
-            `[评审台] 整理完成：${result.points.length} 个点，改写 ${String(result.rewritten).length} 字` +
-              `${result.anchors?.ok ? '' : `（⚠️ 丢了 ${result.anchors.missing.length} 条底线要点）`}`,
+            `[评审台] 整理完成：${result.suggestions.length} 条修改意见` +
+              `${cov.uncovered?.length ? `（⚠️ 没提到 ${cov.uncovered.length} 条底线要点，仅提示）` : ''}`,
           )
           return json(res, 200, {
             ok: true,
             consolidation: saved.consolidation,
-            // ★ 整理产出的点**并进了点表**（不是只留快照）—— 页面拿到新的点表就能立刻更新按钮
-            points: store.listPoints(),
-            pointsMerge: saved.points ?? null,
             // ★ 成功时也回本地聚类：页面可以把它折叠起来给人对照
-            //   （"模型归纳成的点" vs "相似评论的原始分组"，两者不一致时人一眼能看出来）
+            //   （"模型归纳出的意见" vs "相似评论的原始分组"，两者不一致时人一眼能看出来）
             clusters: result.clusters ?? {
               bad: clusterComments({ comments: cs, verdict: 'bad' }),
               good: clusterComments({ comments: cs, verdict: 'good' }),
@@ -666,29 +663,6 @@ export function createReviewServer({
           })
         }
         return fail(res, 405, '只支持 GET（取最近一次）与 POST（真的整理一次）')
-      }
-
-      // ── ⑪ 应用改写（**唯一会碰风格文件（和出厂常量）的写操作**）────────
-      if (req.method === 'POST' && path === '/api/apply') {
-        const body = await readBody(req)
-        if (!body) return fail(res, 400, '请求体不是合法 JSON')
-        const r = store.applyDraft({
-          consolidationId: String(body.consolidation ?? '') || '',
-          scope: String(body.scope ?? body.batch ?? 'all') || 'all',
-          confirm: body.confirm === true,
-          confirmAnchors: body.confirmAnchors === true,
-        })
-        if (!r.ok) return fail(res, r.code ?? 400, r.why, { anchorsMissing: r.anchorsMissing ?? null })
-        return json(res, 200, {
-          ok: true,
-          consolidationId: r.consolidationId,
-          backup: r.backup,
-          sha256: r.sha256,
-          beforeChars: r.beforeChars,
-          chars: r.chars,
-          anchorsOverridden: r.anchorsOverridden,
-          constantSync: r.constantSync,
-        })
       }
 
       // ── ⑫ 删批次 ─────────────────────────────────────────────────────
@@ -723,17 +697,23 @@ export function createReviewServer({
         return
       }
 
-      // ── ⑬ 点表：**顶替原标签系统**的那套东西（长期存在、可编辑）──────
+      // ── ⑬ 标签表：**人工写**（新建 / 改名 / 改说明 / 删）────────────────
       //
       // 为什么它是一条独立路由而不是塞在 /api/stats 里：打分页要按钮，
       // 而打分页不该为了拿到按钮去拉整份统计（那还会随批次变化）。
       if (path === '/api/points') {
         if (req.method === 'GET') {
-          return json(res, 200, { ok: true, kinds: POINT_KINDS, points: store.listPoints(), seeded: seedResult?.seeded ?? 0 })
+          return json(res, 200, { ok: true, kinds: POINT_KINDS, titleMax: POINT_TITLE_MAX_CHARS, points: store.listPoints() })
         }
         if (req.method === 'POST') {
           const body = await readBody(req)
           if (!body) return fail(res, 400, '请求体不是合法 JSON')
+          // ★ 一次性清理：把上一版"自动播种"塞进来的长标题标签删掉（`source !== 'manual'`
+          //   且标题超过 12 字）。手写的、短的一律不动。见 store 的 `pruneLongAutoPoints`。
+          if (body.action === 'prune-auto') {
+            const pruned = store.pruneLongAutoPoints()
+            return json(res, 200, { ok: true, ...pruned, points: store.listPoints() })
+          }
           const r = store.upsertPoint({
             id: body.id ?? '',
             kind: body.kind ?? 'bad',
@@ -741,7 +721,7 @@ export function createReviewServer({
             summary: body.summary ?? '',
           })
           if (!r.ok) return fail(res, 400, r.why)
-          // `merged` = 标题与已有的点撞了、于是并进那一个（"类似的评论总结为同一个点"的手工版）
+          // `merged` = 标题与已有的标签撞了、于是并进那一个（同义标签不该长两条）
           return json(res, 200, {
             ok: true,
             point: r.point,
@@ -753,13 +733,13 @@ export function createReviewServer({
         }
         if (req.method === 'DELETE') {
           const id = url.searchParams.get('id') ?? ''
-          if (!id) return fail(res, 400, '必须给点 id')
+          if (!id) return fail(res, 400, '必须给标签 id')
           const r = store.deletePoint(id)
           if (!r.ok) return fail(res, 404, r.why)
-          // `usedBy` = 有多少条评分引用过它（引用不跟着删：报告里会显示"已删除的点"）
+          // `usedBy` = 有多少条评分引用过它（引用不跟着删：报告里会显示"已删除的标签"）
           return json(res, 200, { ok: true, removed: r.removed, usedBy: r.usedBy, points: store.listPoints() })
         }
-        return fail(res, 405, '只支持 GET（取点表）/ POST（新建或编辑）/ DELETE（删）')
+        return fail(res, 405, '只支持 GET（取标签表）/ POST（新建、编辑或 action=prune-auto）/ DELETE（删）')
       }
 
       // ── 静态页 ───────────────────────────────────────────────────────

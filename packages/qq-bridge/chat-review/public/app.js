@@ -2,10 +2,10 @@
  * 聊天记录评审台 —— 前端（零依赖、无构建、**经典脚本**）。
  *
  * 三个页签：导入 → 打分 → 报告。改版后的形状（先读 chat-review/API.md 的〇节）：
- *   导入真实聊天记录 → 一条条「判档 + 写评论」→ 把评论**整理成「点」**→ 据此**整篇重写** styles/闲聊.md
+ *   导入真实聊天记录 → 一条条「判档 + 写评论（+ 点标签）」→ 把评论整理成**对 styles/闲聊.md 的修改意见**
  *
  * ★ 旧版那套**手写标签**（太长 / 像客服 …）整套删掉了，别再往回加：标签是"我预先想好的分类"，
- *   人没想到的问题就永远进不了统计；现在的素材是**评论**，「点」是从评论里**整理**出来的产物，
+ *   人没想到的问题就永远进不了统计；现在的素材是**评论**，而**标签由人自己写**（模型不再往里塞），
  *   草稿是**整篇重写**（不是往文件尾追加），而应用必须"人点确认 + 先备份 + 过锚点核对"。
  *
  * 四条纪律，改代码时不要绕开：
@@ -35,9 +35,9 @@ const state = {
   // ★ 取不到时要能区分"还没取到"和"服务端说不可用"，否则页面会显示成"0 个会话"
   sources: { corpus: { ok: false, why: '还没取到数据源', chats: [] }, batches: [] },
   taxonomy: { ok: false, verdicts: [], why: '' }, // 只留三档结论：标签体系已删除
-  // ★★ 点表：它**顶替**了原来的标签（位置就在打分卡片上那排按钮），
+  // ★★ 标签表：人工写、可编辑（位置就是打分卡片上那排按钮）。内部字段仍叫 `points`（历史名）。
   //    但性质不同 —— 标签是服务端预先写死的分类，点是使用者从评论里长出来、**可编辑**的词汇表。
-  points: { ok: false, why: '还没取到点表', kinds: ['bad', 'good'], items: [], seeded: 0 },
+  points: { ok: false, why: '还没取到标签表', kinds: ['bad', 'good'], titleMax: 12, items: [] },
   importFormat: 'forward-json',
   score: {
     batch: '', filter: 'unrated',
@@ -168,7 +168,8 @@ function renderHealth() {
   const c = h.corpus // ★ 语料库读不出来时**说为什么**，绝不显示一个像真的行数
   if (c && c.ok === true) box.appendChild(el('span', 'hv', `语料库 ${numOrDash(c.rows)} 行`))
   else box.appendChild(el('span', 'hv bad', `语料库不可用：${c?.why ?? '服务端没说原因'}`))
-  // ★ 这一格就是"改写到底写进去没有"的唯一凭据：应用之后必须重新拉一次（见 applyConsolidation）
+  // ★ 这一格是"风格文件现在长什么样"的唯一凭据（字数 + sha256）——
+  //   评审台**不写**那个文件，所以它现在只是"意见是针对哪一版提的"的参照物。
   const sf = h.styleFile
   if (sf && sf.exists === true) {
     const sha = String(sf.sha256 ?? '')
@@ -198,14 +199,14 @@ async function loadTaxonomy() {
   if (state.page === 'score') renderCard()
 }
 
-/* ── 点表（顶替原标签：打分卡片上那排按钮 + 报告页的点管理）───────────── */
+/* ── 标签表（打分卡片上那排按钮 + 报告页的标签管理）───────────────────── */
 
 /**
- * 拉点表。
+ * 拉标签表。
  *
  * ★ 为什么单独一条请求而不是从 `/api/stats` 里捎带：打分页要按钮，
  *   而打分页**不该为了拿到按钮去拉整份统计**（那还会随批次变化、越拉越慢）。
- * ★ 拉不到时 `ok:false` 要一路带到按钮区：显示"拿不到点表 + 为什么"，
+ * ★ 拉不到时 `ok:false` 要一路带到按钮区：显示"拿不到标签表 + 为什么"，
  *   而**不是**画成"这个批次没有点"（那会让人以为点丢了）。
  */
 async function loadPoints() {
@@ -216,9 +217,9 @@ async function loadPoints() {
         why: '',
         kinds: Array.isArray(data.kinds) && data.kinds.length ? data.kinds : ['bad', 'good'],
         items: Array.isArray(data.points) ? data.points : [],
-        seeded: Number(data.seeded) || 0,
+        titleMax: Number(data.titleMax) || 12,
       }
-    : { ok: false, why: String(data.error ?? '接口失败'), kinds: ['bad', 'good'], items: [], seeded: 0 }
+    : { ok: false, why: String(data.error ?? '接口失败'), kinds: ['bad', 'good'], titleMax: 12, items: [] }
   if (state.page === 'score') renderCard()
   if (state.page === 'report') {
     renderPointsAdmin()
@@ -226,7 +227,7 @@ async function loadPoints() {
   }
 }
 
-/** 点表按 kind 分组（bad / good），组内按 count 降序（常用的排前面，少翻）。 */
+/** 标签按 kind 分组（bad / good），组内按 count 降序（常用的排前面，少翻）。 */
 function pointsByKind(kind) {
   return state.points.items
     .filter((p) => p.kind === kind)
@@ -320,8 +321,8 @@ function renderBatches() {
   $('batch-note').textContent = !list.length
     ? ''
     : missingCommented
-      ? '「有评论」= 这一批里写了评论的条数（整理「点」只吃这些）；标 — 的是服务端这次没给 commented 字段。'
-      : '「有评论」= 这一批里写了评论的条数 —— 整理「点」只吃带评论的评分。'
+      ? '「有评论」= 这一批里写了评论的条数（整理只吃这些）；标 — 的是服务端这次没给 commented 字段。'
+      : '「有评论」= 这一批里写了评论的条数 —— 整理只吃带评论的评分。'
 }
 
 async function pullFromCorpus() {
@@ -561,7 +562,7 @@ function renderCard() {
  *
  * ★ (a) 语义（使用者拍板）：点一下**只记点，不往评论框里自动写字** ——
  *   两者各自留痕、谁也不覆盖谁。已选的点在评论框上方单独显示一行（可点 × 取消）。
- * ★ 拉不到点表时显示"拿不到 + 为什么"，**不显示成"没有点"**（那会让人以为点丢了）。
+ * ★ 拉不到标签表时显示"拿不到 + 为什么"，**不显示成"没有标签"**（那会让人以为标签丢了）。
  */
 function renderPointPicker(item) {
   const s = state.score
@@ -570,8 +571,8 @@ function renderPointPicker(item) {
   if (box) {
     box.hidden = state.points.ok && state.points.items.length > 0
     box.textContent = !state.points.ok
-      ? `拿不到点表（${state.points.why}）—— 点按钮暂时用不了；评论照常可以写。按「↻ 刷新点」重试。`
-      : '点表还是空的 —— 去「③ 报告」页最下面的「点表」里新建几个，或者先写评论再点「整理评论」让它自己长出来。'
+      ? `拿不到标签表（${state.points.why}）—— 标签按钮暂时用不了；评论照常可以写。按「↻ 刷新标签」重试。`
+      : '标签表还是空的 —— 点上面那两个「+ 新增标签」，或去「③ 报告」页最下面的「标签表」里建。'
   }
   for (const kind of ['bad', 'good']) {
     const list = $(`points-${kind}`)
@@ -597,7 +598,7 @@ function renderPickedPoints(selected, item) {
   clear(wrap)
   const chosen = (selected ?? []).map((id) => {
     const p = state.points.items.find((x) => x.id === id)
-    return p ? { id, title: p.title } : { id, title: `（已删除的点 ${id}）` }
+    return p ? { id, title: p.title } : { id, title: `（已删除的标签 ${id}）` }
   })
   wrap.hidden = chosen.length === 0
   if (!chosen.length) return
@@ -606,7 +607,7 @@ function renderPickedPoints(selected, item) {
     const chip = el('span', 'picked-chip', c.title)
     const x = el('button', 'picked-x', '×')
     x.type = 'button'
-    x.title = '取消这个点（不动评论）'
+    x.title = '取消这个标签（不动评论）'
     x.onclick = () => togglePoint(c.id)
     chip.appendChild(x)
     wrap.appendChild(chip)
@@ -663,7 +664,7 @@ function ensureDraft(item) {
 }
 
 /**
- * 切换一个点（点一下 = 记下这一类）。
+ * 切换一个标签（点一下 = 记下这一类）。
  *
  * ★ (a) 语义：**只记点，不碰评论框**。用 `force` 立刻落盘（一次点击就是一次决定），
  *   写失败就把它改回去并报错 —— 与判档那条乐观推进同一条纪律。
@@ -917,15 +918,15 @@ function renderStats(data) {
   // ★ 评论是整理的**唯一素材**：只判档不写字的那些会被排除，所以这个数字必须露出来
   const c = data.comments ?? {}
   box.appendChild(el('div', 'stats-line', Number.isFinite(c.withText)
-    ? `带评论 ${c.withText} 条 / 只判档没写评论 ${numOrDash(c.withoutText)} 条 —— 整理「点」只吃带评论的那些。`
+    ? `带评论 ${c.withText} 条 / 只判档没写评论 ${numOrDash(c.withoutText)} 条 —— 整理只吃带评论的那些。`
     : '服务端没给 comments.withText —— "有多少条带评论"这个数字不知道（不猜）。'))
 
-  // ── 点排行（顶替原来的标签排行）：点一下 = 只看"记过这个点"的评论 ──
+  // ── 标签排行：点一下 = 只看"记过这个标签"的评论 ──
   const pts = Array.isArray(data.points) ? data.points : []
   const pointHits = data.pointCounts && typeof data.pointCounts === 'object' ? data.pointCounts : {}
-  box.appendChild(el('h3', 'sug-head', `点排行（${pts.length} 个点，记过 ${numOrDash(data.pointsUsed)} 条评分）`))
+  box.appendChild(el('h3', 'sug-head', `标签排行（${pts.length} 个标签，记过 ${numOrDash(data.pointsUsed)} 条评分）`))
   if (!pts.length) {
-    box.appendChild(el('div', 'note', '点表还是空的 —— 去下面「点表」那张卡新建几个，或者在「整理评论」里让它从评论里长出来。'))
+    box.appendChild(el('div', 'note', '标签表还是空的 —— 去下面「标签表」那张卡新建几个（标签是人工写的）。'))
     return
   }
   const rank = el('div', 'point-rank')
@@ -935,7 +936,7 @@ function renderStats(data) {
     const b = el('button', `point-chip ${p.kind === 'good' ? 'good' : 'bad'}${state.reportPoint === p.id ? ' on' : ''}`)
     b.appendChild(el('span', 'pc-title', String(p.title)))
     b.appendChild(el('span', 'pc-count', `记过 ${n} · count ${p.count ?? 0}`))
-    b.title = `${p.summary || '（没有摘要）'}\n${state.reportPoint === p.id ? '再点一次取消筛选' : '点一下：只看记过这个点的评论'}`
+    b.title = `${p.summary || '（没有摘要）'}\n${state.reportPoint === p.id ? '再点一次取消筛选' : '点一下：只看记过这个标签的评论'}`
     b.onclick = () => {
       state.reportPoint = state.reportPoint === p.id ? '' : p.id
       renderCommentList()
@@ -945,7 +946,7 @@ function renderStats(data) {
   }
   box.appendChild(rank)
   if (state.reportPoint) {
-    const clearBtn = el('button', 'ghost small', '清掉点的筛选')
+    const clearBtn = el('button', 'ghost small', '清掉标签的筛选')
     clearBtn.onclick = () => {
       state.reportPoint = ''
       renderCommentList()
@@ -965,13 +966,13 @@ function renderCommentList() {
   const q = state.reportSearch.trim().toLowerCase()
   const rows = all.filter((r) => {
     if (state.reportVerdict && r?.verdict !== state.reportVerdict) return false
-    // 按点筛（点排行点一下就筛）：只看"记过这个点"的评论
+    // 按标签筛（排行点一下就筛）：只看"记过这个标签"的评论
     if (state.reportPoint && !(Array.isArray(r?.points) ? r.points : []).some((p) => p?.id === state.reportPoint)) return false
     return !q || `${r?.comment ?? ''}\n${r?.reply ?? ''}`.toLowerCase().includes(q)
   })
   $('comment-list-note').textContent = data
     ? `共 ${all.length} 条评分（带评论 ${all.filter((r) => hasCommentText(r?.comment)).length} 条` +
-      `${state.reportPoint ? `，筛了点 ${state.reportPoint}` : ''}），当前显示 ${rows.length} 条｜新 → 旧`
+      `${state.reportPoint ? `，筛了标签 ${state.reportPoint}` : ''}），当前显示 ${rows.length} 条｜新 → 旧`
     : '还没有统计数据 —— 清单不可用（原因见上方红条）。'
   if (!data) return void box.appendChild(el('div', 'empty', '拉不到统计 —— 评论清单也一起不可用；不会显示一个空的"看起来没评过"的清单。'))
   if (!all.length) return void box.appendChild(el('div', 'empty', '还没有任何评分 —— 去「② 打分」页评几条，这里就有清单了。'))
@@ -1005,7 +1006,7 @@ function commentRow(r) {
   return card
 }
 
-/* ── 点表管理（报告页最下面那张卡）──────────────────────────────────────
+/* ── 标签表管理（报告页最下面那张卡）──────────────────────────────────────
  *
  * ★ 为什么这一块必须存在：点是**使用者的词汇表**，不是代码里的常量。
  *   没有编辑入口的话，"点不合理"就只能去找开发者改代码 —— 那就退回到标签时代了。
@@ -1020,14 +1021,16 @@ function renderPointsAdmin() {
   clear(box)
   const note = $('points-admin-note')
   if (!state.points.ok) {
-    note.textContent = `拿不到点表：${state.points.why} —— 下面显示不了任何点（不显示成"没有点"）。`
+    note.textContent = `拿不到标签表：${state.points.why} —— 下面显示不了任何标签（不显示成"没有标签"）。`
     return
   }
   const items = state.points.items
+  // 标签名上限（服务端也会挡一次；这里先挡住，免得打了 20 个字才被拒）
+  const titleMax = Number(state.points.titleMax) || 12
   note.textContent = items.length
-    ? `共 ${items.length} 个点（bad ${pointsByKind('bad').length} / good ${pointsByKind('good').length}）` +
-      `${state.points.seeded ? `｜这次启动播了 ${state.points.seeded} 个初始点` : ''}｜count = 有多少条评论支撑它`
-    : '点表是空的 —— 用上面的表单新建一个，或者去上面点「整理评论」让点从评论里长出来。'
+    ? `共 ${items.length} 个标签（bad ${pointsByKind('bad').length} / good ${pointsByKind('good').length}）` +
+      `｜标签是人工写的（上一版那种自动播种已经取消）｜count = 有多少条评论支撑它`
+    : '标签表是空的 —— 用上面的表单新建一个（标签由你写，模型不会再往里塞）。'
   for (const p of items.slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind)) || (b.count ?? 0) - (a.count ?? 0))) {
     const row = el('div', 'pt-row')
     const kind = el('select', 'pt-kind')
@@ -1041,6 +1044,7 @@ function renderPointsAdmin() {
 
     const title = el('input', 'pt-title')
     title.value = p.title
+    title.maxLength = titleMax
     title.title = `来源 ${p.source ?? '?'}｜count ${p.count ?? 0}｜${p.id}`
     // 失焦即存；值没变就不发请求（避免点一下别处就打一次接口）
     title.onblur = () => {
@@ -1050,7 +1054,7 @@ function renderPointsAdmin() {
 
     const summary = el('input', 'pt-summary')
     summary.value = p.summary ?? ''
-    summary.placeholder = '摘要（可选，按钮的 title 里显示）'
+    summary.placeholder = '说明（可选，按钮的 title 里显示）'
     summary.onblur = () => {
       if (summary.value.trim() !== (p.summary ?? '')) void savePoint({ id: p.id, kind: kind.value, title: title.value, summary: summary.value })
     }
@@ -1065,29 +1069,84 @@ function renderPointsAdmin() {
   }
 }
 
+/**
+ * 打分页上「+ 新增标签」就地展开的小表单（两组各一个）。
+ *
+ * ★ 为什么不让人跳去报告页建标签：建标签是**打分时顺手**的动作（写着评论发现少一个标签），
+ *   跳页会把"评到一半"的上下文打断。所以这里是一个两输入框的行内表单。
+ */
+function toggleNewLabelForm(kind, show) {
+  const form = $(`np-form-${kind}`)
+  if (!form) return
+  form.hidden = !show
+  if (show) $(`np-${kind}-title`)?.focus()
+  else {
+    if ($(`np-${kind}-title`)) $(`np-${kind}-title`).value = ''
+    if ($(`np-${kind}-summary`)) $(`np-${kind}-summary`).value = ''
+  }
+}
+
+/** 从打分页的行内表单建一个标签（建完立刻出现在按钮排里，并自动选中它）。 */
+async function createLabelQuick(kind) {
+  const title = String($(`np-${kind}-title`)?.value ?? '').trim()
+  const summary = String($(`np-${kind}-summary`)?.value ?? '')
+  const titleMax = Number(state.points.titleMax) || 12
+  if (!title) return toast('先给标签起个名字', 'err')
+  if ([...title].length > titleMax) {
+    return toast(`标签名最多 ${titleMax} 字（现在 ${[...title].length} 字）—— 说明写在右边那个框里`, 'err')
+  }
+  const r = await savePoint({ id: '', kind, title, summary })
+  if (!r) return
+  toggleNewLabelForm(kind, false)
+  // 建完顺手记在当前这条上：建标签的动机通常就是"这条要标它"
+  const id = r.point?.id
+  if (id && currentItem()) await togglePoint(id)
+}
+
+/**
+ * 一次性清理：把上一版**自动播种**塞进来的长标题标签删掉（服务端只删
+ * `source !== 'manual'` 且标题超过 12 字的那种，手写的一律不动）。
+ */
+async function pruneAutoPoints() {
+  const ok = window.confirm(
+    '清理自动生成的长标签？\n\n' +
+      '· 只会删掉"来源不是手写、且标题超过 12 字"的标签（上一版自动播种塞进来的那种）；\n' +
+      '· 你自己建的、以及标题很短的一律不动；\n' +
+      '· 评分里引用过它们的记录不会变（报告页会显示「已删除的标签」）。',
+  )
+  if (!ok) return
+  const data = await api('/api/points', { method: 'POST', body: { action: 'prune-auto' } })
+  if (!data.ok) return void showError(data.error ?? '清理失败')
+  state.points = { ...state.points, ok: true, items: Array.isArray(data.points) ? data.points : state.points.items }
+  renderPointsAdmin()
+  renderPointPicker(currentItem())
+  toast(data.removed ? `清理了 ${data.removed} 个自动生成的长标签` : '没有需要清理的（手写的、短的一律没动）', 'ok')
+}
+
 async function savePoint({ id, kind, title, summary }) {
   const data = await api('/api/points', { method: 'POST', body: { id: id ?? '', kind, title, summary } })
-  if (!data.ok) return void showError(data.error ?? '点没存上')
+  if (!data.ok) return void showError(data.error ?? '标签没存上')
   state.points = { ...state.points, ok: true, items: Array.isArray(data.points) ? data.points : state.points.items }
-  if (data.merged) toast(`「${data.point?.title ?? title}」已并入已有的同名点（不重复建）`, 'ok')
-  else if (data.created) toast(`新建了点「${data.point?.title ?? title}」`, 'ok')
+  if (data.merged) toast(`「${data.point?.title ?? title}」已并入已有的同名标签（不重复建）`, 'ok')
+  else if (data.created) toast(`新建了标签「${data.point?.title ?? title}」`, 'ok')
   renderPointsAdmin()
   renderCard()
-  await loadStats() // 报告页的点排行要跟着变
+  await loadStats() // 报告页的标签排行要跟着变
+  return data // 调用方要拿新建那条的 id（建完顺手记在当前这条上）
 }
 
 async function removePoint(p) {
   const used = Number(p?.count) || 0
   const ok = window.confirm(
     `删掉点「${p?.title ?? p?.id}」？\n\n` +
-      `· 它被记过 ${used} 次（count）；**已经记下的评分不会跟着删** —— 报告页会把它们显示成「（已删除的点）」；\n` +
+      `· 它被记过 ${used} 次（count）；**已经记下的评分不会跟着删** —— 报告页会把它们显示成「（已删除的标签）」；\n` +
       '· 打分页上这个按钮会消失。\n\n确定要删吗？',
   )
   if (!ok) return
   const data = await api(`/api/points?id=${encodeURIComponent(p.id)}`, { method: 'DELETE' })
   if (!data.ok) return void showError(data.error ?? '删不掉')
   state.points = { ...state.points, items: Array.isArray(data.points) ? data.points : state.points.items }
-  toast(`删掉了点「${p?.title ?? p.id}」（有 ${numOrDash(data.usedBy)} 条评分引用过它）`, 'ok')
+  toast(`删掉了标签「${p?.title ?? p.id}」（有 ${numOrDash(data.usedBy)} 条评分引用过它）`, 'ok')
   renderPointsAdmin()
   renderCard()
   await loadStats()
@@ -1129,17 +1188,12 @@ async function runConsolidate() {
   const res = await api('/api/consolidate', { method: 'POST', body: { scope: state.reportBatch || 'all' } })
   c.busy = false
   if (res.ok === true && res.consolidation) {
-    Object.assign(c, { latest: res.consolidation, clusters: res.clusters ?? null, error: '', armed: false })
+    Object.assign(c, { latest: res.consolidation, clusters: res.clusters ?? null, error: '' })
     renderConsolidate()
-    const merge = res.pointsMerge ?? null
-    toast(
-      `整理完成：${numOrDash(res.consolidation.points?.length)} 个点（点表新建 ${numOrDash(merge?.created)} / 并入 ${numOrDash(merge?.merged)}），${numOrDash(res.ms)} ms`,
-      'ok',
-    )
-    // ★ 整理产出的点**并进了点表** —— 打分页那排按钮要立刻反映出来（不必重启、不必再整理一次）
-    if (Array.isArray(res.points)) state.points = { ...state.points, ok: true, items: res.points }
-    renderPointsAdmin()
-    renderCard()
+    const n = Array.isArray(res.consolidation.suggestions) ? res.consolidation.suggestions.length : 0
+    const uncovered = res.consolidation.anchorCoverage?.uncovered?.length ?? 0
+    toast(`整理完成：${n} 条修改意见${uncovered ? `（有 ${uncovered} 条底线要点没提到，页面上有提示）` : ''}，${numOrDash(res.ms)} ms`, 'ok')
+    // ★ 标签表**不会**被整理改动（使用者要求"标签人工写"）—— 所以这里不刷新标签，只提示一句
     return void loadConsolidate({ keepLocal: true })
   }
   // ★ 失败仍是 HTTP 200：error 原样显示，本地聚类与评论原文都要在 —— 素材不能跟着"看不见"
@@ -1171,11 +1225,11 @@ function renderConsolidate() {
           : `模型：${c.model.model ?? '（未给）'}${c.model.baseUrl ? `（${c.model.baseUrl}）` : ''}` +
             `｜一次最多喂 ${numOrDash(lim.comments)} 条评论 / ${numOrDash(lim.chars)} 字`
 
-  // ── 底线要点（锚点）清单：GET 就给了，先让人知道"改写必须留住哪些东西" ──
+  // ── 底线要点（锚点）清单：**提示**用 —— 意见应当继续覆盖它们（不再是"应用的门禁"）──
   const anchorBox = $('anchor-list')
   clear(anchorBox)
   if (c.anchors.length) {
-    anchorBox.appendChild(el('span', 'anchor-box-title', `底线要点（${c.anchors.length} 条，改写一条都不许丢）：`))
+    anchorBox.appendChild(el('span', 'anchor-box-title', `底线要点（${c.anchors.length} 条，意见里应当继续覆盖）：`))
     anchorBox.appendChild(el('span', '', c.anchors.map((a) => a?.label ?? a?.id).filter(Boolean).join('、')))
   }
 
@@ -1190,235 +1244,161 @@ function renderConsolidate() {
   const hasLatest = Boolean(l?.id)
   if (hasLatest) {
     const ps = l.promptStats ?? {}
+    const n = Array.isArray(l.suggestions) ? l.suggestions.length : 0
     const trunc = Number.isFinite(ps.truncatedComments) && ps.truncatedComments > 0 ? `（另有 ${ps.truncatedComments} 条因长度没喂进去）` : ''
     $('consolidate-meta').textContent =
       `整理 ${l.id}｜${fmtTime(l.createdAt)}｜模型 ${l.model ?? '（未给）'}｜${numOrDash(l.ms)} ms\n` +
-      `点 ${Array.isArray(l.points) ? l.points.length : '—'} 条｜改写 ${numOrDash(l.chars)} 字（原 ${numOrDash(l.styleBeforeChars)} 字）｜` +
+      `修改意见 ${n} 条｜针对 styles/闲聊.md（提这份意见时它 ${numOrDash(l.styleBeforeChars)} 字）｜` +
       `喂进去 ${numOrDash(ps.kept)} 条评论${trunc}` +
-      (l.appliedAt ? `\n已于 ${fmtTime(l.appliedAt)} 应用到 styles/闲聊.md` : '\n还没应用到文件')
+      (l.notes ? `\n总体说明：${l.notes}` : '')
   } else {
     $('consolidate-meta').textContent = c.loaded
-      ? (c.error ? '还没有成功的整理结果。' : '这个范围还没整理过 —— 点上面的「整理评论」把评论归纳成「点」并整篇重写。')
+      ? (c.error ? '还没有成功的整理结果。' : '这个范围还没整理过 —— 点上面的「整理评论」，把"评过的发言 + 评论"归纳成对 styles/闲聊.md 的修改意见。')
       : '正在取整理状态…'
   }
-  renderPoints(hasLatest ? l : null)
+  renderSuggestions(hasLatest ? l : null)
   renderClusters(c.clusters)
-  const diff = hasLatest && typeof l.diff === 'string' ? l.diff : ''
-  $('diff-head').hidden = !diff
-  renderDiff($('consolidate-diff'), diff)
-  renderAnchorCheck(hasLatest ? l : null)
-  renderApplyRow()
+  renderAnchorCoverage(hasLatest ? l : null)
+  renderCopyRow()
 }
 
-/** 「点」+ 可展开的证据原文（证据是提示词里的**评论编号**，能换回原文就换回来）。 */
-function renderPoints(l) {
-  const box = $('points')
+/** 四种动作给人看的说法（与 `chat-review-consolidate.mjs` 的 `SUGGESTION_ACTIONS` 对齐）。 */
+const ACTION_LABEL = { rewrite: '改这一条', merge: '并进另一条', delete: '删掉', add: '新增一条' }
+
+/**
+ * 渲染**修改意见**（本工具最终的产物）。
+ *
+ * ★ 为什么这里没有"应用"按钮了（2026-10-02 第三版）：使用者要求
+ *   「最终基于评价过的消息记录和评论，生成闲聊.md 的修改意见」+
+ *   「只要意见，修改内容由 LLM 另外执行」。所以评审台**不写** `styles/闲聊.md` ——
+ *   它只把"该改哪一条、改成什么、为什么"摆出来，并给一个**一键复制**。
+ */
+function renderSuggestions(l) {
+  const box = $('suggestions')
   clear(box)
   if (!l) return
-  const points = Array.isArray(l.points) ? l.points : []
-  box.appendChild(el('h3', 'sug-head', `整理出来的「点」（${points.length} 条）`))
-  if (!points.length) return void box.appendChild(el('div', 'note', '这次整理一个点都没给出 —— 别据此改文件，先看看评论写得够不够具体。'))
-  for (const p of points) {
-    const kind = p?.kind === 'good' ? 'good' : 'bad'
-    const card = el('div', `point point-${kind}`)
-    const head = el('div', 'point-head')
-    head.appendChild(el('span', 'point-kind', kind === 'good' ? '要保留 / 写清楚' : '要改掉'))
-    head.appendChild(el('span', 'point-title', String(p?.title ?? '（没写标题）')))
-    if (p?.where) head.appendChild(el('span', 'point-where', `位置：${p.where}`))
+  const list = Array.isArray(l.suggestions) ? l.suggestions : []
+  box.appendChild(el('h3', 'sug-head', `对 styles/闲聊.md 的修改意见（${list.length} 条）`))
+  if (!list.length) {
+    return void box.appendChild(el('div', 'note', '这次整理一条意见都没给出 —— 先看看评论写得够不够具体。'))
+  }
+  for (const s of list) {
+    const action = SUGGESTION_ACTIONS.includes(String(s?.action)) ? String(s.action) : 'rewrite'
+    const card = el('div', `sug sug-${action}`)
+    const head = el('div', 'sug-row')
+    head.appendChild(el('span', `sug-action sug-action-${action}`, ACTION_LABEL[action]))
+    head.appendChild(el('span', 'sug-target', String(s?.target ?? '（模型没写位置 —— 用下面的"改成"自己找）')))
     card.appendChild(head)
-    if (p?.summary) card.appendChild(el('div', 'point-summary', String(p.summary)))
-    const ev = Array.isArray(p?.evidence) ? p.evidence : []
-    card.appendChild(el('div', 'point-ev', `证据 ${ev.length} 条`))
+    card.appendChild(el('div', 'sug-advice', String(s?.advice ?? '')))
+    if (s?.reason) card.appendChild(el('div', 'sug-reason', `为什么：${String(s.reason)}`))
+    const ev = Array.isArray(s?.evidence) ? s.evidence : []
+    card.appendChild(el('div', 'sug-ev', `依据 ${ev.length} 条评论`))
     if (ev.length) {
       // `<details>` 是浏览器原生的折叠：零依赖，且证据原文默认不占版面
       const det = document.createElement('details')
-      det.appendChild(el('summary', '', `展开证据原文（${ev.length} 条）`))
+      det.appendChild(el('summary', '', `展开依据的评论（${ev.length} 条）`))
       for (const n of ev) det.appendChild(el('div', 'ev-line', evidenceText(n)))
       card.appendChild(det)
     }
     box.appendChild(card)
   }
+  box.appendChild(
+    el('div', 'note', '这些只是**意见**：评审台不会改 styles/闲聊.md（按你的要求，改动由 LLM 另外执行）。用下面的「复制」把它整段拿走。'),
+  )
 }
 
-// 证据是提示词里的**评论编号**（1 起，见 chat-review-consolidate.mjs 的 commentLine）：
-// 编号对得上 `state.cons.comments`（同范围、新→旧、只含带评论的）就换回原文；
-// 换不回来就如实显示编号 —— 不编一段看起来像原文的话。
-function evidenceText(n) {
-  const at = Number(n) - 1
-  const row = Number.isInteger(at) && at >= 0 ? state.cons.comments[at] : null
-  if (!row) return `第 ${n} 条评论（这次没取到它的原文）`
-  const reply = truncate(String(row.reply ?? '').replace(/\s+/g, ' '), 60)
-  return `[${n}] 评论：${String(row.comment ?? '').trim()}${reply ? `\n      当时它说：「${reply}」` : ''}`
+/** 四种动作的白名单（与服务端 `SUGGESTION_ACTIONS` 同源；这里只用来挡模型给的野值）。 */
+const SUGGESTION_ACTIONS = ['rewrite', 'merge', 'delete', 'add']
+
+/** 把意见拼成**纯文本**：复制出去就能直接交给另一个 LLM / 自己照着改。 */
+function suggestionsText(l) {
+  const list = Array.isArray(l?.suggestions) ? l.suggestions : []
+  const out = [`# styles/闲聊.md 修改意见（${list.length} 条）`]
+  out.push(`# 来源：聊天记录评审台｜整理记录 ${l?.id ?? '（未给）'}${l?.createdAt ? `｜${fmtTime(l.createdAt)}` : ''}`)
+  if (l?.notes) out.push('', `总体说明：${l.notes}`)
+  list.forEach((s, i) => {
+    const action = SUGGESTION_ACTIONS.includes(String(s?.action)) ? String(s.action) : 'rewrite'
+    out.push('', `${i + 1}. 【${ACTION_LABEL[action]}】${s?.target ?? '（未指定位置）'}`)
+    out.push(`   改成：${s?.advice ?? ''}`)
+    if (s?.reason) out.push(`   为什么：${s.reason}`)
+    const ev = Array.isArray(s?.evidence) ? s.evidence : []
+    if (ev.length) out.push(`   依据评论编号：${ev.join('、')}`)
+  })
+  const cov = l?.anchorCoverage
+  if (cov && Array.isArray(cov.uncovered) && cov.uncovered.length) {
+    out.push('', `# 提示：这份意见没有提到这些底线要点（不等于错，确认一眼即可）：${cov.uncovered.map((m) => m?.label ?? m?.id).join('、')}`)
+  }
+  return out.join('\n')
 }
 
-/** 本地确定性聚类（不调模型）：让人看见"哪些评论在说同一件事、说了几遍"。 */
-function renderClusters(clusters) {
-  const box = $('clusters')
-  clear(box)
-  if (!clusters || typeof clusters !== 'object') return
-  const groups = [['bad', '不对'], ['ok', '还行'], ['good', '对']]
-  const total = groups.reduce((n, [k]) => n + (Array.isArray(clusters[k]) ? clusters[k].length : 0), 0)
-  if (!total) return
-  const det = document.createElement('details')
-  det.appendChild(el('summary', '', `本地聚类（相似评论分组，共 ${total} 组；不调模型，随时能看）`))
-  for (const [k, label] of groups) {
-    const rows = Array.isArray(clusters[k]) ? clusters[k] : []
-    if (!rows.length) continue
-    det.appendChild(el('div', 'cluster-head', `${label}（${rows.length} 组）`))
-    for (const one of rows) {
-      const row = el('div', 'cluster')
-      row.appendChild(el('span', 'cluster-count', `×${numOrDash(one?.count)}`))
-      row.appendChild(el('span', 'cluster-text', String(one?.text ?? '')))
-      det.appendChild(row)
+/** 复制意见。`navigator.clipboard` 不可用时（非 https/旧浏览器）退回 `select + execCommand`。 */
+async function copySuggestions() {
+  const l = state.cons.latest
+  if (!l?.id) return toast('还没有整理结果可复制', 'err')
+  const text = suggestionsText(l)
+  const box = $('copy-why')
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      throw new Error('这个浏览器不给用剪贴板 API')
     }
-  }
-  det.appendChild(el('div', 'note', '聚类只是"把说得像的评论堆在一起并计数"，不是结论 —— 结论是上面的「点」。'))
-  box.appendChild(det)
-}
-
-/** 锚点核对结果：守住了就说守住了；没守住就把丢失的底线要点**逐条**列出来。 */
-function renderAnchorCheck(l) {
-  const box = $('anchor-check')
-  clear(box)
-  if (!l) return
-  const a = l.anchors
-  if (!a || typeof a !== 'object') {
-    return void box.appendChild(el('div', 'callout warn', '服务端没给 anchors —— 无法确认底线要点有没有守住，应用前请自己把改写读一遍。'))
-  }
-  if (a.ok === true) {
-    return void box.appendChild(el('div', 'callout ok', `锚点核对通过：${numOrDash(a.checked)} 条底线要点都还在。`))
-  }
-  const missing = Array.isArray(a.missing) ? a.missing : []
-  const warn = el('div', 'callout err')
-  warn.appendChild(el('div', '', `⚠️ 锚点没守住：丢了 ${missing.length} 条底线要点（共核对 ${numOrDash(a.checked)} 条）：`))
-  const ul = el('ul', 'anchor-missing')
-  for (const m of missing) {
-    const any = Array.isArray(m?.any) && m.any.length ? `（文件里应有：${m.any.join(' / ')}）` : ''
-    ul.appendChild(el('li', '', `${m?.label ?? m?.id ?? '（服务端没给名字）'}${any}`))
-  }
-  warn.appendChild(ul)
-  box.appendChild(warn)
-}
-
-/** 不引 diff 库：按行分，`+` 绿 `-` 红。 */
-function renderDiff(pre, diff) {
-  clear(pre)
-  if (!diff) return void (pre.hidden = true)
-  pre.hidden = false
-  for (const line of diff.split('\n')) {
-    const cls = line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : line.startsWith('@@') ? 'diff-hunk' : 'diff-line'
-    pre.appendChild(el('div', cls, line === '' ? ' ' : line))
+    box.textContent = `已复制 ${text.length} 字到剪贴板。`
+    toast('修改意见已复制', 'ok')
+  } catch (error) {
+    // ★ 复制失败**不许静默**：把文本摊在一个只读框里让人自己全选复制
+    const ta = $('copy-fallback')
+    ta.hidden = false
+    ta.value = text
+    ta.focus()
+    ta.select()
+    box.textContent = `自动复制失败（${error?.message ?? error}）—— 下面的框里是全文，已帮你全选，Ctrl+C 即可。`
+    toast('自动复制失败，已把全文摊在下面', 'err')
   }
 }
 
-const anchorMissingOf = (l) => (Array.isArray(l?.anchors?.missing) ? l.anchors.missing : []).map((m) => String(m?.label ?? m?.id ?? '（没给名字）'))
-
-function renderApplyRow() {
-  const c = state.cons
-  const btn = $('btn-apply')
-  const why = $('apply-why')
+function renderCopyRow() {
+  const btn = $('btn-copy-suggestions')
+  const why = $('copy-why')
   if (!btn || !why) return
-  const l = c.latest
-  if (!l?.id || !String(l.rewritten ?? '').trim()) {
-    btn.disabled = true
-    btn.textContent = '应用到 styles/闲聊.md'
-    why.textContent = l?.id ? '这份整理结果里没有正文（rewritten 是空的）—— 不能应用。' : '还没有整理结果可应用 —— 先点「整理评论」。'
-    return
-  }
-  const anchorsOk = l.anchors?.ok !== false
-  btn.disabled = false
-  const n = anchorMissingOf(l).length
-  if (anchorsOk) {
-    btn.textContent = '应用到 styles/闲聊.md'
-    why.textContent = '点下去会弹确认框：写清楚会先备份 styles/闲聊.md、再整篇替换、并同步出厂常量。'
-  } else if (c.armed) {
-    btn.textContent = '我知道，仍然应用'
-    why.textContent = `锚点没守住（丢了 ${n} 条）。再点这一次才会写文件（先备份；会记为"覆盖应用"）。`
+  const l = state.cons.latest
+  const has = Boolean(l?.id) && Array.isArray(l?.suggestions) && l.suggestions.length > 0
+  btn.disabled = !has
+  if (has) {
+    if (!why.textContent) why.textContent = `点一下把 ${l.suggestions.length} 条意见整段复制走（带"改成什么"和"为什么"）。`
   } else {
-    btn.textContent = '应用到 styles/闲聊.md'
-    // ★ 锚点没守住时，第一次点击**不发请求、不写文件**：只把丢失清单摆出来等人确认
-    why.textContent = `⚠️ 锚点没守住（丢了 ${n} 条）：第一次点击不会写文件，只会把丢失清单摆出来让你确认。`
+    why.textContent = l?.id ? '这份整理结果里没有意见可复制。' : '还没有整理结果 —— 先点「整理评论」。'
   }
 }
 
 /**
- * 应用改写：**唯一会碰风格文件与出厂常量的写操作**，所以两段确认一个都不能少 ——
- * ① 弹窗写清"先备份、整篇替换、同步出厂常量"；② 锚点没守住时还要一次明确的"仍然应用"。
+ * 底线要点覆盖情况（**只提示，不拦**）。
+ *
+ * 上一版这里是"锚点没守住就拒绝应用"；现在没有"应用"了，所以它只回答一个问题：
+ * 这份意见**提到了**哪些底线要点、**一条都没提**哪些 —— 没提不等于错（可能这次不用动），
+ * 但值得人扫一眼。
  */
-async function applyConsolidation() {
-  const c = state.cons
-  const l = c.latest
-  if (!l?.id) return toast('还没有整理结果可应用', 'err')
-  if (!String(l.rewritten ?? '').trim()) return toast('这份整理结果里没有正文，不能应用', 'err')
-  const anchorsOk = l.anchors?.ok !== false
-  if (!anchorsOk && !c.armed) {
-    // ★ 第一次点击**什么都不发**：只是把"丢了哪几条"摆到台面上，等一个明确的第二次点击
-    c.armed = true
-    renderConsolidate()
-    return toast('锚点没守住：丢失清单在上面，确认后再点「我知道，仍然应用」', 'err')
+function renderAnchorCoverage(l) {
+  const box = $('anchor-coverage')
+  clear(box)
+  if (!l) return
+  const cov = l.anchorCoverage
+  if (!cov || typeof cov !== 'object') {
+    return void box.appendChild(el('div', 'callout warn', '服务端没给 anchorCoverage —— 无法提示这份意见覆盖了哪些底线要点。'))
   }
-  const missing = anchorMissingOf(l)
-  const ok = window.confirm(
-    // ⚠️ `window.confirm` 是**纯文本**，别在这里写 Markdown（星号会原样显示出来）
-    '确认把这份改写写进 styles/闲聊.md 吗？\n\n' +
-      '· 会先把现在的文件备份到 styles/.backups/（闲聊.md.<时间戳>.bak）；\n' +
-      `· 然后把整份文件替换成这次整理出来的正文（现在 ${numOrDash(l.styleBeforeChars)} 字 → 改写 ${numOrDash(l.chars)} 字）；\n` +
-      '· 并同步 src/chat-mode.mjs 里的出厂默认常量（不同步的话两份会漂，测试会红）；\n' +
-      (anchorsOk ? '' : `· ⚠️ 这份改写丢了 ${missing.length} 条底线要点：${missing.join('、')} —— 你选择了仍然应用。\n`) +
-      `\n整理记录：${l.id}`,
+  const uncovered = Array.isArray(cov.uncovered) ? cov.uncovered : []
+  const coveredN = Array.isArray(cov.covered) ? cov.covered.length : 0
+  if (!uncovered.length) {
+    return void box.appendChild(el('div', 'callout ok', `底线要点：这份意见把 ${numOrDash(coveredN)} 条都提到了。`))
+  }
+  const warn = el('div', 'callout warn')
+  warn.appendChild(
+    el('div', '', `底线要点提示：这份意见**没有提到**下面 ${uncovered.length} 条（已提到 ${numOrDash(coveredN)} 条）—— 不等于错，确认一眼即可：`),
   )
-  if (!ok) return
-  $('btn-apply').disabled = true
-  const res = await api('/api/apply', {
-    method: 'POST',
-    // ★ 只有"武装过的第二次点击"才带 confirmAnchors:true；确认框首点永远不带
-    body: { consolidation: l.id, scope: state.reportBatch || 'all', confirm: true, confirmAnchors: !anchorsOk },
-  })
-  if (!res.ok) {
-    $('btn-apply').disabled = false
-    return renderApplyFailure(res)
-  }
-  renderApplyResult(res)
-  toast('已应用到 styles/闲聊.md（备份已生成）', 'ok')
-  await loadHealth() // ★ 顶栏的字数与指纹必须跟着变，否则人会以为没写进去
-  await loadConsolidate({ keepLocal: true }) // latest.appliedAt 也要更新
-}
-
-function renderApplyFailure(res) {
-  const lines = [`没能应用（HTTP ${numOrDash(res.httpStatus)}）：${res.error ?? '服务端没给 error'}`]
-  const missing = Array.isArray(res.anchorsMissing) ? res.anchorsMissing : []
-  if (missing.length) {
-    // 服务端在 409 里回了"丢了哪几条" —— 逐条显示，并把按钮切成"仍然应用"
-    lines.push(`丢了 ${missing.length} 条底线要点：${missing.map((m) => m?.label ?? m?.id ?? '（没给名字）').join('、')}`)
-    state.cons.armed = true
-    renderConsolidate()
-  }
-  $('apply-result').textContent = lines.join('\n')
-  if (missing.length) toast('锚点没守住：再点一次「我知道，仍然应用」才会写文件', 'err')
-}
-
-function renderApplyResult(res) {
-  const before = Number.isFinite(res.beforeChars) ? res.beforeChars : null
-  const after = Number.isFinite(res.chars) ? res.chars : null
-  const delta = before != null && after != null ? after - before : null
-  const parts = [
-    `已应用：${numOrDash(before)} → ${numOrDash(after)} 字` +
-      (delta == null ? '（服务端没给全字数，算不出精简/增加）' : delta === 0 ? '（字数没变）' : `（${delta < 0 ? '精简' : '增加'} ${Math.abs(delta)} 字）`),
-    `备份：${res.backup ?? '（服务端没给备份路径 —— 请自己去 styles/.backups/ 确认）'}`,
-    `新 sha256：${res.sha256 ? String(res.sha256).slice(0, 16) : '（未给）'}`,
-    `整理记录：${res.consolidationId ?? '（未给）'}`,
-    res.anchorsOverridden ? '⚠️ 锚点是被覆盖应用的（这份改写丢了底线要点）' : '锚点核对通过',
-  ]
-  const cs = res.constantSync
-  if (cs?.ok === true) {
-    parts.push(`出厂常量已同步${cs.changed === false ? '（内容本来就一致，没改）' : '（src/chat-mode.mjs 已更新）'}`)
-  } else if (cs?.ok === false) {
-    // ★ 这句必须响：风格文件改了、出厂常量没跟上 —— 两份会漂，而且只有测试会告诉你
-    parts.push(`⚠️ 出厂常量没同步成功：${cs.why ?? '服务端没说原因'}\n   （styles/闲聊.md 已经改好了，但 src/chat-mode.mjs 里的默认常量还是旧的 —— 两份会漂，verify-chat-mode 会红。）`)
-  } else {
-    parts.push('⚠️ 服务端没给 constantSync —— 无法确认出厂常量有没有同步成功。')
-  }
-  $('apply-result').textContent = parts.join('\n')
+  const ul = el('ul', 'anchor-missing')
+  for (const m of uncovered) ul.appendChild(el('li', '', `${m?.label ?? m?.id ?? '（服务端没给名字）'}`))
+  warn.appendChild(ul)
+  box.appendChild(warn)
 }
 
 /* ── 事件绑定：**逐个 try/catch** —— 一个绑不上不影响其余的 ─────────── */
@@ -1469,7 +1449,6 @@ function bindEvents() {
     state.reportSearch = ''
     $('comment-search').value = ''
     for (const other of $('comment-filter').children) other.classList.toggle('active', (other.dataset.verdict ?? '') === '')
-    $('apply-result').textContent = ''
     void reloadReport()
   })
   bind('comment-filter', 'onclick', (e) => {
@@ -1484,12 +1463,15 @@ function bindEvents() {
     renderCommentList()
   })
   bind('btn-consolidate', 'onclick', () => void runConsolidate())
-  bind('btn-apply', 'onclick', () => void applyConsolidation())
-  // 点表：刷新 + 新建（编辑与删除在 renderPointsAdmin 里逐个绑）
+  bind('btn-copy-suggestions', 'onclick', () => void copySuggestions())
+  // 标签：刷新 + 新建（编辑与删除在 renderPointsAdmin 里逐个绑）
   bind('btn-points-reload', 'onclick', () => void loadPoints())
   bind('btn-point-new', 'onclick', () => {
     const title = String($('np-title')?.value ?? '').trim()
-    if (!title) return toast('先给新点起个标题', 'err')
+    const titleMax = Number(state.points.titleMax) || 12
+    if (!title) return toast('先给新标签起个名字', 'err')
+    // ★ 前端也挡一次超长（服务端还会挡）：标签名是按钮上的字，长了就糊成一片
+    if ([...title].length > titleMax) return toast(`标签名最多 ${titleMax} 字（现在 ${[...title].length} 字）—— 说明写在下面那个框里`, 'err')
     void savePoint({
       id: '',
       kind: $('np-kind')?.value === 'good' ? 'good' : 'bad',
@@ -1499,6 +1481,20 @@ function bindEvents() {
     if ($('np-title')) $('np-title').value = ''
     if ($('np-summary')) $('np-summary').value = ''
   })
+  // 一次性清理：删掉上一版自动播种塞进来的长标题标签（手写的、短的一律不动）
+  bind('btn-point-prune', 'onclick', () => void pruneAutoPoints())
+  // 打分页里两组各自的「+ 新增标签」：就地一个小表单，免得为了建标签跳去报告页
+  for (const kind of ['bad', 'good']) {
+    bind(`btn-new-${kind}`, 'onclick', () => toggleNewLabelForm(kind, true))
+    bind(`np-${kind}-cancel`, 'onclick', () => toggleNewLabelForm(kind, false))
+    const form = $(`np-form-${kind}`)
+    if (form) {
+      form.onsubmit = (e) => {
+        e.preventDefault()
+        void createLabelQuick(kind)
+      }
+    }
+  }
 }
 
 // ── 键盘：打分页不该用鼠标 ──────────────────────────────────────────
@@ -1542,7 +1538,7 @@ document.addEventListener('keydown', (e) => {
 
 async function boot() {
   bindEvents()
-  // 点表启动就要有：打分页那排按钮是它的第一落点（原标签的位置不能空着）
+  // 标签表：打分页那排按钮是它的第一落点（原标签系统的位置）
   await Promise.all([loadHealth(), loadTaxonomy(), loadPoints()])
   await switchTab('import') // 打开页面先落在导入页：第一次用它的人要从这里开始
 }
