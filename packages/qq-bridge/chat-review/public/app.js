@@ -484,14 +484,20 @@ async function fetchPage() {
 }
 
 // 进度真值：`/api/items` 的 batch 只有 scored/items（**没有 commented**），而进度行要显示
-// "有评论 Z"。`/api/stats` 的 `comments.withText` 就是它 —— 多一次请求换一个不编的数字，值得。
+// "有评论 Z"。`/api/stats` 的 `comments.withContent`（有文本**或**有标签）就是它 ——
+// 多一次请求换一个不编的数字，值得。
 async function loadProgressTruth() {
   const s = state.score
   if (!s.batch) return
   const data = await api(`/api/stats?batch=${encodeURIComponent(s.batch)}`)
   if (!data.ok) return
   const rate = data.rate ?? {}
-  applyProgress({ scored: rate.scored, total: rate.total, commented: Number.isFinite(data.comments?.withText) ? data.comments.withText : null })
+  applyProgress({
+    scored: rate.scored,
+    total: rate.total,
+    // ★ 口径：**点标签也算评论**（使用者 2026-10-02）—— 所以用 withContent 而不是 withText
+    commented: Number.isFinite(data.comments?.withContent) ? data.comments.withContent : null,
+  })
 }
 
 function applyProgress(p) {
@@ -1040,11 +1046,13 @@ function renderStats(data) {
   legend.appendChild(el('span', '', `合计已评 ${numOrDash(rate.scored)}${Number.isFinite(rate.total) ? ` / 共 ${rate.total}` : ''}`))
   box.appendChild(legend)
   if (sum === 0) box.appendChild(el('div', 'note', '还没有评分 —— 去「② 打分」页评几条，这里的分布才有意义。'))
-  // ★ 评论是整理的**唯一素材**：只判档不写字的那些会被排除，所以这个数字必须露出来
+  // ★ 评论是整理的**唯一素材**：所以这两个数字必须露出来。
+  //   口径（使用者 2026-10-02 修正）：**点标签就等于评论** —— 只点标签、没写字的也算。
   const c = data.comments ?? {}
-  box.appendChild(el('div', 'stats-line', Number.isFinite(c.withText)
-    ? `带评论 ${c.withText} 条 / 只判档没写评论 ${numOrDash(c.withoutText)} 条 —— 整理只吃带评论的那些。`
-    : '服务端没给 comments.withText —— "有多少条带评论"这个数字不知道（不猜）。'))
+  box.appendChild(el('div', 'stats-line', Number.isFinite(c.withContent)
+    ? `有评论 ${c.withContent} 条（写了字 ${numOrDash(c.withText)} 条、只点了标签没写字 ${numOrDash(c.tagsOnly)} 条）` +
+      ` / 判了档但没评论 ${numOrDash(c.withoutText - numOrDash(c.tagsOnly, 0))} 条 —— 整理只吃"有评论"的那些。`
+    : '服务端没给 comments.withContent —— "有多少条有评论"这个数字不知道（不猜）。'))
 
   // ── 标签排行：点一下 = 只看"记过这个标签"的评论 ──
   const pts = Array.isArray(data.points) ? data.points : []
@@ -1095,8 +1103,10 @@ function renderCommentList() {
     if (state.reportPoint && !(Array.isArray(r?.points) ? r.points : []).some((p) => p?.id === state.reportPoint)) return false
     return !q || `${r?.comment ?? ''}\n${r?.reply ?? ''}`.toLowerCase().includes(q)
   })
+  // ★ "有评论" = 有文本**或**有标签（点标签就等于评论）；只有"判了档、既没写字也没点标签"才算没评论
+  const hasContent = (r) => hasCommentText(r?.comment) || (Array.isArray(r?.points) && r.points.length > 0)
   $('comment-list-note').textContent = data
-    ? `共 ${all.length} 条评分（带评论 ${all.filter((r) => hasCommentText(r?.comment)).length} 条` +
+    ? `共 ${all.length} 条评分（有评论 ${all.filter(hasContent).length} 条，其中只点了标签 ${all.filter((r) => !hasCommentText(r?.comment) && Array.isArray(r?.points) && r.points.length).length} 条` +
       `${state.reportPoint ? `，筛了标签 ${state.reportPoint}` : ''}），当前显示 ${rows.length} 条｜新 → 旧`
     : '还没有统计数据 —— 清单不可用（原因见上方红条）。'
   if (!data) return void box.appendChild(el('div', 'empty', '拉不到统计 —— 评论清单也一起不可用；不会显示一个空的"看起来没评过"的清单。'))
@@ -1114,9 +1124,19 @@ function commentRow(r) {
   if (r?.chatLabel) head.appendChild(el('span', 'cm-time', String(r.chatLabel)))
   card.appendChild(head)
   const comment = String(r?.comment ?? '').trim()
-  card.appendChild(el('div', comment ? 'cm-comment' : 'cm-comment empty-comment', comment || '（只判了档，没写评论 —— 它不参与整理）'))
-  // ★ 点与评论**各自留痕**：这里把这条记过的点也显示出来（(a) 语义：点不写进评论正文）
+  // ★ 点与评论**各自留痕**：把这条记过的标签也显示出来（(a) 语义：标签不写进评论正文）
   const ps = Array.isArray(r?.points) ? r.points : []
+  // ★★ 口径（使用者 2026-10-02）：**点标签就等于评论** —— 只点标签、没写字的那些
+  //   **不是"未评论"**，它们照样参与整理。只有"判了档、既没写字也没点标签"才是真没评论。
+  const judgedOnly = !comment && !ps.length
+  card.appendChild(
+    el(
+      'div',
+      judgedOnly ? 'cm-comment empty-comment' : 'cm-comment',
+      comment || (ps.length ? '（只点了标签，没写文字 —— 也算评论，会参与整理）' : '（只判了档，既没写评论也没点标签 —— 它不参与整理）'),
+    ),
+  )
+  // ★ 点与评论**各自留痕**：这里把这条记过的点也显示出来（(a) 语义：点不写进评论正文）
   if (ps.length) {
     const row = el('div', 'cm-points')
     row.appendChild(el('span', 'picked-label', '记的点：'))
@@ -1336,7 +1356,10 @@ function renderConsolidate() {
 
   // ── 「整理评论」按钮：不可用时**禁用并说明原因**（绝不给一个点了没反应的按钮）──
   const modelOk = c.model?.ok === true
-  const noMaterial = Number.isFinite(c.counts?.withText) && c.counts.withText === 0
+  // ★ 新口径：只点标签也算评论 ⇒ "没素材"要用 withContent 判（用 withText 会误判成没素材）
+  const noMaterial = Number.isFinite(c.counts?.withContent ?? c.counts?.comments)
+    ? (c.counts.withContent ?? c.counts.comments) === 0
+    : false
   $('btn-consolidate').disabled = c.busy || !modelOk || noMaterial
   const lim = c.limits ?? {}
   $('consolidate-why').textContent = !c.loaded

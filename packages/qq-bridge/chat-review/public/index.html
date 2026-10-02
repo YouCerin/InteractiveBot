@@ -212,7 +212,12 @@
           <label class="grow">搜评论 / 原话 <input id="comment-search" placeholder="输入一段文字，只看含它的评论或那句话" /></label>
           <span class="note" id="comment-list-note"></span>
         </div>
-        <div id="comment-list"></div>
+        <!-- ★ 限高滚动：清单本身可能几百条，不设限会把整页撑得很长；
+             头部（筛选条 + 计数）在上面那行、**留在容器外**，不跟着滚走。
+             容器不用 fixed/sticky —— 叠层已经被骂过一次（且 .score-bar 有断言禁止）。 -->
+        <div class="scroll-box" id="comment-list-scroll">
+          <div id="comment-list"></div>
+        </div>
       </section>
 
       <!-- ★★ 标签管理：标签是**人工写**的（改名字/改说明/删/新建）——

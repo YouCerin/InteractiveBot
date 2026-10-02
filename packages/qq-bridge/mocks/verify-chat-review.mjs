@@ -417,6 +417,54 @@ section('③b 标签表：**人工写**（可编辑、限 12 字、没有自动�
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+section('③c ★★ 「点标签就等于评论」（使用者 2026-10-02 的语义修正）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 使用者原话：「评论清单显示未评论，不参与整理，但是实际上**选择标签已经相当于评论了**」。
+// 第一版只把**有自由文本**的算成"有评论"，于是"只点了标签、没写字"的评分被标成未评论、
+// **被排除在整理之外** —— 那是错的：点标签就是一次评论，模型必须看得见它。
+{
+  const ws = freshDir('tagonly')
+  const styleDir = freshDir('tagonly-style')
+  writeFileSync(join(styleDir, '闲聊.md'), '【闲聊时的说话方式】\n- 极短。\n', 'utf8')
+  const store = createReviewStore({ workspace: ws, styleFile: join(styleDir, '闲聊.md') })
+  const items = [
+    { id: 'p1', batch: 'pb', source: 'import', chatKey: 'g', chatLabel: '群 g', at: 1, context: [], reply: '第一句原话' },
+    { id: 'p2', batch: 'pb', source: 'import', chatKey: 'g', chatLabel: '群 g', at: 2, context: [], reply: '第二句原话' },
+    { id: 'p3', batch: 'pb', source: 'import', chatKey: 'g', chatLabel: '群 g', at: 3, context: [], reply: '第三句原话' },
+  ]
+  store.createBatch({ label: 'pb', source: 'import', items })
+  const made = store.upsertPoint({ kind: 'bad', title: '太长', summary: '一句话能说完就别写一段' })
+  check('前提：建得出人工标签', made.ok && made.point?.id, JSON.stringify(made.why ?? ''))
+  const pid = made.point.id
+  store.saveScore({ id: 'p1', verdict: 'bad', comment: '写了一句评论', points: [pid] }) // 文本 + 标签
+  store.saveScore({ id: 'p2', verdict: 'good', points: [pid] }) // **只有标签，没有文字**
+  store.saveScore({ id: 'p3', verdict: 'ok' }) // 只判档
+
+  const st = store.stats('pb')
+  check('★★ "有评论"= 有文本**或**有点标签（只有"判了档、两样都没有"才算没评论）',
+    st.comments.withContent === 2 && st.comments.tagsOnly === 1 && st.comments.withText === 1 && st.comments.withoutText === 2,
+    JSON.stringify(st.comments))
+  check('★★ 只点标签的评分**进得了** comments()（第一版会把它排除在整理之外）',
+    store.comments('pb').length === 2 && store.comments('pb').some((c) => c.id === 'p2' && !c.comment && c.points.length),
+    store.comments('pb').map((c) => c.id).join(','))
+  check('★ 清单里那一行带着标签（报告页要显示它，而不是标成"未评论"）',
+    st.list.find((r) => r.id === 'p2')?.points?.[0]?.title === '太长',
+    JSON.stringify(st.list.find((r) => r.id === 'p2')?.points ?? null))
+  check('★ 批次的"有评论"计数也按新口径（点标签算评论）',
+    store.progress('pb').commented === 2, JSON.stringify(store.progress('pb')))
+
+  // 整理提示词：标签名必须在，且"只有标签"的那一行不能是空的
+  const built = buildConsolidatePrompt({ comments: store.comments('pb'), styleText: '【闲聊时的说话方式】\n- 极短。\n', anchors: [] })
+  check('★★ 提示词里带上**标签名**（模型要看见人用标签表达了什么）',
+    built.prompt.includes('标签：太长'), built.prompt.split('\n').filter((l) => l.includes('标签：')).slice(0, 2).join(' | '))
+  check('★★ 只有标签、没有文字的评论，那一行**不能是空的**',
+    /评论：[^\n]*标签：太长/.test(built.prompt), '')
+  check('★ 只判档、既没写字也没点标签的那条**不进**提示词（它确实没素材）',
+    built.kept === 2 && !built.prompt.includes('第三句原话'), `kept=${built.kept}`)
+}
+
 section('④ 整理：评论 → **对 styles/闲聊.md 的修改意见**（★ 不写那个文件）')
 // ══════════════════════════════════════════════════════════════════════════
 // 使用者第三版要求：「最终基于评价过的消息记录和评论，生成闲聊.md 的修改意见」+
@@ -1206,6 +1254,28 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
       scoreBar.length > 0 && !/z-index/.test(scoreBar), '')
     check('★ 打分页的顶部那一行还在 HTML 里（这条审计不是对着空字符串在断言）',
       /class="score-bar"/.test(readFileSync(join(PKG_ROOT, 'chat-review', 'public', 'index.html'), 'utf8')))
+
+    // ★★ 评论清单必须是**限高滚动容器**（使用者 2026-10-02：清单会把整页撑得很长）——
+    //    判据：抠出 .scroll-box 那段 CSS，必须有 max-height 与 overflow-y；
+    //    并且**不许**是 fixed/sticky（上一版批次栏悬浮刚被骂过，别再引入同类问题）。
+    const scrollBox = /\.scroll-box\s*\{([\s\S]*?)\}/.exec(css)?.[1] ?? ''
+    check('★★ 评论清单是限高滚动容器（max-height + overflow-y）',
+      /max-height\s*:/.test(scrollBox) && /overflow-y\s*:/.test(scrollBox),
+      scrollBox.replace(/\s+/g, ' ').trim().slice(0, 140) || '（没找到 .scroll-box）')
+    check('★★ 它也不是叠层（不许 position: fixed/sticky）',
+      scrollBox.length > 0 && !/position\s*:\s*(fixed|sticky|absolute)/.test(scrollBox), '')
+    check('★ 滚动止于容器内（overscroll-behavior: contain，别让滚轮带着整页跳）',
+      /overscroll-behavior\s*:/.test(scrollBox), '')
+    const listHtml = readFileSync(join(PKG_ROOT, 'chat-review', 'public', 'index.html'), 'utf8')
+    check('★ 容器真的套在清单上，且筛选条/计数在容器**外面**（不跟着滚走）',
+      listHtml.includes('id="comment-list-scroll"') &&
+        listHtml.indexOf('id="comment-list-note"') < listHtml.indexOf('id="comment-list-scroll"') &&
+        listHtml.indexOf('id="comment-list-scroll"') < listHtml.indexOf('id="comment-list"'),
+      '')
+    check('★ 页面把"只点标签"的条目当成**有评论**（不再是"未评论"）',
+      app.includes('只点了标签，没写文字 —— 也算评论，会参与整理') &&
+        app.includes('comments?.withContent'),
+      '')
 
     // 反例：把一条不存在的路由塞进去必须能被抓住（否则上面那条断言是空的）
     const bogus = new Set([...`${app}\nfetch('/api/definitely-not-real')`.matchAll(/['"`](\/api\/[\w/-]+)/g)].map((m) => m[1]))

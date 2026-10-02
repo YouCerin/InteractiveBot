@@ -614,7 +614,13 @@ export function createReviewServer({
               })),
             // 评论都在这里：整理没跑成时，页面至少能让人逐条读
             comments: cs,
-            counts: { comments: cs.length, withText: cs.filter((c) => c.comment).length },
+            // cs 本身已经是"有评论"的（有文本**或**有点标签，见 store 的 comments()）；
+            // 这里再把"写了自由文本的"单独给出来，页面两个数都能显示
+            counts: {
+              comments: cs.length,
+              withText: cs.filter((c) => c.comment).length,
+              withContent: cs.length,
+            },
             model: t.ok ? { ok: true, model: t.model, baseUrl: t.baseUrl } : { ok: false, why: t.why },
             limits: CONSOLIDATE_LIMITS,
             anchors: STYLE_ANCHORS.map((a) => ({ id: a.id, label: a.label })),

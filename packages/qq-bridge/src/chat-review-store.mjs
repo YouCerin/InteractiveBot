@@ -144,6 +144,11 @@ export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}
   let bad = 0
   let withText = 0
   let withPoints = 0
+  // ★★ 「有评论」的**新口径**（使用者 2026-10-02：「选择标签已经相当于评论了」）：
+  //   只点标签、没写字的评分**不能算成"没评论"** —— 那会把它们排除在整理之外，
+  //   而人明明已经用标签把判断表达出来了。∴ 另立 withContent（文本**或**标签）。
+  let withContent = 0
+  let tagsOnly = 0
 
   for (const item of items) {
     const s = scores[item?.id]
@@ -158,10 +163,7 @@ export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}
     perChat.set(key, c)
 
     const comment = String(s.comment ?? '').trim()
-    if (comment) {
-      withText += 1
-      if (byVerdict[s.verdict] !== undefined) byVerdict[s.verdict] += 1
-    }
+    if (comment) withText += 1
     // ── 标签：这条评了哪几个标签（(a) 语义：标签与评论**各自留痕**，谁都不覆盖谁）──
     const pointIds = Array.isArray(s.points) ? s.points.filter(Boolean) : []
     const points = pointIds.map((pid) => {
@@ -171,6 +173,12 @@ export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}
       return p ? { id: pid, kind: p.kind, title: p.title } : { id: pid, kind: '', title: `（已删除的标签 ${pid}）` }
     })
     if (points.length) withPoints += 1
+    // 新口径：有文本**或**有点标签 ⇒ 这条"有评论"（只点标签的那些不再被当成没评论）
+    if (comment || points.length) {
+      withContent += 1
+      if (!comment && points.length) tagsOnly += 1
+      if (byVerdict[s.verdict] !== undefined) byVerdict[s.verdict] += 1
+    }
     list.push({
       id: item.id,
       verdict: s.verdict,
@@ -192,7 +200,16 @@ export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}
       good: scored ? verdicts.good / scored : 0,
       bad: scored ? bad / scored : 0,
     },
-    comments: { withText, withoutText: scored - withText, byVerdict },
+    comments: {
+      // 自由文本口径（与旧版一致）：只有写了字才算 withText
+      withText,
+      withoutText: scored - withText,
+      // ★「有评论」的**新口径**：有文本**或**有点标签（使用者：点标签就等于评论）
+      withContent,
+      tagsOnly,
+      // byVerdict 按**新口径**统计 —— 它就是页面上"有评论的按档分布"
+      byVerdict,
+    },
     /** 点被点了多少次（`{ [pointId]: n }`）—— 报告页的"点排行"用它。 */
     pointCounts: Object.fromEntries([...perPoint.entries()].sort((a, b) => b[1] - a[1])),
     pointsUsed: withPoints,
@@ -405,7 +422,8 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
             const s = scores[item?.id]
             if (!s) continue
             scored += 1
-            if (String(s.comment ?? '').trim()) commented += 1
+            // ★ 新口径：有文本**或**有点标签都算"有评论"（点标签就等于评论）
+            if (String(s.comment ?? '').trim() || (Array.isArray(s.points) && s.points.length)) commented += 1
           }
         }
         return { ...meta, scored, commented }
@@ -546,9 +564,15 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
     }
   }
 
-  /** 只有评论的评分（**整理**的输入：没写评论的那些不参与）。 */
+  /**
+   * 「有评论」的评分（**整理**的输入）。
+   *
+   * ★★ 口径（使用者 2026-10-02 修正）：**点标签就等于评论** ——
+   *   所以"只点了标签、没写字"的那些**也要**进来。第一版只收自由文本，
+   *   于是它们被标成"未评论"并被排除在整理之外，而人明明已经表达过判断了。
+   */
   function comments(scope) {
-    return stats(scope).list.filter((row) => row.comment)
+    return stats(scope).list.filter((row) => row.comment || row.points?.length)
   }
 
   // ── 点表（使用者 2026-10-02 拍板：点**顶替**原来的标签，是一套长期存在的评论词汇表）──

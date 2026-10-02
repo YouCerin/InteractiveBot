@@ -71,7 +71,15 @@ function commentLine(entry, index) {
     .replace(/\s*\n\s*/g, ' ')
   const reply = String(entry?.reply ?? '').replace(/\s*\n\s*/g, ' / ')
   const comment = String(entry?.comment ?? '').replace(/\s*\n\s*/g, ' ').trim()
-  return `[${index + 1}] ${verdict}｜机器人当时说：「${reply}」${ctx ? `｜当时对方说：「${ctx}」` : ''}\n    评论：${comment}`
+  // ★★ 标签也要写进这一行（使用者 2026-10-02：「选择标签已经相当于评论了」）。
+  //   模型必须看得见"人已经用标签表达了什么"，否则"只点了标签"的评论在提示词里等于空的。
+  const tags = (Array.isArray(entry?.points) ? entry.points : [])
+    .map((p) => String(p?.title ?? '').trim())
+    .filter(Boolean)
+  const detail =
+    [comment, tags.length ? `标签：${tags.join('、')}` : ''].filter(Boolean).join('｜') ||
+    '（只判了档，既没写文字也没点标签）'
+  return `[${index + 1}] ${verdict}｜机器人当时说：「${reply}」${ctx ? `｜当时对方说：「${ctx}」` : ''}\n    评论：${detail}`
 }
 
 /**
@@ -82,7 +90,10 @@ function commentLine(entry, index) {
  *   ③ 输出**只有 JSON**（解析器不猜散文）。
  */
 export function buildConsolidatePrompt({ comments = [], styleText = '', anchors = STYLE_ANCHORS, limits = CONSOLIDATE_LIMITS } = {}) {
-  const withText = comments.filter((c) => String(c?.comment ?? '').trim())
+  // ★ 新口径：有文本**或**有标签都算"有评论"（只点标签也是评论，必须喂给模型）
+  const withText = comments.filter(
+    (c) => String(c?.comment ?? '').trim() || (Array.isArray(c?.points) && c.points.length),
+  )
   const kept = withText.slice(0, Math.max(1, Number(limits.comments) || 150))
   const lines = []
   let used = 0

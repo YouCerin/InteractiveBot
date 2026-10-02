@@ -20,6 +20,17 @@
    任何一条 `display: flex/grid` 都能盖掉它 —— 于是"设了 hidden 但还显示"，看着像"点了没反应"。 */
 [hidden] { display: none !important; }
 
+/* ★ 限高滚动容器（评论清单这类"可能几百条"的列表用）：
+   ① 限高 + 纵向滚，避免把整页撑长；
+   ② overscroll-behavior: contain —— 滚到底之后**不许把滚动传给页面**（否则鼠标滚一下整页乱跳）；
+   ③ 绝不用 fixed/sticky：这个工具已经因为"悬浮栏压住内容"被骂过一次。 */
+.scroll-box {
+  max-height: 45vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
 body {
   margin: 0;
   background: var(--bg);

@@ -68,7 +68,12 @@
 ```
 
 - `verdict`：`good`（对）/ `ok`（还行）/ `bad`（不对）。
-- `comment`：**自由评论**，最多 2000 字；可以留空（只判档也能用，但整理只吃有评论的）。
+- `comment`：**自由评论**，最多 2000 字；可以留空（只判档也能用）。
+- ★★ **「有评论」= `comment` 有文字 _或_ `points` 非空**（使用者 2026-10-02 原话：
+  「评论清单显示未评论，不参与整理，但是实际上**选择标签已经相当于评论了**」）。
+  只点了标签、没写字的评分**不是"未评论"**，它们**照样参与整理**；
+  只有"判了档、既没写字也没点标签"才是真没评论。
+  `/api/stats` 的 `comments.withContent`（含标签）与 `withText`（只算文字）是两个口径，都给出。
 - `points`：这条上记了哪些**标签**（id 数组）。**点标签只记标签、不往评论框写字**（使用者拍板的 (a)）。
 - 一条 item 只有一个 score；**每条立刻落盘**（没有保存按钮）。
 - **整条替换语义**：重评时没带 `points` ⇒ 这条的标签会被清空（页面每次都会回填，所以正常用不会丢）。
@@ -191,7 +196,8 @@
 { "ok": true, "scope": "all",
   "verdicts": { "good": 20, "ok": 9, "bad": 41 },
   "rate": { "scored": 70, "total": 200, "good": 0.29, "bad": 0.59 },
-  "comments": { "withText": 66, "withoutText": 4, "byVerdict": { "good": 19, "ok": 8, "bad": 39 } },
+  "comments": { "withText": 60, "withoutText": 10, "withContent": 66, "tagsOnly": 6,
+                "byVerdict": { "good": 19, "ok": 8, "bad": 39 } },
   "chats": [ { "chatKey": "group:860771987", "label": "群 860771987", "scored": 40, "bad": 22 } ],
   "points": [ { "id": "p-3", "kind": "bad", "title": "太长", "summary": "…", "count": 4 } ],
   "pointCounts": { "p-3": 7 },
@@ -214,7 +220,7 @@
   "latest": { "…整理记录…": "…" },
   "history": [ { "id": "…", "createdAt": 1759…, "suggestions": 5, "uncovered": 3 } ],
   "comments": [ { "id": "…", "verdict": "bad", "comment": "…", "reply": "…", "context": [], "chatLabel": "…" } ],
-  "counts": { "comments": 42, "withText": 42 },
+  "counts": { "comments": 42, "withText": 36, "withContent": 42 },
   "model": { "ok": true, "model": "deepseek-flash", "baseUrl": "https://api.deepseek.com" },
   "limits": { "comments": 150, "chars": 14000, "styleChars": 9000 },
   "anchors": [ { "id": "not_submit", "label": "接梗不是屈服" } ] }
@@ -309,7 +315,8 @@
   **评论清单**（新→旧，可按判档筛选、按文字搜索，每条显示判档、评论、标签、被评的那句话与上下文）。
 - 标签表管理（改名字/改说明/改分类/删/新建 + 「清理自动生成的长标签」）。
 - 「整理评论」：
-  - `model.ok === false` → 禁用并显示原因；`counts.withText === 0` → 禁用并说明没素材；
+  - `model.ok === false` → 禁用并显示原因；`counts.withContent === 0` → 禁用并说明没素材
+  （**用 `withContent`**：只点了标签也算评论，用 `withText` 会把"只点标签"的批次误判成没素材）；
   - 点了 → `POST /api/consolidate` → 成功显示**逐条修改意见**（动作标签 / 指向哪一条 / 改成什么 /
     为什么 / 依据的评论编号可展开看原文）+ 底线要点覆盖提示 + 本地聚类（可折叠对照）；
     失败 → 显示 `error` + 本地聚类 + 评论原文。
