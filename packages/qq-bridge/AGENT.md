@@ -1320,6 +1320,28 @@ node src/index.mjs --supervise start --id forge1
 **现有的密钥正则抓不到 RCON 密码**（它是任意字符串），所以判据必须是**字段级**的
 （`verify-release-hygiene.mjs` §④-b）。
 
+**★★★ UI 的类型检查只能用 `tsc -b`（一条真实的疏漏，值得记住）**
+
+`config-ui` 的类型检查走**项目引用**：`tsconfig.json` 是 `files: []` + `references`
+（指向 `tsconfig.app.json` / `tsconfig.node.json`），而 **`noUnusedLocals: true`
+写在 `tsconfig.app.json` 里**。
+
+∴ 这两个命令**不等价**：
+
+```bash
+npx tsc --noEmit -p tsconfig.json   # ❌ 不检查被引用的 app 那份（noUnusedLocals 失效）
+npx tsc -b                          # ✅ 真判据（= npm run build 的第一步）
+```
+
+实测代价：我给 `ConsolePanel.tsx` 写了四个没用上的 `Card*` 导入，跑第一个命令得到
+"通过"，于是宣称类型检查干净 —— 而**错误只在用户 `npm run build` 时才炸出来**
+（`error TS6192: All imports in import declaration are unused`）。
+
+现在有守卫 `mocks/verify-ui-types.mjs`（接进测试链），它跑 `tsc -b`，
+并且有一条断言专门盯着「`tsconfig.json` 必须是项目引用形态」——
+防止有人把它改成单文件之后这道守卫**静默失效**。
+★ 守卫本身被验证过**会红**（故意插未使用导入 ⇒ 退出码 1），不是"跑一遍没报错"就算数。
+
 **★★★ 从 QQ 下服务器指令（`servers[].commandFromQQ`，默认关）—— 只认管理员**
 
 需求原话：「让 bot 执行指令（**仅听从管理员**）」。用户明确选择了**完整控制台（op 级别）**，
