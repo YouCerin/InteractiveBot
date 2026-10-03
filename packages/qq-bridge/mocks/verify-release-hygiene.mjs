@@ -15,8 +15,8 @@
  * 用法：node mocks/verify-release-hygiene.mjs
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -30,6 +30,7 @@ import {
   renderProtectedList,
 } from '../src/protected-files.mjs'
 import { batchHazardMessage, findBatchParenHazards } from '../src/batch-safety.mjs'
+import { DEFAULT_EXEMPT, auditPackageRefs, scanSourceForPackageRefs } from '../src/package-refs.mjs'
 
 const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -222,6 +223,151 @@ section('⑥ 批处理启动器：`if (` 块里的裸 `)` 会让启动器在**�
   const checker2 = existsSync(checkerPath2) ? readFileSync(checkerPath2, 'utf8') : ''
   check('★★ 发布包验收脚本调用了括号检查（否则这道门只存在于测试里）',
     /findBatchParenHazards\s*\(/.test(checker2) && /batchHazardMessage\s*\(/.test(checker2))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('⑦ ★ 包内路径引用：`src/**` 要用到的东西必须在包里（BUG-1 那一整类）')
+// ══════════════════════════════════════════════════════════════════════════
+{
+  // 真机事故（2026-10-03 实机测试报告 BUG-1）：`src/ui-status.mjs` 顶层
+  // `require(join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs'))`，而发布包**不含 `scripts/`**
+  // ⇒ 用户机器上 `start.bat` 直接 `Cannot find module '…\scripts\ui-build-stamp.cjs'`，
+  // **桥接从未启动**；更坏的是 `--check` 不 import 那个模块，所以"自检全绿、启动就崩"。
+  // 报告把"加一条这样的发布前置断言"列为价值最高的一步 —— 它能一次消灭整类问题。
+  const bug1 = scanSourceForPackageRefs({
+    text: [
+      "import { createRequire } from 'node:module'",
+      "const require = createRequire(import.meta.url)",
+      "const { computeUiSourceHash } = require(join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs'))",
+    ].join('\n'),
+    fileRel: 'src/ui-status.mjs',
+  })
+  check('★ 认出 `require(join(PKG_ROOT, …))` 这条引用（事故原文的形状）',
+    bug1.refs.length === 1 && bug1.refs[0].rel === 'scripts/ui-build-stamp.cjs',
+    JSON.stringify(bug1.refs))
+  check('  行号指得准（37 行那种要能定位）', bug1.refs[0].line === 3, String(bug1.refs[0].line))
+
+  // 目录 / 运行期产物 / 豁免项：都**不该**被断言（否则这道门天天误报，下次就没人看它）
+  const mixedText = [
+    "const a = join(PKG_ROOT, 'logs')",
+    "const b = join(DIRS.logs, 'bridge.log')",
+    "const c = join(PKG_ROOT, 'vendor', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')",
+    "const d = join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs')",
+  ].join('\n')
+  const dirOfLogs = (k) => (k === 'logs' ? 'logs' : null)
+  const mixed = scanSourceForPackageRefs({ text: mixedText, fileRel: 'src/x.mjs', dirOf: dirOfLogs })
+  const audit = auditPackageRefs({
+    files: ['src/x.mjs'],
+    read: () => mixedText,
+    exists: () => false, // 故意"包里什么都没有"，看它到底断言了哪几条
+    dirOf: dirOfLogs,
+  })
+  check('  `DIRS.logs` 这类键会被翻译成包内目录',
+    mixed.refs.some((r) => r.rel === 'logs/bridge.log' && r.kind === 'DIRS.logs'),
+    JSON.stringify(mixed.refs.map((r) => r.rel)))
+  check('★ 只断言"模块文件"（.mjs/.cjs/.js/.json）：目录与 .log 之类不参与',
+    audit.asserted === 1 && audit.notAsserted === 2 && audit.exempted === 1,
+    JSON.stringify({ asserted: audit.asserted, notAsserted: audit.notAsserted, exempted: audit.exempted }))
+  check('★★ 只有真模块文件那条被断言（目录 `logs` 不算、运行期 `.log` 不算、豁免项不算）',
+    audit.missing.length === 1 && audit.missing[0].endsWith('scripts/ui-build-stamp.cjs'),
+    JSON.stringify(audit.missing))
+  check('  豁免项（vendor/dsh/…）单独计数、不混进"断言"里',
+    auditPackageRefs({
+      files: ['src/y.mjs'],
+      read: () => "const c = join(PKG_ROOT, 'vendor', 'dsh', 'x.mjs')",
+      exists: () => false,
+    }).exempted === 1)
+  check('★★ 注释里的引用**不算**（事故记录/示例代码会被正当写进注释，误报会让这道门失去意义）',
+    scanSourceForPackageRefs({
+      text: "// 以前是 require(join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs'))\nconst real = 1",
+      fileRel: 'src/x.mjs',
+    }).refs.length === 0)
+  check('★★ 豁免是有记录、有理由的（DSH/SnowLuma/锚点各一条，不当消音器用）',
+    DEFAULT_EXEMPT.length === 3 && DEFAULT_EXEMPT.every((e) => e.why && e.why.length > 8),
+    DEFAULT_EXEMPT.map((e) => e.prefix).join(' / '))
+
+  // 相对说明符（动态 import / require）与静态 import 都要能解析成包内路径
+  // ⚠️ 说明符**拼出来**再喂给被测函数：写成字面量的话，`mocks/verify-imports.mjs` 会把本文件
+  //    自己的测试夹具当成真导入去核对（它已经抓到过一次，红在那里 —— 那条守卫本身没错）。
+  const spec = (p) => `'${p}'`
+  const rel = scanSourceForPackageRefs({
+    text: [
+      `const m = await import(${spec('./ui-status.mjs')})`,
+      `import { x } from ${spec('./local.mjs')}`,
+      `const r = require(${spec('../mcp/mcp-qq-server.mjs')})`,
+    ].join('\n'),
+    fileRel: 'src/index.mjs',
+  })
+  check('  动态 import 解析成包内路径', rel.refs.some((r) => r.rel === 'src/ui-status.mjs'))
+  check('  静态 import 也算（它同样会在包里缺文件时炸）', rel.refs.some((r) => r.rel === 'src/local.mjs'))
+  check('  `../` 能正确回退一层', rel.refs.some((r) => r.rel === 'mcp/mcp-qq-server.mjs'))
+
+  // 变量拼接抽不出来 → 必须**数出来**，不能假装没问题
+  const dyn = scanSourceForPackageRefs({
+    text: "const p = join(PKG_ROOT, name)\nconst q = join(DIRS.logs, fileName)",
+    fileRel: 'src/x.mjs',
+    dirOf: () => 'logs',
+  })
+  check('★★ 变量拼接会被计数（"静态判不了"这件事必须可见）', dyn.skipped === 2, String(dyn.skipped))
+
+  // ★★ 真实源码树：用**近似发布包**的存在性判据跑一遍（真包在时用真包）
+  const ASSEMBLE = join(PKG_ROOT, 'scripts', 'assemble-release.mjs')
+  const NOT_SHIPPED = ['config-ui/src/', 'mocks/', 'scripts/', 'docs/', 'reference/', 'tools/', 'cache/', 'runtime/', 'logs/', 'workspace-qq/', 'snowluma/']
+  const releaseRoot = (() => {
+    const rel = join(PKG_ROOT, '..', '..', '_release')
+    if (!existsSync(rel)) return null
+    // ★ 必须挑**当前版本**那个包：按字母序取最后一个会挑到上一版（0.3.0beta），
+    //   于是新版才加的模块会被报成"缺失" —— 那种误报比不查还坏（会让人开始怀疑这道门）。
+    const version = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
+    const want = `InteractiveBot-${version}-win-x64`
+    const dir = join(rel, want)
+    return existsSync(join(dir, 'src', 'index.mjs')) ? dir : null
+  })()
+  const srcFiles = []
+  const walkMjs = (dir, prefix) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walkMjs(join(dir, e.name), `${prefix}${e.name}/`)
+      else if (e.name.endsWith('.mjs')) srcFiles.push(`${prefix}${e.name}`)
+    }
+  }
+  for (const top of ['src', 'mcp']) walkMjs(join(PKG_ROOT, top), `${top}/`)
+  const realAudit = auditPackageRefs({
+    files: srcFiles,
+    read: (r) => readFileSync(join(PKG_ROOT, r.replace(/\//g, sep)), 'utf8'),
+    exists: releaseRoot
+      ? (r) => existsSync(join(releaseRoot, ...r.split('/')))
+      : (r) => existsSync(join(PKG_ROOT, ...r.split('/'))) && !NOT_SHIPPED.some((p) => r.startsWith(p)),
+    dirOf: (key) => {
+      const dirs = {
+        vendor: 'vendor',
+        vendorNodeModules: 'vendor/node_modules',
+        vendorNode: 'vendor/node',
+        vendorDsh: 'vendor/dsh',
+        vendorSnowluma: 'vendor/snowluma',
+        src: 'src',
+        mocks: 'mocks',
+        logs: 'logs',
+        skills: 'skills',
+        personas: 'personas',
+        defaultWorkspace: 'workspace-qq',
+      }
+      return dirs[key] ?? null
+    },
+  })
+  check(
+    `★★ 当前 src/ + mcp/ 里的 ${realAudit.asserted} 条模块引用都能在`
+      + `${releaseRoot ? '真实发布包里' : '（近似）包形态里'}找到 —— BUG-1 那一类现在是空的`,
+    realAudit.missing.length === 0,
+    realAudit.missing.join(' | ') || `（判据：${releaseRoot ? `真包 ${releaseRoot.split(sep).pop()}` : '工作区近似'}）`,
+  )
+  check('  这一步确实在判东西（断言数不为 0，别是"扫了个寂寞"）', realAudit.asserted > 100, String(realAudit.asserted))
+  check('  assemble-release 里那份"要拷什么"的清单仍然存在（判据的来源没被删）', existsSync(ASSEMBLE))
+
+  // 接线：发布包验收必须真的调用它
+  const checkerForRefs = existsSync(join(PKG_ROOT, 'scripts', 'check-release-package.mjs'))
+    ? readFileSync(join(PKG_ROOT, 'scripts', 'check-release-package.mjs'), 'utf8')
+    : ''
+  check('★★ 发布包验收脚本调用了包内路径引用核对', /auditPackageRefs\s*\(/.test(checkerForRefs))
 }
 
 console.log('')

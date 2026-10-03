@@ -11,6 +11,8 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join, relative, extname, sep } from 'node:path'
 import { batchHazardMessage, findBatchParenHazards } from '../src/batch-safety.mjs'
+import { auditPackageRefs } from '../src/package-refs.mjs'
+import { DIRS, PKG_ROOT } from '../src/local.mjs'
 
 const root = process.argv[2]
 if (!root) {
@@ -223,6 +225,41 @@ for (const p of files) {
   for (const hazard of findBatchParenHazards(text)) {
     problems.push(batchHazardMessage(r, hazard))
   }
+}
+
+// ── ⑧ 包内路径引用：`src/**` 里 require/import 到的东西必须在包里 ─────────
+//
+// ★ 为什么单列一条（实机报告 BUG-1 的建议 ②，报告称"价值最高"）：那次事故是
+//   `src/ui-status.mjs` 顶层 `require(join(PKG_ROOT, 'scripts', 'ui-build-stamp.cjs'))`，
+//   而发布包**不含 `scripts/`** ⇒ 用户机器上 `start.bat` 直接
+//   `Cannot find module '…\scripts\ui-build-stamp.cjs'`，**桥接从未启动**；
+//   而 `--check` 不 import 那个模块，所以"自检全绿、启动就崩"。
+//   ★ 这类缺陷静态清单表达不出来（缺的是运行时依赖），但**一条断言能消灭整类问题**。
+//   判据与边界（变量拼接抽不出来会报数量）在 `src/package-refs.mjs` 的文件头。
+{
+  const packageFiles = new Set(files.map((p) => rel(p)))
+  const srcFiles = [...packageFiles].filter((r) => /^(?:src|mcp)\/.*\.mjs$/.test(r))
+  const dirOf = (key) => {
+    const dir = DIRS[key]
+    if (!dir) return null
+    const r = relative(PKG_ROOT, dir).replace(/\\/g, '/')
+    return r === '' ? '.' : r
+  }
+  const audit = auditPackageRefs({
+    files: srcFiles,
+    read: (r) => readFileSync(join(root, r.replace(/\//g, sep)), 'utf8'),
+    exists: (r) => packageFiles.has(r),
+    dirOf,
+  })
+  for (const m of audit.missing) {
+    problems.push(`包内路径引用指向了包里没有的文件：${m}（这类"漏带"只在用户机器上暴露）`)
+  }
+  notes.push(
+    `包内路径引用核对：扫了 ${audit.checked} 个源文件、${audit.refs} 条字面量引用 —— ` +
+      `断言 ${audit.asserted} 条（模块文件）/ 跳过 ${audit.notAsserted} 条（目录等）/ ` +
+      `豁免 ${audit.exempted} 条（设计如此，见 src/package-refs.mjs 的 DEFAULT_EXEMPT）/ ` +
+      `${audit.skipped} 处是变量拼接（静态判不了）`,
+  )
 }
 
 // ── 报告 ───────────────────────────────────────────────────────────────
