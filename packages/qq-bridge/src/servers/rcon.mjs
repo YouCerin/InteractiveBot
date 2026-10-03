@@ -141,6 +141,20 @@ export function classifyRconError(error, { stage = 'connect' } = {}) {
     }
   }
 
+  // ── ★ 会话错位：**必须排在 `stage === 'auth'` 那条之前** ──────────────
+  //   为什么（实测抓到的措辞错位）：`stage==='auth'` 的分支是**无条件**返回
+  //   "密码被拒"的，而"应答 id 对不上"根因完全不同（会话错位 / 端口上不是 MC）。
+  //   走那条分支就会把"我们和它不在同一个对话里"谎报成"你密码填错了"。
+  if (low.includes('id 不匹配')) {
+    return {
+      layer: 'protocol',
+      retryable: true,
+      text:
+        'RCON 应答的 id 对不上（会话错位）—— 端口上那个多半**不是 Minecraft 的 RCON**，' +
+        '或者中间有东西改写了包。检查端口有没有填错（默认 25575）。',
+    }
+  }
+
   // ── 我们自己的判定（不带任何回显）──
   if (stage === 'auth') {
     return {
@@ -271,17 +285,34 @@ export function createRconClient({
     }
     for (const p of packets) {
       if (!pending) continue
-      // 应答的 id 必须对得上（对不上的包丢掉 —— RCON 没有"多路复用"，这是错位的信号）
-      if (p.id !== pending.id && p.id !== -1) continue
-      if (p.type === PACKET.RESPONSE) pending.chunks.push(p.body)
-      else if (p.type === PACKET.AUTH) {
-        // 登录应答：**id 是判据**（见文件头那段）
-        pending.authOk = p.id !== -1 && p.id === pending.id
-        pending.chunks.push(p.body)
-      } else {
-        // 其他类型（含 EXEC 的应答用 type=2 的实现）：也当正文收下
-        pending.chunks.push(p.body)
+      // ★★ 登录阶段：**id 是唯一判据**，且三种情况必须分清 ——
+      //
+      //   `id === 请求号`  ⇒ 过（**不管 type 是几**：真机回的是 `type 2` 空包）
+      //   `id === -1`      ⇒ 密码错
+      //   其它 id          ⇒ **会话错位 ⇒ 立刻失败**
+      //
+      //   第一版把"其它 id"也 `continue` 丢掉了（旧注释自己写着"这是错位的信号"，
+      //   行为却相反）⇒ 症状是**静默等到 30 秒超时**，而文案还会说是"登录超时"
+      //   （"服务端慢"），把"端口填错/不是 MC"这个真因埋掉。
+      if (pending.kind === 'auth') {
+        if (p.id === pending.id) {
+          pending.authOk = true
+        } else if (p.id === -1) {
+          pending.authOk = false
+        } else {
+          settlePending({
+            ok: false,
+            ...classifyRconError(new Error(`应答 id 不匹配（期望 ${pending.id}，收到 ${p.id}）`), { stage: 'auth' }),
+          })
+          teardown('应答 id 不匹配')
+          return
+        }
+        finishPending('auth')
+        continue
       }
+      // 命令阶段：应答的 id 必须对得上（对不上的包丢掉 —— 这是错位的信号）
+      if (p.id !== pending.id) continue
+      pending.chunks.push(p.body)
       // ★★ 收齐的判据不是"收到了包"，而是**流静默**。
       //
       //   为什么（实测抓到的缺陷）：RCON **没有"这条应答结束了"的标记** ——
@@ -290,11 +321,7 @@ export function createRconClient({
       //   （"服务端只回了这么多"）。现在：每次收到正文就重置一个**空闲计时器**，
       //   静默 `idleMs` 之后才算收齐 —— 多包能拼全，卡住的连接也不会悬着
       //   （外层还有 execTimeoutMs 兜底）。
-      if (pending.kind === 'auth') {
-        if (pending.authOk !== undefined) finishPending('auth')
-      } else {
-        scheduleIdleFinish()
-      }
+      scheduleIdleFinish()
     }
   }
 

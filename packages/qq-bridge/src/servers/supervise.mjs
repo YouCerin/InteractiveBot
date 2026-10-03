@@ -164,6 +164,11 @@ export function isPidAlive(pid, kill = process.kill) {
  * @param {Function} [opts.spawnImpl] 可注入的 spawn（测试用）
  * @param {Function} [opts.startedAt] 可注入的"查进程启动时刻"（测试用）
  * @param {Function} [opts.pidAlive]  可注入的"pid 还活着吗"（测试用）
+ * @param {Function} [opts.runCmd]    可注入的"捕获一条命令的输出"（测试用）。
+ *        ★ 为什么必须能注入：默认实现要 spawn 并**捕获输出**，而受限沙箱禁命名管道
+ *        ⇒ 那条路直接 `spawn EPERM`。于是"弱证据比对"这段逻辑**在沙箱里永远测不到**，
+ *        只能靠不可注入的注释来"保证"它是对的 —— 而它恰恰是唯一还能证明
+ *        "这个服务端是我起的"的退路，值得一条真断言。
  * @param {Function} [opts.log]
  */
 export function createSupervisor({
@@ -172,6 +177,7 @@ export function createSupervisor({
   spawnImpl = spawn,
   startedAt = (pid) => processStartedAt(pid),
   pidAlive = (pid) => isPidAlive(pid),
+  runCmd = null,
   log = () => {},
 } = {}) {
   const root = String(workspace ?? '')
@@ -320,13 +326,14 @@ export function createSupervisor({
    */
   async function launch(server = {}) {
     const serverId = String(server.id ?? '')
-    const cmdline = String(server.startCommand ?? '').trim()
     if (!serverId) return { ok: false, why: '缺少 server.id' }
-    if (!cmdline) {
+    // ★ 启动形状的判据在下面（`startExe` 优先；见那段注释）—— 这里**不提前判**
+    //   `startCommand`，否则"只给了 startExe"的配置会被误拒。
+    if (!String(server.startExe ?? '').trim() && !String(server.startCommand ?? '').trim()) {
       return {
         ok: false,
         why:
-          '配置里没有 `startCommand` —— **我不知道怎么启动这个服务端**。' +
+          '配置里既没有 `startExe`+`startArgs`，也没有 `startCommand` —— **我不知道怎么启动这个服务端**。' +
           '模组服的启动方式各不相同（`@args.txt` / 启动器脚本 / JVM 参数），我不猜，请填一条。',
       }
     }
@@ -343,31 +350,46 @@ export function createSupervisor({
     }
 
     const cwd = String(server.cwd ?? '').trim() || undefined
-    // ★★ 用 shell 起（模组服的启动行常带 `&&` / 变量 / `@args.txt`）。
+    // ── ★★★ 启动形状：**优先用 `startExe` + `startArgs`（不走 shell）** ──────
     //
-    // ⚠️⚠️ **必须写成 `spawn([cmdline], {shell:true})`（包成单元素数组），
-    //   不能写 `spawn(cmdline, {shell:false})`** —— 后者会把整串
-    //   `node .tmp-fake-server.mjs` 当成**一个可执行文件名**去 CreateProcess，
-    //   于是必然 `ENOENT: spawn node server.mjs`。
-    //   实测抓到这一次：`--supervise start` 打印了"✅ 已拉起"、归属档也写了 pid，
-    //   而**那个进程从来没起来过** —— 正是本项目最忌讳的"看起来成功了"。
-    //   （`shell:true` 时 spawn 内部走 `cmd.exe /d /s /c <字符串>`，数组里的那一项
-    //    就是被整串执行的命令。）
-    const useShell = server.shell !== false
+    // 为什么这不是可选的优化（实测抓到的硬伤）：`shell: true` 时
+    // **`child.pid` 是 `cmd.exe` 的 pid，不是服务端的**。而 `cmd.exe` 起完 java
+    // 就自己退出了 ⇒ 归属档里记的 pid **立刻变成"已死的进程"** ⇒
+    // `ownership()` 判成"档里的 pid 已死而端口还通 ⇒ 不是我起的" ⇒
+    // **归属永远证明不了 ⇒ 重启能力永远不可用**。
+    //   ∴ 让使用者显式给「可执行文件 + 参数数组」时，我们**直接 spawn，不经 shell**，
+    //     拿到的就是真正的那个进程。
+    //   ⚠️ 保留 `startCommand` 那条路（老写法 / 需要 `&&`、变量的场景），
+    //     但那时的 pid 是 shell 的 —— 归属档里如实记 `viaShell`，别假装它是服务端。
+    const startExe = String(server.startExe ?? '').trim()
+    const startArgs = Array.isArray(server.startArgs) ? server.startArgs.map(String) : null
+    const cmdline = String(server.startCommand ?? '').trim()
+    if (!startExe && !cmdline) {
+      return {
+        ok: false,
+        why:
+          '配置里既没有 `startExe`+`startArgs`，也没有 `startCommand` —— **我不知道怎么启动这个服务端**。' +
+          '模组服的启动方式各不相同，我不猜，请填一条。',
+      }
+    }
+
+    // ★★ 三条 spawn 选项缺一不可（见文件头 ①）：
+    //   `detached` 脱离桥接的进程组（桥接退出不带走它）、`windowsHide` 不弹窗、
+    //   `stdio` 把输出接到**文件句柄**（不是 pipe —— pipe 缓冲区没人读会堵住 JVM）。
+    const useShell = !startExe
     let child
     try {
-      child = useShell
-        ? spawnImpl(cmdline, {
+      child = startExe
+        ? spawnImpl(startExe, startArgs ?? [], {
             cwd,
-            shell: true,
-            // ★★ 三条缺一不可（见文件头 ①）：
-            detached: true, // 脱离桥接的进程组，桥接退出不带走它
+            shell: false, // ★ 不走 shell ⇒ `child.pid` 就是真正的服务端进程
+            detached: true,
             windowsHide: true,
             stdio: ['ignore', fd ?? 'ignore', fd ?? 'ignore'],
           })
-        : spawnImpl(cmdline.split(' ')[0], cmdline.split(' ').slice(1), {
+        : spawnImpl(cmdline, {
             cwd,
-            shell: false,
+            shell: true, // 这条路的 pid 是 shell 的（归属档里如实记 viaShell）
             detached: true,
             windowsHide: true,
             stdio: ['ignore', fd ?? 'ignore', fd ?? 'ignore'],
@@ -397,16 +419,42 @@ export function createSupervisor({
     }
 
     const startedAtMs = Date.now()
+    // ★★★ 「实际命令行」必须对**两种启动形状**都算出来（实测抓到的第二半硬伤）：
+    //
+    //   第一版只把 `startCommand` 记进 `cmdline`，于是走 `startExe` 时它**恒为空串**。
+    //   而"弱证据"退路（`ownership()` 里那条路径比对）正是拿这个字段去比进程命令行 ——
+    //   空串比什么都对不上 ⇒ **归属回退机制在最推荐的那条路上彻底失效**，
+    //   而那恰恰是唯一还能证明"它是我起的"的退路。
+    //   ∴ 这里现拼一条**实际交给系统的**命令行（exe + 参数），与哪种形状无关。
+    const effectiveCmdline = useShell
+      ? cmdline
+      : [startExe, ...(startArgs ?? [])].join(' ')
+    // ★★ 归属档里必须记**真实**的启动形状（这是实测踩出来的）：
+    //   `shell: true` 时 `child.pid` 是 **`cmd.exe` 的 pid**，而真正在监听端口的是它
+    //   拉起来的 `java.exe`。若只记 `command`（原命令），
+    //   ① 现场排查时看不出我们到底是怎么起的；
+    //   ② "命令行的弱证据"退路会拿 `cmd.exe` 的命令行去比，**永远对不上**。
+    //   ∴ 把 `viaShell` 与**实际命令行**一起记下来（`logFile` 也已记）。
     writeState(serverId, {
       version: OWNER_VERSION,
       serverId,
       pid,
       startedAt: startedAtMs,
       startedBy: 'bridge',
-      command: basename(cmdline).slice(0, 80),
+      command: basename(cmdline || startExe || '').slice(0, 80),
+      /** 真正交给系统的命令行（原样，便于现场核对） */
+      cmdline: effectiveCmdline.slice(0, 500),
+      /** 启动可执行文件（只有 `startExe` 形状才有；弱证据的最后一道回退用它） */
+      startExe: String(startExe ?? '').slice(0, 400),
+      /** 是否经 shell（Windows 上 = cmd.exe）；是的话 `pid` 是 shell 的 pid */
+      viaShell: useShell,
+      cwd: cwd ?? '',
       logFile,
     })
-    log(`[supervise] ${serverId} 已拉起（pid ${pid}；输出 → ${logFile}）`)
+    log(
+      `[supervise] ${serverId} 已拉起（${useShell ? 'cmd.exe ' : ''}pid ${pid}；cwd=${cwd ?? '(继承)'}；输出 → ${logFile}）` +
+        (useShell ? '—— ⚠️ 这个 pid 是 **cmd.exe** 的，真正的服务端进程是它的子进程' : ''),
+    )
     return { ok: true, pid, logFile, startedAt: startedAtMs }
   }
 
@@ -436,11 +484,18 @@ export function createSupervisor({
    * ★ 拿不到命令行（沙箱禁管道）⇒ `ok:false` 且原因写清 —— **不许当成"对上了"**。
    */
   async function commandLooksOurs(pid, state) {
-    const needle = commandKey(String(state?.command ?? ''))
+    // ★ 回退顺序：`command` → `cmdline` → `startExe`。
+    //   为什么要有回退：老版本的归属档在 `startExe` 形状下 `command` 与 `cmdline`
+    //   **都是空的**（那是被抓到的硬伤）。升级后盘上可能还留着那样的档，
+    //   这条退路必须还能用，否则"我起过的服务端"会被判成"不是我起的"。
+    const needle =
+      commandKey(String(state?.command ?? '')) ||
+      commandKey(String(state?.cmdline ?? '')) ||
+      commandKey(String(state?.startExe ?? ''))
     if (!needle) return { ok: false, detail: '归属档里没有可比的命令' }
     let text = ''
     try {
-      text = String((await runCmd('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`])) ?? '')
+      text = String((await runCmdFn('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`])) ?? '')
     } catch (error) {
       return { ok: false, detail: `查命令行失败（${error?.message ?? error}）` }
     }
@@ -455,7 +510,7 @@ export function createSupervisor({
    * ⚠️ 受限沙箱下会 `spawn EPERM`（禁命名管道）⇒ 这条退路与"启动时刻"那条一样会失效，
    *   但那时我们**如实降级成 unknown**（只报告不重启），**不会**误判成"是我的"。
    */
-  function runCmd(cmd, args) {
+  function runCmdImpl(cmd, args) {
     return new Promise((resolve) => {
       let child
       try {
@@ -478,6 +533,9 @@ export function createSupervisor({
       }, 4000)?.unref?.()
     })
   }
+
+  /** 实际用的那条：默认是上面的实现，测试可以整条换掉（沙箱里跑不了默认实现） */
+  const runCmdFn = typeof runCmd === 'function' ? runCmd : runCmdImpl
 
   /**
    * 从一条启动命令里取出**最像标识的那一段**（脚本名 / jar 名 / 可执行文件名）。

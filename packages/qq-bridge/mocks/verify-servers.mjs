@@ -15,9 +15,11 @@
  * ══════════════════════════════════════════════════════════════════════════
  * 三条判据来自真机常识，不是我想出来的
  * ══════════════════════════════════════════════════════════════════════════
- *   ① **登录成功的判据是 id，不是"收到了包"** —— 服务端会先回一个**空**的
- *      RESPONSE_VALUE，再回 AUTH_RESPONSE。把第一个包当成功 ⇒ 症状是
- *      "登录成功但第一条命令超时"。
+ *   ① **登录成功的判据是 id，不是"收到了包"、也不是"type 是不是 3"** ——
+ *      Minecraft 对登录只回**一个** `type 2` 空包，`id` 等于请求 id 就是过。
+ *      第一版假服务端建模成了"先回空 RESPONSE_VALUE、再回 AUTH_RESPONSE(type 3)"，
+ *      于是"客户端死等 type 3"这个真机 bug 在这里**测不出来**（真机症状：
+ *      服务端日志反复 `RCON Client started`/`shutting down`，客户端一直超时）。
  *   ② **粘包与分包都要能活**：TCP 是字节流，一次 `data` 可能给半个包或三个半。
  *   ③ **密码绝不进错误文案**（同 `credentials.mjs`）—— 有一条断言逐字检查。
  */
@@ -37,7 +39,7 @@ import {
   encodePacket,
 } from '../src/servers/rcon.mjs'
 import { EVENT, createMonitor, describeSnapshot } from '../src/servers/monitor.mjs'
-import { createServerLoop, parsePlayerList, readRecentEvents } from '../src/servers/loop.mjs'
+import { createServerLoop, parsePlayerList, parseTps, readRecentEvents } from '../src/servers/loop.mjs'
 import { OUTCOME, createRestarter } from '../src/servers/restart.mjs'
 import { createSupervisor, isPidAlive, parseStartTime } from '../src/servers/supervise.mjs'
 
@@ -166,22 +168,29 @@ async function startFakeServer({ password = 'pw', behavior = {} } = {}) {
         if (p.type === PACKET.AUTH) {
           seen.auths += 1
           if (behavior.silentAuth) continue // 故意不回（测超时）
-          // ★ 真实行为：先回一个**空的** RESPONSE_VALUE，再回 AUTH_RESPONSE
-          const first = behavior.skipEmptyAuthPacket
-            ? Buffer.alloc(0)
-            : encodePacket({ id: p.id, type: PACKET.RESPONSE, body: '' })
+          // ★★★ 真机形状（**实测抓到的坑，务必按这个写**）：Minecraft 对登录请求
+          //   只回**一个**包 —— `type 2`（RESPONSE_VALUE）、body 空。
+          //   密码对 ⇒ `id` = 请求的 id；密码错 ⇒ `id` = -1。
+          //
+          //   我们**第一版假服务端写的是错的形状**（先回一个空 RESPONSE_VALUE，
+          //   再回一个 type 3 AUTH_RESPONSE），于是"客户端在等 type 3"这个 bug
+          //   在假服务端上永远测不出来 —— 而真机上的症状是：
+          //   服务端日志每次都出现 `RCON Client started` / `shutting down`，
+          //   客户端那边一直等到超时。**假服务端形状错了，比没有测试更坏**：
+          //   它给了一个"已验证"的错觉。
           const authId = p.body === password ? p.id : -1
-          const second = encodePacket({ id: authId, type: PACKET.AUTH, body: '' })
-          const both = Buffer.concat([first, second])
+          // ★ 测试用：故意让 id 对不上（形状与真机完全一致，只有 id 是错的）——
+          //   用来证明"成功判据确实是 id"，而不是"收到 type 2 就算过"
+          const replyId = behavior.authIdWrong ? p.id + 12345 : authId
+          const reply = encodePacket({ id: replyId, type: PACKET.RESPONSE, body: '' })
           if (behavior.splitAuthIntoChunks) {
             // ★ 故意把应答切成两段写（测客户端的粘包处理）
-            sock.write(both.slice(0, 5))
-            setTimeout(() => sock.write(both.slice(5)), 10)
-          } else if (behavior.glueAuthAndFirstCommand) {
-            // ★ 故意把登录应答与"下一条命令的应答"粘在一起发
-            sock.write(both)
+            sock.write(reply.slice(0, 5))
+            setTimeout(() => sock.write(reply.slice(5)), 10)
           } else {
-            sock.write(both)
+            // ★ 故意与"下一条命令的应答"粘在一起发（glueAuthAndFirstCommand）
+            //   与"直接发"走同一条路 —— 客户端必须两种情况都活
+            sock.write(reply)
           }
           continue
         }
@@ -213,14 +222,20 @@ async function startFakeServer({ password = 'pw', behavior = {} } = {}) {
   return { server, port: server.address().port, seen, close: () => new Promise((r) => server.close(r)) }
 }
 
-console.log('\n=== ③ 真 TCP 握手：登录成功的判据是 id，不是"收到了包" ===')
+console.log('\n=== ③ 真 TCP 握手：登录成功的判据是 id，且**只回一个 type 2 包** ===')
 {
   const fake = await startFakeServer({ password: 'pw' })
   const c = createRconClient({ host: '127.0.0.1', port: fake.port, password: 'pw' })
   const r = await c.connect()
-  ok(r.ok, '登录成功（服务端先回空包、再回 AUTH —— 客户端认的是 id）')
+  ok(r.ok, '登录成功（服务端只回一个 type 2 空包 —— 客户端认的是 id，不是 type）')
   ok(c.state().authed, 'state() 如实报 authed=true')
   ok(!JSON.stringify(c.state()).includes('pw'), '★ state() 里**没有密码**')
+  // ★★★ 这一条是**真机回归**：Minecraft 登录后**不会**再补发任何东西，
+  //   所以登录若靠"等到第二个包 / 等到 type 3"就会一直挂到超时。
+  //   这里紧接一条命令 —— 它必须立刻通，证明客户端**没有在等多余的包**。
+  const q = await c.exec('list')
+  ok(q.ok, '登录后**立刻**能执行命令（证明没有死等第二个包）')
+  ok(String(q.body ?? '').includes('假应答'), '拿回的是命令应答本体')
   c.close()
   await fake.close()
 }
@@ -235,6 +250,21 @@ console.log('\n=== ④ 密码错：不可重试，且文案里没有密码 ===')
   eq(r.retryable, false, '★ 不可重试')
   ok(!JSON.stringify(r).includes('wrong-one'), '★★★ 失败理由里没有密码原文')
   ok(/rcon\.password/.test(String(r.text)), '★ 文案直接指向 server.properties 的 rcon.password')
+  c.close()
+  await fake.close()
+}
+
+console.log('\n=== ④-b ★★★ 真机回归：登录应答的判据是 **id**，不是 type ===')
+{
+  // 形状与真机**逐字节相同**（一个 `type 2` 空包），唯一不同的是 id 对不上。
+  // 这条断言直接钉住那个真机 bug：第一版客户端只认 `type 3`，
+  // 于是收到这个包时既不认成功、也不认失败 —— 一直等到超时，
+  // 而服务端那边每次都留下 `RCON Client started` / `shutting down`。
+  const fake = await startFakeServer({ password: 'pw', behavior: { authIdWrong: true } })
+  const c = createRconClient({ host: '127.0.0.1', port: fake.port, password: 'pw', timeoutMs: 1500 })
+  const r = await c.connect()
+  eq(r.ok, false, '★ id 对不上 ⇒ 登录**失败**（不能"收到 type 2 就算过"）')
+  eq(c.state().authed, false, 'state() 不能把没登录说成登录了')
   c.close()
   await fake.close()
 }
@@ -444,6 +474,19 @@ console.log('\n=== ⑬ 采样解析与监测循环（编排层：多台互不拖
   eq(parsePlayerList('2/20 players online').playerNames, null, '那种形状认不出名单 ⇒ null（不编）')
   eq(parsePlayerList('未知的措辞').players, null, '★★ 认不出的措辞 ⇒ null，**绝不猜成 0**')
   eq(parsePlayerList('').players, null, '空应答 ⇒ null')
+
+  // ── TPS 解析：真机取回来的那段原文，且**认不出就是 null** ──
+  // ★ 为什么这条重要：`rules.minTps` 一旦把"解析失败"当成 0，就会立刻播报
+  //   "TPS 过低 / 服务器快挂了" —— 那是把**我们的 bug**说成**服务器的故障**。
+  const realTps =
+    'Dim minecraft:overworld (minecraft:overworld): Mean tick time: 6.418 ms. Mean TPS: 20.000\n' +
+    'Dim minecraft:the_nether (minecraft:the_nether): Mean tick time: 0.065 ms. Mean TPS: 20.000\n' +
+    'Dim minecraft:the_end (minecraft:the_end): Mean tick time: 0.100 ms. Mean TPS: 19.5'
+  eq(parseTps(realTps), 19.5, '★ 多维度取**最小值**（最慢的那个维度才是玩家体感）')
+  eq(parseTps('Mean TPS: 20.000'), 20, '单维度形状')
+  eq(parseTps('Unknown command. Type "/help"'), null, '★★★ 认不出 ⇒ null，**绝不猜成 0**（否则立刻误报"TPS 过低"）')
+  eq(parseTps(''), null, '空应答 ⇒ null')
+  eq(parseTps('Mean TPS: abc'), null, '★ 字段在但值不是数字 ⇒ null（不 NaN、不 0）')
 
   // ── 编排层：用注入的采样函数真跑（不需要任何服务端）──
   // ★ 必须给**真临时工作区**：事件台账要真的落盘（空字符串会被当成"没有工作区"而整跳跳过 ——
@@ -1007,6 +1050,81 @@ console.log('\n=== ⑯ ★★★ 服务端守护：归属判定是"能不能动�
     eq(r.ok, false, '没配 startCommand ⇒ 拒绝')
     ok(/不知道|不猜/.test(r.why), '★★ 文案说清"我不知道怎么启动它"（不猜一个 java -jar）')
     ok(!existsSync(join(ws, 'runtime/servers/s1.running.json')), '★ 而且**没有留下归属档**（不许假装我起了）')
+    try { rmSync(ws, { recursive: true, force: true }) } catch { /* 无所谓 */ }
+  }
+
+  // ── ⑦-b ★★★ 真起一个进程：`startExe` 这条路必须**不经 shell** ──────────
+  //
+  // 为什么这条不能只靠打桩测（实测抓到的硬伤）：`shell: true` 时 `child.pid` 是
+  // `cmd.exe` 的，而它起完 java 就自己退出 ⇒ 归属档里的 pid 立刻变成"已死的进程"
+  // ⇒ 归属判成"不是我起的" ⇒ **重启能力永远不可用**。
+  // 打桩的 spawn 永远不会暴露这件事（它不给真 pid）—— 所以这里真的起一个
+  // 长跑进程，然后**读它的命令行**，确认 pid 指向的就是那个可执行文件本身。
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'qqb-sup5-'))
+    // 用 node 自己当"服务端"：它一定存在，且 `-e` 让它长跑一会儿
+    const s = mkSup({ workspace: ws, portOpen: async () => false })
+    const launched = await s.launch({
+      id: 'probe',
+      startExe: process.execPath,
+      startArgs: ['-e', 'setTimeout(()=>{}, 20000)'],
+      cwd: process.cwd(),
+    })
+    eq(launched.ok, true, '★★ `startExe` + `startArgs` ⇒ 真的拉起来了（不打桩）')
+    ok(Number.isFinite(Number(launched.pid)) && Number(launched.pid) > 0, '拿到了 pid')
+    const rec2 = JSON.parse(readFileSync(join(ws, 'runtime/servers/probe.running.json'), 'utf8'))
+    eq(rec2.viaShell, false, '★★★ 归属档记下 `viaShell: false`（pid 就是真进程，不是 cmd.exe）')
+    eq(rec2.pid, launched.pid, '归属档里的 pid 与 launch 返回的一致')
+    ok(String(rec2.cmdline ?? '').length > 0, '★ 归属档记下了命令行（弱证据比对靠它）')
+    // 收尾：这个探针是我们自己起的，必须**由我们收掉**（不留野进程）
+    try { process.kill(Number(launched.pid)) } catch { /* 可能已经退了 */ }
+    try { rmSync(ws, { recursive: true, force: true }) } catch { /* 无所谓 */ }
+  }
+
+  // ── ⑦-c ★★★ 弱证据退路：查不到启动时刻时，靠**命令行**证明"是我起的" ──
+  //
+  // 为什么这条最值得钉住：这台机器上（以及任何受限沙箱里）查 `pid@启动时刻`
+  // 要靠**捕获 PowerShell 输出**，而管道被禁 ⇒ 那一步必然拿不到 ⇒ 归属只能靠这条
+  // **弱证据**退路。它是"尝试一次重启"最后的地基：它要是坏的，
+  // 重启能力在最需要它的环境里就是死的（实测抓到的第二半硬伤：
+  // 走 `startExe` 时 `cmdline` 恒为空 ⇒ 比对必然失败）。
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'qqb-sup6-'))
+    const launched = await mkSup({ workspace: ws, portOpen: async () => false }).launch({
+      id: 'weak',
+      startExe: process.execPath,
+      startArgs: ['-e', 'setTimeout(()=>{}, 20000)'],
+      cwd: process.cwd(),
+    })
+    ok(launched.ok, '前提：探针真的起来了')
+
+    // 注入"查命令行"的返回值 —— 模拟真机：进程命令行里含那个可执行文件名
+    const fakePs = (text) => async () => text
+    const mkWeak = (over) =>
+      mkSup({ workspace: ws, portOpen: async () => true, pidAlive: () => true, startedAt: async () => null, ...over })
+
+    const ow = await mkWeak({ runCmd: fakePs(`${process.execPath} -e setTimeout(()=>{}, 20000)`) }).ownership({
+      serverId: 'weak',
+      port: 25565,
+    })
+    eq(ow.owner, 'bridge', '★★★ 命令行里有那个可执行文件名 ⇒ 归属是我（走的是弱证据）')
+    eq(ow.weak, true, '★★ 而且**标明这是弱证据**（判定依据要让人看得见）')
+    ok(/弱证据/.test(ow.why), '原因里写明"弱证据"三个字')
+
+    // 反例：命令行对不上 ⇒ **绝不猜成我的**（宁可不动）
+    const ow2 = await mkWeak({ runCmd: fakePs('C:\\other\\something-else.exe --run') }).ownership({
+      serverId: 'weak',
+      port: 25565,
+    })
+    eq(ow2.owner, 'unknown', '★★★ 命令行对不上 ⇒ unknown（**绝不当成我起的**）')
+    eq(ow2.weak, undefined, '不许标成弱证据')
+
+    // 反例：命令行**查不到** ⇒ 也是 unknown，且原因说清查不到
+    const ow3 = await mkWeak({ runCmd: fakePs('') }).ownership({ serverId: 'weak', port: 25565 })
+    eq(ow3.owner, 'unknown', '★ 命令行查不到 ⇒ unknown')
+    ok(/拿不到命令行/.test(ow3.why), '原因说清"拿不到命令行"（不是"对不上"）')
+
+    try { process.kill(Number(launched.pid)) } catch { /* 可能已经退了 */ }
     try { rmSync(ws, { recursive: true, force: true }) } catch { /* 无所谓 */ }
   }
 

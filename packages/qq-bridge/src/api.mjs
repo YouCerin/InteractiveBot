@@ -883,6 +883,11 @@ export function createApiHandler(deps) {
           // ★ 只回"配没配"，**绝不回密码本身**
           passwordSet: s.passwordSet === true,
           startCommandSet: s.startCommandSet === true,
+          // ★ `startExe` 是推荐的启动形状（不走 shell ⇒ 归属可判定）。
+          //   只回 `startCommandSet` 会让"只配了 startExe"的机器在界面上被显示成不可重启。
+          startExeSet: s.startExeSet === true,
+          startExe: typeof s.startExe === 'string' ? s.startExe : '',
+          tpsCommand: typeof s.tpsCommand === 'string' ? s.tpsCommand : '',
           failThreshold: s.failThreshold ?? null,
           rules: {
             minTps: s.rules?.minTps ?? null,

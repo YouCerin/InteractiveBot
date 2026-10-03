@@ -1247,17 +1247,45 @@ node src/index.mjs --servers --probe  # 真连一次 RCON 并跑只读命令 lis
 协议本身很小（4 类包），自实现比引依赖划算，而且避免了"别人机器上
 `ERR_MODULE_NOT_FOUND`"那类只在那台机器上出现的失败。
 
-**★ 两条只有踩过才知道的协议细节**（都在 `mocks/verify-servers.mjs` 里钉着）：
+**★ 三条只有踩过才知道的协议细节**（都在 `mocks/verify-servers.mjs` 里钉着）：
 
 | 事项 | 事实 |
 |---|---|
-| **登录成功的判据是 id** | 服务端会先回一个**空**的 `RESPONSE_VALUE`，再回 `AUTH_RESPONSE`。`id == 请求号` 才是成功、`id == -1` 是密码错。把第一个包当成功 ⇒ 症状是"登录成功但第一条命令永远超时" |
+| **登录成功的判据是 `id`，不是 `type`** | Minecraft 对登录请求**只回一个**包：`type 2`（`RESPONSE_VALUE`）、body 空。`id == 请求号` ⇒ 过；`id == -1` ⇒ 密码错；**其它 id ⇒ 会话错位，要立刻失败**（不是丢掉继续等）。第一版只认 `type 3`（`AUTH_RESPONSE`）⇒ 真机上一直等到 30 秒超时，服务端日志里反复出现 `RCON Client started` / `shutting down`。**真机实测：改对之后登录耗时 3ms** |
 | **"应答收齐"的判据是流静默** | RCON **没有"应答结束"标记**，同一个应答可以被拆成任意多个包。第一版"收到第一个非空包就结算"，于是"应答拆成两包"时**只拿到前半句**，而症状看起来完全合理 |
+| **假服务端形状错了比没有测试更坏** | 上面那个登录 bug 在 64 项 RCON 断言下**全绿**，因为假服务端当时按"先空包、再 `type 3`"造的 —— 它给了一个"已验证"的错觉。**只有真服务端能暴露它。**∴ 假服务端现在逐字节照真机造（一个 `type 2` 空包），并另有一条"id 对不上必须失败"的断言 |
+
+**★★ 真机端到端验证**：`probe-live-rcon.mjs`（仓库根）在**一条命令内**把真 Forge 服拉起、
+连它的 RCON、读 `list` 与 `forge tps`、验密码错、再优雅 `stop`（11 项全通）。
+为什么必须在一条命令内做完：这台沙箱**每条命令结束时会把 detached 子进程一起收走**
+（隔离实验证实：6 秒后还活着，下一条命令里就没了）⇒「跨命令的守护/归属」在这里验不了，
+只能在**使用者自己的终端**里验。
 
 **★★ 密码的边界**：只进 `config.json`（`user` 类受保护路径），**绝不进日志、错误信息与接口响应**
 —— 失败理由里有断言逐字检查不含密码。而 `config.example.json` 里它**必须是空串**：
 **现有的密钥正则抓不到 RCON 密码**（它是任意字符串），所以判据必须是**字段级**的
 （`verify-release-hygiene.mjs` §④-b）。
+
+**★★ TPS 是"问了才有"，不是"问了拿不到"**：`servers[].tpsCommand` 留空 ⇒
+我们**不问**（`tps: null`）。为什么不让代码猜一个：TPS 不是通用命令
+（vanilla 要 datapack、各端措辞不同），猜错只会在真机上拿到一句报错，
+然后把"我猜错了"显示成"服务器有问题"。填了（如 Forge 的 `forge tps`）就采，
+只解析最稳的那段文本（`Mean TPS: 20.000`），多维度取**最小值**
+（最慢的维度才是玩家体感；取平均会掩盖一个卡死的维度）。
+认不出**仍留 `null`** —— 一旦把"解析失败"当成 `0`，`rules.minTps` 会立刻播报
+"TPS 过低"，那是把**我们的 bug** 说成**服务器的故障**。
+
+**★★★ 启动形状优先用 `startExe` + `startArgs`（不走 shell）**：`startCommand` 走 shell 时
+我们拿到的 pid 是 `cmd.exe` 的，而它起完 java 就自己退出 ⇒ 归属档里那个 pid
+立刻变成"已死的进程" ⇒ 归属判成"不是我起的" ⇒ **重启能力永远不可用**（实测抓到的硬伤）。
+给 `startExe`+`startArgs` 时不经 shell，`child.pid` 才是真正的服务端进程。
+
+★ 这个判据在**四个地方**都要用同一条，漏一处就会出现"明明能重启、界面显示不能"
+（实测：`supervise.launch()` 支持了 `startExe`，但 `index.mjs` 的 `--supervise start`
+和 `--servers` 显示、以及 `ServerTab` 都还在只看 `startCommand` ⇒ 直接拒绝启动）：
+`launch()` 自身 · `--supervise start` 的前置校验 · `--servers` 的"重启能力"显示 ·
+`bridge.serversSnapshotForApi()` → `api.mjs` 字段白名单 → `ServerTab`。
+
 
 **★★ 监测状态机**（`src/servers/monitor.mjs`）：**跃迁才产出事件** ——
 持续 down **不重复播报**、`down→up` 也报一次、状态**落盘**所以重启不会忘。

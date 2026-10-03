@@ -150,7 +150,7 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
 
       {data?.servers.map((s) => {
         const own = s.ownership
-        const canRestart = own?.owner === 'bridge' && s.startCommandSet
+        const canRestart = own?.owner === 'bridge' && (s.startExeSet || s.startCommandSet)
         return (
           <Card key={s.id}>
             <CardHeader className="pb-2">
@@ -212,8 +212,9 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                   <div className="text-muted-foreground mt-0.5">{own?.why ?? '（拿不到归属信息）'}</div>
                   <div className="text-muted-foreground mt-1">
                     重启能力：<span className={cn(canRestart ? 'text-emerald-600' : 'text-amber-600')}>{canRestart ? '✅ 可用' : '⛔ 不可用'}</span>
-                    {!s.startCommandSet && '（没配 startCommand —— 我不知道怎么启动它）'}
-                    {s.startCommandSet && own?.owner !== 'bridge' && '（需要服务端**由机器人拉起**：`--supervise start`）'}
+                    {!s.startExeSet && !s.startCommandSet && '（没配 `startExe`/`startCommand` —— 我不知道怎么启动它）'}
+                    {s.startExeSet && !canRestart && own?.owner !== 'bridge' && '（需要服务端**由机器人拉起**：`--supervise start`）'}
+                    {!s.startExeSet && s.startCommandSet && own?.owner !== 'bridge' && '（需要服务端**由机器人拉起**：`--supervise start`）'}
                   </div>
                 </div>
               </div>
@@ -252,12 +253,13 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
               {/* ── 配置摘要（**只显示配没配，不回显凭据**）── */}
               <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs">
                 <span>RCON 密码：{s.passwordSet ? '已配置（不回显）' : '⚠️ 没配'}</span>
-                <span>启动命令：{s.startCommandSet ? '已配置' : '⚠️ 没配'}</span>
+                <span>启动方式：{s.startExeSet ? `${s.startExe}（不走 shell）` : s.startCommandSet ? 'startCommand（走 shell）' : '⚠️ 没配'}</span>
                 <span>
                   判 down 需连续失败 {s.failThreshold ?? '—'} 次
                 </span>
                 <span>
                   异常阈值：{s.rules.minTps ?? '—'} TPS / {s.rules.maxPlayers ?? '—'} 人
+                  {s.tpsCommand ? `（TPS 命令：${s.tpsCommand}）` : '（没配 `tpsCommand` ⇒ **不问 TPS**，不是拿不到）'}
                 </span>
               </div>
             </CardContent>

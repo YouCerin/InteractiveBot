@@ -2910,11 +2910,41 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `servers` | object[] | `[]` | 每台一条：`{id,name,host,port,rconPort,password,enabled,failThreshold,rules:{minTps,maxPlayers}}`。★ 空数组 = 不工作、零网络请求 |
+| `servers` | object[] | `[]` | 每台一条：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,startExe,startArgs,startCommand,cwd,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ 空数组 = 不工作、零网络请求 |
 | `serversPollMs` | number | 30000 | 多久采样一次（有 15 秒下限）。★ 界面可以给一个只读展示；**不要**做成无下限的输入框 |
 
 ★ 每台服务器的**条目级启用开关**要能单独改（`servers[].enabled`）——
 它与功能总开关（有没有配服务器）**不是**一回事。
+
+#### ★★★ P4 补充（0.3.2）：**"重启能力"的判据只有一条，四处必须同源**
+
+界面显示的"重启能力：✅ 可用 / ⛔ 不可用"**必须**与后端判定完全一致，判据是：
+
+```
+可用  ⇔  归属是我（own.owner === 'bridge'） 且 配了启动形状（startExe 或 startCommand 二者之一）
+```
+
+**为什么这条要单独写下来（实测抓到的硬伤）**：`startExe` 是后加的启动形状
+（不走 shell ⇒ `child.pid` 才是真正的服务端进程），但显示层当时**只看 `startCommand`**
+⇒ 明明能重启的机器被显示成 ⛔ 不可用，而且 `--supervise start` **自己就把自己拒了**
+（输出「❌ 没配 `startCommand`」）。同一条判据在**四个地方**都要用：
+`supervise.launch()` 自身 · `--supervise start` 的前置校验 · `--servers` 的显示 ·
+`bridge.serversSnapshotForApi()` → `api.mjs` 字段白名单 → 本页。
+漏一处就会出现"后端能、界面说不能"这类**比不显示更坏**的不一致。
+
+★ 因此接口必须回**两个**字段：`startExeSet` 与 `startCommandSet`（都是布尔），
+外加 `startExe`（可执行文件名，用于展示"启动方式"）。
+**只回 `startCommandSet` 是不够的** —— 它会让 `startExe` 形状的机器在界面上显示成不可重启。
+
+#### ★★ TPS 显示（0.3.2）：**"没问"与"拿不到"是两件事**
+
+`servers[].tpsCommand` 留空 ⇒ 我们**不问** TPS（`snapshot.tps === null`），
+界面必须把这个原因说清（"没配 `tpsCommand` ⇒ **不问 TPS**，不是拿不到"）。
+
+**为什么**：TPS 不是通用命令（vanilla 要 datapack、各端措辞不同），猜一个只会在真机上
+拿到一句报错，然后把"我猜错了"显示成"服务器有问题"。填了就采（Forge 的 `forge tps`
+实测能回 `Mean TPS: 20.000`），**认不出仍留 `null`** —— 一旦把"解析失败"当 0，
+`rules.minTps` 会立刻播报"TPS 过低"，那是把**我们的 bug** 说成**服务器的故障**。
 
 ---
 

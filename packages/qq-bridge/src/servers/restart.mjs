@@ -213,7 +213,7 @@ export function createRestarter({
       }
     }
     if (typeof launch !== 'function') {
-      return { ok: false, why: 'no-launcher', text: '没有可用的启动方式（配置里缺 `restart.startCommand`）—— 我拉不起来它。' }
+      return { ok: false, why: 'no-launcher', text: '没有可用的启动方式（配置里既没给 `servers[].startExe`+`startArgs`，也没给 `startCommand`）—— 我拉不起来它。' }
     }
     // ③ 累计尝试上限（**"试一次"的硬保证**）
     //

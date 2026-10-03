@@ -73,6 +73,29 @@ export function parsePlayerList(body) {
   return { players: null, playerNames: null }
 }
 
+/**
+ * 从 TPS 命令的应答里抠出 TPS。
+ *
+ * ★ 与 `parsePlayerList` 同一条纪律：**只认最稳的形状，认不出就 `null`，绝不编**。
+ *   尤其**不能**把认不出当成 0 —— 那会让 `rules.minTps` 立刻判出"TPS 过低"，
+ *   于是"我解析失败"被播报成"服务器快挂了"（正是 `Number(null) === 0` 那类坑）。
+ *
+ * 认的形状（真机取回来的原文）：
+ *   `Dim minecraft:overworld ...: Mean tick time: 6.418 ms. Mean TPS: 20.000`
+ *   `Dim minecraft:the_nether ...: Mean tick time: 0.065 ms. Mean TPS: 20.000`
+ * ⇒ 多维度时取**最小值**（最慢的那个维度才是玩家体感；取平均会掩盖一个卡死的维度）。
+ *
+ * @returns {number|null}
+ */
+export function parseTps(body) {
+  const text = String(body ?? '')
+  if (!text.trim()) return null
+  const all = [...text.matchAll(/Mean TPS:\s*([0-9]+(?:\.[0-9]+)?)/gi)].map((m) => Number(m[1]))
+  const usable = all.filter((n) => Number.isFinite(n))
+  if (usable.length === 0) return null
+  return Math.min(...usable)
+}
+
 function readJson(file, fallback = null) {
   try {
     if (!existsSync(file)) return fallback
@@ -204,13 +227,31 @@ export function createServerLoop({
     } catch (error) {
       listError = String(error?.message ?? error)
     }
+    // ── TPS：**只在使用者给了命令时才采** ────────────────────────────────
+    //
+    // ★ 为什么不给就留 null：TPS 不是通用命令（vanilla 要 datapack、各端措辞不同），
+    //   猜一个只会在真机上拿到一句报错，然后把"我猜错了"显示成"服务器有问题"。
+    // ★ 但也不能永远不采（实测撞到的误导）：Forge 的 `forge tps` 真能给
+    //   `Mean TPS: 20.000`，而 `--servers` 那时显示"TPS 拿不到" ——
+    //   看起来像服务端的毛病，其实是**我们没问**。
+    //   ∴ 把"问什么"交给使用者（`servers[].tpsCommand`），解析不出来就仍留 null，
+    //     「拿不到」与「TPS 是 0」始终是两件事。
+    let tps = null
+    const tpsCommand = String(server.tpsCommand ?? '').trim()
+    if (tpsCommand) {
+      try {
+        const tr = await client.exec(tpsCommand)
+        if (tr.ok) tps = parseTps(tr.body)
+        else listError = listError ?? tr.text ?? 'tps 命令失败'
+      } catch (error) {
+        listError = listError ?? String(error?.message ?? error)
+      }
+    }
     return {
       reachable: true,
       players,
       playerNames,
-      // ★ tps **不采**：它不是通用命令（vanilla 要 datapack、各端措辞不同）。
-      //   拿不到就留 null —— 「拿不到」与「TPS 是 0」是两件事（monitor 里有断言盯着）。
-      tps: null,
+      tps,
       version: null,
       error: listError,
       thresholds: server.rules?.minTps || server.rules?.maxPlayers ? server.rules : null,

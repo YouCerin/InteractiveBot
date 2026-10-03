@@ -1491,6 +1491,15 @@ export class Bridge extends EventTarget {
         rconPort: s.rconPort,
         passwordSet: Boolean(s.password),
         startCommandSet: Boolean(String(s.startCommand ?? '').trim()),
+        // ★ 界面要按"能不能拉起它"来判断重启能力，而启动形状有**两条路**：
+        //   `startExe`+`startArgs`（不走 shell，归属可判定 —— 推荐）
+        //   `startCommand`（走 shell，`cmd.exe` 会先退出 ⇒ 归属难判）
+        //   只报 `startCommandSet` 会让"只配了 startExe"的机器在界面上显示成不可重启。
+        startExeSet: Boolean(String(s.startExe ?? '').trim()),
+        startExe: String(s.startExe ?? '').trim(),
+        // ★ TPS 是**问了才有**：留空表示"我们没问"（不是"问了没拿到"）。
+        //   界面必须能区分这两件事，否则"TPS 拿不到"看起来像服务端的毛病。
+        tpsCommand: String(s.tpsCommand ?? '').trim(),
         failThreshold: s.failThreshold,
         rules: s.rules ?? {},
         monitor,

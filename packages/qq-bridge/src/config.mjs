@@ -569,6 +569,14 @@ export function normalizeConfig(c) {  const src = c ?? {}
           password: typeof item.password === 'string' ? item.password : '',
           enabled: item.enabled !== false,
           failThreshold: Number.isFinite(Number(item.failThreshold)) ? Math.max(1, Number(item.failThreshold)) : 2,
+          // ── TPS：**留空 = 不问**（不是"问了但没拿到"）────────────────────
+          //
+          // ★ 为什么留空：TPS 不是通用命令（vanilla 要 datapack、各端措辞不同），
+          //   猜一个只会在真机上拿到一句报错，然后把"我猜错了"显示成"服务器有问题"。
+          // ★ 为什么仍然开放：Forge 的 `forge tps` 真能给 `Mean TPS: 20.000`，
+          //   不给配就会一直显示"TPS 拿不到"，看起来像服务端的毛病。
+          //   ∴ 由使用者给命令（如 `forge tps`），我们只解析最稳的那段文本。
+          tpsCommand: typeof item.tpsCommand === 'string' ? item.tpsCommand.slice(0, 200) : '',
           // ── 0.3.2 P4：守护与重启要的那几项 ──────────────────────────────
           //
           // ★ **`startCommand` 留空 = 我们不知道怎么启动它** ⇒ `supervise.launch()`
@@ -577,6 +585,14 @@ export function normalizeConfig(c) {  const src = c ?? {}
           //   ⚠️ 它在 config.json 里是**明文命令**（可能含路径与 JVM 参数）——
           //   属于使用者的机器信息，与密码同一类保护（配置本身永不进 git/发布包）。
           startCommand: typeof item.startCommand === 'string' ? item.startCommand.slice(0, 500) : '',
+          // ★★★ 0.3.2 P4 修正：**优先用「可执行文件 + 参数数组」**。
+          //
+          // 为什么（实测抓到的硬伤）：`startCommand` 走 shell，而 **`shell:true` 时
+          // 我们拿到的 pid 是 `cmd.exe` 的**，它起完 java 就自己退出 ⇒
+          // 归属档里那个 pid 立刻变成"已死的进程" ⇒ 归属判成"不是我起的" ⇒
+          // **重启能力永远不可用**。给 exe+args 时**不经 shell**，pid 才是真正的服务端。
+          startExe: typeof item.startExe === 'string' ? item.startExe.slice(0, 400) : '',
+          startArgs: Array.isArray(item.startArgs) ? item.startArgs.map((a) => String(a).slice(0, 400)).slice(0, 40) : [],
           cwd: typeof item.cwd === 'string' ? item.cwd.slice(0, 300) : '',
           // 默认用 shell 起（模组服的启动行常带 `&&` / 变量 / `@args.txt`）
           shell: item.shell !== false,

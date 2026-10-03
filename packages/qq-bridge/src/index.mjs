@@ -1647,24 +1647,39 @@ async function main() {
         // ── ★★ 归属与重启状态（P4）：**"能不能重启"必须看得见** ──
         //   归属不是 `bridge` 时，"尝试一次重启"**会**被拒（那是纪律）；不显示出来的话，
         //   使用者只会看到"服务器挂了它没动作"，而原因完全猜不到。
+        // ★★ `--dry` 时**跳过归属探测**：那个探测要连一次端口，而 `--dry` 的承诺就是
+        //   "不发任何网络请求"。第一版没跳过，于是它在 `--dry` 下也去探了端口
+        //   （输出里出现"端口有东西在听，但不是我的"）—— **名不符实**，已修。
         try {
           const { createSupervisor } = await import('./servers/supervise.mjs')
           const { createRestarter } = await import('./servers/restart.mjs')
-          if (workspace) {
+          if (workspace && !dry) {
             const sup = createSupervisor({ workspace, log: () => {} })
             const own = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
             const mark = own.owner === 'bridge' ? '✅ 是我起的' : own.owner === 'external' ? '⚠️ 不是我起的' : '⛔ 没在跑'
             console.log(`     归属：${mark}${own.weak ? '（弱证据：命令行比对）' : ''} —— ${own.why}`)
-            console.log(`     重启能力：${own.owner === 'bridge' && s.startCommand ? '✅ 可用' : '⛔ 不可用'}（需要"归属是我" + 配了 startCommand）`)
-            const rst = createRestarter({ workspace, serverId: s.id, log: () => {} })
-            rst.load()
-            const st = rst.state()
+            // ★ 判据必须覆盖 `startExe`（见 `supervise.launch`：启动形状 `startExe` 优先）。
+            //   第一版这里只看 `startCommand`，于是"只配了 startExe"的机器**明明能重启**
+            //   却被显示成 ⛔ —— 显示层和实际能力不一致，比没显示更坏（实测抓到）。
+            const canLaunch = Boolean(String(s.startExe ?? '').trim() || String(s.startCommand ?? '').trim())
+            console.log(`     重启能力：${own.owner === 'bridge' && canLaunch ? '✅ 可用' : '⛔ 不可用'}（需要"归属是我" + 配了 startExe/startCommand）`)
+          } else if (workspace) {
+            // dry：只读盘上的归属档，**不碰网络**
+            const rec = createSupervisor({ workspace, log: () => {} }).readState(s.id)
             console.log(
-              `     重启状态：尝试 ${st.attempts} 次 · 上次结果 ${st.lastOutcome ?? '—'}` +
-                `${st.cooldownUntil ? ` · 冷却到 ${new Date(st.cooldownUntil).toLocaleTimeString()}` : ''}` +
-                `${st.waitingForAdmin ? ' · ⏳ **等管理员指令**（retry / abandon）' : ''}`,
+              rec
+                ? `     归属：盘上有档（pid ${rec.pid}，起于 ${new Date(rec.startedAt).toLocaleString()}）—— **--dry 不探端口，这次不判归属**`
+                : '     归属：盘上**没有归属档** ⇒ 它不是我拉起的（`--dry` 不探端口，未再确认）',
             )
           }
+          const rst = createRestarter({ workspace, serverId: s.id, log: () => {} })
+          rst.load()
+          const st = rst.state()
+          console.log(
+            `     重启状态：尝试 ${st.attempts} 次 · 上次结果 ${st.lastOutcome ?? '—'}` +
+              `${st.cooldownUntil ? ` · 冷却到 ${new Date(st.cooldownUntil).toLocaleTimeString()}` : ''}` +
+              `${st.waitingForAdmin ? ' · ⏳ **等管理员指令**（retry / abandon）' : ''}`,
+          )
         } catch (error) {
           // 增强路径：读不到就说读不到（别让整个巡检挂掉）
           console.log(`     ⚠️ 归属/重启状态读不出来：${error?.message ?? error}`)
@@ -1775,7 +1790,12 @@ async function main() {
           const own = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
           const mark = own.owner === 'bridge' ? '✅ 是我起的' : own.owner === 'external' ? '⚠️ 不是我起的' : '⛔ 没在跑'
           console.log(`     归属：${mark} —— ${own.why}`)
-          console.log(`     ${s.enabled ? '✅ 启用' : '⛔ 停用'} · startCommand：${s.startCommand ? '已配置' : '⚠️ **没配**（那就只能"只报告、不重启"）'}`)
+          const launchShape = String(s.startExe ?? '').trim()
+            ? `startExe：${s.startExe}（不走 shell ⇒ 归属可判定）`
+            : s.startCommand
+              ? 'startCommand：已配置（走 shell ⇒ 归属可能判不出）'
+              : '⚠️ **没配**（那就只能"只报告、不重启"）'
+          console.log(`     ${s.enabled ? '✅ 启用' : '⛔ 停用'} · ${launchShape}`)
           const rec = sup.readState(s.id)
           if (rec) {
             console.log(`     归属档：pid ${rec.pid} · 起于 ${new Date(rec.startedAt).toLocaleString()} · 输出 → ${rec.logFile}`)
@@ -1784,8 +1804,8 @@ async function main() {
         }
 
         if (action === 'start') {
-          if (!s.startCommand) {
-            console.log(`     ❌ 没配 \`startCommand\` —— **我不知道怎么启动它**（绝不猜一个 java -jar）`)
+          if (!String(s.startExe ?? '').trim() && !s.startCommand) {
+            console.log(`     ❌ 既没配 \`startExe\`+\`startArgs\`，也没配 \`startCommand\` —— **我不知道怎么启动它**（绝不猜一个 java -jar）`)
             continue
           }
           const st = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })

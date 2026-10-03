@@ -612,6 +612,21 @@ export interface ServerRow {
   passwordSet: boolean
   /** 同上：那是使用者的机器信息（可能含路径与 JVM 参数） */
   startCommandSet: boolean
+  /**
+   * 推荐的启动形状：`startExe` + `startArgs`（**不走 shell**）。
+   * 为什么它不是可有可无的：`shell: true` 时我们记录到的是 `cmd.exe` 的 pid，
+   * 而它起完 java 就退出 ⇒ "归属是我"永远判不出来 ⇒ 重启能力形同虚设。
+   * 只回 `startCommandSet` 会把这种"明明能重启"的机器在界面上显示成不可重启。
+   */
+  startExeSet: boolean
+  /** 启动可执行文件（相对 `cwd` 或绝对路径）；`startExeSet` 为 false 时是空串 */
+  startExe: string
+  /**
+   * 采 TPS 用的那条命令（如 Forge 的 `forge tps`）。
+   * **空串 = 我们没问**（不是"问了没拿到"）—— 界面必须能区分，
+   * 否则"TPS 拿不到"看起来像服务端的毛病。
+   */
+  tpsCommand: string
   failThreshold: number | null
   rules: { minTps: number | null; maxPlayers: number | null }
   /** 活证据：这台采过样才有（`null` = 还没采过） */
