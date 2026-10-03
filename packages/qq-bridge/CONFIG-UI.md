@@ -2946,6 +2946,25 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 实测能回 `Mean TPS: 20.000`），**认不出仍留 `null`** —— 一旦把"解析失败"当 0，
 `rules.minTps` 会立刻播报"TPS 过低"，那是把**我们的 bug** 说成**服务器的故障**。
 
+#### ★★★ 界面**不可以**提供"启动服务端"的按钮（0.3.2，实测教训）
+
+只能 `retry` / `abandon`（改重启状态机），**不能** `start` / `stop` —— 接口已经
+按这个口径 fail-closed（`POST /api/servers/action` 收到 `start`/`stop` 回 400）。
+
+**为什么这条要写死在文档里（不是"以后再补"）**：`--supervise start` 启动的服务端是
+**那条命令的 detached 子进程**，而"命令结束时回收整棵进程树"的环境（**包括本项目的
+agent 沙箱**）会把它一起收走 ⇒ 从那种环境里点一下"启动"的按钮，服务端**起来就会被杀掉**，
+而界面上会显示"启动成功"。实测两次对照：
+
+| 怎么死的 | 服务端日志尾部 |
+|---|---|
+| **优雅停服**（RCON `stop`） | 完整收尾：`All dimensions are saved` → `Thread RCON Listener stopped` |
+| **被回收** | **戛然而止**（停在 `Preparing start region…`），一行停机记录都没有 |
+
+所以：启动/停止**留在 CLI**，并且明确告诉使用者**要在自己的终端里跑**
+（`supervise-server.bat start --id <服务器>`）。★ 若将来真要做这个按钮，前提是
+服务端由**桥接进程自己**持有（桥接活着它才活着），而不是由一次性的 CLI 命令启动。
+
 ---
 
 ## 4. 校验与错误提示（重要）

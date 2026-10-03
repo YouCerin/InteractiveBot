@@ -210,6 +210,7 @@
                         "_默认":  "这一整段**留空 = 这一层完全不工作**，而且**一次网络请求都不发**。",
                         "_RCON 怎么开":  "在服务端的 server.properties 里：enable-rcon=true · rcon.password=<自己设一个> · rcon.port=25575 · 改完要重启服务端。⚠️ RCON 只该监听本机或可信内网 —— 它等于服务端的控制台。",
                         "_巡检":  "node src/index.mjs --servers 看配置与监测状态；加 --probe 真连一次并跑只读命令 list（不发任何改变服务端的指令）。",
+                        "_启动命令怎么跑":  "★★★ 要拉起/停掉服务端，请在**你自己的终端**里跑 `supervise-server.bat start --id <id>`（或 `node src/index.mjs --supervise start --id <id>`）。★ 为什么不能在 agent/沙箱会话里跑：那种环境会在**命令结束时收走它启动的子进程**（实测：服务端刚起来就被杀，日志戛然而止、一行停机记录都没有），于是服务端**注定活不过那条命令**。判据是服务端日志的尾部 —— 优雅停服有完整收尾（`All dimensions are saved`），被回收则是戛然而止。★ `start` 现在会**等到端口真的开放**才算成功（默认最多 180 秒，`--wait <秒>` 可调），等不到就如实报没起来。",
                         "_判据":  "★ 默认**只把「连不上」算 down**（连续失败 failThreshold 次才判定，防网络抖动误报）。rules 里的 minTps / maxPlayers 只产出**异常报告**，**不会触发重启** —— 因为「TPS 低就重启」是赌博。",
                         "id":  "mc-main",
                         "name":  "主服",

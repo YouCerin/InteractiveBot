@@ -1257,9 +1257,33 @@ node src/index.mjs --servers --probe  # 真连一次 RCON 并跑只读命令 lis
 
 **★★ 真机端到端验证**：`probe-live-rcon.mjs`（仓库根）在**一条命令内**把真 Forge 服拉起、
 连它的 RCON、读 `list` 与 `forge tps`、验密码错、再优雅 `stop`（11 项全通）。
-为什么必须在一条命令内做完：这台沙箱**每条命令结束时会把 detached 子进程一起收走**
-（隔离实验证实：6 秒后还活着，下一条命令里就没了）⇒「跨命令的守护/归属」在这里验不了，
-只能在**使用者自己的终端**里验。
+
+**★★★ 「拉起服务端」必须在你自己的终端里跑 —— 这不是猜测，是两次对照实验**
+
+DSH 的沙箱（以及任何"命令结束时回收整棵进程树"的环境）会**收走这条命令启动的
+detached 子进程**，所以从 agent 会话里跑 `--supervise start` 的服务端**注定活不过那条命令**。
+判据在**服务端日志的尾部**（实测两次，形状完全不同）：
+
+| 怎么死的 | 日志尾部 | 端口 |
+|---|---|---|
+| **优雅停服**（RCON `stop`） | 有完整收尾：`Saving players` → `All dimensions are saved` → `Thread RCON Listener stopped` | 关闭 |
+| **被回收**（进程树被收走） | **戛然而止**：最后一次停在 `Preparing start region for dimension …`，连 `Done (...) !` 都没到，一行停机记录都没有 | 关闭 |
+
+```bash
+# ✅ 对：你自己的终端（或双击 supervise-server.bat）
+packages\qq-bridge\supervise-server.bat start --id forge1
+
+# ❌ 错：agent/沙箱会话里 —— 起来了也会立刻被回收
+node src/index.mjs --supervise start --id forge1
+```
+
+★ 为什么 `--supervise start` 现在要**等到端口真的开放**才算成功：第一版打印
+`launch()` 的结果就收工，于是「✅ 已拉起」只意味着"进程创建成功"。实测：跑完这条
+紧接着跑 `--supervise status`，看到的是「⛔ 没在跑」（那次 Forge 要 18 秒才 `Done`）——
+**那句成功是在没有验证的情况下说出来的**，正是本项目最贵的那类谎话。现在等不到端口
+就如实说没起来，并指路控制台输出；端口开过又消失时，把"被回收"与"自己挂了"两种
+可能都说清楚（默认最多等 180 秒，`--wait <秒>` 可调）。
+
 
 **★★ 密码的边界**：只进 `config.json`（`user` 类受保护路径），**绝不进日志、错误信息与接口响应**
 —— 失败理由里有断言逐字检查不含密码。而 `config.example.json` 里它**必须是空串**：

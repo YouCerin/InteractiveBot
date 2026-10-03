@@ -1731,7 +1731,9 @@ async function main() {
   // 「尝试一次重启」这条需求就只会退化成"只报告"。
   //
   //   --supervise status [--id <服务器>]   看归属：是我起的 / 别人的 / 没在跑
-  //   --supervise start  [--id <服务器>]   ★ 拉起它（detached + unref + 输出落盘）
+  //   --supervise start  [--id <服务器>] [--wait <秒>]
+  //       ★ 拉起它（detached + unref + 输出落盘），并**等端口真的开放**才算成功
+  //       （默认最多等 180 秒；模组服首次启动很慢，用 `--wait` 可加长）
   //   --supervise stop   [--id <服务器>]   通过 RCON 优雅停服（**会真的停服务端**）
   //   --supervise retry  [--id <服务器>]   管理员说"再试一次重启"
   //   --supervise abandon[--id <服务器>]   管理员说"放弃，别再自动动它"
@@ -1782,6 +1784,10 @@ async function main() {
       }
 
       const sup = createSupervisor({ workspace, log: (m) => console.log(`   ${m}`) })
+      // `start` 要等多久才算起来。默认 3 分钟：模组服**首次**启动（要生成世界、
+      // 加载几百个 mod）实测能到 1~2 分钟，给足余量；可用 `--wait <秒>` 调整。
+      const waitArg = Number(argOf('--wait'))
+      const startWaitMs = Number.isFinite(waitArg) && waitArg > 0 ? Math.min(waitArg, 3600) * 1000 : 180_000
       for (const s of targets) {
         console.log('')
         console.log(`  ── ${s.name}（${s.id}）──`)
@@ -1819,8 +1825,75 @@ async function main() {
             continue
           }
           const r = await sup.launch(s)
-          console.log(r.ok ? `     ✅ 已拉起（pid ${r.pid}）· 输出 → ${r.logFile}` : `     ❌ 没起来：${r.why}`)
-          console.log('     ⚠️ 服务端要几秒到几分钟才能接受连接（模组服更久）—— 用 `--servers` 看它到底通没通。')
+          if (!r.ok) {
+            console.log(`     ❌ 没起来：${r.why}`)
+            continue
+          }
+          console.log(`     ✅ 进程已创建（pid ${r.pid}）· 输出 → ${r.logFile}`)
+          // ★★★ 必须**等它真的接受连接**才算成功（实测抓到的硬伤）：
+          //
+          //   第一版到上面那行就结束了，于是「✅ 已拉起」只意味着"进程创建成功"，
+          //   而**服务端可能还在加载，甚至可能等一下崩掉**。实测：用户跑完这条、
+          //   紧接着跑 `--supervise status`，看到的是「⛔ 没在跑」—— 因为那次
+          //   Forge 要 18 秒才 `Done`。于是"✅ 已拉起"变成了一句**在没有验证的
+          //   情况下说出的成功**，而这正是本项目最贵的那类谎话。
+          //   ∴ 现在等到端口真的开了才收工；等不到就**如实说没起来**并指路控制台输出。
+          //
+          // ★★ 另一个只有真机能发现的细节（实测两次对照）：
+          //   · 优雅停服（RCON `stop`）⇒ 日志有完整收尾（`All dimensions are saved`
+          //     + `Thread RCON Listener stopped`）。
+          //   · 被**回收**（agent/沙箱会话收走整棵进程树）⇒ 日志**戛然而止**
+          //     （最后一次实测停在 `Preparing start region for dimension …`，
+          //     连 `Done` 都没到，一行停机记录都没有）。
+          //   两者在"端口通不通"上看起来一样，但日志尾部把原因区分得很清楚 ——
+          //   所以下面那个 ⚠️ 分支要把这两种可能都说给使用者听。
+          const deadline = Date.now() + startWaitMs
+          const beganAt = Date.now()
+          let up = false
+          let lastReported = 0
+          while (Date.now() < deadline) {
+            await new Promise((res) => setTimeout(res, 1500))
+            const probe = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
+            if (probe.portOpen) {
+              up = true
+              break
+            }
+            // 每 10 秒报一次进度（按**已等秒数**判，不要按"剩余秒数是 10 的倍数"——
+            // 起点不是整十时那个判据会永不触发或乱触发）
+            const waited = Math.round((Date.now() - beganAt) / 1000)
+            if (waited - lastReported >= 10) {
+              lastReported = waited
+              console.log(`     … 已等 ${waited} 秒，端口还没开（模组服首次启动可能要几分钟）`)
+            }
+          }
+          if (up) {
+            // 归属**必须再判一次**：端口开了，但"是不是我起的"要以最新的 pid@时刻 为准。
+            // ★ 也正因为再判一次，这里能抓到一种**环境特有的失败**（实测抓到）：
+            //   在"会把 detached 子进程一起收走"的环境里（DSH 自己的沙箱就是），
+            //   服务端刚起来就**被杀**，而且日志戛然而止（没有 Stopping、没有异常）。
+            //   不说清的话，使用者会以为是自己 server.properties 配错了。
+            await new Promise((res) => setTimeout(res, 3000))
+            const after = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
+            if (after.owner === 'bridge') {
+              console.log(`     ✅ 端口 ${s.port} 已开放，服务端**真的起来了**，而且归属是我（pid ${after.pid}）`)
+            } else if (after.owner === 'external') {
+              console.log(
+                `     ✅ 端口 ${s.port} 已开放，但**归属判不出是我**（${after.why}）—— 不会自动重启它（按纪律不抢别人的服务端）。`,
+              )
+            } else {
+              console.log(`     ⚠️ 端口开过，但**现在进程已经不在了**：${after.why}`)
+              console.log('        这不是服务端的毛病 —— 常见原因是**它所在的进程组被回收了**：')
+              console.log('        · 如果你是在 **agent/沙箱会话里**跑的这条命令：那个环境会在命令结束时收走')
+              console.log('          它启动的子进程（本仓库真机实验证实），服务端**注定活不过这条命令**。')
+              console.log('          ⇒ 请在**你自己的终端**里跑这条命令（或双击 start-server.bat）。')
+              console.log(`        · 如果是在自己的终端里，那就去看它的输出最后停在哪：${r.logFile}`)
+            }
+          } else {
+            console.log(`     ❌ 等了 ${Math.round(startWaitMs / 1000)} 秒，端口 ${s.port} **一直没开** —— 它没起来。`)
+            console.log(`        去看它的控制台输出（最后几行通常就是原因）：${r.logFile}`)
+            console.log('        常见原因：JVM 参数/路径不对、EULA 没同意、端口被占、内存不够。')
+            console.log('        ⚠️ 这次**不算启动成功**；归属档还在，下次 `--supervise start` 会先看端口再决定要不要拉起。')
+          }
           continue
         }
 
