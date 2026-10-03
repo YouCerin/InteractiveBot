@@ -19,7 +19,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -43,10 +43,8 @@ import {
   POINT_TITLE_MAX_CHARS,
   REVIEW_REL,
   VERDICTS,
-  aggregateStats,
   createReviewStore,
   normalizePointTitle,
-  unifiedDiff,
   validatePoint,
   validateScore,
 } from '../src/chat-review-store.mjs'
@@ -736,14 +734,21 @@ section('④ 整理：评论 → **对说话方式的修改意见**（★ 不写
     for (let i = 0; i < 23; i += 1) {
       st.saveFailure({ scope: 'all', why: `第 ${i} 次`, raw: `坏 JSON ${i}`, at: 1000 + i })
     }
-    const kept = st.listFailures()
-    check('★★ 失败原文只留最近 20 份（旧的自动作废，不许无限增长）', kept.length === 20, String(kept.length))
-    check('★ 留下的是**最近的**那 20 份（最新那份在最前，最老的 3 份已经删掉）',
-      kept[0]?.why === '第 22 次' && kept[19]?.why === '第 3 次',
-      `${kept[0]?.why} … ${kept[19]?.why}`)
+    // ★ 刻意**不**经过 store 的读接口：那个接口已删（生产上零调用，只有这条测试在用 ——
+    //   那正是"测试养着死代码"的典型）。要盯的是"封顶"这件事本身，直接数目录更硬：
+    //   文件真的少了才算数，而不是某个函数的返回值说少了。
+    const failedDir = join(failWs, REVIEW_REL, 'failed')
+    const files = readdirSync(failedDir).filter((f) => f.endsWith('.json')).sort()
+    const readOne = (f) => JSON.parse(readFileSync(join(failedDir, f), 'utf8'))
+    const oldest = readOne(files[0])
+    const newest = readOne(files[files.length - 1])
+    check('★★ 失败原文只留最近 20 份（旧的自动作废，不许无限增长）', files.length === 20, String(files.length))
+    check('★ 留下的是**最近的**那 20 份（最老的 3 份已经删掉）',
+      oldest?.why === '第 3 次' && newest?.why === '第 22 次',
+      `${oldest?.why} … ${newest?.why}`)
     check('★ 每份都记着 why 与原文本身（不留原文就等于没留）',
-      kept[0]?.raw === '坏 JSON 22' && kept[0]?.chars === [...'坏 JSON 22'].length,
-      JSON.stringify({ raw: kept[0]?.raw, chars: kept[0]?.chars }))
+      newest?.raw === '坏 JSON 22' && newest?.chars === [...'坏 JSON 22'].length,
+      JSON.stringify({ raw: newest?.raw, chars: newest?.chars }))
     check('★ 落盘目录就在评审数据下面（`runtime/chat-review/failed/`）',
       st.files.failed === join(failWs, REVIEW_REL, 'failed'), st.files.failed)
   }

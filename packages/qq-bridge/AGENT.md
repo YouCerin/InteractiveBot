@@ -102,7 +102,7 @@ qq-bridge/
 │   ├── plugins.mjs        内置插件登记表（记忆/看图/QQ工具… 的开关 + 即时还是重启）
 │   └── doctor.mjs         体检
 ├── mcp/              手写的 MCP 服务器：mcp-qq-server.mjs（QQ 工具）+ mcp-skills-server.mjs（技能工具）
-├── skills/           外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup、sticker、video-frames
+├── skills/           外部技能（`<id>/skill.json` + 入口）；当前装了 pixiv-lookup、sticker、video-frames、screenshot
 ├── mocks/            测试替身与验证脚本（不需要真 QQ，不花钱）
 ├── vendor/           包内自带：node 运行时 + ws（由 setup.mjs 生成）
 ├── logs/             运行日志
@@ -608,7 +608,9 @@ qq-bridge/
   认 `【说话方式…】` / `【怎么说话】`（含别名、编号式 `二、怎么说话`），回答
   "这份人设里有没有说话方式那一节"。**它不参与拼装，也不拦、不回落内置** ——
   认不出只是"这是使用者自己写的散文人设"这一事实。日志（`#notePersonaShape`，前缀 `[persona]`）
-  **只在形状变化时记一行**，两种形态都把提示词用的是整份人设写明：
+  **在构造期记一次**（人设是构造期读一次的快照，运行期形状不会变；函数自带签名去重，重复调用无副作用）
+  —— ★ 2026-10-03 从"每轮在拼提示词时算一遍"挪到这里：签名每轮都一样，那行日志永远不会再触发，
+  等于每轮白做一次全量分节。两种形态都把提示词用的是整份人设写明：
   `[persona] 说话方式：人设里有「…」这一节（共 N 节），提示词直接用整份人设` /
   `⚠️ [persona] 这套人设里**没有**可识别的「说话方式」那一节 —— 提示词里就只有你写的正文`。
   那条历史判据（"替换而不是追加"）当年的场景是"编号式人设被判成无分节 ⇒ 同一份提示词里两套相反口吻" ——
@@ -1177,12 +1179,27 @@ node src/index.mjs --recipes --add --file 配方.json     # ★ 推荐 --file
   界面与 `--extensions` 走同一个口径（`skillStatus()` 会给出这条原因）。
 * **一条新通道**：`src/extensions-service.mjs` 是**唯一**"改配置且不要求重启"的路径
   （写盘 + 改活配置对象，两件事都做）。其它配置仍然"保存后需重启"。
+* ★★ **技能的 `ctx` 里有 `workspace` 与 `hostTool`（0.3.0alpha 补）**：技能要落盘就必须知道
+  工作区在哪（少了它只能猜相对路径，猜错就把图写到发布目录里），要引用宿主工具就必须拿真名。
+  这两件事以前**配了但没传**（`writeSkillsMcpConfig` 写了 workspace，`api.hostTool` 也只在
+  `setup(api)` 里有），属于"看着都在、其实拿不到"的静默缺口 —— 技能里用
+  `typeof ctx.hostTool === 'function'` 探测后使用（老宿主没有这两项）。
+* ★★ **`collectSkillPromptSections()` 现在兜底提供 `toolName` / `hostTool`（0.3.0alpha 修）**：
+  以前它给技能的 `ctx` 恒为 `{}`（没有任何调用方传 ctx），于是"拿不到工具名就整段不注入"的
+  技能会**一个字都不出现在提示词里**，而界面照样显示"已启用"。
+* ★★ **技能权限的两层要分清**：`permission: "write"` 只是**提示词层**的约束
+  （MCP 的 `tools/call` 上没有调用者身份）。需要**真硬闸**的话，走截图技能那条路：
+  桥接按会话写授权文件（`src/screenshot-grant.mjs`）→ MCP 子进程里的技能读它 →
+  没授权就拒绝。**这是本项目目前唯一一处"技能侧真硬闸"**，也是"功能是技能、
+  判定在宿主"这条规矩在权限上的落地。
 
 ```bash
 node src/index.mjs --extensions        # 离线巡检：技能状态 + 工具全名 + 清单告警 + 插件开关
 node src/index.mjs --personas          # 离线巡检：装了哪几套人设 / 现在用哪一套 / 老配置回落提示
 node mocks/probe-extensions.mjs        # 看"打开某个技能后，提示词里到底多出什么字"
 node mocks/verify-extensions.mjs       # 扩展系统测试（命名/设置/密文/开关语义/发图守卫）
+node mocks/verify-screenshot.mjs       # 截图技能：路径约束/黑图判定/权限硬闸/脚本注入面
+node mocks/verify-screenshot-real.mjs  # 截图真机：真抓一张、真发一次、授权闭环
 node mocks/verify-personas.mjs         # 人设库测试（多文件/命名/切换/老配置回落/配置跟随/接口）
 ```
 

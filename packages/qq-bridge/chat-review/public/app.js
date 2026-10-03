@@ -21,7 +21,8 @@ const $ = (id) => document.getElementById(id)
 
 const PAGE_SIZE = 20 // 一次取多少条（契约默认 20）
 const PREFETCH_MIN = 6 // 队列里剩这么少就续取下一页，让"下一条"永远是本地就有的
-// 三档结论（契约固定）。`/api/taxonomy` 取不到时用这个兜住键盘，不让人"按了没反应"。
+// 三档结论（契约固定）。`/api/taxonomy` 那条路由是历史名 + 故意保留的兼容壳，
+// 取不到时用这个兜住键盘，不让人"按了没反应"。
 const FALLBACK_VERDICTS = [
   { id: 'good', label: '对', key: '1' },
   { id: 'ok', label: '还行', key: '2' },
@@ -34,7 +35,10 @@ const state = {
   health: null,
   // ★ 取不到时要能区分"还没取到"和"服务端说不可用"，否则页面会显示成"0 个会话"
   sources: { corpus: { ok: false, why: '还没取到数据源', chats: [] }, batches: [] },
-  taxonomy: { ok: false, verdicts: [], why: '' }, // 只留三档结论：标签体系已删除
+  // ★ 名字从 `taxonomy` 改成 `verdicts`：那条路由名是**故意保留的兼容壳**（标签体系 2026-10-02 删除，
+  //   删掉路由会让旧页面拿到 404，而 404 在浏览器里只表现为"点了没反应"），但它装的东西就是三档结论
+  //   —— 沿用旧名会让人以为标签体系还在。
+  verdicts: { ok: false, items: [], why: '' },
   // ★★ 标签表：人工写、可编辑（位置就是打分卡片上那排按钮）。内部字段仍叫 `points`（历史名）。
   //    但性质不同 —— 标签是服务端预先写死的分类，点是使用者从评论里长出来、**可编辑**的词汇表。
   points: { ok: false, why: '还没取到标签表', kinds: ['bad', 'good'], titleMax: 12, items: [], deleteMode: false },
@@ -55,7 +59,7 @@ const state = {
   // 整理那一块的全部状态：GET 一进报告页就拉（不花钱），POST 只在人点击时发生
   cons: {
     loaded: false, latest: null, comments: [], counts: null, model: null,
-    limits: null, anchors: [], clusters: null, error: '', rawFile: '', busy: false, armed: false,
+    limits: null, anchors: [], clusters: null, error: '', rawFile: '', busy: false,
   },
 }
 
@@ -90,11 +94,11 @@ function clamp(n, lo, hi) {
 const truncate = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n)}…` : String(s ?? ''))
 const hasCommentText = (s) => String(s ?? '').trim() !== '' // 空评论是合法的：只判档也能用，只是不进整理
 function verdictLabel(id) {
-  return [...state.taxonomy.verdicts, ...FALLBACK_VERDICTS].find((v) => v.id === id)?.label ?? id ?? '—'
+  return [...state.verdicts.items, ...FALLBACK_VERDICTS].find((v) => v.id === id)?.label ?? id ?? '—'
 }
 /** 按契约固定的键位取结论；税则里的 `key` 对得上就优先用它。 */
 function verdictForKey(key) {
-  const list = state.taxonomy.verdicts.length ? state.taxonomy.verdicts : FALLBACK_VERDICTS
+  const list = state.verdicts.items.length ? state.verdicts.items : FALLBACK_VERDICTS
   return list.find((v) => String(v.key) === String(key))?.id ?? { 1: 'good', 2: 'ok', 3: 'bad' }[key] ?? null
 }
 /** `context` 在契约里是数组（`[{name,text,isBot}]`）；不是数组就如实返回空串，不猜。 */
@@ -185,19 +189,20 @@ function renderHealth() {
   box.appendChild(started)
 }
 
-/* ── 三档结论（`/api/taxonomy` 已废弃，只回一句人话 + verdicts）───────── */
+/* ── 三档结论（路由名 `/api/taxonomy` 是历史包袱：它是故意保留的兼容壳，载荷只有 verdicts）── */
 
-async function loadTaxonomy() {
+async function loadVerdicts() {
   // ★ 只读 `verdicts`，不读也不渲染任何标签：标签体系已整套删除。
   //   保留这次请求是因为"三档按钮的中文名"由服务端给；拿不到就用契约里的兜底三档。
+  //   ⚠️ 路由名 `taxonomy` 不是笔误 —— 删掉它旧页面只会"点了没反应"，所以留着并回一句人话。
   const data = await api('/api/taxonomy')
-  state.taxonomy = data.ok
-    ? { ok: true, verdicts: Array.isArray(data.verdicts) ? data.verdicts : [], why: String(data.why ?? '') }
-    : { ok: false, verdicts: [], why: String(data.error ?? '接口失败') }
-  const note = $('taxonomy-note')
+  state.verdicts = data.ok
+    ? { ok: true, items: Array.isArray(data.verdicts) ? data.verdicts : [], why: String(data.why ?? '') }
+    : { ok: false, items: [], why: String(data.error ?? '接口失败') }
+  const note = $('verdicts-note')
   if (note) {
-    note.hidden = state.taxonomy.ok
-    note.textContent = state.taxonomy.ok ? '' : `拿不到 /api/taxonomy（${state.taxonomy.why}）：判档用的是契约里固定的三档（对 / 还行 / 不对）。`
+    note.hidden = state.verdicts.ok
+    note.textContent = state.verdicts.ok ? '' : `拿不到 /api/taxonomy（${state.verdicts.why}）：判档用的是契约里固定的三档（对 / 还行 / 不对）。`
   }
   if (state.page === 'score') renderCard()
 }
@@ -822,7 +827,7 @@ function renderVerdicts(item) {
   const wrap = $('verdicts')
   clear(wrap)
   const d = ensureDraft(item)
-  for (const v of state.taxonomy.verdicts.length ? state.taxonomy.verdicts : FALLBACK_VERDICTS) {
+  for (const v of state.verdicts.items.length ? state.verdicts.items : FALLBACK_VERDICTS) {
     const b = el('button', `verdict verdict-${v.id}${d.verdict === v.id ? ' active' : ''}`)
     b.appendChild(el('span', 'vk', v.key ?? ''))
     b.appendChild(el('span', 'vl', v.label ?? v.id))
@@ -1316,8 +1321,8 @@ async function loadConsolidate({ keepLocal = false } = {}) {
     limits: data.limits ?? null,
     anchors: Array.isArray(data.anchors) ? data.anchors : [],
   })
-  // 换了范围时，上一次的失败信息/本地聚类/"仍然应用"的武装状态都作废
-  if (!keepLocal) Object.assign(c, { clusters: null, error: '', rawFile: '', armed: false })
+  // 换了范围时，上一次的失败信息与本地聚类都作废
+  if (!keepLocal) Object.assign(c, { clusters: null, error: '', rawFile: '' })
   renderConsolidate()
 }
 
@@ -1649,7 +1654,7 @@ function bindEvents() {
   tab('tab-score', 'score')
   tab('tab-report', 'report')
   bind('btn-reload', 'onclick', async () => {
-    await Promise.all([loadHealth(), loadTaxonomy(), refreshSources()])
+    await Promise.all([loadHealth(), loadVerdicts(), refreshSources()])
     if (state.page === 'score') { renderCard(); void loadProgressTruth() }
     if (state.page === 'report') await reloadReport()
     toast('已重载数据')
@@ -1778,7 +1783,7 @@ document.addEventListener('keydown', (e) => {
 async function boot() {
   bindEvents()
   // 标签表：打分页那排按钮是它的第一落点（原标签系统的位置）
-  await Promise.all([loadHealth(), loadTaxonomy(), loadPoints()])
+  await Promise.all([loadHealth(), loadVerdicts(), loadPoints()])
   await switchTab('import') // 打开页面先落在导入页：第一次用它的人要从这里开始
 }
 

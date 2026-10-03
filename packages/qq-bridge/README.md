@@ -567,9 +567,8 @@ qq-bridge/
 │   ├── persona.mjs        人设提示词
 │   ├── personas.mjs       ★ 人设库（personas/<名字>.md，一个文件一套）
 │   ├── speed.mjs          回应速度三档（快速/均衡/谨慎，均为等待下限）
-│   ├── voice.mjs          ★★ 说话方式（**唯一**口径）：所有回合都用它（0.3.0alpha 拆掉了双态）
-│   ├── voice-source.mjs   ★ 说话方式的唯一来源：读常量正文 / 三条守卫写回
-│   ├── persona-sections.mjs ★ 人设分节与节名归一（认【怎么说话】与「二、怎么说话」两种写法）
+│   ├── persona-sections.mjs ★ 人设分节（**只用于日志与自检**：说清这份人设里有没有说话方式那一节；
+│   │                          说话方式本身就在人设正文里，没有独立的常量文件了）
 │   ├── memory.mjs         记忆约定（提示词那一段）
 │   ├── doctor.mjs         体检
 │   └── api.mjs            本地配置 HTTP 接口

@@ -105,6 +105,9 @@ import { buildChannelPrompt } from './channel-prompt.mjs'
 import { collectSkillPromptSections, isSkillEnabled, skillToolFullName, callSkillAvailable } from './extensions.mjs'
 import { nicknameFor } from './contacts.mjs'
 import { createImageInbox, collectImages } from './images.mjs'
+// ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
+//   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
+import { writeGrant, clearGrant } from './screenshot-grant.mjs'
 // ★ H16：`PLATFORM_RULES` 与整段拼装逻辑已搬到 `src/channel-prompt.mjs`。
 //   搬它的**验收标准**是"同一份输入产出的提示词逐字相同"（见 verify-memory-roundtrip 第⑱节
 //   与 mocks/fixtures/prompt-golden.txt）—— 不是"看着像对的"。
@@ -488,6 +491,11 @@ export class Bridge extends EventTarget {
       this.log(`⚠️ 人设配置有问题，已退回不使用人设：${error.message}`)
       this.personaText = ''
     }
+    // ★ 人设形状**只在这里定一次**，所以"这份人设里有没有说话方式那一节"那行日志也只在这里记一次
+    //   （`#notePersonaShape` 自带签名去重，重复调用无副作用）。
+    //   为什么不在每轮拼提示词时记：`this.personaText` 全类只有上面这几处赋值，运行期不会变
+    //   —— 每轮算一遍等于做一次注定没有输出的全量分节（出厂人设约 5000 字）。
+    this.#notePersonaShape(this.personaText)
 
     // ★★ H11：把**人设里的名字表**变成真正的唤醒词。
     //
@@ -2409,6 +2417,33 @@ export class Bridge extends EventTarget {
       //   就定下"不唤醒 = 零成本"，所以取图必须发生在**确认要回复之后**。
       const imagePlan = await this.#collectImages(imageRefs, { kind, peerId })
 
+      // ── 截图技能的管理员硬闸：写这一轮的会话授权 ──────────────────────────
+      //
+      // ★ 位置是刻意的：**真跑模型之前**。理由有两条，第二条是决定性的：
+      //   ① 技能工具在模型回合里被调用，所以授权必须在那一刻之前就位；
+      //   ② 判定依据只能是**桥接自己算出来的 tier**（`verdict.tier`，见上面的准入校验）——
+      //      它是这个进程里唯一"模型改不了"的权限事实。
+      // 失败的后果只是"管理员截图会被拒"，所以这里**只记一行日志**，绝不影响对话。
+      const grant = writeGrant({
+        workspace: this.config?.dsh?.workspace,
+        peerKey: chatKey,
+        kind,
+        peerId,
+        senderId,
+        tier,
+        config: this.config,
+      })
+      if (!grant.ok && this.config?.skills?.screenshot?.enabled !== false) {
+        // 只有"截图技能开着但授权没写成功"才值得喊一声（那正是会静默失效的组合）
+        this.log(`⚠️ [bridge] 截图授权没写成功（截图会被拒，聊天不受影响）：${grant.why}`)
+      }
+      const dropGrant = () => {
+        const r = clearGrant({ workspace: this.config?.dsh?.workspace, peerKey: chatKey })
+        if (!r.ok && r.why !== '缺参数') {
+          this.log(`⚠️ [bridge] 截图授权没清掉（${r.why}）—— 它会在 10 分钟后自然过期`)
+        }
+      }
+
       try {
         const blocks = [
           {
@@ -2444,6 +2479,8 @@ export class Bridge extends EventTarget {
       } catch (error) {
         clearInterim()
         settle()
+        // ★ 授权必须跟着回合一起收掉：留着它等于"上一轮的管理员授权还活着"。
+        dropGrant()
         this.router.clear(sessionId)
         collector.abort('prompt-failed')
         this.stats.failed += 1
@@ -2477,6 +2514,8 @@ export class Bridge extends EventTarget {
 
       const result = await collector.finished()
       clearInterim()
+      // ★ 回合跑完就收掉截图授权（超时/作废的回合也会走到这里 —— 正是要收的那种）。
+      dropGrant()
       this.router.clear(sessionId)
 
       // ── 记账：**必须在任何提前 return 之前**做 ──────────────────────────
@@ -3103,9 +3142,10 @@ export class Bridge extends EventTarget {
     // （`this.personaText`，构造期缓存的那一份）；`src/voice.mjs` 与
     // `src/voice-source.mjs` 都删掉了，那一层连常量带同步工具一起不存在了。
     //
-    // ★ 保留的**唯一**一件事是可观测性：`#notePersonaShape()` 记一行"这份人设里
-    //   有没有说话方式那一节"（换成人写的散文时就没有）—— 那在提示词里看不出来。
-    this.#notePersonaShape(this.personaText)
+    // ★ 可观测性仍然有，但已经搬到**构造期**（构造函数里那一行）：人设文本是构造期读一次的
+    //   快照，形状在运行期不可能变 —— `api.mjs` 的 `/api/config` 自己也回 `restartRequired: true`。
+    //   以前在这里每轮跑一遍全量分节只为"形状变了才记一行"，而签名每轮都一样，
+    //   那行日志永远不会再触发 ⇒ 每轮都在做一次注定没有输出的解析。
     return buildChannelPrompt({
       rendered,
       reason,

@@ -8,11 +8,13 @@
  *
  * ★★ 0.3.0alpha 第二步之后，这个模块**实际在用的只剩 `personaVoiceSections()`**
  *    （给日志与自检回答"这份人设里有没有说话方式那一节"）。下面那套
- *    `split` / `render` / 别名表的**替换机制已经不在生产路径上** ——
- *    说话方式就是人设正文的一部分，没有"哪一节要被换掉"这回事了。
- *    保留它们是因为：① `personaVoiceSections()` 靠它分节；② 它们是**纯函数且有断言**，
- *    删掉等于把"分节这条能力"也一起删了，而将来若又要按节替换（比如多套人设各带口吻），
- *    这里就是现成的那一处。**别把它当成还在生效的机制。**
+ *    分节 / 别名表的**替换机制已经不在生产路径上** —— 说话方式就是人设正文的一部分，
+ *    没有"哪一节要被换掉"这回事了。
+ *    ★ 2026-10-03 审查：与"按节替换"配套的 `renderPersonaSections()`（把切开的节渲染回去）
+ *    **已删除** —— 它没有任何调用方、也没有任何测试，留着只会让人以为替换机制还在生效。
+ *    保留 `splitPersonaSections` / `personaSectionTitle` / `canonicalStyleSection` / `STYLE_SECTIONS`
+ *    是因为 `personaVoiceSections()` 就靠它们分节，而那条能力**仍被 `verify-persona.mjs` 覆盖**。
+ *    **别把这里当成还在生效的替换机制。**
  *
  * ══════════════════════════════════════════════════════════════════════════
  * 为什么当初必须"替换"而不是"追加"（**历史**：这段判断是实测逼出来的）
@@ -146,19 +148,4 @@ export function personaVoiceSections(text) {
     voice = sections.find((s) => STYLE_SECTIONS.includes(canonicalStyleSection(s.title))) ?? null
   }
   return { voice, sections }
-}
-
-/** 渲染回人设文本（与 `splitPersonaSections` 严格互逆，末尾保留换行）。 */
-export function renderPersonaSections({ pre = '', sections = [] } = {}) {
-  const out = []
-  const head = String(pre).replace(/\s+$/, '')
-  if (head) out.push(head)
-  for (const s of sections) {
-    const body = String(s?.body ?? '').replace(/^\n+/, '').replace(/\s+$/, '')
-    // ★ 优先用**原始标题行**（编号式人设的 `二、怎么说话` 要原样回去）；
-    //   手工构造的 `{title, body}` 没有 header ⇒ 退回【标题】。
-    out.push(String(s?.header ?? '').trim() || `【${String(s?.title ?? '').trim()}】`)
-    if (body) out.push(body)
-  }
-  return `${out.join('\n')}\n`
 }

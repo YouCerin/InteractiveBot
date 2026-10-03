@@ -40,7 +40,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { anchorCoverage, STYLE_ANCHORS } from './chat-review-consolidate.mjs'
 import { createHash } from 'node:crypto'
 
 /** 文本 sha256（"这份意见是针对哪一版提的"就靠它）。 */
@@ -75,12 +74,6 @@ export const COMMENT_MAX_CHARS = 2000
  */
 export const POINT_TITLE_MAX_CHARS = 12
 export const POINT_SUMMARY_MAX_CHARS = 300
-
-/**
- * 旧标题上限（40）—— 只用来**读旧数据**时判断"这个标题是不是自动播种塞进来的长句子"。
- * 不参与校验（校验一律用 12）。
- */
-export const POINT_TITLE_LEGACY_MAX = 40
 
 /**
  * 标签标题的**归一化**（只用于"这是不是同一个标签"的比较，不改写原文）。
@@ -227,71 +220,6 @@ export function aggregateStats({ items = [], scores = {}, pointsById = {} } = {}
     /** 评论清单：报告页显示它，「整理」把它喂给模型。 */
     list,
   }
-}
-
-/**
- * 统一 diff（LCS）。只给**人看**，不参与任何自动改写。
- *
- * 为什么不用外部 diff 库：这个项目零运行时依赖，而这里只需要"看个大概"。
- * 整篇重写时行数不多（几十行），LCS 足够快。
- */
-export function unifiedDiff(aText, bText, { context = 3, aName = 'a', bName = 'b' } = {}) {
-  const a = String(aText ?? '').split('\n')
-  const b = String(bText ?? '').split('\n')
-  const n = a.length
-  const m = b.length
-  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1))
-  for (let i = n - 1; i >= 0; i -= 1) {
-    for (let j = m - 1; j >= 0; j -= 1) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
-    }
-  }
-  const ops = []
-  let i = 0
-  let j = 0
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      ops.push({ type: ' ', text: a[i] })
-      i += 1
-      j += 1
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ type: '-', text: a[i] })
-      i += 1
-    } else {
-      ops.push({ type: '+', text: b[j] })
-      j += 1
-    }
-  }
-  while (i < n) ops.push({ type: '-', text: a[i++] })
-  while (j < m) ops.push({ type: '+', text: b[j++] })
-
-  const keep = new Array(ops.length).fill(false)
-  ops.forEach((op, idx) => {
-    if (op.type === ' ') return
-    for (let k = Math.max(0, idx - context); k <= Math.min(ops.length - 1, idx + context); k += 1) keep[k] = true
-  })
-  const out = [`--- ${aName}`, `+++ ${bName}`]
-  let idx = 0
-  while (idx < ops.length) {
-    if (!keep[idx]) {
-      idx += 1
-      continue
-    }
-    const start = idx
-    let aCount = 0
-    let bCount = 0
-    const lines = []
-    while (idx < ops.length && keep[idx]) {
-      const op = ops[idx]
-      if (op.type !== '+') aCount += 1
-      if (op.type !== '-') bCount += 1
-      lines.push(`${op.type}${op.text}`)
-      idx += 1
-    }
-    out.push(`@@ -${start + 1},${aCount} +${start + 1},${bCount} @@`)
-    out.push(...lines)
-  }
-  return out.join('\n')
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -711,7 +639,11 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
       notes: String(result.notes ?? ''),
       // ★ 锚点不再是"应用前的门禁"，而是**提示**：哪些底线要点这份意见覆盖到了、
       //   哪些一条都没提（人自己判断"要不要动它们"）。
-      anchorCoverage: result.anchorCoverage ?? anchorCoverage({ suggestions, anchors: STYLE_ANCHORS }),
+      // ★ 不再"没给就重算"：`consolidateComments()` 无条件给出这一项，仓内两个调用点都传完整 result。
+      //   重算意味着**存储层依赖归纳层**（store → consolidate），而这个模块的职责是"你给什么我存什么"；
+      //   真有人直调 store 又没给这一项时，落一个**空覆盖**（形状不变、页面用 `?.` 读得动），
+      //   而不是让一个存储层去替归纳层猜结果。
+      anchorCoverage: result.anchorCoverage ?? { covered: [], uncovered: [] },
       model: result.model ?? null,
       ms: result.ms ?? null,
       usage: result.usage ?? null,
@@ -759,20 +691,6 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
     return { ok: true, id, file: abs, chars: [...String(raw ?? '')].length }
   }
 
-  function listFailures() {
-    if (!existsSync(failedDir)) return []
-    try {
-      return readdirSync(failedDir)
-        .filter((f) => f.endsWith('.json'))
-        .map((f) => readJson(join(failedDir, f), null, log))
-        .filter(Boolean)
-        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-    } catch (error) {
-      log(`⚠️ [评审台] 列失败原文失败：${error?.message ?? error}`)
-      return []
-    }
-  }
-
   function listConsolidations() {
     if (!existsSync(consolidateDir)) return []
     try {
@@ -810,9 +728,8 @@ export function createReviewStore({ workspace, log = () => {} } = {}) {
     saveConsolidation,
     listConsolidations,
     latestConsolidation,
-    // ── 整理失败时的模型原文（排查用；见 saveFailure 的注释）──
+    // ── 整理失败时的模型原文（落盘给排查用；见 saveFailure 的注释）──
     saveFailure,
-    listFailures,
     /** 给 `/api/items` 用：某批次的条目 + 评分（分页是 HTTP 层的事）。 */
     itemsWithScores(scope) {
       const { items, metas } = collect(scope)

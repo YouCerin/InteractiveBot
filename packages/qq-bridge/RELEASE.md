@@ -270,7 +270,10 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 `package.json` / `PROJECT.json` 的 `package.version` / MCP server info /
 `RELEASE.md` 里的包名。四处里漏改一处，症状是"包名写着 0.2.0、里面报的却是 0.1.0"。
 
-**发布包的最终形状**（73 个文件 / 解压后约 87 MB / zip 约 32.6 MB）：
+**发布包的最终形状**（当前清单实算 **166 个文件** / 解压后约 87 MB / zip 约 40–45 MB）：
+
+> ★ 文件数**以脚本打印为准**：`scripts/assemble-release.mjs` 组装时会数，这里只是某一版的实测值。
+> （曾经写死过 "73 个文件"，而**没有任何脚本校验它** —— 清单加了目录，这个数就悄悄过期了。）
 
 ```
 InteractiveBot-<版本>-win-x64/
@@ -283,6 +286,10 @@ InteractiveBot-<版本>-win-x64/
 ├── src/                    桥接代码
 ├── mcp/                    QQ 工具服务器
 ├── assets/                 icon.ico 等
+├── personas/               ★ 出厂人设（**只有一份**：小鲸鱼（完整带情绪）.md）
+├── chat-review/            ★ 聊天记录评审台（页面 + 启动壳）
+├── sticker-label/          ★ 表情包标注台（页面 + 启动壳）
+├── skills/                 ★ 随包的技能（QQ 工具等）
 ├── config-ui/dist/         ★ 只有构建产物 + 溯源标记 ui-build.json
 └── vendor/
     ├── node/node.exe       85.6 MB

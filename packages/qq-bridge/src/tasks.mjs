@@ -608,21 +608,6 @@ export function rollbackTask({ workspace, chatKey, step, mode = 'replay', note =
   return { ok: true, task, target, range }
 }
 
-/** 清掉 `redo` 标记（重做过一次之后就不该再提）。 */
-export function clearRedo({ workspace, chatKey } = {}) {
-  try {
-    const root = String(workspace ?? '')
-    if (!root || !chatKey) return false
-    const task = readTask({ workspace: root, chatKey })
-    if (!task || !task.redo) return false
-    delete task.redo
-    writeJson(join(root, taskRel(chatKey)), task)
-    return true
-  } catch {
-    return false
-  }
-}
-
 // ══════════════════════════════════════════════════════════════════════════
 // 生命周期
 // ══════════════════════════════════════════════════════════════════════════
