@@ -835,7 +835,27 @@ export function collectSkillPromptSections({ skills = [], config, log = () => {}
       if (skill.promptSource === 'manifest') {
         sections = Array.isArray(skill.manifest?.prompt?.sections) ? skill.manifest.prompt.sections : []
       } else if (typeof skill.module?.promptSections === 'function') {
-        const r = skill.module.promptSections({ ...ctx, config })
+        // ★★ 0.3.0alpha 补的一处**静默失效**（本文件里第二例同类问题，记下来）：
+        //
+        // 原来这里只传 `{ ...ctx, config }`，而**没有任何调用方传 ctx** ——
+        // 桥接与自检都是 `collectSkillPromptSections({ skills, config })`，
+        // 于是 `ctx` 恒为 `{}`。后果：
+        //   · 按契约用 `context.toolName(id)` 取真名的技能拿到的是 `undefined`，
+        //     于是"片段自己决定要不要给"的写法（例如截图技能在拿不到工具名时
+        //     返回 `[]`）会**静默地一个字都不注入** —— 界面显示"已启用"，
+        //     模型那边却从来没被告知有这个工具。
+        //   · 上游表情包技能当年的那个"promptSections 从来没生效过"的坑，
+        //     根因就是这一条（见 skills/sticker/index.js 文件头那段墓志铭）。
+        //
+        // 修法：宿主在这里**兜底提供**与 `loadSkill` 里 `setup(api)` 完全同源的
+        // `toolName` / `hostTool`。技能仍然可以自己传 ctx 覆盖（`...ctx` 在前）。
+        const hostCtx = {
+          toolName: (toolId) => skillToolFullName(skill.id, toolId),
+          hostTool: (id) => HOST_TOOLS[String(id)] ?? '',
+          ...ctx,
+          config,
+        }
+        const r = skill.module.promptSections(hostCtx)
         sections = Array.isArray(r) ? r : []
       } else if (Array.isArray(skill.manifest?.prompt?.sections)) {
         // 运行期没导出就退回清单里的静态文案（少一层准确度，但比什么都不给强）

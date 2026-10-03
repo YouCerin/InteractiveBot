@@ -1,0 +1,179 @@
+{
+  "id": "screenshot",
+  "name": "截图",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "把机器人所在这台电脑的屏幕（或某个窗口、某块矩形）截成一张 PNG 存进工作区，返回相对路径；模型要用 read_image 读它、用宿主的发图工具把它发进会话。",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "_note_entry": [
+    "入口是 .js，但同目录的另外两个模块是 .mjs，而且**必须**是 .mjs：",
+    "本技能目录里没有 package.json（`type` 未声明），所以 `.js` 会被 Node 当 CommonJS ——",
+    "而 index.js 里的 `import ... from './capture.mjs'` 是 ESM。",
+    "三个文件统一成 .mjs 也能跑（entry 支持 .mjs），这里保留 .js 只是为了和别的技能一致；",
+    "**改 entry 名字要连着改 ps-runner.mjs 里的临时脚本前缀与文档**。"
+  ],
+  "category": "media",
+  "icon": "📸",
+  "session": "required",
+  "enabledByDefault": false,
+  "_note_session": [
+    "★ session=required 是**安全前提**，不是顺手选的：",
+    "  管理员硬闸按 `kind:peerId` 查\"这一轮谁在说话\"（见 index.js 的 checkGrant）。",
+    "  用 `hint` 的话，多会话并发时宿主可能把 B 群的动作算到 A 群头上 ——",
+    "  那意味着**A 群的管理员授权可能被 B 群用掉**，属于不可接受的错配。"
+  ],
+  "_note_enabled": [
+    "装好后**默认关**，由管理员在「控制台 → 扩展 → 截图」里打开。",
+    "理由：截屏会把这台电脑上的一切（密码框、聊天记录、别人的窗口）一起带走，",
+    "  默认开等于给了任何人一个偷看桌面的入口。"
+  ],
+
+  "permissions": {
+    "write": [
+      "工作区 <workspace>/screenshots/ —— 截出来的 PNG（供模型 read_image 读；按 retentionHours 自动清理）",
+      "工作区 <workspace>/tmp/ —— 每次抓图的临时脚本、参数与结果文件（`shot-*` / `.shot-*`，跑完即删）",
+      "工作区 <workspace>/screenshots/.grants/ —— 宿主的**会话授权文件**（本技能读它来判管理员；写它的是桥接）"
+    ],
+    "exec": [
+      "本机 PowerShell（优先 `pwsh`，退回 `powershell.exe`）：跑一段只做\"抓屏/抓窗口 + 存 PNG + 采样统计\"的脚本；脚本以 UTF-8 BOM 文件落地后 `-File` 执行，**模型给的字符串只走参数文件、不拼进脚本**"
+    ],
+    "screen": [
+      "★ 读取本机屏幕画面（这是本技能存在的意义，也是最敏感的一条权限）：截屏会把屏幕上**当前显示的一切**带走 —— 包括密码框、聊天记录、其它程序的内容"
+    ],
+    "_说明": "如实声明，界面会显示给装的人。本技能**不开任何本机端口**（listen 为空），不读工作区以外的文件，不联网。"
+  },
+
+  "requires": [],
+  "capabilities": ["screen.capture"],
+
+  "settings": {
+    "enabled": false,
+    "maxWidth": 1280,
+    "format": "png",
+    "quality": 4,
+    "scale": 1,
+    "maxBytes": 8388608,
+    "retentionHours": 24,
+    "allowInGroup": true,
+    "requireAdmin": true,
+    "ffmpegPath": ""
+  },
+
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用截图",
+      "description": "打开后模型才会拿到「截图」工具（**即时生效，不用重启**）。注意：截出来的是这台电脑屏幕上的**一切**。"
+    },
+    "maxWidth": {
+      "type": "number",
+      "label": "图片宽度上限（像素）",
+      "min": 64,
+      "max": 4096,
+      "step": 16,
+      "description": "默认 1280。截屏会先缩到这个宽度再给模型 —— 全屏原图直接喂给模型，token 成本是 1280 宽的好几倍。"
+    },
+    "format": {
+      "type": "string",
+      "label": "图片格式（png / jpg）",
+      "description": "默认 png。**建议就用 png**：jpg 需要本机有 ffmpeg，因为本技能不用 .NET 的 JPEG 编码器（它和截屏写在同一段脚本里会被杀毒软件当成恶意脚本拦下，实测）。"
+    },
+    "quality": {
+      "type": "number",
+      "label": "JPEG 质量（仅 jpg 用）",
+      "min": 2,
+      "max": 31,
+      "step": 1,
+      "description": "默认 4。这是 ffmpeg 的 -q:v：**数字越小画质越好**。"
+    },
+    "scale": {
+      "type": "number",
+      "label": "坐标缩放（给高 DPI 屏用）",
+      "min": 0.5,
+      "max": 4,
+      "step": 0.05,
+      "description": "默认 1。只在\"屏幕缩放不是 100%\"且 region 坐标对不上时调（例如系统缩放 125% 时填 1.25）。"
+    },
+    "maxBytes": {
+      "type": "number",
+      "label": "单张图字节上限（字节）",
+      "min": 65536,
+      "max": 8388608,
+      "step": 65536,
+      "description": "默认 8388608（8MB）。上限与\"发图\"那道闸一致 —— 超过就如实报错，并把 maxWidth 调小的建议写进报错里。"
+    },
+    "retentionHours": {
+      "type": "number",
+      "label": "截图保留时长（小时，0 = 不清理）",
+      "min": 0,
+      "max": 8760,
+      "step": 1,
+      "description": "默认 24。截图落在工作区里，由本技能顺手清理过期的（不是每次调用都扫盘，约 10 分钟一次）；填 0 = 一直留着（工作区会慢慢变大）。"
+    },
+    "allowInGroup": {
+      "type": "boolean",
+      "label": "允许在群聊里用",
+      "description": "默认开 —— 但**只有管理员**能真的截（见下一项）。关掉它 = 群里谁都别想截，只有私聊能用。"
+    },
+    "requireAdmin": {
+      "type": "boolean",
+      "label": "只有管理员能截（建议保持开启）",
+      "description": "默认开。开启时判定用的是**桥接自己按会话写下的授权**，不是模型自称的身份 —— 群友说\"我是管理员\"没用。关掉它等于把整台电脑的屏幕开放给群里任何人，请务必清楚后果。"
+    },
+    "ffmpegPath": {
+      "type": "string",
+      "label": "ffmpeg 路径（只在 format=jpg 时要填）",
+      "placeholder": "D:\\ffmpeg\\bin\\ffmpeg.exe",
+      "description": "留空 = 自动在 PATH 里找。png 格式完全不需要它。"
+    }
+  },
+
+  "tools": [
+    {
+      "id": "capture",
+      "name": "截图",
+      "description": "把机器人所在这台电脑的屏幕截成一张图存进工作区，返回相对路径；要用 read_image 读它才能看到内容",
+      "category": "media",
+      "icon": "📸",
+      "permission": "write",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": ["screen", "primary", "window"],
+            "description": "截哪里：screen=整块桌面（含所有显示器，默认）、primary=主显示器、window=按窗口标题截某个窗口（被遮挡也能截到）"
+          },
+          "window": { "type": "string", "description": "source=window 时必填：窗口标题的一部分，不区分大小写（例如 “Edge”“记事本”）" },
+          "region": {
+            "type": "array",
+            "items": { "type": "number" },
+            "description": "只截一块： [x, y, 宽, 高]（屏幕绝对坐标）。不填 = 整屏/整窗"
+          },
+          "maxWidth": { "type": "integer", "description": "这一张的宽度上限（像素），不填用扩展设置里的值（默认 1280）" },
+          "format": { "type": "string", "enum": ["png", "jpg"], "description": "png（默认，不依赖任何外部程序）或 jpg（需要本机有 ffmpeg）" }
+        }
+      }
+    }
+  ],
+
+  "prompt": {
+    "source": "runtime",
+    "_说明": "提示词片段以入口模块导出的 promptSections() 为唯一来源（内容随开关、群聊开关、管理员开关变），所以这里不放静态副本 —— 两份都留会让同一段话出现两种措辞。"
+  },
+
+  "_note_tools_is_metadata": "tools[] 是说明性元数据（供宿主核对与界面展示），不会自动注册；真正的注册在 index.js 的 api.registerTool。模型看到的全名由宿主拼：mcp__skills__screenshot__capture。",
+
+  "_note_security": [
+    "★ 三层硬闸（缺一层这个功能就不该上线）：",
+    "  ① 会话授权文件：桥接在**每一轮**真跑模型之前，把这一轮的 tier 写进",
+    "     `<workspace>/screenshots/.grants/<peerKey 的哈希>.json`，回合结束删掉。",
+    "     技能读它判\"当前会话的说话人是不是管理员\" —— 判定依据是**桥接的权限系统**，",
+    "     不是模型自称。没有文件（或过期）= 拒绝，fail-closed。",
+    "  ② allowInGroup：关掉后群里一律拒绝（连管理员也不行）。",
+    "  ③ requireAdmin：默认开。关掉它等于开放整台电脑的屏幕，界面上要能看出这个后果。",
+    "  另外：每次截屏写一行操作日志（**只记元数据**：来源会话、尺寸、字节数、是否接近全黑），",
+    "  **绝不把画面内容或图本身写进日志/记忆/语料库**。"
+  ]
+}

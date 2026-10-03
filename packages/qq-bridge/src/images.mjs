@@ -59,9 +59,9 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isIP } from 'node:net'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 
 /** 图片落在工作区里的子目录名。 */
@@ -405,6 +405,90 @@ export async function fetchImageBytes(rawUrl, options = {}) {
     return { ok: true, bytes: read.value, url: String(check.url) }
   }
   return { ok: false, reason: `重定向次数超过上限（${maxRedirects}）` }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 本机工作区文件：把"已经落在工作区里的图"发出去
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * ★ 从**工作区内的相对路径**读一张图（`qq_send_image` 的第二种入参）。
+ *
+ * ── 为什么需要它（不是"顺手加的便利功能"）──────────────────────────────
+ * 机器人生成的图（截屏、抽帧、渲染出来的卡片）本来就落在工作区里。
+ * 在它之前，唯一能发出去的路是"先在本机开个小端口把图变成 http 直链，
+ * 再打开 `security.allowPrivateImageHosts`" —— pixiv 插件的"本地图片桥"
+ * 就是被这件事逼出来的（`docs/插件设计规范.md` §5.5）。
+ * 那条路要**开监听端口** + **放开内网图片地址**，两样都是真实的安全代价，
+ * 换来的只是"把本地文件变成 URL 再自己下回来"。
+ * 这里直接读文件：**不开端口、不放宽任何守卫**。
+ *
+ * ── 硬闸（每一条都对应一种真实的越界方式）──────────────────────────────
+ *   ① 必须是**工作区内的相对路径**：绝对路径、盘符、UNC 一律拒；
+ *   ② `resolve` 之后必须仍在工作区内 —— `..\..\config.json` 这类拼接在这里被挡；
+ *   ③ 目标目录用 `realpath` 复核一次 —— 符号链接指向工作区外面也拒
+ *      （工作区里出现符号链接不是臆想：`setup.mjs` / `extensions.mjs` 就**会建 junction**）；
+ *   ④ 只读文件、限大小；类型仍然由 `sniffImageMediaType` 按**内容**判
+ *      —— 所以"让机器人把工作区里的 config.json 发出去"这条路是死的（它不是图片）。
+ *
+ * @returns {{ok:true, bytes:Uint8Array, path:string} | {ok:false, reason:string}}
+ */
+export function readWorkspaceImage(relPath, { workspace, maxBytes = DEFAULT_MAX_BYTES } = {}) {
+  const root = String(workspace ?? '').trim()
+  if (!root) return { ok: false, reason: '桥接没有把工作区告诉宿主工具（无法读本机文件）' }
+  const raw = String(relPath ?? '').trim()
+  if (!raw) return { ok: false, reason: '没给路径' }
+  // ① 相对路径 + 不许含 NUL（Node 的路径 API 遇到 NUL 会抛，提前挡掉更清楚）
+  if (raw.includes('\0')) return { ok: false, reason: '路径里有非法字符' }
+  if (isAbsolute(raw) || /^[a-zA-Z]:/.test(raw) || raw.startsWith('\\\\')) {
+    return {
+      ok: false,
+      reason: `只接受**工作区内的相对路径**（收到的是绝对路径/盘符路径「${raw}」）—— 例如 screenshots/shot_screen_....png`,
+    }
+  }
+  const rootAbs = resolve(root)
+  const target = resolve(rootAbs, raw)
+  // ② 必须仍在工作区内
+  const rel = relative(rootAbs, target)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    return { ok: false, reason: `路径跑到工作区外面了（${raw}）—— 只允许发工作区里的图片` }
+  }
+  // ③ 符号链接复核
+  let realTarget = target
+  try {
+    realTarget = realpathSync(target)
+  } catch (error) {
+    return { ok: false, reason: `读不到这个文件：${raw}（${error?.code ?? error?.message ?? error}）` }
+  }
+  let realRoot = rootAbs
+  try {
+    realRoot = realpathSync(rootAbs)
+  } catch {
+    /* 工作区本身读不到 realpath 时退回 resolve 结果（下面那次 relative 会判） */
+  }
+  const relReal = relative(realRoot, realTarget)
+  if (relReal.startsWith('..') || isAbsolute(relReal)) {
+    return { ok: false, reason: `这个路径经过符号链接后指向了工作区外面（${raw}）—— 拒绝` }
+  }
+  // ④ 大小与读盘
+  let st
+  try {
+    st = statSync(realTarget)
+  } catch (error) {
+    return { ok: false, reason: `读不到这个文件：${raw}（${error?.code ?? error?.message ?? error}）` }
+  }
+  if (!st.isFile()) return { ok: false, reason: `不是文件（${raw}）` }
+  const cap = Number(maxBytes) > 0 ? Number(maxBytes) : DEFAULT_MAX_BYTES
+  if (st.size > cap) {
+    return { ok: false, reason: `文件太大（${st.size} 字节 > 上限 ${cap}）` }
+  }
+  try {
+    const bytes = new Uint8Array(readFileSync(realTarget))
+    if (!bytes.byteLength) return { ok: false, reason: `文件是空的（${raw}）` }
+    return { ok: true, bytes, path: realTarget }
+  } catch (error) {
+    return { ok: false, reason: `读文件失败：${raw}（${error?.message ?? error}）` }
+  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────

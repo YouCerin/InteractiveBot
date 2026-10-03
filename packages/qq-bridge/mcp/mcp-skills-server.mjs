@@ -48,6 +48,7 @@ import {
   mergeSkillSettings,
   skillToolFullName,
   skillToolLocalName,
+  HOST_TOOLS,
 } from '../src/extensions.mjs'
 
 const PROTOCOL_VERSION = '2024-11-05'
@@ -208,6 +209,20 @@ async function runSkillTool(toolName, args) {
     kind: kind || 'unknown',
     chatId: peerId,
     peerKey: kind && peerId ? `${kind}:${peerId}` : '',
+    // ★ 0.3.0alpha：把工作区路径交给技能。
+    //
+    // ── 为什么必须有 ────────────────────────────────────────────────────
+    // 技能要落盘（例如「截图」把 PNG 写进工作区）就必须知道工作区在哪。
+    // 少了它，技能只有两条路：猜相对路径（`process.cwd()` 是 `skills/` 或
+    // 别的地方，**猜错就把图写到发布目录里**），或者干脆不落盘。
+    // 桥接本来就把 workspace 写进了本服务器的配置（`writeSkillsMcpConfig`），
+    // 只是**没往 ctx 里传** —— 那正是"配了但拿不到"的那类静默缺口。
+    //
+    // ── 它同时是硬边界 ──────────────────────────────────────────────────
+    // 技能的契约是"只往工作区写"。所以这里给的是工作区**绝对路径**，
+    // 技能侧一律以它为根拼路径（`screenshot` 就是这么做的）；
+    // 宿主不做代码级拦截（规范 §5.1 早就写明没有沙箱）。
+    workspace: String(config?.workspace ?? ''),
     config: live ?? config,
     settings: mergeSkillSettings(skill.manifest, (live ?? config)?.skills?.[skill.id]).settings,
     // 让技能自己也能算「**模型实际看到的工具全名**」（例如在报错里写清该调哪个）。
@@ -216,6 +231,11 @@ async function runSkillTool(toolName, args) {
     //    而那个名字**模型根本调不到** —— 技能若把它写进给模型看的话，模型会去调一个不存在的工具，
     //    而且失败得很安静（它只会说"查不到"）。所以命名规则只有一处实现（src/extensions.mjs）。
     toolName: (id) => skillToolFullName(skill.id, id),
+    // ★ 同理：技能要引用**宿主的**工具时（例如"把这张图发出去"）也得拿真名。
+    //   0.2.2 起 `setup(api)` 里有 `api.hostTool()`，但 `execute()` 的 ctx 里**漏了** ——
+    //   于是技能在返回值里写不出正确的宿主工具名，只能写死或含糊其辞。
+    //   这里补齐，与 `api.hostTool()` 同一个来源（`HOST_TOOLS`）。
+    hostTool: (id) => HOST_TOOLS[String(id)] ?? '',
   }
 
   try {

@@ -211,13 +211,14 @@ const TOOLS = [
     adminOnly: true,
     description:
       '把一张**图片**发到指定会话里（不是发链接，是真的发图）。' +
-      'url 可以是公网图片直链，也可以是本机/内网地址（需要在配置里打开「允许下载内网/本机图片地址」）。' +
+      'url 可以是公网图片直链、本机/内网地址（后者需要在配置里打开「允许下载内网/本机图片地址」），' +
+      '也可以是**工作区里的相对路径**（例如 screenshots/shot_screen_xxx.png，截屏/抽帧产出的图就走这条，不需要任何额外开关）。' +
       '★ 必须显式给出 kind 与 peerId（就是当前会话，见你这轮的来源标注）—— 不能跨会话发图。' +
       '★ 图中的文字说明用 caption；只有图不想说话就别写 caption。',
     inputSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: '图片地址（http/https；也可以用 i.pximg.net 之外的直链）' },
+        url: { type: 'string', description: 'http/https 图片直链，或者工作区里的相对路径（如 screenshots/shot_screen_123.png）' },
         kind: { type: 'string', enum: ['private', 'group'], description: '会话类型（必填）' },
         peerId: { type: 'string', description: '群号或 QQ 号（必填，就是来源标注里那串号码）' },
         caption: { type: 'string', description: '随图发的一句话（可选）' },
@@ -593,14 +594,28 @@ function readLiveConfig() {
  *   ① 守卫放行？→ 内网地址被拒时要**明确说清是哪个开关**（否则使用者只会看到"下载失败"）
  *   ② 取回来的是不是真图片？（按内容嗅探，不信 Content-Type）
  *   ③ 协议端收不收？（base64 段，避免把 URL 交给另一个进程去取）
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ★ 0.3.0alpha：`url` 现在也可以是**工作区内的相对路径**
+ * ══════════════════════════════════════════════════════════════════════════
+ * 机器人生成的图（截屏、视频抽帧、以后渲染的卡片）本来就落在工作区里。
+ * 在这之前它们发不出去 —— 唯一的路是"在本机开个小端口把文件变成 http 直链，
+ * 再打开 `security.allowPrivateImageHosts`"（pixiv 插件的本地图片桥就是这么来的）。
+ * 那条路要开监听端口 + 放宽内网守卫，换来的只是"本地文件 → URL → 再下回来"。
+ * 现在直接读文件：**不开端口、不放宽任何守卫**，大小上限与内容嗅探原样复用。
+ * 越界的几种写法（绝对路径、`..`、符号链接）在 `readWorkspaceImage()` 里逐条挡掉。
  */
-async function runSendImage({ url, kind, peerId, caption } = {}) {
+async function runSendImage({ url, source, kind, peerId, caption } = {}) {
   const u = String(url ?? '').trim()
+  const src = String(source ?? '').trim()
+  const ref = src || u
   const k = String(kind ?? '').trim()
   const peer = String(peerId ?? '').trim()
   const cap = String(caption ?? '').trim()
 
-  if (!u) return { isError: true, text: '要发哪张图？把图片地址给我（url）。' }
+  if (!ref) {
+    return { isError: true, text: '要发哪张图？把图片地址（http/https 直链）或者工作区里的相对路径给我。' }
+  }
   // ★ fail-closed：与 qq_search_history / qq_forward_log 同一条纪律 ——
   //   会话必须显式给出，否则我可能把图发到别人的会话里（那是不可挽回的）。
   if ((k !== 'private' && k !== 'group') || !peer) {
@@ -625,12 +640,29 @@ async function runSendImage({ url, kind, peerId, caption } = {}) {
   const maxBytes = Math.min(Number.isFinite(cfgMax) && cfgMax > 0 ? cfgMax : images.DEFAULT_MAX_BYTES, SEND_IMAGE_MAX_BYTES)
   const cfgTimeout = Number(live?.image?.timeoutMs)
 
-  const got = await images.fetchImageBytes(u, {
-    allowPrivateHosts: allowPrivate,
-    maxBytes,
-    timeoutMs: Number.isFinite(cfgTimeout) && cfgTimeout > 0 ? cfgTimeout : images.DEFAULT_TIMEOUT_MS,
-  })
+  // ── 判定这是"网络地址"还是"工作区文件" ─────────────────────────────────
+  const isHttp = /^https?:\/\//i.test(ref)
+  let got
+  let fromLocal = false
+  if (isHttp) {
+    got = await images.fetchImageBytes(ref, {
+      allowPrivateHosts: allowPrivate,
+      maxBytes,
+      timeoutMs: Number.isFinite(cfgTimeout) && cfgTimeout > 0 ? cfgTimeout : images.DEFAULT_TIMEOUT_MS,
+    })
+  } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) {
+    // 认得出是别的协议（file:// / data: / ftp:// …）就直说，别让它落进"路径"分支里猜
+    return {
+      isError: true,
+      text: `只认 http/https 直链或**工作区内的相对路径**（收到的是 ${String(ref).split('://')[0]}:// 这种协议）—— file:// 之类的一律不发。`,
+    }
+  } else {
+    fromLocal = true
+    got = images.readWorkspaceImage(ref, { workspace: config?.workspace, maxBytes })
+  }
+
   if (!got.ok) {
+    if (fromLocal) return { isError: true, text: `图没发出去：${got.reason}` }
     // ★ "怎么办"必须写在报错里：被守卫拦下是最容易误判成网络故障的一种失败。
     const isGuard = /内网|回环|localhost/i.test(got.reason)
     const hint = isGuard && !allowPrivate
@@ -643,7 +675,9 @@ async function runSendImage({ url, kind, peerId, caption } = {}) {
   if (!media) {
     return {
       isError: true,
-      text: '那个地址返回的不是支持的图片（只认 PNG/JPEG/WebP/GIF）—— 检查一下直链是不是过期或指向了网页。',
+      text: fromLocal
+        ? `工作区里那个文件不是支持的图片（只认 PNG/JPEG/WebP/GIF，按**内容**判，不看扩展名）—— 检查一下路径是不是给错了。`
+        : '那个地址返回的不是支持的图片（只认 PNG/JPEG/WebP/GIF）—— 检查一下直链是不是过期或指向了网页。',
     }
   }
 
@@ -660,7 +694,7 @@ async function runSendImage({ url, kind, peerId, caption } = {}) {
   }
   return {
     isError: false,
-    text: `已发图（${media}，${Math.round(got.bytes.byteLength / 1024)} KB）${cap ? '，附了一句话' : ''}。`,
+    text: `已发图（${media}，${Math.round(got.bytes.byteLength / 1024)} KB${fromLocal ? '，来自本机工作区' : ''}）${cap ? '，附了一句话' : ''}。`,
   }
 }
 
