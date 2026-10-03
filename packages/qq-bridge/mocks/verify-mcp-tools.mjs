@@ -182,7 +182,14 @@ section('⑤ qq_api 的**白名单**（2026-09-27 修的漏洞）与暴露档位
   const allowed = await runTool('qq_api', { action: 'get_group_list' })
   check('★ 白名单内的只读动作**放行到网络层**（这里连不上是预期的，但不能是"被清单拒绝"）', !gated(allowed))
 
-  check('工具总数没变（这次改动只加闸门、不增删工具）', TOOLS.length === 14, `${TOOLS.length} 个`)
+  // ★ 0.3.2 收尾：新增 `mc_command`（服务器控制台，adminOnly）⇒ 14 → 15。
+  //   这条断言的意思是"工具增减是**有意的**、要显式更新这个数字"，
+  //   所以改数字时必须同时说清是哪个工具 —— 见下一条。
+  check('工具总数（14 → 15：0.3.2 收尾新增 `mc_command`）', TOOLS.length === 15, `${TOOLS.length} 个`)
+  check('★ `mc_command` 在名单里且标了 adminOnly（档位过滤靠它）', byName('mc_command')?.adminOnly === true)
+  check('★★★ `mc_command` 的工具描述**必须写明"只有管理员"与"被拒不要重试"**（否则模型会反复试探）',
+    /只有管理员/.test(String(byName('mc_command')?.description ?? '')) && /不要重试/.test(String(byName('mc_command')?.description ?? '')),
+    String(byName('mc_command')?.description ?? '').slice(0, 60))
   check('★ qq_api 被标记为万能口（闸门靠这个标记判断，不靠名字猜）', byName('qq_api')?.generic === true)
 
   // 档位：被隐藏的工具**即使被直接调用也要拒** —— 只过滤 tools/list 是不够的

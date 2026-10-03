@@ -96,6 +96,39 @@ const RECENT_CTX_CHARS = 150
  *   （无限等会让 start.bat 永远不返回，使用者连界面都看不到）。
  */
 const DEFAULT_START_WAIT_MS = 180_000
+/**
+ * **本地指令通道**（0.3.2 收尾）：管理员在群里发 `/mc <命令>`，桥接**自己执行**。
+ *
+ * ★★★ 这条路与"模型调工具"那条路的根本区别：**模型一次都没被叫醒**。
+ *   所以它没有"伪造授权文件"那个上限（见 `src/servers/command-gate.mjs` 的边界说明），
+ *   权限判据就是桥接手里那份 `roster.decide()` 的结论。
+ *
+ * ★★ 两条设计纪律（都写在设计文档 §11「本地指令通道」那一条里）：
+ *   ① 它必须在**语义唤醒闸门之前**命中且**立即 return** —— 放在后面会静默失效：
+ *      `semantic` 模式下"来下指令"可能被判成"该沉默"，命令白下；
+ *   ② **只有管理员**能用（`tier === 'admin'`）。非管理员发这个形状的文本时
+ *      **不是**"拒绝并解释"，而是**当作普通聊天**（否则等于告诉所有人"这里有后门"）。
+ *   ③ 参数消歧**不能靠正则**：`/mc list` 里的 `list` 是命令不是 id（实测踩到）。
+ *      判据是"第一个词是不是配置里真实存在的 id"。
+ *   ④ 形状判据必须**纯同步**（`looksLikeMcCommand`），普通消息不产生额外 `await` ——
+ *      见那个函数的注释（无条件 `await` 会扰动原有时序，代价很大）。
+ */
+const MC_COMMAND_SHAPE = /^\/mc(?:\s|$)/i
+/**
+ * 这条文本**看起来**是不是 `/mc` 指令（**纯同步、零副作用**）。
+ *
+ * ★★ 为什么单独抽一个同步判据（而不是直接 `await` 那个 async 处理器）：
+ *   它让"普通聊天消息不产生任何额外 `await`"成为**结构上的保证**。
+ *   实测教训：无条件 `await` 会扰动"主动回合 vs 随后到达的用户消息"那条竞争，
+ *   使 `verify-schedule` 报 `unsettled top-level await`（退出码 13）——
+ *   那种失败看起来与本地指令毫无关系，极难定位。
+ * ★ 形状判据**只看开头**：必须以 `/mc` 作为一个词开头，
+ *   所以群里聊到"那个 /mc 命令"**不会**命中。
+ */
+function looksLikeMcCommand(text) {
+  return MC_COMMAND_SHAPE.test(String(text ?? '').trim())
+}
+
 import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './memory-stats.mjs'
 import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
 import { appendTurnOps, appendOp } from './oplog.mjs'
@@ -128,6 +161,7 @@ import {
 import { createServerLoop } from './servers/loop.mjs'
 import { createRestarter } from './servers/restart.mjs'
 import { runConsoleCommand } from './servers/console.mjs'
+import { runMcCommand } from './servers/command-gate.mjs'
 import { createSupervisor, defaultPortOpen as defaultPortProbe } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
 //   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
@@ -1454,6 +1488,85 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * **本地指令通道**：`/mc [服务器id] <命令>`（0.3.2 收尾）。
+   *
+   * ★★★ 判据顺序（每一步都要有理由）：
+   *   ① 文本必须是这个**完整指令形状**（`/mc ` 前缀）—— 只有前缀不算命中
+   *      （群里聊到"那个 /mc 命令"不该触发）。形状不对 ⇒ 返回 `notMatched`，
+   *      调用方**照常走普通聊天**。
+   *   ② **只有管理员**（`tier === 'admin'`）—— 非管理员发这个形状时返回 `notMatched`
+   *      **而不是拒绝**：拒绝等于告诉所有人"这里有后门"，而照常聊天什么都不暴露。
+   *   ③ 解析出服务器（省略 id 且只有一台时取那一台；多台且没给 ⇒ **报错不猜**）。
+   *   ④ 执行（`runMcCommand` 里还有"这台开了 `commandFromQQ` 吗"这一道）。
+   *
+   * ★ 它**不产生模型调用**：命中就直接执行并 return。
+   *
+   * @returns {Promise<{matched: false} | {matched: true, text: string, ok: boolean}>}
+   */
+  async #handleMcLocalCommand({ text, kind, peerId, senderId, tier }) {
+    const raw = String(text ?? '').trim()
+    // ★ 形状判据：必须以 `/mc` **作为一个词**开头（`/mc` / `/mc xxx`），
+    //   而不是"文本里出现过 /mc" —— 群里聊到"那个 /mc 命令"不该触发。
+    if (!/^\/mc(?:\s|$)/i.test(raw)) return { matched: false }
+    // ★★ 参数消歧（实测踩到的真 bug）：`/mc list` 里的 `list` 是**命令**，
+    //   不是服务器 id。靠正则分不出来 ⇒ **按配置里真实存在的 id 来消歧**：
+    //   第一个词命中某个 id 才算 id，否则整串都是命令（id 留空，交给"只有一台就自动选"）。
+    const rest = raw.replace(/^\/mc\s*/i, '').trim()
+    if (!rest) {
+      await this.#safeSend(kind, peerId, '用法：`/mc [服务器id] <命令>` —— 例如 `/mc list`、`/mc forge tps`')
+      return { matched: true, ok: false, text: '没给命令' }
+    }
+    // ★ 只有管理员：非管理员 ⇒ **当作普通聊天**（不解释、不拒绝）
+    if (String(tier ?? '') !== 'admin') {
+      this.log(`🎛️ [servers] 有人发了 /mc 形状的文本但不是管理员（${kind}:${peerId}）⇒ 按普通聊天处理，不执行也不解释`)
+      return { matched: false }
+    }
+    const list = (Array.isArray(this.config?.servers) ? this.config.servers : []).filter((s) => s && s.enabled !== false)
+    const knownIds = new Set(list.map((s) => String(s.id ?? '')))
+    const first = rest.split(/\s+/)[0]
+    let serverId = ''
+    let command = rest
+    if (knownIds.has(first)) {
+      serverId = first
+      command = rest.slice(first.length).trim()
+    }
+    if (!command) {
+      await this.#safeSend(kind, peerId, `用法：\`/mc ${serverId} <命令>\` —— 只给了服务器 id，没给命令`)
+      return { matched: true, ok: false, text: '没给命令' }
+    }
+    if (!serverId) {
+      if (list.length === 1) serverId = list[0].id
+      else {
+        // ★ 多台且没给 id ⇒ **报错不猜**（"随便挑一台"是这里最坏的一种猜错）
+        const ids = list.map((s) => s.id).filter(Boolean)
+        const msg = `配了 ${list.length} 台服务器，必须指明是哪一台：\`/mc <id> <命令>\`（有：${ids.join('、') || '无'}）`
+        await this.#safeSend(kind, peerId, msg)
+        return { matched: true, ok: false, text: msg }
+      }
+    }
+    const r = await runMcCommand({
+      workspace: this.config?.dsh?.workspace,
+      kind,
+      peerId,
+      serverId,
+      command,
+      config: this.config,
+    })
+    this.log(
+      `🎛️ [servers] 本地控制台指令（${kind}:${peerId}·admin）→ ${serverId}：${command.slice(0, 120)} ⇒ ${r.ok ? '已送达' : `拒绝/失败(${r.denied ?? '?'})`}`,
+    )
+    // ★ 回话**必须如实**：把输出（若有）与控制台日志增量一起给，
+    //   并带上那句"不保证只属于这一条命令"（见 `servers/console.mjs` 的实测事实）。
+    const parts = [r.text]
+    if (r.reply) parts.push(`RCON 回话：${r.reply}`)
+    if (r.output) parts.push(`控制台新增输出：\n${r.output.trim().slice(0, 1500)}`)
+    else if (r.ok) parts.push('（控制台这段时间没有新输出 —— 很多命令本来就不回话，**不代表没生效**）')
+    if (r.caveat) parts.push(r.caveat)
+    await this.#safeSend(kind, peerId, parts.filter(Boolean).join('\n'))
+    return { matched: true, ok: Boolean(r.ok), text: parts.join('\n') }
+  }
+
+  /**
    * 起（或重启）服务器监测循环。
    *
    * ★ 抽出来是为了让"改了服务器列表"能**即时生效**（`reloadServers()`）：
@@ -1766,6 +1879,21 @@ export class Bridge extends EventTarget {
    */
   manageServersOnStartForTest() {
     return this.manageServersOnStartInternal()
+  }
+
+  /**
+   * **本地指令通道**的测试入口（0.3.2 收尾：`/mc [id] <命令>`）。
+   *
+   * ★ 为什么必须留这个入口：那条通道的**位置**才是关键 —— 它必须在
+   *   **语义唤醒闸门之前**且**命中即 return**。放错地方会**静默失效**
+   *   （命令白下且不报错），而那种错纯函数断言一条都抓不到。
+   * ★ 为什么不直接发一条群消息来测：**群里没 @ 机器人时根本走不到这里**
+   *   （`no-trigger`，见 `trigger.mjs`）—— 那是既有设计，不是缺陷。
+   *   所以接线测法只能是"直接调这个方法 + 断言它不经模型"。
+   * ★ 它**不是**给产品代码用的（生产路径由 `#handleMcLocalCommand` 在 `handleEvent` 里调用）。
+   */
+  handleMcLocalCommandForTest(o) {
+    return this.#handleMcLocalCommand(o)
   }
 
   /**
@@ -2449,8 +2577,39 @@ export class Bridge extends EventTarget {
       this.log(`⚠️ [people-stats] 统计没记上（聊天不受影响）：${error?.message ?? error}`)
     }
 
-    // ④ 唤醒闸门（0.2.3，**实验性**：`wake.policy = 'semantic'`）
+    // ── ③-b 本地指令通道：`/mc [id] <命令>`（0.3.2 收尾）──────────────────
     //
+    // ★★★ 位置是**刻意的**（设计文档 §11「本地指令通道」那一条）：
+    //   · 在**语义唤醒闸门之前** ⇒ 否则 `semantic` 模式下"来下指令"可能被判成
+    //     "该沉默"，于是**命令白下**（而且完全不报错，最难查的一类失效）；
+    //   · 命中即 **return** ⇒ 这一轮**一次模型调用都不产生**（省钱、也不给模型
+    //     任何"看到这条消息"的机会）。
+    // ★ 非管理员发这个形状时 `#handleMcLocalCommand` 返回 `matched:false`
+    //   ⇒ **照常走普通聊天**（不解释、不拒绝 —— 拒绝等于告诉所有人这里有后门）。
+    // ★★ 形状判据做成**纯同步**的：普通聊天消息**完全不产生额外的 `await`**。
+    //   为什么这条不是微优化 —— 实测：把它写成无条件 `await` 会扰动"主动回合 vs
+    //   随后到达的用户消息"那条竞争，使 `verify-schedule` 出现
+    //   `unsettled top-level await`（退出码 13），**极难定位**（花了很多轮才发现）。
+    //   同步判据把"不影响原有时序"这件事变成结构上的保证，而不是靠运气。
+    if (looksLikeMcCommand(rendered.text)) {
+      try {
+        const local = await this.#handleMcLocalCommand({
+          text: rendered.text,
+          kind,
+          peerId,
+          senderId,
+          tier: verdict.tier,
+        })
+        if (local.matched) {
+          return { handled: true, reason: 'local-command', peerId, senderId }
+        }
+      } catch (error) {
+        // 本地指令炸了**不该**让这条消息消失 —— 留痕后继续走普通聊天
+        this.log(`❌ [servers] 本地指令通道抛异常（这条按普通聊天处理）：${error?.message ?? error}`)
+      }
+    }
+
+    // ④ 唤醒闸门（0.2.3，**实验性**：`wake.policy = 'semantic'`）
     // ══════════════════════════════════════════════════════════════════════
     // 它是什么：规则说"回"之后，再问一次**判定器**"这条该不该沉默"。
     // 它**只做减法** —— 规则说"不回"的消息根本走不到这里（上面就 return 了），
@@ -3396,10 +3555,42 @@ export class Bridge extends EventTarget {
         // 只有"截图技能开着但授权没写成功"才值得喊一声（那正是会静默失效的组合）
         this.log(`⚠️ [bridge] 截图授权没写成功（截图会被拒，聊天不受影响）：${grant.why}`)
       }
+      // ── 服务器控制台的管理员硬闸（0.3.2 收尾）：**独立一个域** ──────────────
+      //
+      // ★★ 为什么单独写一份、而不是复用截图那份：两个域的开关注解不同
+      //   （截图看 `skills.screenshot.enabled`，MC 看 `servers[].commandFromQQ`），
+      //   共用一份会让"截图开着"顺带给 MC 开权限 —— 那是最难查的一类越权。
+      // ★ 默认**不写**（没有任何服务器打开 `commandFromQQ`，或说话人不是管理员）⇒
+      //   工具侧 fail-closed 拒绝，且工作区里不留垃圾文件。
+      // ★ 失败的后果只是"管理员下指令被拒"，所以只记一行日志，绝不影响对话。
+      try {
+        const mcGrant = writeGrant({
+          workspace: this.config?.dsh?.workspace,
+          peerKey: chatKey,
+          kind,
+          peerId,
+          senderId,
+          tier,
+          config: this.config,
+          scope: 'mc',
+        })
+        if (mcGrant.ok) {
+          this.log(`🎛️ [servers] 已给这一轮写控制台授权（${chatKey}·${tier}）—— 只有管理员会在文件里`)
+        }
+      } catch (error) {
+        this.log(`⚠️ [servers] 控制台授权没写成功（从 QQ 下指令会被拒）：${error?.message ?? error}`)
+      }
       const dropGrant = () => {
         const r = clearGrant({ workspace: this.config?.dsh?.workspace, peerKey: chatKey })
         if (!r.ok && r.why !== '缺参数') {
           this.log(`⚠️ [bridge] 截图授权没清掉（${r.why}）—— 它会在 10 分钟后自然过期`)
+        }
+        // ★ MC 那份**必须一起清**：留着就是"上一轮管理员的授权"，
+        //   而下一轮可能是普通人在说话 —— 那就是一条提权路径（同截图那条教训）。
+        try {
+          clearGrant({ workspace: this.config?.dsh?.workspace, peerKey: chatKey, scope: 'mc' })
+        } catch {
+          /* 清不掉就靠 10 分钟过期兜底；上面那条日志已经提示了这个机制 */
         }
       }
 

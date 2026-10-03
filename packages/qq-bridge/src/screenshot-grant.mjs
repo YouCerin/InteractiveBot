@@ -44,21 +44,46 @@ export const GRANTS_DIR = '.grants'
 export const GRANT_TTL_MS = 10 * 60_000
 
 /**
+ * 授权**分域**（0.3.2 收尾加的第二个域：服务器控制台）。
+ *
+ * ★★ 为什么必须分域，而不是共用一份：两个域的开关注解**不同** ——
+ *   截图那边看 `skills.screenshot.enabled`（技能关着就不用写），
+ *   服务器控制台看 `servers[].commandFromQQ`（默认关）。共用一份的话，
+ *   写截图的授权会**顺带**给 MC 开权限（反过来也一样）——
+ *   那正是"一个开关悄悄影响另一个能力"这类最难查的越权。
+ * ★ `''` 这个值刻意从缺省值改成 `'screenshot'`：**老的调用点一个字都不用改**，
+ *   而且老的文件名逐字不变（`grantFileName` 对 screenshot 域不加前缀）。
+ */
+export const GRANT_SCOPE = { screenshot: 'screenshot', mc: 'mc' }
+
+/**
  * 会话键 → 授权文件名。
  *
  * ⚠️ **这个函数在技能侧有一份逐字对应的实现**（技能不能 import 宿主的 `src/`）。
  * 两份不一致的症状是"管理员明明有权限，截图却总说没有授权" —— 很安静的一种坏。
  * `mocks/verify-screenshot.mjs` 里有断言盯着两份实现给出同样的结果。
+ *
+ * ★ 分域之后：截图域**保持原样**（技能侧那份实现因此仍然逐字正确）；
+ *   MC 域加一个 `mc-` 前缀 ⇒ 两个域的文件永不互相覆盖。
  */
-export function grantFileName(peerKey) {
+export function grantFileName(peerKey, scope = GRANT_SCOPE.screenshot) {
   const h = crypto.createHash('sha1').update(String(peerKey ?? '')).digest('hex')
-  return `${h.slice(0, 16)}.json`
+  const prefix = scope === GRANT_SCOPE.mc ? 'mc-' : ''
+  return `${prefix}${h.slice(0, 16)}.json`
 }
 
 /** 授权目录（工作区里）。 */
-export function grantsDir(workspace) {
+/**
+ * 授权目录（工作区里）—— **按域分开两个目录**。
+ *
+ * ★ 截图域保持 `<ws>/screenshots/.grants`（技能侧有一份逐字对应的实现，不能动）。
+ * ★ MC 域放 `<ws>/.grants/mc` —— 它不该住在 `screenshots/` 里面：那样排查时
+ *   会让人以为"服务器控制台的授权"是截图功能的一部分。
+ */
+export function grantsDir(workspace, scope = GRANT_SCOPE.screenshot) {
   const ws = String(workspace ?? '').trim()
   if (!ws) return ''
+  if (scope === GRANT_SCOPE.mc) return path.join(ws, GRANTS_DIR, 'mc')
   return path.join(ws, SHOTS_DIR, GRANTS_DIR)
 }
 
@@ -81,6 +106,25 @@ export function shouldWriteGrant(config) {
 }
 
 /**
+ * 这一轮要不要写**服务器控制台**的授权？
+ *
+ * ★★ 默认**不写**（`servers[].commandFromQQ` 默认 false），与截图那边的方向**相反**。
+ *   为什么方向相反：截图是"看一眼"，MC 控制台是 **op 级别的服务器权限** ——
+ *   按本项目"危险的能力默认关"的口径，这个必须显式打开。
+ *
+ * ★ 条件：**至少有一台服务器显式开了 `commandFromQQ`**，且当前说话人是管理员。
+ *   一台都没开 ⇒ 不写文件（于是工具侧 fail-closed 拒绝，也不会在工作区里留垃圾）。
+ */
+export function shouldWriteMcGrant(config, tier) {
+  // ⚠️ 枚举是 `TIER.ADMIN`（大写）—— 这里第一版写成 `TIER.admin`，恒等于 `undefined`，
+  //    后果是**管理员永远拿不到 MC 授权**（而测试里同样写错，两边一起错 ⇒ 差点漏过）。
+  //    教训：用枚举就别用字面量，写错了才有机会被"与字面量比对"的断言抓住。
+  if (String(tier ?? '') !== TIER.ADMIN) return false
+  const list = Array.isArray(config?.servers) ? config.servers : []
+  return list.some((s) => s && s.commandFromQQ === true)
+}
+
+/**
  * 写这一轮的授权。
  *
  * **绝不抛异常**：授权写不上只该让截图功能用不了，不该影响任何一轮对话。
@@ -92,23 +136,28 @@ export function shouldWriteGrant(config) {
  *   kind/peerId/senderId  这一轮的事实
  *   tier      `roster.decide()` 给的 tier（`admin` / `user` / `stranger`）
  *   config    归一化配置（用来判 shouldWriteGrant）
+ *   scope     `'screenshot'`（默认）或 `'mc'`
  *   now       测试注入点
  * @returns {{ok:boolean, file?:string, why?:string}}
  */
-export function writeGrant({ workspace, peerKey, kind, peerId, senderId, tier, config, now = Date.now() } = {}) {
+export function writeGrant({ workspace, peerKey, kind, peerId, senderId, tier, config, scope = GRANT_SCOPE.screenshot, now = Date.now() } = {}) {
   try {
     if (!workspace) return { ok: false, why: '没有工作区路径' }
     if (!peerKey) return { ok: false, why: '没有会话键' }
-    if (!shouldWriteGrant(config)) return { ok: false, why: '截图技能没开 / 已明确关掉管理员限制' }
-    const dir = grantsDir(workspace)
+    const want = scope === GRANT_SCOPE.mc ? shouldWriteMcGrant(config, tier) : shouldWriteGrant(config)
+    if (!want) {
+      return { ok: false, why: scope === GRANT_SCOPE.mc ? '没有任何服务器打开 commandFromQQ / 说话人不是管理员' : '截图技能没开 / 已明确关掉管理员限制' }
+    }
+    const dir = grantsDir(workspace, scope)
     if (!dir) return { ok: false, why: '工作区路径不可用' }
     fs.mkdirSync(dir, { recursive: true })
-    const file = path.join(dir, grantFileName(peerKey))
+    const file = path.join(dir, grantFileName(peerKey, scope))
     const body = JSON.stringify({
       kind: String(kind ?? ''),
       peerId: String(peerId ?? ''),
       senderId: String(senderId ?? ''),
       tier: String(tier ?? ''),
+      scope: String(scope ?? GRANT_SCOPE.screenshot),
       at: Number(now),
       exp: Number(now) + GRANT_TTL_MS,
     })
@@ -120,18 +169,53 @@ export function writeGrant({ workspace, peerKey, kind, peerId, senderId, tier, c
 }
 
 /**
+ * **读**这一轮的授权（工具侧用；`skills/screenshot` 里有一份对应的实现）。
+ *
+ * ★★ 为什么宿主要导出这个（自用）：MC 控制台的 MCP 工具跑在**子进程**里，
+ *   而它需要判断"当前会话的说话人是不是管理员"。判据只能来自这里 ——
+ *   桥接进程里那份 `roster.decide()` 的结论。
+ *
+ * ★ 状态码与技能侧一致（`ok` / `missing` / `not-admin` / `expired` / `broken`），
+ *   且**一律 fail-closed**：只有 `ok` 才放行，其余全部拒绝。
+ *
+ * @returns {{state:'ok'|'missing'|'not-admin'|'expired'|'broken', tier?:string, senderId?:string, why?:string}}
+ */
+export function readGrant({ workspace, peerKey, scope = GRANT_SCOPE.screenshot, now = Date.now() } = {}) {
+  try {
+    if (!workspace || !peerKey) return { state: 'missing', why: '缺参数' }
+    const dir = grantsDir(workspace, scope)
+    if (!dir) return { state: 'missing', why: '工作区路径不可用' }
+    const file = path.join(dir, grantFileName(peerKey, scope))
+    if (!fs.existsSync(file)) return { state: 'missing', why: '这一轮没有授权文件' }
+    let raw = fs.readFileSync(file, 'utf8')
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1)
+    const g = JSON.parse(raw)
+    // ★ 域要核对：MC 的工具**不许**接受一份截图域的授权（反之亦然）——
+    //   否则"截图开着的会话"会顺带给 MC 权限。
+    if (String(g?.scope ?? GRANT_SCOPE.screenshot) !== scope) {
+      return { state: 'missing', why: `授权文件是「${g?.scope ?? 'screenshot'}」域的，不是这个域的` }
+    }
+    if (!Number.isFinite(Number(g.exp)) || Number(g.exp) <= Number(now)) return { state: 'expired', why: '授权已过期' }
+    if (String(g.tier ?? '') !== TIER.ADMIN) return { state: 'not-admin', tier: String(g.tier ?? ''), why: '这一轮的说话人不是管理员' }
+    return { state: 'ok', tier: String(g.tier), senderId: String(g.senderId ?? '') }
+  } catch (error) {
+    return { state: 'broken', why: error?.message ?? String(error) }
+  }
+}
+
+/**
  * 回合结束清掉这一个会话的授权。
  *
  * ⚠️ **只删自己写过的那一个文件**（按 peerKey 算出来的名字），
  * 不做"清空目录" —— 多会话并发时清空会把**别的会话正在用的授权**删掉，
  * 症状是"隔壁群的管理员截图忽然说没权限"（而且极难复现）。
  */
-export function clearGrant({ workspace, peerKey } = {}) {
+export function clearGrant({ workspace, peerKey, scope = GRANT_SCOPE.screenshot } = {}) {
   try {
     if (!workspace || !peerKey) return { ok: false, why: '缺参数' }
-    const dir = grantsDir(workspace)
+    const dir = grantsDir(workspace, scope)
     if (!dir) return { ok: false, why: '工作区路径不可用' }
-    fs.rmSync(path.join(dir, grantFileName(peerKey)), { force: true })
+    fs.rmSync(path.join(dir, grantFileName(peerKey, scope)), { force: true })
     return { ok: true }
   } catch (error) {
     return { ok: false, why: error?.message ?? String(error) }
@@ -139,10 +223,13 @@ export function clearGrant({ workspace, peerKey } = {}) {
 }
 
 /**
- * 测试/排障用：清掉所有授权文件（**产品代码不要调用** —— 见 clearGrant 的警告）。
+ * 测试/排障用：清掉**某一个域**的所有授权文件（**产品代码不要调用** —— 见 clearGrant 的警告）。
+ *
+ * ★ 加 `scope` 是必须的：不传就按截图域（向后兼容），
+ *   而 MC 域现在住另一个目录（`.grants/mc`）—— 两个域各自清各自的，互不牵连。
  */
-export function clearAllGrants({ workspace } = {}) {
-  const dir = grantsDir(workspace)
+export function clearAllGrants({ workspace, scope = GRANT_SCOPE.screenshot } = {}) {
+  const dir = grantsDir(workspace, scope)
   if (!dir) return { ok: false, why: '工作区路径不可用' }
   let names = []
   try {

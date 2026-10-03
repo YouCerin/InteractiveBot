@@ -220,6 +220,13 @@
       "assertions": 255
     },
     {
+      "cmd": "node mocks/verify-mc-gate.mjs",
+      "purpose": "★★★ **服务器控制台的「仅听从管理员」硬闸**（0.3.2 收尾，56 项）。它守的是 **op 级别的服务器权限**（`op`/`ban`/`stop`），所以断言全是「没授权就不许动」：**没有授权文件 ⇒ 拒绝且一次 RCON 连接都不发起**（判权限在碰网络之前）、**非管理员那一轮根本不写授权文件**、**文件在但 tier 不是 admin ⇒ 也拒绝**（不只看文件在不在）、**会话隔离**（A 会话的授权不能给 B 用）、**域隔离**（截图的授权不能当 MC 的用 —— 否则「截图开着」顺带给了 op；两个域住两个目录、互不覆盖）、**过期 ⇒ 拒绝**、**回合结束清掉 ⇒ 拒绝**（陈旧授权 = 提权）、**服务器没开 `commandFromQQ` ⇒ 拒绝**（管理员授权也不够）、**没指明哪一台 / 认不出的 id ⇒ 拒绝且不猜**、空命令/超长命令 ⇒ 拒绝、**密码绝不出现在任何返回文本里**（含拒绝与失败路径）、连不上/抛异常如实失败（永不抛）。★ 实测踩到的真缺陷：`TIER.ADMIN` 的枚举被写成 `TIER.admin`（恒等于 `undefined`）⇒ **管理员永远拿不到授权**，而测试里同样写错 ⇒ 两边一起错，靠「与字面量比对」的断言才抓住。全程不连真服务端（RCON 是注入的桩），授权文件用真临时文件。",
+      "network": "local-only",
+      "costs": "none",
+      "assertions": 56
+    },
+    {
       "cmd": "node mocks/verify-console.mjs",
       "purpose": "★★ **服务器控制台**（0.3.2 收尾，31 项）：手动输指令 + 看输出。存在理由是**两条实测事实**，它们决定了这块**不能做成看起来像终端的假终端**：① **很多命令的 RCON 应答是空的**（`list`/`forge tps` 有回显，`time set day` 不回话，结果只进日志）⇒「没看到回话」**不代表没生效**；② **输出无法归因到具体命令** ⇒ 只给「控制台日志的新增片段」并如实标注。★ 断言：日志**按字节增量**读（服务端可能正在写一行 ⇒ 按行读会截断）、文件变小判为**轮转/截断**并从头读（否则「控制台永远不再更新」）、命令**成功不靠回显判**、返回里带回那句 caveat、**密码绝不出现在任何返回文本里**（含失败路径）、**没配密码时一次连接都不发起**、客户端抛异常也如实失败（永不抛）。★ 安全边界（用户拍板）：完整 RCON（op 级别），**只从本机网页进，绝不进 QQ 工具面**。",
       "network": "local-only",
@@ -933,7 +940,7 @@
         "type": "object[]",
         "default": [],
         "optional": true,
-        "note": "★★ **0.3.2 P2 服务器监测**（每台一条）：`{id,name,host,port,rconPort,password,enabled,failThreshold,rules:{minTps,maxPlayers}}`。★ **默认空数组 = 这一层完全不工作，而且一次网络请求都不发**。★ `password` 只进 config.json（属于 `user` 类受保护路径：永不进包、永不进日志与错误信息 —— 代码里有断言逐字盯着）；`config.example.json` 里它**必须是空串**（`verify-release-hygiene.mjs` 有字段级断言，因为现有的密钥正则**抓不到 RCON 密码**这种任意字符串）。★ 判据：**默认只把「连不上」算 down**（连续 `failThreshold` 次才判定，防抖动误报）；`rules` 里的阈值只产出**异常报告**、**不触发重启**（「TPS 低就重启」是赌博）。★ 这一层**不认识任何具体服务端**（没有版本判断），原版/Paper/Forge/Fabric/NeoForge 通用；巡检入口 `--servers [--probe]`。"
+        "note": "★★ **0.3.2 P2 服务器监测**（每台一条）：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,manageOnStart,startWaitMs,commandFromQQ,startExe,startArgs,startCommand,cwd,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ **默认空数组 = 这一层完全不工作，而且一次网络请求都不发**。★ `password` 只进 config.json（属于 `user` 类受保护路径：永不进包、永不进日志与错误信息 —— 代码里有断言逐字盯着）；`config.example.json` 里它**必须是空串**（`verify-release-hygiene.mjs` 有字段级断言，因为现有的密钥正则**抓不到 RCON 密码**这种任意字符串）。★ 判据：**默认只把「连不上」算 down**（连续 `failThreshold` 次才判定，防抖动误报）；`rules` 里的阈值只产出**异常报告**、**不触发重启**（「TPS 低就重启」是赌博）。★ `tpsCommand` 留空 = **不问** TPS（不是「问了没拿到」）；`manageOnStart` 默认 false（桥接启动时要不要接管/拉起它）；`commandFromQQ` **默认 false**（★ 它是唯一一条「外部消息能改游戏服务器状态」的通道 —— 打开后**管理员**拥有这台服务器的**完整控制台（op 级别）**，两条路都受它控制：管理员在群里发 `/mc [id] <命令>`（桥接**本地拦截执行**，不经模型）与模型调 `mc_command` 工具（读本轮 MC 域授权文件，非管理员一律拒绝）。★★★ 两条**已知并接受**的代价：① `op` 可提权 ⇒ 命令白名单**事实上失效**；② 管理员 QQ 被盗 = 服务器 op 被劫持。判定依据是桥接写的一份**明文授权文件**，模型能伪造 ⇒ 挡得住外部陌生人，**挡不住模型主动伪造**）。★ 这一层**不认识任何具体服务端**（没有版本判断），原版/Paper/Forge/Fabric/NeoForge 通用；巡检入口 `--servers [--probe]`。"
       },
       {
         "key": "serversPollMs",

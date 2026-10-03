@@ -211,6 +211,23 @@ export function normalizeServerEntry(item) {
     //   端口活着但归属不是我 ⇒ **只报告**（绝不"先杀再起"去抢）；
     //   端口不通 ⇒ 按 `startExe`/`startCommand` 拉起来，并**等端口真的开放**。
     manageOnStart: item.manageOnStart === true,
+    /**
+     * ★★★ **允许从 QQ 下控制台指令**（0.3.2 收尾）。**默认 false。**
+     *
+     * 打开之后，**管理员**这一轮拥有该服务器的**完整控制台**（RCON = op 级别）：
+     * 可以 `op` / `ban` / `stop` / `whitelist`。两条能力都受它控制：
+     *   · 管理员在群里发 `/mc [id] <命令>` ⇒ 桥接**本地拦截并执行**（不经模型）；
+     *   · 模型调 `mc_command` 工具（读本轮的 MC 域授权文件，非管理员一律拒绝）。
+     *
+     * ★★ 为什么默认关：它是**唯一一条"外部消息能改游戏服务器状态"**的通道。
+     * ★★★ 两条**已知并接受**的代价（用户拍板时已明确告知，记在这里免得后人不知道）：
+     *   ① `op` 可提权 ⇒ 一旦能执行任意命令，**命令白名单事实上失效**
+     *      （可以 `op` 一个玩家，之后白名单毫无意义）——所以这条路**没有**白名单兜底，
+     *      它靠的是"只有管理员这一轮才有授权"；
+     *   ② **管理员 QQ 被盗 = 服务器 op 被劫持**（本机网页那个终端没有这个问题，
+     *      因为它要求能碰到这台机器）。
+     */
+    commandFromQQ: item.commandFromQQ === true,
     // 拉起之后最多等多久（毫秒）。0 = 用桥接默认（3 分钟；模组服首次启动实测 1~2 分钟）。
     startWaitMs:
       Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0

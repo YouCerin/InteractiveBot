@@ -47,6 +47,14 @@ import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 
+// ── 0.3.2 收尾：服务器控制台（**管理员硬闸在里面**）────────────────────────
+//
+// ★ 相对导入 `../src/...` 是**刻意的**：闸与执行只有一份实现
+//   （`src/servers/command-gate.mjs`），MCP 侧不许再抄一遍 ——
+//   两份必然分叉，而分叉的表现是"桥接放行、工具拒绝"或更糟的反过来。
+// ★ `verify-imports.mjs` 有断言盯着"相对导入不跑出包外"，这条在包内。
+import { runMcCommand } from '../src/servers/command-gate.mjs'
+
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
 // ★ 版本号只有四个地方有（package.json / PROJECT.json / 这里 / RELEASE.md 的包名），
@@ -465,6 +473,37 @@ const TOOLS = [
     },
     build: ({ action, params }) => ({ action: String(action), params: params ?? {} }),
   },
+  {
+    // ★★★ 0.3.2 收尾：服务器控制台（**op 级别**，只认管理员）。
+    //
+    // 这条路与"管理员发 `/mc <命令>`"那条**不是**同一件事：
+    //   · `/mc` 那条由桥接**本地拦截**执行，模型一次都没被叫醒（见 bridge.mjs）；
+    //   · 本工具是模型那条路 —— 它**读本轮的 MC 域授权文件**来判"当前会话的说话人
+    //     是不是管理员"，读不到/过期/非管理员一律拒绝（fail-closed）。
+    // ★★ 那道闸的**真实上限**写在 `src/servers/command-gate.mjs` 文件头：
+    //   授权文件是明文的、模型能伪造 ⇒ 它挡得住外部陌生人，**挡不住模型主动恶意伪造**。
+    //   MC 是 op 权限，所以这一条必须在工具描述里也说清，别让模型以为自己是"被信任的"。
+    name: 'mc_command',
+    adminOnly: true,
+    local: 'mcCommand',
+    description:
+      '在 Minecraft 服务器控制台执行一条指令（例如 list、forge tps、say 你好、whitelist add 某人）。' +
+      '**只有管理员**能用：桥接会按"这一轮是谁在说话"判定，非管理员一律被拒（不是你能决定的）。' +
+      '★ 这是**完整控制台**（op 级别）：op / ban / stop 都能做，所以每次调用都会被审查。' +
+      '★ 很多命令**不回话**（结果只进服务端日志）⇒ 返回里会有"控制台新增输出"，' +
+      '但那段**不保证只属于你这一条命令**（模型不要把它说成精确结果）。' +
+      '★ 被拒绝时**不要重试、不要换个说法绕过**，如实告诉对方"这条指令需要管理员"。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        serverId: { type: 'string', description: '哪一台服务器（config.json 里 servers[].id）；只有一台时可以省略' },
+        command: { type: 'string', description: '要执行的指令原文，例如 list / forge tps / say 你好' },
+        kind: { type: 'string', description: '当前会话类型：group 或 private' },
+        peerId: { type: 'string', description: '当前会话号（群号或 QQ 号）' },
+      },
+      required: ['command', 'kind', 'peerId'],
+    },
+  },
 ]
 
 // ── 运行时状态 ────────────────────────────────────────────────────────────
@@ -760,8 +799,61 @@ async function runForwardLog({ query, kind, peerId, toId, toKind, limit } = {}) 
   }
 }
 
-/** 当前档位下**对模型可见**的工具（`tools/list` 用它；`runTool` 也用它做 fail-closed 校验）。 */
-function visibleTools() {
+/**
+ * **服务器控制台**（模型那条路，0.3.2 收尾）。
+ *
+ * ★★★ 判据全在 `src/servers/command-gate.mjs`：它读**桥接写的本轮授权文件**
+ *   （那份东西的 tier 来自 `roster.decide()`，模型改不了桥接的判定）。
+ *   本函数只做两件事：把参数摆对、把结果翻成模型能读的话。
+ *
+ * ★ fail-closed：缺参数/读不到授权/非管理员/服务器没开 `commandFromQQ` ⇒ 全部拒绝，
+ *   并且**告诉模型"不要重试、不要绕过"** —— 否则它会换着说法反复试。
+ */
+async function runMcCommandTool({ serverId, command, kind, peerId } = {}) {
+  const ws = config?.workspace
+  if (!ws) return { isError: true, text: '没有工作区路径 ⇒ 定位不到授权文件（这一层不可用）。' }
+  let live = null
+  try {
+    live = readLiveConfig()
+  } catch {
+    live = null
+  }
+  // ★ 读不到实时配置时**按保守处理**：这里要判"这台有没有开 commandFromQQ"，
+  //   判不出来就不放行（方向与语料库那条相反 —— 因为这条会**改游戏服务器状态**）。
+  if (!live) {
+    return { isError: true, text: '读不到 config.json ⇒ 无法确认这台服务器是否允许从 QQ 下指令（按**拒绝**处理）。' }
+  }
+  const list = Array.isArray(live.servers) ? live.servers : []
+  let id = String(serverId ?? '').trim()
+  if (!id) {
+    const enabled = list.filter((s) => s && s.enabled !== false)
+    if (enabled.length === 1) id = enabled[0].id
+    else {
+      const ids = enabled.map((s) => s.id).filter(Boolean)
+      return {
+        isError: true,
+        text: `必须指明是哪一台服务器（\`serverId\`）—— 现在有 ${enabled.length} 台可用${ids.length ? `：${ids.join('、')}` : ''}。**不要猜**。`,
+      }
+    }
+  }
+  const r = await runMcCommand({
+    workspace: ws,
+    kind: String(kind ?? ''),
+    peerId: String(peerId ?? ''),
+    serverId: id,
+    command: String(command ?? ''),
+    config: live,
+  })
+  if (!r.ok) return { isError: true, text: r.text }
+  const parts = [r.text]
+  if (r.reply) parts.push(`RCON 回话：${r.reply}`)
+  if (r.output) parts.push(`控制台新增输出：\n${r.output.trim().slice(0, 1500)}`)
+  else parts.push('（控制台这段时间没有新输出 —— 很多命令本来就不回话，**不代表没生效**）')
+  if (r.caveat) parts.push(`⚠️ ${r.caveat}`)
+  return { isError: false, text: parts.join('\n') }
+}
+
+/** 当前档位下**对模型可见**的工具（`tools/list` 用它；`runTool` 也用它做 fail-closed 校验）。 */function visibleTools() {
   const readonly = config?.profile === 'readonly'
   return TOOLS.filter((t) => {
     if (t.generic && config?.genericApi === false) return false
@@ -813,6 +905,13 @@ async function runTool(name, args) {
   }
   // ── 0.2.2：发图（自己下载 + 守卫 + base64 段）────────────────────────────
   if (tool.local === 'sendImage') return runSendImage(args ?? {})
+
+  // ── 0.3.2 收尾：服务器控制台（**先过管理员硬闸**）─────────────────────────
+  //
+  // ★★★ 闸在 `src/servers/command-gate.mjs` 里，判据是**桥接写的本轮授权文件**
+  //   （`roster.decide()` 的结论），**不是**模型的自我声明。
+  // ★ 失败方向 fail-closed：读不到 / 过期 / 不是管理员 / 域不对 ⇒ 全部拒绝。
+  if (tool.local === 'mcCommand') return runMcCommandTool(args ?? {})
 
   let built
   try {
