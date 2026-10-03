@@ -627,18 +627,36 @@ async function main() {
       // ④ 已经发过「先应一声」：不作废 —— 答应了就答完
       {
         const { bridge, sent, logs } = makeBridge({
+          // ★ delays 从 300 提到 800：原来的余量太小（40ms 定时器 / 140ms 睡眠，
+          //   只约 3.5 倍），**整套连跑时 CPU 忙，定时器被饿到 140ms 之外** ⇒
+          //   「先应一声」没发出去 ⇒ 这一组三条断言连带变红。
+          //   实测：单独跑 4 次全过、连跑全套时偶发变红 —— 这种红会训练人忽略红色。
           replies: ['答应了就要给的答复', '第二条的答复'],
-          delays: [300, 0],
+          delays: [800, 0],
           humanize: { enabled: false, chunkChars: 300, interim: { enabled: true, afterMs: 40 } },
         })
         // 必须是**工作态**的文本：「先应一声」只在工作态发（闲聊态刻意不发，见 bridge 里的注释）
         const p1 = bridge.handleEvent(privateMsg(ADMIN, '把 config.json 里的端口改成 4410'))
-        await sleep(140) // 让 40ms 的「先应一声」真的发出去
+        // ★★ 不睡固定时长，而是**轮询等证据出现**（上限 3 秒）。
+        //   为什么：固定 `sleep(140)` 是在赌"定时器一定按时点火"，而这是**测试自己
+        //   制造的竞争**（真实定时器 + 真实 CPU 争用）。改成等条件成立之后，
+        //   这个套件在忙机器上也不会变红，而它测的东西一个字都没变
+        //   （"第二轮到来时，第一轮已经发过先应一声"）。
+        //   上限仍然保留：进程被冻住时不能无限等（那会让整套挂死而不是变红）。
+        const sawInterim = async () => {
+          const deadline = Date.now() + 3000
+          while (Date.now() < deadline) {
+            if (logs.some((l) => l.includes('先发一条'))) return true
+            await new Promise((r) => setTimeout(r, 20))
+          }
+          return false
+        }
+        const interimSent = await sawInterim()
         const p2 = bridge.handleEvent(privateMsg(ADMIN, '在吗'))
         await Promise.all([p1, p2])
         const texts = sent.map((s) => s.text)
         check('前提：这一轮真的先应了一声（否则这条断言是空的）',
-          logs.some((l) => l.includes('先发一条')), logs.filter((l) => l.includes('先发一条')).join('｜') || '（没有）')
+          interimSent, logs.filter((l) => l.includes('先发一条')).join('｜') || '（没有）')
         check('★★★ 发过「先应一声」的那一轮**不许再被作废**（原来会：说了"稍等"然后永远没正文）',
           texts.some((t) => t.includes('答应了就要给的答复')), JSON.stringify(texts))
         check('★★ 日志写明原因是"已发过「先应一声」"',

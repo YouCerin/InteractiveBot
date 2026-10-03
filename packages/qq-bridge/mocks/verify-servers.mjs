@@ -41,7 +41,7 @@ import {
 import { EVENT, createMonitor, describeSnapshot } from '../src/servers/monitor.mjs'
 import { createServerLoop, parsePlayerList, parseTps, readRecentEvents } from '../src/servers/loop.mjs'
 import { OUTCOME, createRestarter } from '../src/servers/restart.mjs'
-import { createSupervisor, isPidAlive, parseStartTime } from '../src/servers/supervise.mjs'
+import { createSupervisor, isPidAlive, parseStartTime, processStartedAt, defaultRun as runAndCapture } from '../src/servers/supervise.mjs'
 
 let pass = 0
 let fail = 0
@@ -955,11 +955,97 @@ console.log('\n=== ⑯ ★★★ 服务端守护：归属判定是"能不能动�
 // 根本没在跑的东西）。判据是 `pid@启动时刻`（pid 会被复用），而"查不到启动时刻"
 // 必须**判为不是我的**（宁可不动，也不赌）。
 {
-  // ── 启动时刻解析：两种命令的输出都要认，认不出就 null ──
+  // ── 启动时刻解析：几种命令的输出都要认，认不出就 null ──
   eq(parseStartTime('CreationDate=20261004003012.123456+480'), new Date(2026, 9, 4, 0, 30, 12).getTime(), '认得 wmic 的 CreationDate')
   ok(Number.isFinite(parseStartTime('2026-10-04T00:30:12.1234567+08:00')), '认得 PowerShell 的 ISO 时间')
   eq(parseStartTime('乱七八糟'), null, '★★ 认不出 ⇒ null（**不猜**）')
   eq(parseStartTime(''), null, '空输出 ⇒ null')
+
+  // ── ★★★ Ticks 解析（真机实测的三条硬伤，全部钉在这里）──
+  //
+  // 为什么这段非有不可：归属判据是"pid@启动时刻 对得上"，而真机上**唯一能用**的
+  // 取法就是 `Get-Process ... ToUniversalTime().Ticks`。它有三个坑，
+  // 每一个都会让判据**永远对不上**（症状是"明明是我起的却说不是我起的"，
+  // 而重启能力就此静默失效）：
+  //   ① 必须 `ToUniversalTime()` —— `StartTime.Kind` 是 **Local**，直接取 `.Ticks`
+  //      会差一个时区（实测 UTC+8 ⇒ 差整整 8 小时 = 28800 秒）；
+  //   ② 不能 `ToFileTimeUtc()`（实测低 32 位是错的，差约 5×10¹⁰ 秒）；
+  //   ③ `Get-CimInstance Win32_Process` 在这台机器上**直接拒绝访问**
+  //      （实测 HRESULT 0x80041003）—— 所以 `wmic`/CIM 只能当退路。
+  //
+  // 真机取回的原值（2026-10-04，pid 171288）：`.ToUniversalTime().Ticks` =
+  // 639266479092289852，权威 Unix 毫秒 = 1791051109228，两者**差 0 秒**。
+  // ★★★ 真机取回的原值（2026-10-04，pid 171288）：`.ToUniversalTime().Ticks` =
+  //   639266479092289852，权威 Unix 毫秒 = 1791051109228（两者差 0 秒）。
+  //   断言用"差 ≤ 1ms"而不是精确相等：Ticks 是 100ns 精度，除以 1e4 会有取整尾巴
+  //   （实测取整后是 …229 而不是 …228）。
+  eq(
+    Math.abs(parseStartTime('639266479092289852') - 1791051109228) <= 1,
+    true,
+    '★★★ 认得 .NET 的 UTC Ticks（真机原值，与权威值差 ≤ 1ms）',
+  )
+  // ★ 同一个进程的**原始** `.Ticks`（漏掉 `ToUniversalTime()` 时拿到的那个值）
+  //   换算出来是**未来 8 小时** ⇒ 必须被守卫拒掉。
+  //   这条断言证明的是"那个 bug 会被挡住"，而不是"它能被解析出来"。
+  eq(
+    parseStartTime('639266767092289852'),
+    null,
+    '★★★ 漏掉 ToUniversalTime 的值（落到未来 8 小时）⇒ **拒掉**（否则会拿一个未来的时刻去比对）',
+  )
+  // 反过来：一个**合理范围内的旧**时刻要能正常解析（守卫不能把正常值也拒了）
+  ok(parseStartTime('637000000000000000') !== null, '★ 合理范围内的旧时刻仍能解析（守卫不许误杀）')
+  eq(parseStartTime('99999999999999999999'), null, '★★ 荒谬的 Ticks（超出合理范围）⇒ null（不许当时间用）')
+  eq(parseStartTime('12345'), null, '★ 位数不够 ⇒ 不当 Ticks（可能只是错误文本里的数字）')
+  eq(
+    parseStartTime('Get-Process : Cannot find a process with the process identifier 99999999.'),
+    null,
+    '★★★ 错误文本里的数字**不许**被当成启动时刻（凭空判对归属比判错更坏）',
+  )
+
+  // ── ★★★ 真机取启动时刻：走**文件重定向**，不是管道 ──
+  //
+  // 为什么必须测这条：管道被禁时 `spawn EPERM`，而那是**归属判据整条失效**的原因
+  // （不是"少一个功能"）。这里拿**当前 node 进程自己**当被测对象 —— 它一定活着，
+  // 而且它的启动时刻一定在合理范围内。
+  if (process.platform === 'win32') {
+    const wsProbe = mkdtempSync(join(tmpdir(), 'qqb-sup-ticks-'))
+    const outFile = join(wsProbe, '.probe-out.txt')
+    const seenBy = []
+    const wrappedRun = async (cmd, args, file) => {
+      seenBy.push({ cmd, outFile: String(file ?? '') })
+      return runAndCapture(cmd, args, file)
+    }
+
+    // ① 底层那一手本身：给了 outFile 就必须能把输出拿回来
+    const echo = await runAndCapture(
+      'powershell',
+      ['-NoProfile', '-Command', 'Write-Output "hello-from-probe"'],
+      outFile,
+    )
+    ok(String(echo).includes('hello-from-probe'), '★★★ 文件重定向真的能把子进程输出拿回来（管道被禁时**只有这一条路**）')
+
+    // ② 在它之上，启动时刻必须真的查得到
+    const live = await processStartedAt(process.pid, { run: wrappedRun, outFile })
+    ok(live !== null, '★★★ 真的查到了当前进程的启动时刻')
+    if (live !== null) {
+      const ageSec = Math.round((Date.now() - live) / 1000)
+      ok(ageSec >= 0 && ageSec < 3600, `★★ 查到的时刻在合理范围内（本进程已运行 ${ageSec} 秒）`)
+      // ★★★ 这条才是"没有时区错位"的判据：与 node 自己知道的启动时刻对照。
+      //   漏掉 `ToUniversalTime()` 时这里会差整整 8 小时（实测）。
+      const selfStart = Date.now() - Math.round(process.uptime() * 1000)
+      const deltaMs = Math.abs(live - selfStart)
+      ok(deltaMs < 5000, `★★★ 与 node 自己算的启动时刻差 ${deltaMs}ms（< 5s ⇒ **没有时区错位**）`)
+    }
+    ok(
+      seenBy.every((s) => s.outFile !== ''),
+      '★★★ 每次调用都带了 outFile（**这就是绕过"管道被禁"的那一手**）',
+    )
+    ok(
+      seenBy[0]?.cmd === 'powershell',
+      '★★ 优先用 powershell + Get-Process（实测 CIM 在这台机器上拒绝访问）',
+    )
+    try { rmSync(wsProbe, { recursive: true, force: true }) } catch { /* 无所谓 */ }
+  }
 
   // ── pid 存活：EPERM 也算活着（进程在，只是没权限问）──
   eq(isPidAlive(123, () => {}), true, '能发信号 ⇒ 活着')

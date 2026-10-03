@@ -57,28 +57,40 @@ const OWNER_VERSION = 1
  * 查一个进程的启动时刻（用来构成 `pid@启动时刻` 这个身份）。
  *
  * ★★ 拿不到就返回 `null`，而**调用方必须把 null 当"不是我的"**（不许退化成"只看 pid"）。
- *   实现方式用 `wmic`（老 Windows）与 PowerShell（新 Windows）两条都试：
- *   这个项目已经吃过"命令在当前系统上不存在"的亏（`--check` 里那些探测都是这么写的）。
- * ★ 在**非 Windows** 上返回 null（如实：我们没实现那两条路）—— 那会让归属判定
- *   保守地失败（只报告不重启），而不是猜。
+ * ★ 三条实现细节**每一条都是实测踩出来的**（改之前先读完）：
+ *
+ *   ① **优先 `Get-Process`，不要 `wmic`/`Get-CimInstance`**：实测这台机器上
+ *      `Get-CimInstance Win32_Process` 直接 `拒绝访问`（`HRESULT 0x80041003`），
+ *      而 `Get-Process` 能正常拿到启动时刻与可执行文件路径。
+ *      `wmic` 留作最后一条退路（老系统上它才是有的那个）。
+ *   ② **必须 `ToUniversalTime()`**：`Get-Process.StartTime` 的 `Kind` 是 **`Local`**，
+ *      直接取 `.Ticks` 会得到本地墙钟 —— 实测与真值**差整整 8 小时**（UTC+8），
+ *      于是"明明是我起的"被判成"不是我起的"。加了 `ToUniversalTime()` 之后
+ *      与权威值**差 0 秒**。
+ *   ③ **别用 `ToFileTimeUtc()`**：实测它给出的低 32 位是错的（差约 5×10¹⁰ 秒）。
  *
  * @param {number} pid
- * @param {{run?: Function}} [deps] 可注入的"执行一条命令"（测试用）
+ * @param {{run?: Function, outFile?: string}} [deps]
+ *        `run` 可注入的"执行一条命令并拿回输出"（测试用）；
+ *        `outFile` 把输出重定向到文件再读（**绕过"管道被禁"**，见 `defaultRun`）
  * @returns {Promise<number|null>} 毫秒时间戳；查不到返回 null
  */
-export async function processStartedAt(pid, { run = defaultRun } = {}) {
+export async function processStartedAt(pid, { run = defaultRun, outFile = '' } = {}) {
   const p = Number(pid)
   if (!Number.isFinite(p) || p <= 0) return null
   if (process.platform !== 'win32') return null
-  // 两条路都试：新系统上 wmic 可能已经移除，老系统上没有 PowerShell 7
+  // 顺序：Get-Process（实测最可靠）→ wmic（老系统退路）。
+  // ★ `-ErrorAction SilentlyContinue` + `if ($x)`：进程不存在时**输出空**
+  //   （否则会拿到一句错误文本，而 `parseStartTime` 认不出它 ⇒ 仍然是 null，
+  //   但让输出干净更省事，也少一处"把错误文本当数据"的风险）。
   const attempts = [
+    ['powershell', ['-NoProfile', '-Command', `$x=Get-Process -Id ${p} -ErrorAction SilentlyContinue; if ($x) { $x.StartTime.ToUniversalTime().Ticks }`]],
     ['wmic', ['process', 'where', `processid=${p}`, 'get', 'CreationDate', '/value']],
-    ['powershell', ['-NoProfile', '-Command', `(Get-Process -Id ${p} -ErrorAction SilentlyContinue).StartTime.ToString('o')`]],
   ]
   for (const [cmd, args] of attempts) {
     let out = ''
     try {
-      out = String((await run(cmd, args)) ?? '')
+      out = String((await run(cmd, args, outFile)) ?? '')
     } catch {
       continue
     }
@@ -88,10 +100,30 @@ export async function processStartedAt(pid, { run = defaultRun } = {}) {
   return null
 }
 
-/** 从两种命令的输出里抠出时间（**认不出返回 null，不猜**）。 */
+/** 从几种命令的输出里抠出时间（**认不出返回 null，不猜**）。 */
 export function parseStartTime(text) {
   const s = String(text ?? '').trim()
   if (!s) return null
+  // ① `.NET` 的 `DateTime.ToUniversalTime().Ticks`（**纯数字**，首选）
+  //
+  //   为什么首选数字：它是**自 1601-01-01 UTC 起的 100ns 计数**，没有时区参与、
+  //   没有地域格式差异 ⇒ 解析最不容易出错（实测与权威值差 0 秒）。
+  //   ★ 只认**整串都是数字**的情况：PowerShell 的错误文本里也可能出现数字，
+  //     而"把错误文本里的某个数当时间"会让归属判据凭空判对（比判错更坏）。
+  if (/^\d{15,20}$/.test(s)) {
+    const ticks = Number(s)
+    // ★ 取整到毫秒：Ticks 是 100ns 精度，直接除会留下小数尾巴，
+    //   而调用方比的是毫秒时间戳（小数会让"相等"的比较变脆）。
+    const ms = Math.round(ticks / 10_000 - 62_135_596_800_000)
+    // 合理范围：**2000 年之后**、且不在未来（防"把别的数字当 Ticks"）。
+    // ★ 为什么必须有上界：`.NET` 的 Ticks 是"自 1601 起"，一个被漏掉时区
+    //   修正的值会**落到未来**（实测差 8 小时 ⇒ 未来的时间戳）。
+    //   把未来判成"它是我起的"没有任何意义，而拒掉它就是拒掉那个 bug。
+    // ★ 下界取 2000 年而不是 1970 年：进程启动时刻不可能早于 Windows 存在，
+    //   更小的值几乎一定是"别的数字"而不是时间。
+    if (Number.isFinite(ms) && ms >= 946_684_800_000 && ms <= Date.now() + 60_000) return ms
+    return null
+  }
   // `CreationDate=20261004003012.123456+480`（wmic）
   const wmic = /CreationDate=(\d{14})/.exec(s)
   if (wmic) {
@@ -114,30 +146,92 @@ export function parseStartTime(text) {
   return null
 }
 
-/** 默认的"跑一条命令并拿回 stdout"（失败返回空串，由调用方当"查不到"）。 */
-function defaultRun(cmd, args) {
+/**
+ * 默认的"跑一条命令并拿回 stdout"（失败返回空串，由调用方当"查不到"）。
+ *
+ * ★ 它 `export` 出去是**故意的**：测试要能直接断言"给了 `outFile` 就真的能把输出
+ *   拿回来" —— 那是绕过"管道被禁"的那一手，也是归属判据能工作的前提。
+ *   一行都不许只是"注释里说它对"（本项目最贵的失败形状之一）。
+ *
+ * ★★★ `outFile` 不是可选优化，它是**这条退路能不能用**的关键（实测抓到的硬伤）：
+ *
+ *   第一版用 `stdio: 'pipe'` 抓输出，而**捕获另一个进程的输出需要命名管道**，
+ *   受限沙箱直接 `spawnSync powershell EPERM`。后果不是"少一个功能"，而是
+ *   **归属判据整个失效**：`processStartedAt()` 与 `commandLooksOurs()` 都走这条
+ *   `run()`，拿不到输出 ⇒ 判成"无法证明它是我起的" ⇒ **重启能力废掉** ——
+ *   而症状看起来完全像是"这服务端不是我起的"（会把人往错误方向引）。
+ *
+ *   实测对照（同一个命令，同一台机器）：
+ *     管道     `spawnSync powershell` → `EPERM`
+ *     重定向到文件                    → 正常拿到输出
+ *   ∴ 现在**优先把输出重定向到文件再读**（与"服务端控制台输出落盘"同一套做法），
+ *     只在调用方没给文件路径时才退回管道（那是给测试的兼容路径）。
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string} [outFile] 把 stdout/stderr 写到这里再读回来（绕过管道限制）
+ */
+export function defaultRun(cmd, args, outFile = '') {
   return new Promise((resolve) => {
+    const file = String(outFile ?? '').trim()
+    let fd = null
+    if (file) {
+      try {
+        fd = openSync(file, 'w')
+      } catch {
+        fd = null // 打不开文件就退回管道（总比什么都不做好）
+      }
+    }
     let child
     try {
-      child = spawn(cmd, args, { windowsHide: true })
+      child = spawn(cmd, args, fd === null ? { windowsHide: true } : { windowsHide: true, stdio: ['ignore', fd, fd] })
     } catch {
+      if (fd !== null) {
+        try {
+          closeSync(fd)
+        } catch {
+          /* 无所谓 */
+        }
+      }
       resolve('')
       return
+    }
+    const readBack = () => {
+      if (fd === null) return ''
+      try {
+        let text = readFileSync(file, 'utf8')
+        if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+        return text
+      } catch {
+        return ''
+      }
+    }
+    const finish = (piped) => {
+      if (fd !== null) {
+        try {
+          closeSync(fd)
+        } catch {
+          /* 无所谓 */
+        }
+        resolve(readBack())
+        return
+      }
+      resolve(piped)
     }
     let out = ''
     child.stdout?.on('data', (d) => {
       out += String(d)
     })
-    child.on('error', () => resolve(''))
-    child.on('close', () => resolve(out))
+    child.on('error', () => finish(''))
+    child.on('close', () => finish(out))
     setTimeout(() => {
       try {
         child.kill()
       } catch {
         /* 已经没了 */
       }
-      resolve(out)
-    }, 4000)?.unref?.()
+      finish(out)
+    }, 8000)?.unref?.()
   })
 }
 
@@ -175,13 +269,24 @@ export function createSupervisor({
   workspace,
   portOpen = null,
   spawnImpl = spawn,
-  startedAt = (pid) => processStartedAt(pid),
+  startedAt = null,
   pidAlive = (pid) => isPidAlive(pid),
   runCmd = null,
   log = () => {},
 } = {}) {
   const root = String(workspace ?? '')
   const rel = (serverId) => `${SUPERVISE_DIR}/${String(serverId).replace(/[^a-zA-Z0-9_.-]/g, '_')}.running.json`
+  /**
+   * 子进程输出的落盘中转文件。
+   *
+   * ★ 为什么必须有一个：**捕获子进程输出要命名管道，而受限沙箱禁管道**
+   *   （实测 `spawnSync powershell EPERM`）⇒ 不改的话归属判据整条失效。
+   *   放在 `SUPERVISE_DIR` 下与归属档同片区，便于排查时一起看。
+   * ★ 用处只有一个（跑完立刻读回），所以**每次覆盖写**、不留历史。
+   */
+  const probeOutFile = root ? join(root, SUPERVISE_DIR, '.probe-out.txt') : ''
+  /** 默认的"查启动时刻"：把输出重定向到文件再读（绕过管道限制） */
+  const startedAtFn = typeof startedAt === 'function' ? startedAt : (pid) => processStartedAt(pid, { outFile: probeOutFile })
 
   function readState(serverId) {
     if (!root) return null
@@ -263,7 +368,7 @@ export function createSupervisor({
       }
     }
     // ★★ 关键那一步：`pid@启动时刻` 都对得上才算我的（pid 会被复用）
-    const live = await startedAt(pid)
+    const live = await startedAtFn(pid)
     if (live === null) {
       // ── ★★ 退一步：用**启动命令**做弱证据 ──────────────────────────────
       //
@@ -495,7 +600,18 @@ export function createSupervisor({
     if (!needle) return { ok: false, detail: '归属档里没有可比的命令' }
     let text = ''
     try {
-      text = String((await runCmdFn('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`])) ?? '')
+      // ★ 同一条实测教训（见 `processStartedAt` 的注释）：`Get-CimInstance
+      //   Win32_Process` 在这台机器上**直接拒绝访问**，而 `Get-Process` 能拿到
+      //   可执行文件路径 ⇒ 弱证据比对改用 `Get-Process`。
+      //   `-ErrorAction SilentlyContinue` + `if ($x)`：进程没了就输出空
+      //   （免得把一句错误文本当成"命令行"，那会让比对凭空判对）。
+      text = String(
+        (await runCmdFn('powershell', [
+          '-NoProfile',
+          '-Command',
+          `$x=Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($x) { "$($x.ProcessName)|$($x.Path)" }`,
+        ], probeOutFile)) ?? '',
+      )
     } catch (error) {
       return { ok: false, detail: `查命令行失败（${error?.message ?? error}）` }
     }
@@ -505,33 +621,15 @@ export function createSupervisor({
   }
 
   /**
-   * 跑一条命令（**捕获输出**）。失败**不抛**，返回空串 —— 调用方按"查不到"处理。
+   * 跑一条命令并把输出拿回来。失败**不抛**，返回空串 —— 调用方按"查不到"处理。
    *
-   * ⚠️ 受限沙箱下会 `spawn EPERM`（禁命名管道）⇒ 这条退路与"启动时刻"那条一样会失效，
-   *   但那时我们**如实降级成 unknown**（只报告不重启），**不会**误判成"是我的"。
+   * ★ 这里**不再自己实现一遍**：直接复用 `defaultRun`（它会把输出重定向到
+   *   `outFile` 再读回，**绕过"管道被禁"**）。两处各写一份必然分叉 ——
+   *   而分叉的后果是"启动时刻那条路能用了、命令行这条还是废的"，
+   *   归属判据仍然走不通（实测就是这么发现的）。
    */
-  function runCmdImpl(cmd, args) {
-    return new Promise((resolve) => {
-      let child
-      try {
-        child = spawn(cmd, args, { windowsHide: true })
-      } catch {
-        resolve('')
-        return
-      }
-      let out = ''
-      child.stdout?.on('data', (d) => (out += String(d)))
-      child.on('error', () => resolve(''))
-      child.on('close', () => resolve(out))
-      setTimeout(() => {
-        try {
-          child.kill()
-        } catch {
-          /* 已经没了 */
-        }
-        resolve(out)
-      }, 4000)?.unref?.()
-    })
+  function runCmdImpl(cmd, args, outFile = '') {
+    return defaultRun(cmd, args, outFile)
   }
 
   /** 实际用的那条：默认是上面的实现，测试可以整条换掉（沙箱里跑不了默认实现） */
