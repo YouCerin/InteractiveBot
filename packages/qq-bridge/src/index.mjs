@@ -31,7 +31,7 @@ import { Bridge } from './bridge.mjs'
 import { makeSessionId } from './session-id.mjs'
 import { PKG_ROOT, DIRS, resolveDshHome, resolveInPackage, findDshAsar, DSH_APP_DIR_NAMES } from './local.mjs'
 import { runDoctor, printDoctor } from './doctor.mjs'
-import { normalizeConfig, validateConfig } from './config.mjs'
+import { normalizeConfig, validateConfig, normalizeServerEntry } from './config.mjs'
 import { createApiHandler, serveApi } from './api.mjs'
 import { writeMcpConfig, ensureSdkProfilePatch, writeSkillsMcpConfig } from './mcp-profile.mjs'
 import { createPriceBook } from './prices.mjs'
@@ -2822,7 +2822,27 @@ async function main() {
   const onebot = new OneBotClient({ ...config.onebot, log })
   const sendQueue = new SendQueue({ ...config.send, log })
   const router = new SessionRouter({ log })
-  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey })
+  /**
+   * ★★ **现读盘上的服务器列表**（0.3.2 收尾的"改配置即时生效"）。
+   *
+   * 为什么需要它：界面改完服务器条目后若还要**重启桥接**才生效，那"换一台服务器"
+   * 这件事就没解决 —— 而列表本身是纯数据，没有任何理由为它重启整个机器人。
+   *
+   * ★ 读不到 / 解析失败 ⇒ 返回 `null`（**不是空数组**）：空数组的意思是
+   *   "使用者就是要停掉服务器功能"，而读盘失败是"我不知道现在是什么"。
+   *   把两者混在一起会在文件短暂写坏时**静默停掉监测**（本项目最贵的那类静默失效）。
+   */
+  const readServersFromDisk = () => {
+    try {
+      const parsed = JSON.parse(readFileSync(configPath, 'utf8'))
+      const norm = normalizeConfig(parsed)
+      return Array.isArray(norm.servers) ? norm.servers : null
+    } catch (error) {
+      log(`⚠️ [config] 现读服务器列表失败（沿用当前内存里那份）：${error?.message ?? error}`)
+      return null
+    }
+  }
+  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey, readServers: readServersFromDisk })
   // ★★ 0.3.2 起 `attach()` 是 async（`servers[].manageOnStart` 要等到服务端端口真的开放）。
   //   这里**必须接住它的拒绝**：否则启动期的接管失败会变成未处理的 Promise 拒绝。
   //   而且**不阻塞**后面连 OneBot —— 服务端可能要好几分钟才起来，
@@ -3440,6 +3460,18 @@ async function main() {
           return { ok: false, why: `执行 ${action} 失败：${error?.message ?? error}` }
         }
       },
+
+      // ── 0.3.2 收尾：服务器控制台 + 条目增删改 ─────────────────────────────
+      //
+      // ★★★ 安全边界（**用户拍板**，别在下游放宽）：控制台是**完整 RCON**
+      //   （op/ban/stop 都能做），只从本机网页进（API 只绑 127.0.0.1），
+      //   **绝不进 QQ 工具面**（那条面是"只说话 + 只读"）。
+      serversCommand: async ({ serverId, command } = {}) => bridge.runServerCommand({ serverId, command }),
+      // ★ 归一化**复用 config.mjs 那一份**（与启动读配置同一实现）——
+      //   另写一份必然分叉，而分叉的表现是"界面存进去的"与"启动时读到的"不是一回事。
+      normalizeServer: (entry) => normalizeServerEntry(entry),
+      // ★ 让盘上的列表**即时生效**（重建监测循环，不必重启桥接）
+      onServersChanged: async () => bridge.reloadServers(),
 
       // ④ 日志流：按游标增量取（**轮询，不是 SSE** —— 见 CONFIG-UI.md 里的说明与理由）
       logStream: ({ since = 0, limit = 200 } = {}) => {

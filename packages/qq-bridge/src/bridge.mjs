@@ -127,6 +127,7 @@ import {
 } from './schedule.mjs'
 import { createServerLoop } from './servers/loop.mjs'
 import { createRestarter } from './servers/restart.mjs'
+import { runConsoleCommand } from './servers/console.mjs'
 import { createSupervisor, defaultPortOpen as defaultPortProbe } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
 //   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
@@ -456,13 +457,19 @@ export class Bridge extends EventTarget {
    * @param {import('./session-bridge.mjs').SessionRouter} opts.router
    * @param {object} opts.config
    */
-  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, affectGate = null, modelApiKey = '', log = () => {} }) {
+  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, affectGate = null, modelApiKey = '', readServers = null, log = () => {} }) {
     super()
     this.rpc = rpc
     this.onebot = onebot
     this.sendQueue = sendQueue
     this.router = router
     this.config = config
+    /**
+     * 现读盘上的服务器列表（0.3.2 收尾「改配置即时生效」）。
+     * ★ 返回 `null` = 读不到（沿用内存那份）；返回**数组** = 这就是现在的真相（含空数组）。
+     *   两者混同会在文件短暂写坏时**静默停掉监测** —— 见 `index.mjs` 的注入点注释。
+     */
+    this.readServers = typeof readServers === 'function' ? readServers : null
     // ── 唤醒判定器（0.2.3）：**可注入** ──────────────────────────────────
     // ★ 为什么留这个口子：判定器正常路径要**起一次性 DSH 子进程**，那在测试里
     //   既慢又不可控（受限沙箱里还会 EPERM）。注入一个桩之后，测的就不再是
@@ -1394,27 +1401,7 @@ export class Bridge extends EventTarget {
     // ★ 它**只采只读命令**（`list`）；真正会改服务端的动作属于 P4 的重启编排。
     // ★ 事件产出来后怎么用是**另一件事**（见 `#onServerEvent`）：
     //   它写进事件台账，并按任务定义里的 `announce` 档位决定要不要**自动播报**。
-    try {
-      const servers = Array.isArray(this.config.servers) ? this.config.servers : []
-      if (servers.length > 0 && this.config.dsh?.workspace) {
-        this.#serverLoop = createServerLoop({
-          workspace: this.config.dsh.workspace,
-          servers: () => (Array.isArray(this.config.servers) ? this.config.servers : []),
-          pollMs: this.config.serversPollMs,
-          log: this.log,
-          onEvent: (row) => {
-            // 事件回调**不 await**（它在采样循环里）：投递是另一条时间线上的事，
-            // 卡住采样会让下一台的采样一起迟到。
-            this.#onServerEvent(row).catch((error) => {
-              this.log(`❌ [servers] 处理事件时抛异常（监测照常，下一次仍会采）：${error?.message ?? error}`)
-            })
-          },
-        })
-        this.#serverLoop.start()
-      }
-    } catch (error) {
-      this.log(`❌ [servers] 服务器监测启动失败（机器人照常工作）：${error?.message ?? error}`)
-    }
+    this.#startServerLoop()
     // ★★★ 启动时接手服务端（`servers[].manageOnStart`，设计文档 §6.3.1）。
     //
     // 为什么排在监测之后：先让监测跑起来（"出问题主动播报"越早在线越好），
@@ -1427,6 +1414,117 @@ export class Bridge extends EventTarget {
       this.log(`❌ [servers] 启动接管时抛异常（机器人照常工作）：${error?.message ?? error}`)
     }
     return this
+  }
+
+  /**
+   * **手动跑一条服务器控制台命令**（0.3.2 收尾的服务器终端）。
+   *
+   * ★★★ 安全边界（**用户拍板**，不许在下游放宽）：
+   *   它是**完整控制台**（RCON = op 级别：`op`/`ban`/`stop`/`save-off` 都能做），
+   *   所以**只从本机网页进**（HTTP 服务只绑 127.0.0.1），**绝不进 QQ 工具面**
+   *   —— 那条面的纪律是"只说话 + 只读"。让 LLM 拿到服务器 op 权限，
+   *   被诱导一次就是不可逆的。
+   *
+   * ★ 它**不经过重启编排的纪律**（冷却/次数上限/归属），因为那是"自动动作"的纪律；
+   *   手动敲一条命令是人在做决定，与 `--supervise stop` 同一条路（那是 CLI，这是本机网页）。
+   *   但 `stop` 这类会**停掉服务端**的命令仍然建议走 `supervise-server.bat stop`，
+   *   因为那条路会等端口释放。
+   *
+   * @param {object} o
+   * @param {string} o.serverId
+   * @param {string} o.command
+   */
+  async runServerCommand({ serverId = '', command = '' } = {}) {
+    const id = String(serverId ?? '').trim()
+    if (!id) return { ok: false, why: '必须给 serverId（不猜是哪一台）' }
+    const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+    const server = list.find((s) => s?.id === id)
+    if (!server) return { ok: false, why: `配置里没有 id 为「${id}」的服务器` }
+    if (server.enabled === false) return { ok: false, why: `「${server.name ?? id}」是停用的（先启用再发命令）` }
+    const workspace = this.config?.dsh?.workspace
+    if (!workspace) return { ok: false, why: '没有工作区 ⇒ 定位不到控制台日志' }
+    const r = await runConsoleCommand({ server, command, workspace })
+    // 只记命令本身，**绝不记密码**（`runConsoleCommand` 也保证返回值里没有它）
+    if (r.ok) {
+      this.log(`🎛️ [console] ${server.name ?? id} ← ${String(command).trim().slice(0, 120)}`)
+    } else {
+      this.log(`❌ [console] ${server.name ?? id} 命令没跑成：${r.why}`)
+    }
+    return r
+  }
+
+  /**
+   * 起（或重启）服务器监测循环。
+   *
+   * ★ 抽出来是为了让"改了服务器列表"能**即时生效**（`reloadServers()`）：
+   *   循环的定时器是 `start()` 时建的，所以列表变了必须**停掉重建** ——
+   *   只改 `this.config.servers` 的话，`servers()` getter 虽然会返回新列表，
+   *   但已经排好的采样节奏与内部 `byId` 缓存（monitor/client）都还是旧的，
+   *   表现是"新加的那台一直不采样"。
+   * ★ 只**配了服务器**才建：空列表 ⇒ 一次网络请求都不发、也不起定时器。
+   */
+  #startServerLoop() {
+    try {
+      this.#serverLoop?.stop?.()
+      this.#serverLoop = null
+      const servers = Array.isArray(this.config.servers) ? this.config.servers : []
+      if (servers.length === 0 || !this.config.dsh?.workspace) return
+      this.#serverLoop = createServerLoop({
+        workspace: this.config.dsh.workspace,
+        servers: () => (Array.isArray(this.config.servers) ? this.config.servers : []),
+        pollMs: this.config.serversPollMs,
+        log: this.log,
+        onEvent: (row) => {
+          // 事件回调**不 await**（它在采样循环里）：投递是另一条时间线上的事，
+          // 卡住采样会让下一台的采样一起迟到。
+          this.#onServerEvent(row).catch((error) => {
+            this.log(`❌ [servers] 处理事件时抛异常（监测照常，下一次仍会采）：${error?.message ?? error}`)
+          })
+        },
+      })
+      this.#serverLoop.start()
+    } catch (error) {
+      // 监测起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
+      this.log(`❌ [servers] 服务器监测启动失败（机器人照常工作）：${error?.message ?? error}`)
+    }
+  }
+
+  /**
+   * **让盘上的服务器列表即时生效**（0.3.2 收尾「改配置即时生效」）。
+   *
+   * ★ 为什么需要它：界面加/改/删一台服务器之后，若还要**重启桥接**才生效，
+   *   那"我之后换了服务器怎么办"这件事就没解决 —— 而列表是纯数据，
+   *   没有任何理由为它重启整个机器人（重启会断开 QQ、也会打断在跑的回合）。
+   *
+   * 判据（**顺序重要**）：
+   *   ① `readServers()` 返回 `null`（读不到）⇒ **什么都不动**，如实说明。
+   *      空数组 ≠ 读不到：前者是"使用者就是要停掉服务器功能"，后者是"我不知道现在是什么"。
+   *   ② 列表与内存那份**逐条比对**（`JSON.stringify` 足够：归一化后字段顺序稳定），
+   *      相同就**不重建循环**（重建会丢掉 monitor 的连续失败计数 ⇒ 可能误报一次 down）。
+   *   ③ 不同 ⇒ 换掉 `this.config.servers` 并重建循环。
+   *
+   * @returns {{ok: boolean, changed: boolean, count: number, why?: string}}
+   */
+  reloadServers() {
+    if (!this.readServers) {
+      return { ok: false, changed: false, count: 0, why: '这个实例没有接"现读配置"的口子（测试环境常见）' }
+    }
+    const next = this.readServers()
+    if (next === null) {
+      return { ok: false, changed: false, count: 0, why: '读不到 config.json（沿用内存里那份，不改动）' }
+    }
+    const before = JSON.stringify(Array.isArray(this.config.servers) ? this.config.servers : [])
+    const after = JSON.stringify(next)
+    if (before === after) {
+      return { ok: true, changed: false, count: next.length }
+    }
+    this.config.servers = next
+    this.#startServerLoop()
+    this.log(
+      `♻️ [servers] 服务器列表已更新（${next.length} 台）—— 监测循环已按新列表重启` +
+        '（不必重启桥接）',
+    )
+    return { ok: true, changed: true, count: next.length }
   }
 
   /**

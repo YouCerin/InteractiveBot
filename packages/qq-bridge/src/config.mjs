@@ -167,6 +167,83 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null
 }
 
+/**
+ * 归一化**一台**服务端配置（`servers[]` 里的一条）。
+ *
+ * ★★ 为什么把它抽出来（而不是写在 `normalizeConfig` 里）：界面要能**逐条增删改**
+ *   服务器条目（0.3.2 收尾）。如果那条路上另写一份字段处理，两份必然分叉 ——
+ *   而分叉的表现是"界面存进去的配置和启动时读到的不是一回事"，
+ *   正是本项目最贵的那类缺陷（`schedule.mjs` 的 `writeTask` 清过 `createdAt`，
+ *   静默导致重发）。∴ **只有这一份实现**，`normalizeConfig` 与接口都用它。
+ *
+ * ★ `id` 是**状态文件的键**（`runtime/servers/<id>.running.json` / `events.jsonl` /
+ *   `<id>.restart.json`），所以它被限制成文件安全字符；**没有 id 就返回 null**
+ *   （调用方跳过 —— 没有键就没有文件名，**不猜**）。
+ *
+ * @param {object} item 原始条目
+ * @returns {object|null} 归一化后的条目；没有可用 id 时 null
+ */
+export function normalizeServerEntry(item) {
+  if (!item || typeof item !== 'object') return null
+  const id = String(item.id ?? '').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 40)
+  if (!id) return null
+  return {
+    id,
+    name: String(item.name ?? id).slice(0, 60),
+    host: String(item.host ?? '127.0.0.1').trim() || '127.0.0.1',
+    port: Number.isFinite(Number(item.port)) ? Number(item.port) : 25565,
+    rconPort: Number.isFinite(Number(item.rconPort)) ? Number(item.rconPort) : 25575,
+    // ★ 密码原样保留（含空串）：空 = 没配，用的时候会**如实报"没配密码"**，不猜默认值
+    password: typeof item.password === 'string' ? item.password : '',
+    enabled: item.enabled !== false,
+    failThreshold: Number.isFinite(Number(item.failThreshold)) ? Math.max(1, Number(item.failThreshold)) : 2,
+    // ── TPS：**留空 = 不问**（不是"问了但没拿到"）──────────────────────
+    //
+    // ★ 为什么留空：TPS 不是通用命令（vanilla 要 datapack、各端措辞不同），
+    //   猜一个只会在真机上拿到一句报错，然后把"我猜错了"显示成"服务器有问题"。
+    // ★ 为什么仍然开放：Forge 的 `forge tps` 真能给 `Mean TPS: 20.000`，
+    //   不给配就会一直显示"TPS 拿不到"，看起来像服务端的毛病。
+    tpsCommand: typeof item.tpsCommand === 'string' ? item.tpsCommand.slice(0, 200) : '',
+    // ── 0.3.2 P2「启动接管」：桥接启动时要不要管这台服务端 ──────────────
+    //
+    // ★ **默认 false**（"无人开口就动手的能力默认关"）。
+    //   打开后桥接启动时按顺序：端口活着+归属是我 ⇒ **接管**（不上手）；
+    //   端口活着但归属不是我 ⇒ **只报告**（绝不"先杀再起"去抢）；
+    //   端口不通 ⇒ 按 `startExe`/`startCommand` 拉起来，并**等端口真的开放**。
+    manageOnStart: item.manageOnStart === true,
+    // 拉起之后最多等多久（毫秒）。0 = 用桥接默认（3 分钟；模组服首次启动实测 1~2 分钟）。
+    startWaitMs:
+      Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0
+        ? Math.min(Number(item.startWaitMs), 3_600_000)
+        : 0,
+    // ── 0.3.2 P4：守护与重启要的那几项 ──────────────────────────────
+    //
+    // ★ **`startCommand` 留空 = 我们不知道怎么启动它** ⇒ `supervise.launch()` 会如实拒绝
+    //   （**绝不猜一个 `java -jar server.jar`**：模组服的启动方式各不相同，
+    //   猜错就是"我试过重启了"的假象）。
+    //   ⚠️ 它是**明文命令**（可能含路径与 JVM 参数）—— 属于使用者的机器信息，
+    //   与密码同一类保护（配置本身永不进 git/发布包）。
+    startCommand: typeof item.startCommand === 'string' ? item.startCommand.slice(0, 500) : '',
+    // ★★★ **优先用「可执行文件 + 参数数组」**（不走 shell）。
+    //   为什么（实测抓到的硬伤）：`startCommand` 走 shell 时拿到的 pid 是 `cmd.exe` 的，
+    //   它起完 java 就自己退出 ⇒ 归属档里那个 pid 立刻变成"已死的进程" ⇒
+    //   归属判成"不是我起的" ⇒ **重启能力永远不可用**。
+    startExe: typeof item.startExe === 'string' ? item.startExe.slice(0, 400) : '',
+    startArgs: Array.isArray(item.startArgs) ? item.startArgs.map((a) => String(a).slice(0, 400)).slice(0, 40) : [],
+    cwd: typeof item.cwd === 'string' ? item.cwd.slice(0, 300) : '',
+    // 默认用 shell 起（模组服的启动行常带 `&&` / 变量 / `@args.txt`）
+    shell: item.shell !== false,
+    // ★★ 阈值必须区分"没配"与"配了 0"（见 `numOrNull` 的注释）：
+    //   `rules.minTps: null` 被归一化成 0 会让 monitor 认为"TPS 低于 0 算异常" ⇒ 误报。
+    rules: {
+      minTps: numOrNull(item.rules?.minTps),
+      maxPlayers: numOrNull(item.rules?.maxPlayers),
+      cooldownMs: numOrNull(item.rules?.cooldownMs),
+      maxAttempts: numOrNull(item.rules?.maxAttempts),
+    },
+  }
+}
+
 export function normalizeConfig(c) {  const src = c ?? {}
 
   // DSH 的额外安装位置候选要在 `findDshCli()` 之前算好 —— 它直接吃这张表。
@@ -556,84 +633,8 @@ export function normalizeConfig(c) {  const src = c ?? {}
       const raw = Array.isArray(src.servers) ? src.servers : []
       const list = []
       for (const item of raw) {
-        if (!item || typeof item !== 'object') continue
-        const id = String(item.id ?? '').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 40)
-        if (!id) continue // 没有 id 就没有文件名 ⇒ 跳过（**不猜**）
-        list.push({
-          id,
-          name: String(item.name ?? id).slice(0, 60),
-          host: String(item.host ?? '127.0.0.1').trim() || '127.0.0.1',
-          port: Number.isFinite(Number(item.port)) ? Number(item.port) : 25565,
-          rconPort: Number.isFinite(Number(item.rconPort)) ? Number(item.rconPort) : 25575,
-          // ★ 密码原样保留（含空串）：空 = 没配，用的时候会**如实报"没配密码"**，不猜默认值
-          password: typeof item.password === 'string' ? item.password : '',
-          enabled: item.enabled !== false,
-          failThreshold: Number.isFinite(Number(item.failThreshold)) ? Math.max(1, Number(item.failThreshold)) : 2,
-          // ── TPS：**留空 = 不问**（不是"问了但没拿到"）────────────────────
-          //
-          // ★ 为什么留空：TPS 不是通用命令（vanilla 要 datapack、各端措辞不同），
-          //   猜一个只会在真机上拿到一句报错，然后把"我猜错了"显示成"服务器有问题"。
-          // ★ 为什么仍然开放：Forge 的 `forge tps` 真能给 `Mean TPS: 20.000`，
-          //   不给配就会一直显示"TPS 拿不到"，看起来像服务端的毛病。
-          //   ∴ 由使用者给命令（如 `forge tps`），我们只解析最稳的那段文本。
-          tpsCommand: typeof item.tpsCommand === 'string' ? item.tpsCommand.slice(0, 200) : '',
-          // ── 0.3.2 P2「启动接管」：桥接启动时要不要管这台服务端 ──────────
-          //
-          // ★ **默认 false**（按"无人开口就动手的能力默认关"的口径）。
-          //   打开后桥接启动时按顺序：端口活着+归属是我 ⇒ 接管（不上手）；
-          //   端口活着但归属不是我 ⇒ 只报告（绝不"先杀再起"去抢）；
-          //   端口不通 ⇒ 按 startExe/startCommand 拉起来，并**等端口真的开放**。
-          // ★ 为什么需要它：没有它，使用者必须先手动 `--supervise start` 一次，
-          //   "挂了自动拉起一次"才生效 —— 而设计文档 §6.3.1 明说「服务端要由机器人启动」。
-          manageOnStart: item.manageOnStart === true,
-          // 拉起之后最多等多久（毫秒）。0 = 用桥接的默认值（3 分钟，模组服首次启动够用）。
-          startWaitMs:
-            Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0
-              ? Math.min(Number(item.startWaitMs), 3_600_000)
-              : 0,
-          // ── 0.3.2 P2「启动接管」：桥接启动时要不要管这台服务端 ──────────
-          //
-          // ★ **默认 false**（按本项目"无人开口就动手的能力默认关"的口径）。
-          //   打开之后桥接启动时会按顺序：端口活着+归属是我 ⇒ **接管**（不上手）；
-          //   端口活着但归属不是我 ⇒ **只报告**（绝不"先杀再起"去抢）；
-          //   端口不通 ⇒ 按 startExe/startCommand 拉起来，并**等端口真的开放**。
-          // ★ 为什么需要它：没有它，使用者必须先手动 `--supervise start` 一次，
-          //   「挂了自动拉起一次」才生效 —— 而设计文档 §6.3.1 明说
-          //   「**服务端要由机器人启动**」。
-          manageOnStart: item.manageOnStart === true,
-          // 拉起之后最多等多久（毫秒）。默认 3 分钟：模组服首次启动实测 1~2 分钟。
-          startWaitMs: Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0
-            ? Math.min(Number(item.startWaitMs), 3_600_000)
-            : 0,
-          // ── 0.3.2 P4：守护与重启要的那几项 ──────────────────────────────
-          //
-          // ★ **`startCommand` 留空 = 我们不知道怎么启动它** ⇒ `supervise.launch()`
-          //   会如实拒绝（**绝不猜一个 `java -jar server.jar`**：模组服的启动方式
-          //   各不相同，猜错就是"我试过重启了"的假象）。
-          //   ⚠️ 它在 config.json 里是**明文命令**（可能含路径与 JVM 参数）——
-          //   属于使用者的机器信息，与密码同一类保护（配置本身永不进 git/发布包）。
-          startCommand: typeof item.startCommand === 'string' ? item.startCommand.slice(0, 500) : '',
-          // ★★★ 0.3.2 P4 修正：**优先用「可执行文件 + 参数数组」**。
-          //
-          // 为什么（实测抓到的硬伤）：`startCommand` 走 shell，而 **`shell:true` 时
-          // 我们拿到的 pid 是 `cmd.exe` 的**，它起完 java 就自己退出 ⇒
-          // 归属档里那个 pid 立刻变成"已死的进程" ⇒ 归属判成"不是我起的" ⇒
-          // **重启能力永远不可用**。给 exe+args 时**不经 shell**，pid 才是真正的服务端。
-          startExe: typeof item.startExe === 'string' ? item.startExe.slice(0, 400) : '',
-          startArgs: Array.isArray(item.startArgs) ? item.startArgs.map((a) => String(a).slice(0, 400)).slice(0, 40) : [],
-          cwd: typeof item.cwd === 'string' ? item.cwd.slice(0, 300) : '',
-          // 默认用 shell 起（模组服的启动行常带 `&&` / 变量 / `@args.txt`）
-          shell: item.shell !== false,
-          // ★★ 阈值必须区分"没配"与"配了 0"：`Number(null) === 0` 而且 `isFinite(0)` 为真，
-          //   于是 `rules.minTps: null`（= 不判这一项）会被归一化成 **0**，
-          //   接着 `monitor.mjs` 就会认为"TPS 低于 0 算异常"、"人数超过 0 算异常" ⇒ **误报**。
-          //   这个坑在本项目里出现过两次（渲染那侧一次、这里一次），∴ 判据统一写成
-          //   "先排除 null/undefined/空串，再谈数值"。
-          rules: {
-            minTps: numOrNull(item.rules?.minTps),
-            maxPlayers: numOrNull(item.rules?.maxPlayers),
-          },
-        })
+        const one = normalizeServerEntry(item)
+        if (one) list.push(one) // 没有 id 就没有文件名 ⇒ 跳过（**不猜**）
       }
       return list
     })(),

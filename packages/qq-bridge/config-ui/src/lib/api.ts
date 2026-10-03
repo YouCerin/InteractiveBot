@@ -596,6 +596,27 @@ export const api = {
   /** 人工指令：**只有 retry / abandon**（start/stop 走 CLI，那条路上是人在做）。 */
   serversAction: (serverId: string, action: 'retry' | 'abandon') =>
     request<ServersActionResult>('POST', '/api/servers/action', { serverId, action }),
+
+  // ── 0.3.2 收尾：服务器**控制台**与**条目增删改** ────────────────────────
+  /**
+   * 手动跑一条服务端控制台命令（RCON）。
+   *
+   * ★★★ 这是**完整控制台**（op 级别）。后端只绑 127.0.0.1，这是**用户拍板**的边界：
+   *   本机网页可以，**绝不进 QQ 工具面**（那条面是"只说话 + 只读"）。
+   * ★ 返回里的 `output` 是**控制台日志的新增片段**，`caveat` 明说"不保证只属于这条命令"
+   *   —— 界面必须把这句话显示出来（不要把它做成看起来精确的终端）。
+   */
+  serversCommand: (serverId: string, command: string) =>
+    request<ServersCommandResult>('POST', '/api/servers/command', { serverId, command }),
+  /**
+   * 新增/更新一台服务器条目（**改完即时生效**，不必重启桥接）。
+   * ★ `applied` 如实说明"配置写进去了"与"生效了没有"是两件事。
+   */
+  serversSave: (server: Record<string, unknown>) =>
+    request<ServersSaveResult>('POST', '/api/servers/save', { server }),
+  /** 删掉一台服务器条目。★ 状态文件（归属证据）**刻意保留**，返回里会说明。 */
+  serversDelete: (serverId: string) =>
+    request<ServersDeleteResult>('POST', '/api/servers/delete', { serverId }),
 }
 
 // ── 0.3.2 服务器监测（CONFIG-UI.md §2.12）─────────────────────────────────
@@ -674,6 +695,41 @@ export interface ServersActionResult {
   cooldownUntil?: number | null
   /** ★ 后端如实给的提醒（"这条指令不会立刻重启"）—— 界面照着显示，别自己编 */
   hint?: string
+}
+
+/**
+ * 服务器控制台一条命令的结果（0.3.2 收尾）。
+ *
+ * ★★ `reply` 常常是**空串**（真机实测：很多命令不通过 RCON 回话，结果只进日志）。
+ *   所以界面**不能**用"reply 为空"来判失败 —— `ok` 只表示"命令已送达"。
+ * ★ `output` 是控制台日志的**新增片段**；`caveat` 是那句"不保证只属于这条命令"，
+ *   界面必须原样显示（含糊地把它做成看起来精确的终端才是危险的）。
+ */
+export interface ServersCommandResult {
+  command: string
+  reply: string
+  output: string
+  nextByte: number
+  rotated: boolean
+  caveat: string
+}
+
+/** 保存服务器条目的结果。★ `applied` 把"写盘了"与"生效了"分开如实报。 */
+export interface ServersSaveResult {
+  saved: boolean
+  created: boolean
+  id: string
+  applied: { ok: boolean; changed?: boolean; count?: number; why?: string }
+}
+
+/** 删除服务器条目的结果。★ `keptStateFiles` 说明归属证据被刻意保留。 */
+export interface ServersDeleteResult {
+  deleted: boolean
+  id: string
+  remaining: number
+  keptStateFiles: boolean
+  note: string
+  applied: { ok: boolean; changed?: boolean; count?: number; why?: string }
 }
 
 // ── 0.3.2 定时任务（CONFIG-UI.md §2.11）────────────────────────────────────

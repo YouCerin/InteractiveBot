@@ -71,6 +71,11 @@ mkdirSync(WS, { recursive: true })
 }
 
 const logs = []
+/**
+ * 配置的**可变桩**（④-d 的服务器条目增删改要真的读→改→写回）。
+ * 起点放一台 `s1`，与 `serversList` / `serversCommand` 的桩对齐。
+ */
+let rawConfigStub = { servers: [{ id: 's1', name: '主服' }] }
 // 造两个记忆文件（④-b 的记忆检索要扫它们）
 {
   const memDir = join(WS, 'memory')
@@ -85,8 +90,13 @@ const logs = []
 
 const handler = createApiHandler({
   configPath: join(TMP, 'config.json'),
-  readRawConfig: () => ({}),
-  writeRawConfig: () => {},
+  // ★ 用**可变桩**（而不是 `() => ({})`）：④-d 的服务器条目增删改要真的
+  //   "读→改→写回去"，否则 `created` 的判据测不出来（写进去的内容被丢掉，
+  //   第二次保存同一台仍然报"新建"）。这是"测了空气"的典型形状。
+  readRawConfig: () => rawConfigStub,
+  writeRawConfig: (cfg) => {
+    rawConfigStub = cfg
+  },
   normalize: (c) => c,
   validate: () => ({ problems: [] }),
   getStatus: () => ({ running: true }),
@@ -222,6 +232,31 @@ const handler = createApiHandler({
       hint: action === 'retry' ? '已解除「等指令」与冷却。**真正的重启会在下一次检测到它连不上时执行。**' : '已标记放弃。',
     }
   },
+  // ── 0.3.2 收尾：服务器**控制台**与**条目增删改** ──────────────────────
+  //
+  // ★ 控制台是**完整 RCON**（op 级别）⇒ 这一套盯两件事：
+  //   ① 缺 serverId / 空命令 / 超长命令一律 **400**（fail-closed，不猜哪一台）；
+  //   ② 实现带回的密码**绝不外泄**（照 serversList 那套"故意放一个必泄串"的套路）。
+  serversCommand: async ({ serverId, command } = {}) => {
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    return {
+      ok: true,
+      command,
+      reply: '',
+      output: '[Server thread/INFO]: 时间设为白天\n',
+      nextByte: 12345,
+      rotated: false,
+      caveat: '以下是控制台的新增输出，**不保证只属于这一条命令**。',
+      __password: 'THIS_SHOULD_NEVER_LEAK',
+    }
+  },
+  normalizeServer: (entry) => {
+    if (!entry || typeof entry !== 'object') return null
+    const id = String(entry.id ?? '').trim()
+    if (!id) return null
+    return { id, name: String(entry.name ?? id), host: '127.0.0.1', port: 25565, rconPort: 25575, password: '', enabled: true }
+  },
+  onServersChanged: async () => ({ ok: true, changed: true, count: 2 }),
 })
 
 const server = await serveApi({ port: 0, handler, log: (m) => logs.push(String(m)) })
@@ -467,6 +502,95 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★★ 回带**如实提醒**：这条指令不会立刻重启（避免界面给人错误的期待）',
     /不会立刻重启|下一次检测到/.test(String(okRetry.json?.data?.hint ?? '')), String(okRetry.json?.data?.hint ?? ''))
   check('★ `abandon` → 200 且 waitingForAdmin=true', (await act({ serverId: 's1', action: 'abandon' })).json?.data?.waitingForAdmin === true)
+
+  // ── ④-c 服务器**控制台**（0.3.2 收尾）：完整 RCON，只从本机网页进 ──────────
+  //
+  // ★★★ 这是**唯一**一个能对服务端下任意命令的 HTTP 口子（op 级别）。
+  //   所以它必须：① 与"改重启状态机"那条**分开**（纪律不同）；
+  //   ② 缺 serverId / 空命令一律 fail-closed；③ 密码绝不出门。
+  const cmd = async (body) => {
+    const res = await fetch(url('/api/servers/command'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  check('★★★ 缺 serverId ⇒ 400（不猜是哪一台）', (await cmd({ command: 'list' })).status === 400)
+  check('★★ 空命令 ⇒ 400（不发一条空命令给服务端）', (await cmd({ serverId: 's1', command: '   ' })).status === 400)
+  check('★★ 超长命令 ⇒ 400（防止把巨串灌进控制台）', (await cmd({ serverId: 's1', command: 'x'.repeat(600) })).status === 400)
+  const okCmd = await cmd({ serverId: 's1', command: 'time set day' })
+  check('★ 正常命令 → 200', okCmd.status === 200, okCmd.text.slice(0, 120))
+  check('★ 回带命令原文与控制台输出增量',
+    okCmd.json?.data?.command === 'time set day' && String(okCmd.json?.data?.output ?? '').includes('时间设为白天'))
+  check('★★★ 回带那句"输出不保证只属于这一条命令"（不许把它做成看起来精确的终端）',
+    /不保证/.test(String(okCmd.json?.data?.caveat ?? '')), String(okCmd.json?.data?.caveat ?? ''))
+  check('★★★ 控制台响应里也**一个字符都没有密码**', !okCmd.text.includes('THIS_SHOULD_NEVER_LEAK'))
+  check('★ 不认识的 serverId 如实报错（不静默成功）', (await cmd({ serverId: 'nope', command: 'list' })).status === 400)
+
+  // ── ④-d 服务器条目**增删改**（0.3.2 收尾）：改完要**即时生效** ────────────
+  const saveSrv = async (body) => {
+    const res = await fetch(url('/api/servers/save'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  check('★★ 没带 server 对象 ⇒ 400', (await saveSrv({})).status === 400)
+  check('★★★ 缺 id ⇒ 400（id 是状态文件的键，不能空）', (await saveSrv({ server: { name: '没有id' } })).status === 400)
+  const saved = await saveSrv({ server: { id: 's2', name: '第二台' } })
+  check('★ 合法条目 → 200 且如实回带 created', saved.status === 200 && saved.json?.data?.created === true, saved.text.slice(0, 140))
+  check('★ 真的写回配置了（桩里现在有 s2）',
+    Array.isArray(rawConfigStub.servers) && rawConfigStub.servers.some((s) => s.id === 's2'))
+  const savedAgain = await saveSrv({ server: { id: 's2', name: '第二台改名' } })
+  check('★★ 再存同一台 ⇒ created=false（**认得出是更新，不是又建一台**）',
+    savedAgain.json?.data?.created === false, savedAgain.text.slice(0, 140))
+  check('★ 更新是**替换**而不是追加（不允许出现两条同 id）',
+    rawConfigStub.servers.filter((s) => s.id === 's2').length === 1)
+  check('★★★ 回带"生效没有"（配置写进去 ≠ 生效了 —— 这是两件事）',
+    typeof saved.json?.data?.applied === 'object' && saved.json?.data?.applied !== null,
+    JSON.stringify(saved.json?.data?.applied))
+  check('★ 即时生效：applied.changed 为 true（不必重启桥接）', saved.json?.data?.applied?.changed === true)
+
+  const delSrv = async (body) => {
+    const res = await fetch(url('/api/servers/delete'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  check('★★ 缺 serverId ⇒ 400', (await delSrv({})).status === 400)
+  const delOk = await delSrv({ serverId: 's2' })
+  check('★ 删掉存在的条目 → 200', delOk.status === 200, delOk.text.slice(0, 120))
+  check('★★★ 明确回带"状态文件刻意保留"（那是"我起过它"的归属证据，删了就失去重启能力）',
+    delOk.json?.data?.keptStateFiles === true && /归属证据/.test(String(delOk.json?.data?.note ?? '')),
+    String(delOk.json?.data?.note ?? ''))
 }
 
 // ══════════════════════════════════════════════════════════════════════════

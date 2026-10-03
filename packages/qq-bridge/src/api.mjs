@@ -312,6 +312,18 @@ export function createApiHandler(deps) {
     //      绕过全部纪律的旁路。它们留在 CLI（`--supervise start|stop`），
     //      那条路上是**人**在明确地做这件事。
     serversAction,
+    // ── 0.3.2 收尾：服务器**控制台**与**条目增删改** ───────────────────────
+    //
+    // `serversCommand({serverId, command})` —— 手动跑一条控制台命令（RCON）。
+    //   ★★★ **完整控制台（op 级别）**，安全边界由用户拍板：只从本机网页进
+    //      （本服务只绑 127.0.0.1），**绝不进 QQ 工具面**（那条面是"只说话 + 只读"）。
+    //   ★ 它与 `serversAction` 的区别：这条真的往服务端发命令，那条只改重启状态机。
+    serversCommand,
+    // `normalizeServer(entry)` —— **与启动读配置同一份**归一化（不另写一份，见路由注释）。
+    normalizeServer,
+    // `onServersChanged()` —— 让盘上的服务器列表**即时生效**（重建监测循环）。
+    //   ★ 返回 `{ok, changed, count}`；失败**不回滚配置**（配置本身是好的，如实说没生效即可）。
+    onServersChanged,
     // ── 0.2.2 扩展（技能 / 插件）：全部可选，不传就回 501 ──────────────────
     //   ★ 这四条与其余路由的**根本差别**：它们是"即时生效"的通道 ——
     //     实现里既写盘又改活配置对象（见 index.mjs 的 applyExtensionChange），
@@ -836,6 +848,131 @@ export function createApiHandler(deps) {
         const limit = Number(queryParam(req, 'limit')) || 50
         const r = await scheduleHistory({ limit })
         return r?.ok === false ? fail(r.status ?? 500, r.why ?? '读历史失败') : ok(r)
+      }
+
+      // ── 服务器**控制台**（0.3.2 收尾：手动输指令）──────────────────────
+      //
+      // ★★★ 这是**完整控制台**（RCON = op 级别），安全边界由用户拍板：
+      //   **只从本机网页进，绝不进 QQ 工具面**（那条面是"只说话 + 只读"）。
+      //   本文件的路由本身只绑 127.0.0.1（见文件头的约束），所以这个口子
+      //   不会扩到局域网/公网。
+      // ★ 与 `/api/servers/action` 的区别：那条只改**重启状态机**（retry/abandon），
+      //   本条真的往服务端发命令。两者刻意分开，因为纪律不同。
+      if (method === 'POST' && path === '/api/servers/command') {
+        if (typeof serversCommand !== 'function') return notImplemented('服务器控制台')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        const serverId = String(body.serverId ?? '').trim()
+        const command = String(body.command ?? '').trim()
+        // fail-closed：缺一个都不猜（"随便挑一台"是最坏的一种猜错）
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        if (!command) return fail(400, '命令是空的')
+        // ★ 长度上限：控制台命令没那么长，防止把巨串灌进去
+        if (command.length > 500) return fail(400, '命令太长了（上限 500 字）')
+        const r = await serversCommand({ serverId, command })
+        if (r?.ok === false) return fail(r.status ?? 400, r.why ?? '执行失败')
+        // ★★★ **字段白名单**（纵深防御，与 `/api/servers` 同一条纪律）：
+        //   不把依赖的返回值直接转出去。第一版**漏了这一步**，于是依赖带回的
+        //   任何多余字段（包括密码）都会原样出这个门 —— 实测被
+        //   `verify-api-h13.mjs` 那条"故意塞一个必泄串"的断言当场抓住。
+        //   白名单让"泄露凭据"变成**结构上不可能**，而不是靠每个实现者记得。
+        return ok({
+          command: String(r?.command ?? command),
+          // RCON 的应答（常常是空串 —— 见 `servers/console.mjs` 文件头那条实测事实）
+          reply: String(r?.reply ?? ''),
+          output: String(r?.output ?? ''),
+          nextByte: Number.isFinite(Number(r?.nextByte)) ? Number(r.nextByte) : 0,
+          rotated: r?.rotated === true,
+          caveat: String(r?.caveat ?? ''),
+        })
+      }
+
+      // ── 服务器的**增删改**（0.3.2 收尾，服务器页签）────────────────────────
+      //
+      // ★★ 为什么要有这两条：在那之前只能手改 `config.json`，而且**改完要重启桥接**
+      //   —— 于是"我之后换了服务器怎么办"这件事没有答案。
+      // ★ 归一化**复用 `normalizeServerEntry`**（与启动读配置同一份实现）：
+      //   另写一份必然分叉，而分叉的表现是"界面存进去的"和"启动时读到的"不是一回事。
+      // ★ 保存成功后由 `onServersChanged()` 让桥接**现读盘上的列表并重建监测循环**
+      //   （不必重启桥接）。它失败也不回滚配置 —— 配置本身是好的，如实说没生效即可。
+      if (method === 'POST' && path === '/api/servers/save') {
+        if (typeof onServersChanged !== 'function') return notImplemented('服务器条目管理')
+        if (typeof normalizeServer !== 'function') return notImplemented('服务器条目管理')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        const incoming = body.server && typeof body.server === 'object' ? body.server : null
+        if (!incoming) return fail(400, '必须带 server 对象')
+        const norm = normalizeServer(incoming)
+        if (!norm) return fail(400, '这台服务器缺 id（id 是状态文件的键，不能空）')
+        let raw
+        try {
+          raw = await readRawConfig()
+        } catch (e) {
+          return fail(500, `读配置失败：${e?.message ?? e}`)
+        }
+        const list = Array.isArray(raw.servers) ? raw.servers.slice() : []
+        const idx = list.findIndex((s) => s && String(s.id) === norm.id)
+        const isNew = idx < 0
+        if (isNew) list.push(norm)
+        else list[idx] = norm
+        raw.servers = list
+        try {
+          await writeRawConfig(raw)
+        } catch (e) {
+          return fail(500, `写配置失败：${e?.message ?? e}`)
+        }
+        // ★ 让新列表**即时生效**（不必重启桥接）
+        let applied = null
+        try {
+          applied = await onServersChanged()
+        } catch (e) {
+          applied = { ok: false, why: String(e?.message ?? e) }
+        }
+        return ok({
+          saved: true,
+          created: isNew,
+          id: norm.id,
+          // ★ 如实说明"配置写进去了，但生效没有"是两件事
+          applied: applied?.ok === false ? { ok: false, why: applied.why } : { ok: true, changed: Boolean(applied?.changed), count: applied?.count ?? list.length },
+        })
+      }
+
+      if (method === 'POST' && path === '/api/servers/delete') {
+        if (typeof onServersChanged !== 'function') return notImplemented('服务器条目管理')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        const serverId = String(body.serverId ?? '').trim()
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        let raw
+        try {
+          raw = await readRawConfig()
+        } catch (e) {
+          return fail(500, `读配置失败：${e?.message ?? e}`)
+        }
+        const list = Array.isArray(raw.servers) ? raw.servers.slice() : []
+        const next = list.filter((s) => !(s && String(s.id) === serverId))
+        if (next.length === list.length) return fail(404, `配置里没有 id 为「${serverId}」的服务器`)
+        raw.servers = next
+        try {
+          await writeRawConfig(raw)
+        } catch (e) {
+          return fail(500, `写配置失败：${e?.message ?? e}`)
+        }
+        let applied = null
+        try {
+          applied = await onServersChanged()
+        } catch (e) {
+          applied = { ok: false, why: String(e?.message ?? e) }
+        }
+        // ★★★ 刻意**不删**状态文件（`runtime/servers/<id>.*`）：里面是"我起过它"的
+        //   归属证据与事件台账。删掉配置不等于"那个服务端不存在了"，而归属证据
+        //   一旦丢失，一个**还在跑**的服务端就会被判成"不是我起的" ⇒ 失去重启能力。
+        //   真想清就由使用者手动删（这一条写在返回里，免得以后有人"顺手"加自动清理）。
+        return ok({
+          deleted: true,
+          id: serverId,
+          remaining: next.length,
+          keptStateFiles: true,
+          note: '状态文件（runtime/servers/<id>.*）刻意保留 —— 那是"我起过它"的归属证据，删了就失去重启能力。',
+          applied: applied?.ok === false ? { ok: false, why: applied.why } : { ok: true, changed: Boolean(applied?.changed), count: applied?.count ?? next.length },
+        })
       }
 
       // ── 服务器监测的**人工指令**（0.3.2 P4，服务器页签）────────────────────

@@ -588,6 +588,15 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
       // 会被报成"文档谎称已实现"（这条检查就是这么抓漏注入的，这是第四次）。
       buildMemory: async () => ({ ok: true, considered: 0, applied: [], ignored: [], entries: [] }),
       memoryBuildCursor: () => ({ chatKey: 'group:1', userId: null, lastId: 0, considered: 0, entries: 0 }),
+      // 服务器监测的两条**老**接口也要注入 —— 它们一直不在接口表里，所以从没被探测过；
+      // 这次把 `/api/servers` 系列补进表里（0.3.2 收尾），它们立刻暴露"没注入桩"。
+      serversList: async () => ({ ok: true, enabled: true, running: false, pollMs: 30000, servers: [], recentEvents: [] }),
+      serversAction: async () => ({ ok: true }),
+      // 服务器控制台与条目增删改（0.3.2 收尾）也要注入 —— 否则那三条路由在探测里
+      // 走 notImplemented，会被报成"文档谎称已实现"（**这是这条检查第五次抓漏注入了**）。
+      serversCommand: async () => ({ ok: true, command: 'probe', reply: '', output: '', nextByte: 0, rotated: false, caveat: '' }),
+      normalizeServer: (e) => (e && typeof e === 'object' ? { id: String(e.id ?? 'probe') } : null),
+      onServersChanged: async () => ({ ok: true, changed: false, count: 0 }),
       requestRestart: () => {},
       requestStop: () => {},
       powerUpdateDelayMs: 0,

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertCircle, RefreshCw, Server, ShieldQuestion, Wrench } from 'lucide-react'
+import { AlertCircle, Plus, RefreshCw, Server, ShieldQuestion, Trash2, Wrench } from 'lucide-react'
 
 import { api, isNotImplemented, type ServerRow, type ServersResult } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import { ConsolePanel } from '@/sections/ConsolePanel'
+import { ServerForm } from '@/sections/ServerForm'
 
 /**
  * 服务器页签（0.3.2 P2/P4，规格见 CONFIG-UI.md §2.12）。
@@ -32,6 +34,8 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
   const [unsupported, setUnsupported] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  /** 表单：null = 不显示；'new' = 新建；一台 = 编辑 */
+  const [editing, setEditing] = useState<ServerRow | 'new' | null>(null)
   /** 每秒刷一次"多久之前"（**只重渲染，不重新请求**） */
   const [, forceTick] = useState(0)
 
@@ -71,6 +75,41 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
       await load()
     } catch (e) {
       setNotice(`没改成：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  /** 打开编辑表单，并把表单滚到可见（**卡片在页尾时表单会出现在看不见的地方**） */
+  const openForm = (row: ServerRow | 'new') => {
+    setEditing(row)
+    // 下一帧再滚（要等表单渲染出来）
+    setTimeout(() => {
+      try {
+        document.querySelector('[data-server-form]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      } catch {
+        /* 拿不到就算了，不影响功能 */
+      }
+    }, 60)
+  }
+
+  const remove = async (row: ServerRow) => {
+    // ★ 二次确认：删条目是"我不再管它了"，不是"删掉那个服务端" —— 但要挡住手滑
+    const yes = window.confirm(
+      `删掉服务器条目「${row.name}（${row.id}）」？\n\n` +
+        '· 只是从 config.json 里移除，**不会停掉那个服务端**；\n' +
+        '· 状态文件（归属证据 / 事件台账）**会保留** —— 删了就失去重启能力；\n' +
+        '· 保存后即时生效，不必重启桥接。',
+    )
+    if (!yes) return
+    setBusyId(row.id)
+    setNotice(null)
+    try {
+      const r = await api.serversDelete(row.id)
+      setNotice(`已删除（还剩 ${r.remaining} 台）。${r.note ?? ''}`)
+      await load()
+    } catch (e) {
+      setNotice(`没删成：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusyId(null)
     }
@@ -120,6 +159,10 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
               <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
               刷新
             </Button>
+            <Button variant="outline" size="sm" onClick={() => openForm('new')} className="gap-1.5">
+              <Plus className="h-3.5 w-3.5" />
+              新增服务器
+            </Button>
           </div>
           <p className="text-muted-foreground text-xs leading-relaxed">
             ★ 这一层**默认不工作**：配置里 `servers` 为空时它一次网络请求都不发。采样只用**只读命令**
@@ -142,10 +185,21 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
       {(data?.servers.length ?? 0) === 0 && (
         <Card>
           <CardContent className="pt-4 text-sm text-muted-foreground">
-            还没配服务器。在 `config.json` 的 `servers` 段里加一条（`{'{'}id,name,host,port,rconPort,password,startCommand{'}'}`），
+            还没配服务器。点上面的**「新增服务器」**加一条（也可直接改 `config.json` 的 `servers` 段），
             并在服务端的 `server.properties` 里开 `enable-rcon=true` + 设 `rcon.password`。
           </CardContent>
         </Card>
+      )}
+
+      {/* ★ 新增 / 编辑表单（保存后**即时生效**，不必重启桥接）*/}
+      {editing !== null && (
+        <div data-server-form>
+          <ServerForm
+            server={editing === 'new' ? null : editing}
+            onClose={() => setEditing(null)}
+            onSaved={() => void load()}
+          />
+        </div>
       )}
 
       {data?.servers.map((s) => {
@@ -167,6 +221,15 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                     {s.monitor.phase === 'down' ? '🔴 down' : '🟢 up'}
                   </span>
                 )}
+                <span className="ml-auto flex items-center gap-1.5">
+                  <Button variant="outline" size="sm" disabled={busyId === s.id} onClick={() => openForm(s)}>
+                    编辑
+                  </Button>
+                  <Button variant="ghost" size="sm" className="text-destructive" disabled={busyId === s.id} onClick={() => void remove(s)}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    删除
+                  </Button>
+                </span>
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
@@ -249,6 +312,9 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                   </span>
                 </div>
               </div>
+
+              {/* ── 控制台（0.3.2 收尾）：手动输指令 ── */}
+              <ConsolePanel server={s} />
 
               {/* ── 配置摘要（**只显示配没配，不回显凭据**）── */}
               <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs">
