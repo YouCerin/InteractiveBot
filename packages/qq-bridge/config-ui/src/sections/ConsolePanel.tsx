@@ -3,7 +3,6 @@ import { AlertTriangle, Terminal } from 'lucide-react'
 
 import { api, type ServerRow } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 /**
  * 服务器**控制台**（0.3.2 收尾）：手动输一条指令，看它引起的控制台输出。
