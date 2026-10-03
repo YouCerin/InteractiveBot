@@ -105,6 +105,20 @@ import { buildChannelPrompt } from './channel-prompt.mjs'
 import { collectSkillPromptSections, isSkillEnabled, skillToolFullName, callSkillAvailable } from './extensions.mjs'
 import { nicknameFor } from './contacts.mjs'
 import { createImageInbox, collectImages } from './images.mjs'
+import { createScheduleRunner } from './schedule-runner.mjs'
+import {
+  claimEventFire,
+  listTasks,
+  noteHistory,
+  noteKnownChat,
+  readKnownChats,
+  renderScheduleTaskBlock,
+  renderServerEventBlock,
+  settleFire,
+} from './schedule.mjs'
+import { createServerLoop } from './servers/loop.mjs'
+import { createRestarter } from './servers/restart.mjs'
+import { createSupervisor } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
 //   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
 import { writeGrant, clearGrant } from './screenshot-grant.mjs'
@@ -248,6 +262,74 @@ export class Bridge extends EventTarget {
    * @type {{start: Function, stop: Function, tick: Function}|null}
    */
   #consolidate = null
+
+  /**
+   * 定时任务的执行器（0.3.2 P1，见 `schedule-runner.mjs`）。
+   *
+   * `attach()` 里启动、`close()` 里停掉；null = 没启用（`schedule.enabled=false` 或没有工作区）。
+   * ★ 与 `#consolidate` **刻意分成两个定时器**：整理记忆是"重写文件"、定时任务是
+   *   "主动说话"，两者的失败后果与空闲要求都不同（任务**不要求空闲** ——
+   *   到点了就该发，最多排队等会话锁）。
+   * @type {{start: Function, stop: Function, tick: Function, stats: Function}|null}
+   */
+  #schedule = null
+
+  /**
+   * 服务器监测循环（0.3.2 P2，见 `servers/loop.mjs`）。
+   *
+   * `attach()` 里启动、`close()` 里停掉；null = 没启用（没有配置服务器 / 没有工作区）。
+   * ★ 默认**不建**：`config.servers` 为空时它一次网络请求都不发，也不起定时器。
+   * @type {{start: Function, stop: Function, tick: Function, stateOf: Function}|null}
+   */
+  #serverLoop = null
+
+  /**
+   * 每一条事件型任务**上次自动播报**的时刻（内存态，只为冷却）。
+   *
+   * ★ 为什么可以不落盘：冷却的语义是"别刷屏"，重启后重新开始计时完全可接受
+   *   （而"重启后重复播报"这件事由**事件台账**挡住 —— 那才是必须落盘的那一半）。
+   * @type {Map<string, number>}
+   */
+  #lastServerAnnounce = new Map()
+
+  /**
+   * 服务端守护器与重启编排（0.3.2 P4）。
+   *
+   * **懒建**（第一次真需要时才建）：它们要读盘上的归属档、还要连端口探针，
+   * 而绝大多数部署根本没配服务器 —— 懒建让"没配服务器"这条路**一行 IO 都不做**。
+   */
+  #supervisor = null
+  #restarterFor = new Map()
+  /** 最近一次重启处置的结论（给界面/巡检看；**内存态**，重启即失）。 */
+  #lastRestartOutcome = null
+
+  /**
+   * **测试用**的注入口：替换"查归属"与"端口探针"。
+   *
+   * ★ 为什么需要它（不是为了好看）：`down → 重启` 这条链里有两处**只能靠真进程与真端口**
+   *   才有结果的东西（归属证据、端口是否释放）。不给注入口的话，这条链
+   *   **永远只能靠真机验** —— 而本项目最贵的缺陷恰好是接线（"任务段从未注入过"那次）。
+   * ★ 它只影响**这两个探针**，重启的判据（冷却/次数/归属纪律）一个都不放宽。
+   */
+  setServerProbesForTest({ ownership, portOpen, launch } = {}) {
+    // ★★ 判据是 `!== undefined`，**不是"传了没有"** —— 第一版把没传的写成 `null`，
+    //   于是 `setServerProbesForTest({ownership, portOpen})` 会把 **launch 也清掉**，
+    //   结果"归属是我的"那条链被 `no-launcher` 拦住（实测抓到的接线错）。
+    //   ∴ 只覆盖**显式给了的**那几个探针。
+    if (ownership !== undefined) this.#testOwnership = typeof ownership === 'function' ? ownership : null
+    if (portOpen !== undefined) this.#testPortOpen = typeof portOpen === 'function' ? portOpen : null
+    if (launch !== undefined) this.#testLaunch = typeof launch === 'function' ? launch : null
+    this.#restarterFor.clear() // 让下一次重启编排用新的探针
+  }
+  #testOwnership = null
+  #testPortOpen = null
+  #testLaunch = null
+  /** **测试用**：把"等端口/等恢复"的时长与 sleep 换掉（生产路径不设，用默认值）。 */
+  #testRestartTiming = null
+
+  setRestartTimingForTest(timing) {
+    this.#testRestartTiming = timing && typeof timing === 'object' ? timing : null
+  }
 
   /**
    * 每个会话"近期真的见过的消息 id"（H6 引用校验用）。
@@ -1258,6 +1340,61 @@ export class Bridge extends EventTarget {
       // 定时整理起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
       this.log(`❌ [memory] 定时整理启动失败（机器人照常工作）：${error?.message ?? error}`)
     }
+
+    // ── 0.3.2 P1：定时任务（到点了主动说一句）────────────────────────────
+    //
+    // ★ 与定时整理**同一刻启动**（都在 `attach` 里），但两条纪律不同：
+    //   · 整理**只在空闲时动手**（它要重写记忆文件）；
+    //   · 定时任务**不要求空闲** —— 到点了就该发，撞上在跑的回合就排队等会话锁
+    //     （`#deliver` 那条路本来就是串行的）。要求空闲会让"8 点叫我"在忙的时候
+    //     被跳过，而那时**使用者恰恰最需要被提醒**。
+    // ★ 默认**关闭**（`schedule.enabled !== true` 即不开）：定时任务是"无人开口也说话"，
+    //   按本项目"危险的能力默认关"的口径（同截图技能）。配置里显式写 true 才开。
+    try {
+      if (this.config.schedule?.enabled === true && this.config.dsh?.workspace) {
+        this.#schedule = createScheduleRunner({
+          workspace: this.config.dsh.workspace,
+          config: this.config,
+          bridge: {
+            resolveTarget: (opts) => this.resolveScheduleTarget(opts),
+            runProactiveTurn: (opts) => this.runProactiveTurn(opts),
+          },
+          log: this.log,
+        })
+        this.#schedule.start()
+      }
+    } catch (error) {
+      // 定时任务起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
+      this.log(`❌ [schedule] 定时任务启动失败（机器人照常工作）：${error?.message ?? error}`)
+    }
+
+    // ── 0.3.2 P2：服务器监测（采样 → 状态机 → 事件）──────────────────────
+    //
+    // ★ 只有**配了服务器**才建这个循环：空配置 ⇒ 一次网络请求都不发、也不起定时器。
+    // ★ 它**只采只读命令**（`list`）；真正会改服务端的动作属于 P4 的重启编排。
+    // ★ 事件产出来后怎么用是**另一件事**（见 `#onServerEvent`）：
+    //   它写进事件台账，并按任务定义里的 `announce` 档位决定要不要**自动播报**。
+    try {
+      const servers = Array.isArray(this.config.servers) ? this.config.servers : []
+      if (servers.length > 0 && this.config.dsh?.workspace) {
+        this.#serverLoop = createServerLoop({
+          workspace: this.config.dsh.workspace,
+          servers: () => (Array.isArray(this.config.servers) ? this.config.servers : []),
+          pollMs: this.config.serversPollMs,
+          log: this.log,
+          onEvent: (row) => {
+            // 事件回调**不 await**（它在采样循环里）：投递是另一条时间线上的事，
+            // 卡住采样会让下一台的采样一起迟到。
+            this.#onServerEvent(row).catch((error) => {
+              this.log(`❌ [servers] 处理事件时抛异常（监测照常，下一次仍会采）：${error?.message ?? error}`)
+            })
+          },
+        })
+        this.#serverLoop.start()
+      }
+    } catch (error) {
+      this.log(`❌ [servers] 服务器监测启动失败（机器人照常工作）：${error?.message ?? error}`)
+    }
     return this
   }
 
@@ -1268,6 +1405,566 @@ export class Bridge extends EventTarget {
   consolidateNow() {
     if (!this.#consolidate) return { ok: false, why: '定时整理没有启动' }
     return this.#consolidate.tick()
+  }
+
+  /**
+   * 手动跑一次定时任务巡检（测试与排查用；返回本次结果）。
+   *
+   * ★ 与 `consolidateNow` 一样是**只读排查手段**：它不会因为"巡检"而多做任何事，
+   *   只是把该 tick 的那一跳立刻跑一遍（到点了就真发）。
+   */
+  scheduleNow() {
+    if (!this.#schedule) return { ok: false, why: '定时任务没有启动（schedule.enabled !== true）' }
+    return this.#schedule.tick({ reason: 'manual' })
+  }
+
+  /** 定时任务的运行统计（只读，给巡检与界面用）。 */
+  scheduleStats() {
+    if (!this.#schedule) return { ok: false, why: '定时任务没有启动' }
+    return { ok: true, ...this.#schedule.stats() }
+  }
+
+  /**
+   * **服务器页签要的全部事实**（0.3.2 P2/P4；只读，给 `GET /api/servers` 用）。
+   *
+   * ★ 与 `scheduleNow()` 同类：这是**给界面看的运行时快照**，不做任何动作。
+   * ★ 组装放在这里而不是 `api.mjs`：活证据要运行时对象（监测循环的状态、归属探针、
+   *   重启状态机），而 `api.mjs` 刻意"只做接口、不碰业务"。
+   * ★ **不回密码**：这里只给 `passwordSet`（配没配），密码本身永不出这个函数。
+   */
+  async serversSnapshotForApi() {
+    const workspace = this.config?.dsh?.workspace
+    const list = Array.isArray(this.config.servers) ? this.config.servers : []
+    const stats = this.#serverLoop?.stats?.() ?? null
+    const rows = []
+    for (const s of list) {
+      // 监测状态（这台采过样才有）
+      let monitor = null
+      try {
+        const st = this.#serverLoop?.stateOf?.(s.id) ?? null
+        if (st) {
+          monitor = {
+            phase: st.phase === 'down' ? 'down' : 'up',
+            samples: st.samples ?? 0,
+            failures: st.failures ?? 0,
+            lastAt: st.lastAt ?? null,
+            lastReachable: st.lastReachable ?? null,
+            lastPlayers: st.lastPlayers ?? null,
+            lastTps: st.lastTps ?? null,
+            lastVersion: st.lastVersion ?? null,
+            lastError: st.lastError ?? null,
+          }
+        }
+      } catch {
+        /* 增强路径：读不到就是 null（界面显示"还没采过样"） */
+      }
+      // 归属（**只报告不重启**那条纪律的依据）
+      let ownership = null
+      try {
+        ownership = await this.#serverOwnership(s)
+      } catch (error) {
+        ownership = { owner: 'unknown', why: `查归属失败：${error?.message ?? error}` }
+      }
+      // 重启状态机（冷却 / 等指令 / 上次结果）
+      let restart = null
+      try {
+        const r = this.#restarterFor.get(s.id)
+        if (r) {
+          const st = r.state()
+          restart = {
+            attempts: st.attempts ?? 0,
+            lastOutcome: st.lastOutcome ?? null,
+            lastAttemptAt: st.lastAttemptAt ?? null,
+            cooldownUntil: st.cooldownUntil ?? null,
+            waitingForAdmin: st.waitingForAdmin === true,
+          }
+        }
+      } catch {
+        /* 同上 */
+      }
+      rows.push({
+        id: s.id,
+        name: s.name,
+        enabled: s.enabled !== false,
+        host: s.host,
+        port: s.port,
+        rconPort: s.rconPort,
+        passwordSet: Boolean(s.password),
+        startCommandSet: Boolean(String(s.startCommand ?? '').trim()),
+        failThreshold: s.failThreshold,
+        rules: s.rules ?? {},
+        monitor,
+        ownership,
+        restart,
+        // 给界面显示"上次采样在多久前"用（后端给时间戳，前端自己算差值）
+        lastSample: monitor?.lastAt ?? null,
+        __password: s.password, // ★ 只给 api.mjs 那一层做"泄露兜底断言"，不进响应
+      })
+    }
+    return {
+      ok: true,
+      enabled: list.length > 0,
+      running: Boolean(stats?.running),
+      pollMs: Number.isFinite(Number(this.config.serversPollMs)) ? Number(this.config.serversPollMs) : null,
+      servers: rows,
+      recentEvents: [],
+      workspace: Boolean(workspace),
+    }
+  }
+
+  /**
+   * **测试用**的薄口：把一条服务器事件直接喂进"要不要自动播报"那条链。
+   *
+   * ★ 为什么留一个测试入口而不是让测试自己去造 loop：那条链的输入是
+   *   **采样结果**，而采样必须真连一台服务端才能产出事件 —— 那让
+   *   "事件→播报"这条接线**永远只能靠真机验**。而本项目最贵的缺陷恰好是接线。
+   * ★ 它**不是**给产品代码调用的（生产路径由 `#serverLoop.onEvent` 触发）；
+   *   行为与那条路径**完全一致**（它就是同一个私有方法）。
+   */
+  onServerEventForTest(row) {
+    return this.#onServerEvent(row)
+  }
+
+  /**
+   * 拿到某台服务器的归属证据（懒建守护器）。
+   *
+   * ★★ 这是 `restart.mjs` 允许动手的**唯一依据** —— 它只认
+   *   `pid@启动时刻` 对得上的那一种（`supervise.mjs` 的 `ownership()`）。
+   */
+  async #serverOwnership(server) {
+    // ★ 测试注入口优先（它同样返回"归属证据"，判据一点没放宽）
+    if (this.#testOwnership) return this.#testOwnership(server)
+    if (!this.#supervisor) {
+      this.#supervisor = createSupervisor({ workspace: this.config?.dsh?.workspace, log: this.log })
+    }
+    return this.#supervisor.ownership({
+      serverId: server?.id,
+      host: server?.host ?? '127.0.0.1',
+      port: server?.port ?? 25565,
+    })
+  }
+
+  /**
+   * **尝试一次重启**（0.3.2 P4）—— `down` 事件唯一的处置动作。
+   *
+   * ★ 三条纪律全在 `restart.mjs` 里（等端口释放 / 冷却 / 归属），这里只负责**接线**：
+   *   · `evidence` 来自守护器（**不猜**）；
+   *   · `launch` 来自守护器（没配 `startCommand` ⇒ 它自己会拒绝）；
+   *   · `stopGracefully` 用**这一轮的 RCON 连接**发一条 `stop`。
+   * ★ 失败之后**不在这里继续做任何事**：`restart.mjs` 已经置了 `waitingForAdmin`，
+   *   处置权交回给人（"向管理员求助等待指令"）。
+   */
+  async #tryRestart(server, { event } = {}) {
+    const workspace = this.config?.dsh?.workspace
+    if (!workspace) return { ok: false, why: '没有工作区' }
+    if (!this.#supervisor) {
+      this.#supervisor = createSupervisor({ workspace, log: this.log })
+    }
+    let restarter = this.#restarterFor.get(server.id)
+    if (!restarter) {
+      restarter = createRestarter({
+        workspace,
+        serverId: server.id,
+        log: this.log,
+        // ★ 测试注入口：端口探针（同样只影响"探针"，判据不放宽）
+        ...(this.#testPortOpen ? { portOpen: this.#testPortOpen } : {}),
+        // ★ 优雅停服：用这一轮采样用的那条 RCON 连接发 `stop`
+        stopGracefully: async () => {
+          const client = this.#serverLoop?.clientFor?.(server.id)
+          if (!client) return { ok: false, why: '没有可用的 RCON 连接（它可能已经崩了）' }
+          const r = await client.exec('stop')
+          return { ok: Boolean(r?.ok), why: r?.why }
+        },
+        // ★ 测试注入口优先；否则交由守护器（真起来）
+        launch: (s) => (this.#testLaunch ? this.#testLaunch(s) : this.#supervisor.launch(s)),
+      })
+      restarter.load()
+      this.#restarterFor.set(server.id, restarter)
+    }
+
+    const evidence = await this.#serverOwnership(server)
+    const rules = {
+      cooldownMs: Number.isFinite(Number(server.rules?.cooldownMs)) ? Number(server.rules.cooldownMs) : undefined,
+      maxAttempts: Number.isFinite(Number(server.rules?.maxAttempts)) ? Number(server.rules.maxAttempts) : 1,
+    }
+    const out = await restarter.restart({ server, reason: event, evidence, rules, ...(this.#testRestartTiming ? { timing: this.#testRestartTiming } : {}) })
+    // ★ 成功之后把监测状态**重置成 up**：否则状态机还停在 down，
+    //   下一跳会把"已经好了"的服务器当成持续 down（而重试计数也会继续累加）。
+    if (out?.outcome === 'restarted') {
+      try {
+        this.#serverLoop?.resetMonitor?.(server.id)
+      } catch (error) {
+        this.log(`⚠️ [restart] ${server.id} 重启成功，但监测状态没重置（下一跳可能仍报 down）：${error?.message ?? error}`)
+      }
+    }
+    return out
+  }
+
+  /**
+   * 服务器事件 → **要不要自动喊一声**（0.3.2 P2）。
+   *
+   * ★★ 三条判断，缺任何一条都会出问题：
+   *   ① **只有 `announce[事件类型] === 'auto'` 才喊**。默认全 `manual`
+   *      —— 一台服务器 down 就自动播报到群里，等于把"服务端的一部分事实"
+   *      交给了**任何能让它掉线的人**（重启一下、打崩它，群里就会响）。
+   *   ② **事件级去重**（`claimEventFire`）：状态机已经保证"跃迁才产出"，
+   *      这里是第二道锁 —— 同一行事件被处理两次（重入、并发回调）也不会说两遍。
+   *   ③ **冷却**：`trigger.cooldownMs`（默认 5 分钟）内同一台服务器同一类事件只喊一次
+   *      —— 服务端反复崩/起时，"每次都喊"会把群刷成警报器，而**刷屏的告警等于没有告警**。
+   *
+   * ★ 目标仍要过 `resolveScheduleTarget`（**fail-closed**：不往陌生会话发消息），
+   *   与时钟那条路同一套判据 —— 不许因为"这是告警"就绕过它。
+   */
+  async #onServerEvent(row) {
+    if (!row || !row.serverId) return { ok: false, why: '事件不完整' }
+    const workspace = this.config?.dsh?.workspace
+    if (!workspace) return { ok: false, why: '没有工作区' }
+
+    let listed
+    try {
+      listed = listTasks({ workspace })
+    } catch (error) {
+      this.log(`⚠️ [servers] 读任务定义失败（这条事件不播报）：${error?.message ?? error}`)
+      return { ok: false, why: '读任务失败' }
+    }
+
+    const matched = listed.tasks.filter(
+      (t) =>
+        t.enabled !== false &&
+        t.trigger?.kind === 'server' &&
+        t.trigger.serverId === row.serverId &&
+        Array.isArray(t.trigger.events) &&
+        t.trigger.events.includes(row.event),
+    )
+
+    // ── ★★ P4：`down` 事件要不要**尝试一次重启** ───────────────────────────
+    //
+    // ★ 判据不在这一层：`restart.mjs` 的 `canRestart` 会依次检查
+    //   「只有 down 才允许」「归属证据」「次数上限」「在等指令」「冷却」。
+    //   这里只负责**把证据准备好**（守护器的 ownership）并把结论播报出去。
+    // ★ **没有任务盯着它也要尝试重启** —— "让服务器活过来"与"要不要告诉群里"
+    //   是两件事：前者是处置，后者是播报。只有 `announce: auto` 才播报（下面那段）。
+    if (row.event === 'down') {
+      const server = (Array.isArray(this.config.servers) ? this.config.servers : []).find((s) => s.id === row.serverId)
+      if (server && server.enabled !== false) {
+        try {
+          const out = await this.#tryRestart(server, { event: row.event })
+          if (out?.outcome === 'restarted') {
+            this.log(`[restart] 「${server.name}」已重启成功`)
+            // 重启成功了 ⇒ 把"我准备重启"这件事的下文说清楚（**恰好一次**由冷却与次数保证）
+            this.#lastRestartOutcome = { at: Date.now(), serverId: server.id, outcome: out.outcome, text: '' }
+          } else if (out?.outcome === 'failed') {
+            this.#lastRestartOutcome = { at: Date.now(), serverId: server.id, outcome: out.outcome, text: String(out.text ?? '') }
+            this.log(`❌ [restart] 「${server.name}」重启失败：${out.why} —— 等管理员指令`)
+          } else if (out?.outcome === 'skipped') {
+            this.log(`[restart] 「${server.name}」没有重启：${out.text || out.why}`)
+          }
+        } catch (error) {
+          this.log(`❌ [restart] 「${server.name}」重启编排抛异常（已吞掉，监测照常）：${error?.message ?? error}`)
+        }
+      }
+    }
+
+    if (matched.length === 0) return { ok: true, announced: 0, why: '没有任务盯着这个事件' }
+
+    const seq = this.#serverLoop?.eventSeq?.() ?? 0
+    let announced = 0
+    for (const task of matched) {
+      const mode = task.trigger?.announce?.[row.event] ?? 'manual'
+      if (mode !== 'auto') continue
+
+      // ── 冷却（同一任务 + 同一类事件）──
+      const cooldownMs = Number.isFinite(Number(task.trigger?.cooldownMs)) ? Number(task.trigger.cooldownMs) : 5 * 60_000
+      const last = this.#lastServerAnnounce.get(task.id) ?? 0
+      const sinceLast = Date.now() - last
+      if (cooldownMs > 0 && last > 0 && sinceLast < cooldownMs) {
+        this.log(
+          `[servers] 「${task.title}」这次不喊：距上次播报 ${Math.round(sinceLast / 1000)} 秒` +
+            `（冷却 ${Math.round(cooldownMs / 60000)} 分钟）—— 刷屏的告警等于没有告警`,
+        )
+        continue
+      }
+
+      const key = `evt:${seq}@${row.serverId}@${row.event}@${row.at}`
+      const claim = claimEventFire({ workspace, key, task, detail: `${row.event} ${row.text}`.slice(0, 200) })
+      if (!claim.ok) {
+        this.log(`❌ [servers] 「${task.title}」认领失败（**这次不喊**，避免重复）：${claim.why}`)
+        continue
+      }
+
+      const target = this.resolveScheduleTarget({ kind: task.target.kind, peerId: task.target.peerId })
+      if (!target.ok) {
+        settleFire({ workspace, key, status: 'failed', detail: `目标会话不可用：${target.why ?? ''}` })
+        this.log(`❌ [servers] 「${task.title}」没喊成：目标会话不可用（${target.why ?? ''}）`)
+        continue
+      }
+
+      const r = await this.runEventTurn({ task, row, target })
+      if (r.ok && r.text) {
+        announced += 1
+        this.#lastServerAnnounce.set(task.id, Date.now())
+        settleFire({ workspace, key, status: 'delivered', chars: r.text.length })
+        noteHistory({ workspace, task, scheduledAt: row.at, text: r.text, via: 'server-event' })
+        this.log(`[servers] 「${task.title}」已播报 ${row.event}（${r.text.length} 字）`)
+      } else {
+        settleFire({ workspace, key, status: 'failed', detail: String(r.why ?? '未知') })
+        this.log(`❌ [servers] 「${task.title}」没有产出内容（${r.why ?? '未知'}）—— 不重跑模型`)
+      }
+    }
+    return { ok: true, announced }
+  }
+
+  /**
+   * 跑一轮**服务器事件**的主动回合。
+   *
+   * 与 `runProactiveTurn`（时钟）的关系：**共用投递与记账**，差别只在提示词那段
+   * 来由（"到点了" vs "出事了"）—— 所以这里不重复实现那一整套，
+   * 而是复用同一份 `#recordUsage` / `#deliver` / 会话锁纪律。
+   *
+   * ★ 与时钟那条同样的三条边界：不参与 `#pending`（否则用户一句话就把告警作废）、
+   *   投递前**清掉上一轮留下的截图授权**（陈旧授权 = 提权）、
+   *   记账在任何提前 return 之前。
+   */
+  async runEventTurn({ task, row, target } = {}) {
+    const kind = target?.kind
+    const peerId = String(target?.peerId ?? '')
+    const sessionId = String(target?.sessionId ?? '')
+    if (!sessionId || !task || !row) return { ok: false, why: '缺少 sessionId / task / row（内部接线问题）' }
+    const chatKey = `${kind}:${peerId}`
+    const turnStartedAt = Date.now()
+
+    const collector = this.router.beginTurn(sessionId, {
+      label: `${chatKey}（服务器事件）`,
+      timeoutMs: this.config.turn?.timeoutMs ?? 10 * 60_000,
+    })
+
+    // ★ 陈旧授权 = 提权（与时钟路径同一条理由，见 runProactiveTurn 的注释）
+    try {
+      const r = clearGrant({ workspace: this.config?.dsh?.workspace, peerKey: chatKey })
+      if (!r.ok && r.why !== '缺参数') {
+        this.log(`⚠️ [servers] 事件回合前没能清掉截图授权（${r.why}）—— 它会在 10 分钟后自然过期`)
+      }
+    } catch {
+      /* 清不掉不影响这一轮 */
+    }
+
+    try {
+      const lines = []
+      if (this.personaText) lines.push(this.personaText)
+      lines.push(
+        '',
+        renderServerEventBlock({
+          task,
+          trigger: {
+            event: row.event,
+            text: row.text || row.detail,
+            at: row.at,
+            serverId: row.serverId,
+            serverName: row.serverName,
+            snapshot: row.snapshot,
+          },
+          now: Date.now(),
+        }),
+      )
+      const blocks = [{ type: 'text', text: lines.filter((x) => String(x).trim() !== '').join('\n') }]
+      await this.rpc.prompt(sessionId, blocks)
+      const result = await collector.finished()
+
+      try {
+        this.#recordUsage({ kind, peerId, result })
+      } catch (error) {
+        this.log(`⚠️ [servers] 用量记账失败（不影响这条播报）：${error?.message ?? error}`)
+      }
+
+      const answer = markdownToPlain(result?.text ?? '')
+      if (!String(answer ?? '').trim()) {
+        return { ok: false, why: result?.timedOut ? '回合超时' : '模型没有产出内容' }
+      }
+      const outcome = await this.#deliver(kind, peerId, answer, result, {
+        replyTo: null,
+        faceId: null,
+        sticker: null,
+        turnStartedAt,
+      })
+      if (outcome && outcome.ok === false) return { ok: false, why: `投递失败：${outcome.why ?? '未知原因'}` }
+      return { ok: true, text: answer, via: 'server-event' }
+    } catch (error) {
+      this.log(`❌ [servers] 事件回合失败（「${task?.title ?? '?'}」）：${error?.message ?? error}`)
+      return { ok: false, why: `事件回合失败：${error?.message ?? error}` }
+    } finally {
+      try {
+        this.router.clear(sessionId)
+      } catch {
+        /* 清不掉无所谓 */
+      }
+    }
+  }
+
+  /**
+   * 定时任务的**目标解析**：由桥接决定"这个会话的 sessionId 是谁、以什么权限跑"。
+   *
+   * ★ 为什么必须由桥接做：会话键 → sessionId 的映射（`makeSessionId`）只有这里知道，
+   *   而它依赖构造期固定的 `session.instance` —— 定时任务那边**不许**自己算
+   *   （`session-id.mjs` 顶部记着"每次调用都换 instance ⇒ 每条消息都失忆"那个坑）。
+   *
+   * ★★ **fail-closed（与 §4 的"号码不猜"同一条纪律）**：目标会话必须在
+   *   **会话镜像里出现过**。一个从没来消息的号码被写进任务时，正确行为是
+   *   **拒绝执行并如实说明**，而不是往一个陌生号码发消息 —— 那可能是打错的一位数字。
+   *
+   * @param {{kind: string, peerId: string}} opts
+   * @returns {{ok: boolean, sessionId?: string, chatKey?: string, tier?: string, reason?: string, why?: string}}
+   */
+  resolveScheduleTarget({ kind, peerId } = {}) {
+    const k = kind === 'group' ? 'group' : kind === 'private' ? 'private' : null
+    const id = String(peerId ?? '').trim()
+    if (!k || !id) return { ok: false, why: 'target 必须是 {kind: group|private, peerId: "号码"}' }
+    const chatKey = `${k}:${id}`
+
+    // ── fail-closed：这个会话**来过消息**吗（§4 的"号码不猜"）──────────────
+    //
+    // ★ 判据是**落盘的**已知会话名单，不是内存里的会话镜像：
+    //   晚上重启过桥接、早上 8 点要发到某个群、而那个群今天还没人说话 ——
+    //   用内存判据会把这条提醒判成"陌生号码"而拒发（使用者看到的就是"8 点它没响"）。
+    let known = false
+    try {
+      const r = readKnownChats({ workspace: this.config?.dsh?.workspace })
+      if (!r.ok) this.log(`⚠️ [schedule] 读已知会话名单失败（这次按"未知"处理）：${r.why}`)
+      known = r.chats.includes(chatKey)
+    } catch (error) {
+      this.log(`⚠️ [schedule] 读已知会话名单抛异常（这次按"未知"处理）：${error?.message ?? error}`)
+    }
+    if (!known) {
+      return {
+        ok: false,
+        why:
+          `${chatKey} **从没有来过消息**（已知会话名单里没有它）。` +
+          '照 §4 的纪律不往陌生号码发消息（可能是打错的一位数字）；' +
+          '先在那个会话里说过话，或者把目标改成来过的会话。',
+      }
+    }
+
+    let sessionId
+    try {
+      sessionId = makeSessionId(k, id, {
+        salt: this.config.session?.salt,
+        // ★ 必须用**构造期固定的那个**（与 `#runTurn` 同一行口径）
+        instance: this.sessionInstance ?? this.config.session?.instance,
+      })
+    } catch (error) {
+      return { ok: false, why: `算 sessionId 失败：${error?.message ?? error}` }
+    }
+
+    // 权限：与 `roster.decide` 同一口径（定时任务不该绕过任何名单）
+    let tier = 'user'
+    let respond = true
+    let reason = ''
+    try {
+      const v = this.roster.decide({ kind: k, peerId: id, senderId: id })
+      tier = v?.tier ?? 'user'
+      respond = v?.respond !== false
+      reason = v?.reason ?? ''
+    } catch (error) {
+      return { ok: false, why: `权限判定失败：${error?.message ?? error}` }
+    }
+    if (!respond) {
+      return { ok: false, why: `这个会话现在不接收消息（名单判定=${reason || '拒绝'}）—— 定时任务不绕过名单` }
+    }
+    return { ok: true, sessionId, chatKey, tier, reason }
+  }
+
+  /**
+   * 跑一轮**主动回合**：不是"有人说话"，是"到点了"。
+   *
+   * 与 `#runTurn` 的关系（这条边界是刻意划的，改之前先读）：
+   *   · **共用**：`#recordUsage`（钱花了就要记账）、`#deliver`（分条/账本/拟人延迟/限流/
+   *     终检门/隐私闸）、`router.beginTurn`（会话路由）。
+   *   · **不共用**：唤醒判定、准入（已由 `resolveScheduleTarget` 判过）、
+   *     `#runTurn` 的**「被更新的消息作废」那一套**（`#pending`）—— 主动回合**不进
+   *     `#pending`**，否则使用者在这条提醒之后 1 秒说句话，就会把这次定时任务
+   *     当成"同一发言人连发"作废掉 ⇒ 表现成"8 点的提醒偶尔不说"（`docs/0.3.2-task-manager-plan.md` §11）。
+   *   · **不共用**：记忆结算（`#settleMemory`）—— 那一轮没有"用户那句话"，
+   *     把主动说出的话记进别人的档案不是使用者要的。
+   *
+   * @param {{task: object, scheduledAt: number, lateByMs: number, target: object}} opts
+   * @returns {Promise<{ok: boolean, text?: string, via?: string, why?: string}>}
+   */
+  async runProactiveTurn({ task, scheduledAt, lateByMs = 0, target } = {}) {
+    const kind = target?.kind
+    const peerId = String(target?.peerId ?? '')
+    const sessionId = String(target?.sessionId ?? '')
+    if (!sessionId || !task) return { ok: false, why: '缺少 sessionId 或 task（内部接线问题）' }
+    const chatKey = `${kind}:${peerId}`
+    const turnStartedAt = Date.now()
+
+    const collector = this.router.beginTurn(sessionId, {
+      label: `${chatKey}（定时任务）`,
+      timeoutMs: this.config.turn?.timeoutMs ?? 10 * 60_000,
+    })
+
+    // ── ★★ 收掉"上一轮留下的授权"：主动回合**不许继承**任何截图权限 ──────
+    //
+    // 为什么必须显式收（这是一处真缺陷，被 `verify-screenshot.mjs` 的源序断言连带抓出来的）：
+    //   截图那道闸的判据是**按会话写下的授权文件**（里面是"这一轮说话人是不是管理员"，
+    //   10 分钟有效）。而主动回合**没有"这一轮说话人"** —— 它是时钟发起的。
+    //   若不收，那个会话里**上一轮**留下的管理员授权仍然有效 ⇒ 一次定时任务
+    //   可以带着"十分钟前某位管理员说过话"的凭证去截屏。**陈旧授权 = 提权**。
+    //   ∴ fail-closed：先清掉，主动回合里模型拿不到截屏权限（要截屏得先有人说话）。
+    try {
+      const r = clearGrant({ workspace: this.config?.dsh?.workspace, peerKey: chatKey })
+      if (!r.ok && r.why !== '缺参数') {
+        this.log(`⚠️ [schedule] 主动回合前没能清掉截图授权（${r.why}）—— 它会在 10 分钟后自然过期`)
+      }
+    } catch (error) {
+      this.log(`⚠️ [schedule] 清截图授权时抛异常（忽略，它会在 10 分钟后自然过期）：${error?.message ?? error}`)
+    }
+
+    try {
+      // ── 提示词：**复用同一份人设与平台规则**，只把"这一轮的来由"换掉 ──
+      //   为什么另起一段而不是拿 `buildChannelPrompt` 硬塞：那一段的核心假设是
+      //   "origin 那条消息是对方刚说的"，而这里根本没有那条消息。硬塞会让模型
+      //   以为对方刚提了这件事（于是回一句"好的我记下了"）。
+      const lines = [this.personaText ? this.personaText : '']
+      lines.push('', renderScheduleTaskBlock({ task, scheduledAt, now: Date.now() }))
+      const lines2 = lines.filter((x) => String(x).trim() !== '')
+
+      const blocks = [{ type: 'text', text: lines2.join('\n') }]
+      await this.rpc.prompt(sessionId, blocks)
+      const result = await collector.finished()
+
+      // ★ 记账**必须在任何提前 return 之前**：超时/空回复也真的烧了 token
+      try {
+        this.#recordUsage({ kind, peerId, result })
+      } catch (error) {
+        this.log(`⚠️ [schedule] 用量记账失败（不影响这条提醒）：${error?.message ?? error}`)
+      }
+
+      let answer = markdownToPlain(result?.text ?? '')
+      if (!String(answer ?? '').trim()) {
+        return { ok: false, why: result?.timedOut ? '回合超时' : '模型没有产出内容' }
+      }
+
+      // ── 投递：与普通回复**同一条管线**（三道闸一个都不绕过）──
+      const delivering = this.#deliver(kind, peerId, answer, result, {
+        replyTo: null,
+        faceId: null,
+        sticker: null,
+        turnStartedAt,
+      })
+      const outcome = await delivering
+      if (outcome && outcome.ok === false) {
+        return { ok: false, why: `投递失败：${outcome.why ?? '未知原因'}` }
+      }
+      return { ok: true, text: answer, via: 'model' }
+    } catch (error) {
+      this.log(`❌ [schedule] 主动回合失败（「${task?.title ?? '?'}」）：${error?.message ?? error}`)
+      return { ok: false, why: `主动回合失败：${error?.message ?? error}` }
+    } finally {
+      try {
+        this.router.clear(sessionId)
+      } catch {
+        /* 清不掉无所谓，收尾时还会清一遍 */
+      }
+    }
   }
 
   /** 处理一条 OneBot 事件。返回结果对象（便于测试断言）。 */
@@ -1457,6 +2154,25 @@ export class Bridge extends EventTarget {
         await this.#safeSend(kind, peerId, '抱歉，这个机器人只对名单内的人开放。')
       }
       return { handled: false, reason: verdict.reason, peerId, senderId }
+    }
+
+    // ── 记下"这个会话来过消息"（定时任务的目标判定要它，**必须落盘**）──────
+    //
+    // ★ 位置：**准入通过之后** —— 名单外的人不该让任何会话被记成"已知"。
+    // ★ 幂等且只在**第一次**写盘（`noteKnownChat` 判过已存在就返回），
+    //   所以它不是"每条消息一次 IO"。
+    // ★ 失败只喊一行（增强路径），绝不影响这一轮 —— 但它必须留痕：
+    //   写不上会让**下次重启后**的定时任务被误判成"陌生号码"而拒发。
+    try {
+      if (this.config?.dsh?.workspace) {
+        // ⚠️ 这里**不能**用 `chatKey` —— 那是 `#runTurn` 里的局部变量（本项目栽过
+        //    同一个名字的坑：任务段的 `chatKey` 在错的作用域里，那个段在真机上
+        //    从未注入过）。本函数里只有 `kind` 与 `peerId`，会话键得自己拼。
+        const r = noteKnownChat({ workspace: this.config.dsh.workspace, chatKey: `${kind}:${peerId}` })
+        if (!r.ok) this.log(`⚠️ [schedule] 已知会话名单没记上（定时任务在下次重启后可能误判陌生号码）：${r.why}`)
+      }
+    } catch (error) {
+      this.log(`⚠️ [schedule] 已知会话名单记不上（异常，忽略）：${error?.message ?? error}`)
     }
 
     // ── 个人层的行为统计（0.2.9 决定：纳入）──────────────────────────────
@@ -3398,6 +4114,20 @@ export class Bridge extends EventTarget {
     //   等回复发完 —— 没必要在这个窗口里再去动用户的记忆文件。
     try {
       this.#consolidate?.stop()
+    } catch {
+      /* 停不掉也不影响收尾 */
+    }
+    // ★ 定时任务也要停：它的回调会去拼提示词、调模型、投递，
+    //   而收尾正在做"等回复发完"这件事 —— 这个窗口里再塞新回合只会更难收干净。
+    try {
+      this.#schedule?.stop()
+    } catch {
+      /* 停不掉也不影响收尾 */
+    }
+    // ★ 服务器监测也要停，并且**把连接关掉**（RCON 是一条长连接，留着它就等于
+    //   留一个句柄给下一次启动；同语料库那条"用完就关"的理由）。
+    try {
+      this.#serverLoop?.stop()
     } catch {
       /* 停不掉也不影响收尾 */
     }

@@ -129,6 +129,40 @@ section('④ 删除前检查：只允许删"我们自己的产物"')
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+section('④-b ★★ 发布模板里**不许有真实凭据**（0.3.2：RCON 密码这一类现有正则抓不到）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 为什么要单独加这一条：`check-release-package.mjs` 的 `SECRETS` 只认三种形状
+// （DeepSeek key 的 `sk-<32位十六进制>` 与两个历史 SnowLuma token）。
+// **RCON 密码不匹配任何一条** —— 它可以是任意字符串，所以字符串匹配那条路
+// 对它天然无效。∴ 判据必须是**字段级**的："模板里这个字段是不是空的"。
+{
+  const examplePath = join(PKG_ROOT, 'config.example.json')
+  let example = null
+  try {
+    example = JSON.parse(readFileSync(examplePath, 'utf8'))
+  } catch (error) {
+    check('config.example.json 是可解析的 JSON', false, String(error?.message ?? error))
+  }
+  if (example) {
+    const servers = Array.isArray(example.servers) ? example.servers : []
+    check('★ servers 段存在（模板要教人怎么写）', Array.isArray(example.servers))
+    const withPassword = servers.filter((s) => typeof s?.password === 'string' && s.password !== '')
+    check(
+      '★★★ 模板里每一条 RCON 密码**都是空字符串**（泄露一条 = 把别人的服务端控制台交出去）',
+      withPassword.length === 0,
+      withPassword.map((s) => s.id).join(' / '),
+    )
+    // 地址也不许填成一个真实的开发机地址（那是"机器专属信息"，与 MACHINE 那条同类）
+    const withHost = servers.filter((s) => s?.host && !/^(127\.0\.0\.1|localhost|::1)$/.test(String(s.host)))
+    check('★ 模板里的 host 只有回环地址（本机 IP / 域名属于机器专属信息）', withHost.length === 0, withHost.map((s) => s.host).join(' / '))
+    // 默认必须是**关**的：监测是"会去连外部服务"的能力
+    const enabled = servers.filter((s) => s?.enabled === true)
+    check('★ 模板里默认全是停用的（监测会去连外部服务，默认不许自己跑起来）', enabled.length === 0)
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 section('⑤ 接线：发布脚本**真的**用了这些检查（纯函数测过 ≠ 接线做了）')
 // ══════════════════════════════════════════════════════════════════════════
 {

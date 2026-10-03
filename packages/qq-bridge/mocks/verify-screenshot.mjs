@@ -541,7 +541,14 @@ setQqConfig({ httpUrl: 'http://127.0.0.1:9', selfId: '1' })
 section('⑫ 桥接接线与登记')
 
 const bridgeSrc = readFileSync(join(PKG_ROOT, 'src', 'bridge.mjs'), 'utf8')
-check('★ bridge 在跑模型之前写授权', bridgeSrc.indexOf('writeGrant({') > 0 && bridgeSrc.indexOf('writeGrant({') < bridgeSrc.indexOf('await this.rpc.prompt('))
+// ★ 判据用 **lastIndexOf**：`bridge.mjs` 里有两处 `await this.rpc.prompt(` ——
+//   `#runTurn`（普通回合，**必须先写授权**）与 `runProactiveTurn`（定时任务发起的回合，
+//   **刻意不写授权、还要清掉上一轮留下的**）。用 indexOf 会拿主动那一处去比，
+//   于是这条断言在"接线完全正确"的情况下变红（2026-10 加定时任务时实际发生了）。
+check('★ bridge 在跑模型之前写授权', bridgeSrc.indexOf('writeGrant({') > 0 && bridgeSrc.indexOf('writeGrant({') < bridgeSrc.lastIndexOf('await this.rpc.prompt('))
+// ★★ 主动回合**不许继承**上一轮留下的授权：那个文件是"这一轮说话人是不是管理员"，
+//    而主动回合**没有"这一轮说话人"** ⇒ 不清掉就是拿着十分钟前某位管理员的凭证去截屏。
+check('★★ 定时任务的主动回合会**清掉**上一轮留下的截图授权（陈旧授权 = 提权）', /runProactiveTurn[\s\S]{0,6000}?clearGrant\(/.test(bridgeSrc))
 const dropCall = (bridgeSrc.match(/^\s*dropGrant\(\)/gm) ?? []).length
 check('★ 授权在失败出口与正常出口都清了', dropCall >= 2, `调用点 ${dropCall} 个`)
 check('★ tier 取自 roster 的判定结果（模型改不了的那个事实）', /writeGrant\(\{[\s\S]{0,400}?\btier,/.test(bridgeSrc))

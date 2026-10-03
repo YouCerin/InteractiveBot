@@ -29,6 +29,19 @@ import { createApiHandler, serveApi } from '../src/api.mjs'
 import { createCorpus } from '../src/corpus.mjs'
 import { sliceLogLines } from '../src/log-tail.mjs'
 import { searchMemoryFiles } from '../src/memory-search.mjs'
+import {
+  FIRES_REL,
+  MISSED_REL,
+  deleteTask as deleteScheduleTask,
+  dueAt,
+  listTasks as listScheduleTasks,
+  msUntilNext,
+  readFireIndex,
+  readKnownChats,
+  readLedger,
+  writeTask as writeScheduleTask,
+} from '../src/schedule.mjs'
+import { createRestarter } from '../src/servers/restart.mjs'
 
 let passed = 0
 let failed = 0
@@ -110,6 +123,105 @@ const handler = createApiHandler({
   searchMemory: ({ query, limit = 50 } = {}) =>
     // ★ 用**实现里那一份**纯函数（`src/memory-search.mjs`）—— 不在测试里再写一遍。
     searchMemoryFiles({ workspace: WS, query, limit }),
+
+  // ── 0.3.2 P5 定时任务（任务页签）────────────────────────────────────────
+  //
+  // ★ 依赖名必须与 `api.mjs` 里解构的名字**逐个一致**（`scheduleList` / `scheduleSave` /
+  //   `scheduleDelete` / `scheduleHistory`）—— 名字写错的表现是路由回 501，
+  //   而 501 在界面上是"未实现"（会被静默隐藏），很难看出是名字写错了。
+  // ★ 这里**直接用真实现**（`src/schedule.mjs`）+ 真临时工作区：
+  //   "写进去能不能读回来""删了还在不在"这类问题，只有真落盘才答得出来。
+  scheduleList: async () => {
+    const listed = listScheduleTasks({ workspace: WS })
+    const idx = readFireIndex({ workspace: WS })
+    const claimed = new Set(idx.map.keys())
+    const now = Date.now()
+    return {
+      ok: true,
+      enabled: false,
+      tasks: listed.tasks.map((t) => {
+        const due = dueAt(t, { now, isClaimed: (k) => claimed.has(k) })
+        return {
+          ...t,
+          nextInMs: msUntilNext(t, { now, isClaimed: (k) => claimed.has(k) }),
+          dueNow: Boolean(due),
+          dueScheduledAt: due ? due.scheduledAt : null,
+          dueLateMs: due ? due.lateByMs : 0,
+        }
+      }),
+      problems: listed.problems,
+      ledgerBad: idx.bad,
+      missed: readLedger(MISSED_REL, { workspace: WS }).rows.slice(-20),
+      history: readLedger('runtime/schedule-history.jsonl', { workspace: WS }).rows.slice(-20),
+      knownChats: readKnownChats({ workspace: WS }).chats,
+      timezone: 'Asia/Shanghai',
+    }
+  },
+  scheduleSave: async ({ task } = {}) => {
+    const r = writeScheduleTask({ workspace: WS, task })
+    return r.ok ? { ok: true, task: r.task } : { ok: false, why: r.why }
+  },
+  scheduleDelete: async ({ id } = {}) => {
+    if (!id) return { ok: false, why: '缺少 id' }
+    const r = deleteScheduleTask({ workspace: WS, id })
+    return r.ok ? { ok: true } : { ok: false, why: r.why }
+  },
+  scheduleHistory: async ({ limit = 50 } = {}) => ({
+    ok: true,
+    fires: readLedger(FIRES_REL, { workspace: WS, limit }).rows,
+    missed: readLedger(MISSED_REL, { workspace: WS, limit }).rows,
+    history: readLedger('runtime/schedule-history.jsonl', { workspace: WS, limit }).rows,
+  }),
+
+  // ── 0.3.2 P2/P4 服务器监测（服务器页签）───────────────────────────────
+  //
+  // ★ 故意在密码字段里放一个**必须永不外泄**的串（与 `/api/snowluma/accounts`
+  //   那条断言同一个套路）：路由若漏了白名单，这条会当场变红。
+  serversList: async () => ({
+    ok: true,
+    enabled: true,
+    running: true,
+    pollMs: 30000,
+    servers: [
+      {
+        id: 's1',
+        name: '主服',
+        enabled: true,
+        host: '127.0.0.1',
+        port: 25565,
+        rconPort: 25575,
+        passwordSet: true,
+        startCommandSet: true,
+        __password: 'THIS_SHOULD_NEVER_LEAK',
+        failThreshold: 2,
+        rules: { minTps: null, maxPlayers: null },
+        monitor: { phase: 'up', samples: 3, failures: 0, lastAt: 1000, lastReachable: true, lastPlayers: 2, lastTps: null, lastVersion: null, lastError: null },
+        ownership: { owner: 'bridge', pid: 4242, startedAt: 900, portOpen: true, why: '是我起的' },
+        restart: { attempts: 0, lastOutcome: null, lastAttemptAt: null, cooldownUntil: null, waitingForAdmin: false },
+        lastSample: 1000,
+      },
+    ],
+    recentEvents: [],
+  }),
+  // ★ 人工指令：用**真实现**改真临时工作区里的重启状态（"改完能不能从盘上读回来"只有真落盘才答得出）
+  serversAction: async ({ serverId, action } = {}) => {
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    if (action !== 'retry' && action !== 'abandon') return { ok: false, why: `不认识的动作「${action}」` }
+    const r = createRestarter({ workspace: WS, serverId, log: () => {} })
+    r.load()
+    if (action === 'retry') r.approveRetry()
+    else r.abandon()
+    const st = r.state()
+    return {
+      ok: true,
+      serverId,
+      action,
+      attempts: st.attempts,
+      waitingForAdmin: st.waitingForAdmin === true,
+      cooldownUntil: st.cooldownUntil ?? null,
+      hint: action === 'retry' ? '已解除「等指令」与冷却。**真正的重启会在下一次检测到它连不上时执行。**' : '已标记放弃。',
+    }
+  },
 })
 
 const server = await serveApi({ port: 0, handler, log: (m) => logs.push(String(m)) })
@@ -217,6 +329,144 @@ section('④-b /api/memory/search —— 搜"沉淀的事实"（不需要会话�
   check('  报了扫了几个记忆文件（让人知道搜索范围）', (hd?.files ?? 0) >= 2, String(hd?.files))
   check('★★ 搜不到时是"空结果 + 200"，不是报错（搜索无结果不是故障）',
     (await get('/api/memory/search?q=%E4%B8%8D%E5%8F%AF%E8%83%BD%E5%AD%98%E5%9C%A8%E7%9A%84%E8%AF%8D')).status === 200)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('④-c /api/schedule —— 定时任务（0.3.2 P5 任务页签）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ★ 为什么这一节必须"真起 HTTP 打一次"：这三类错**`node --check` 与导入审计都抓不到**
+//   （AGENT.md 里写着）：① 返回自己的对象而不是 `ok()`；② 异步漏 `await`（序列化成 `{}`，
+//   界面"什么都不显示"却不报错）；③ **依赖名与 api.mjs 解构的名字不一致** ⇒ 路由拿不到依赖、
+//   回 501，而 501 在界面上是"未实现"（会被静默隐藏）。
+{
+  const post = async (p, body) => {
+    const res = await fetch(url(p), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 就按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  const del = async (p) => {
+    const res = await fetch(url(p), { method: 'DELETE', signal: AbortSignal.timeout(15_000) })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 就按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+
+  // ① 列表：**不是空对象**（漏 await 就会是 `{}`）
+  const l0 = await get('/api/schedule')
+  check('返回 200', l0.status === 200, String(l0.status))
+  check('★★ 拿到的是内容而不是 `{}`（漏 await 的典型形状）', Array.isArray(l0.json?.data?.tasks), l0.text.slice(0, 120))
+  check('★ 带 `enabled`（功能总开关状态）与 `knownChats`（目标必须在这份名单里）',
+    typeof l0.json.data.enabled === 'boolean' && Array.isArray(l0.json.data.knownChats))
+  check('★ `problems` / `ledgerBad` 也在（界面要能说"有 N 条读不出来"）',
+    Array.isArray(l0.json.data.problems) && typeof l0.json.data.ledgerBad === 'number')
+
+  // ② 保存：**校验不过一个字都不写**
+  const bad = await post('/api/schedule', { task: { id: 'x', title: '缺 prompt 与 target' } })
+  check('★ 非法任务 → 400（不是 500，也不是"默默存了"）', bad.status === 400, String(bad.status))
+  const before = (await get('/api/schedule')).json.data.tasks.length
+  check('★★ 被拒之后磁盘上**没有多出一条**（不许写半个任务）', before === 0, String(before))
+  check('★ 缺 task 对象也 400（不用空对象去"存一条空任务"）', (await post('/api/schedule', {})).status === 400)
+
+  // ③ 存一条合法的：下一跳/触发点字段要真的算出来
+  const okBody = {
+    task: {
+      id: 'api1',
+      title: '接口用例',
+      repeat: { kind: 'daily', at: '08:00', weekdays: null },
+      target: { kind: 'private', peerId: '999' },
+      prompt: '提醒我吃饭',
+      timezone: 'Asia/Shanghai',
+    },
+  }
+  const saved = await post('/api/schedule', okBody)
+  check('★ 合法任务 → 200 且回带规范化后的任务', saved.status === 200 && saved.json?.data?.task?.id === 'api1', saved.text.slice(0, 160))
+  const after = await get('/api/schedule')
+  const one = after.json.data.tasks.find((t) => t.id === 'api1')
+  check('★★ 列表里出现了它，且**带算出来的 `nextInMs` / `dueNow`**',
+    Boolean(one) && 'nextInMs' in one && typeof one.dueNow === 'boolean',
+    JSON.stringify(one)?.slice(0, 200))
+  check('★ 规范化后的形状带 `effectiveFrom`（"从哪一刻起算它的账"）', typeof one.effectiveFrom === 'number')
+
+  // ④ 历史：三份台账都要有键（**字段名对着实现取**，别按想象改名）
+  const h = await get('/api/schedule/history?limit=5')
+  check('历史接口 200 且三份台账齐全（fires/missed/history）',
+    h.status === 200 && Array.isArray(h.json?.data?.fires) && Array.isArray(h.json?.data?.missed) && Array.isArray(h.json?.data?.history),
+    h.text.slice(0, 140))
+
+  // ⑤ 删除：**没有 id 就 400**（"删全部"是最坏的一种猜错）
+  check('★★ 没带 id 的删除 → 400（绝不"删全部"）', (await del('/api/schedule')).status === 400)
+  const d1 = await del('/api/schedule?id=api1')
+  check('★ 带 id 的删除 → 200', d1.status === 200, String(d1.status))
+  check('★ 删完之后列表里真的没了', (await get('/api/schedule')).json.data.tasks.length === 0)
+  check('★ 删不存在的 id 如实报错（不装成功）', (await del('/api/schedule?id=nope')).status === 400)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器页签）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ★ 这一条的核心是**凭据不出门**：RCON 密码是任意字符串，现有的密钥正则
+//   （`sk-<32位>` 那两个 token）**天然抓不到它**，所以判据必须是
+//   「响应里有没有那串密码」（逐字检查）+ 「有没有 passwordSet 这个布尔」。
+{
+  const r = await get('/api/servers')
+  check('返回 200', r.status === 200, String(r.status))
+  check('★★ 拿到的是内容而不是 `{}`（漏 await 的典型形状）', Array.isArray(r.json?.data?.servers), r.text.slice(0, 120))
+  check('★ 带 `enabled` / `running`（功能开没开、监测跑没跑 —— 两个不同的问题）',
+    typeof r.json.data.enabled === 'boolean' && typeof r.json.data.running === 'boolean')
+  const row = r.json.data.servers[0]
+  check('★ 每台带**活证据**：monitor + ownership + restart（界面据此显示"上次采样在多久前"）',
+    Boolean(row) && 'monitor' in row && 'ownership' in row && 'restart' in row)
+  check('★★★ 响应里**一个字符都没有密码**（依赖故意塞了 `THIS_SHOULD_NEVER_LEAK`）',
+    !r.text.includes('THIS_SHOULD_NEVER_LEAK'), r.text.slice(0, 160))
+  check('★ 只给"配没配"（passwordSet 布尔），不给密码本身', row?.passwordSet === true)
+  check('★ startCommand 同理只给布尔（那是使用者的机器信息）', typeof row?.startCommandSet === 'boolean')
+  check('★ 阈值缺失必须是 `null` 而**不是 0**（Number(null)===0 会让"没配"变成"阈值 0"⇒误报）',
+    row?.rules?.minTps === null, JSON.stringify(row?.rules))
+
+  // ── 人工指令：**只白名单两个动作**（fail-closed）──
+  const act = async (body) => {
+    const res = await fetch(url('/api/servers/action'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 就按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  check('★★★ `start` 走 HTTP **被拒**（它绕过了归属/冷却/次数三道纪律）', (await act({ serverId: 's1', action: 'start' })).status === 400)
+  check('★★★ `stop` 同样被拒（同上）', (await act({ serverId: 's1', action: 'stop' })).status === 400)
+  check('★ 不认识的动作 400', (await act({ serverId: 's1', action: 'nuke' })).status === 400)
+  check('★★ 缺 serverId 就 400（**不猜是哪一台**）', (await act({ action: 'retry' })).status === 400)
+  const okRetry = await act({ serverId: 's1', action: 'retry' })
+  check('★ `retry` → 200 且回带状态', okRetry.status === 200 && typeof okRetry.json?.data?.attempts === 'number', okRetry.text.slice(0, 120))
+  check('★★ 回带**如实提醒**：这条指令不会立刻重启（避免界面给人错误的期待）',
+    /不会立刻重启|下一次检测到/.test(String(okRetry.json?.data?.hint ?? '')), String(okRetry.json?.data?.hint ?? ''))
+  check('★ `abandon` → 200 且 waitingForAdmin=true', (await act({ serverId: 's1', action: 'abandon' })).json?.data?.waitingForAdmin === true)
 }
 
 // ══════════════════════════════════════════════════════════════════════════

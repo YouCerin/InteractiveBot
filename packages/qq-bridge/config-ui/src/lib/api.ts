@@ -578,6 +578,153 @@ export const api = {
   /** 增改；★ nickname 空串 = 删除这个号码。改了下一轮就生效（restartRequired:false）。 */
   contactSave: (qq: string, nickname: string) =>
     request<ContactSaveResult>('POST', '/api/contacts', { qq, nickname }),
+
+  // ── 0.3.2 定时任务（CONFIG-UI.md §2.11「任务」页签）─────────────────────
+  /** 任务列表 + 认领状态 + 错过/历史 + 已知会话名单。★ 进页签拉一次即可，别跟着 3 秒轮询。 */
+  schedule: () => request<ScheduleListResult>('GET', '/api/schedule'),
+  /** 新建 / 覆盖一条任务。★ 校验不过后端**一个字都不写**，错误照实回给界面。 */
+  scheduleSave: (task: ScheduleTaskDraft) => request<{ ok?: boolean; task?: ScheduleTask }>('POST', '/api/schedule', { task }),
+  /** 删掉一条任务（必须带 id —— 没有"删全部"这条路）。 */
+  scheduleDelete: (id: string) =>
+    request<{ ok?: boolean }>('DELETE', `/api/schedule?id=${encodeURIComponent(id)}`),
+  /** 触发台账 + 错过台账 + **实际发出去的原文**（后者是唯一能事后核对的东西）。 */
+  scheduleHistory: (limit = 50) => request<ScheduleHistoryResult>('GET', `/api/schedule/history?limit=${limit}`),
+
+  // ── 0.3.2 服务器监测（CONFIG-UI.md §2.12「服务器」页签）──────────────────
+  /** 配置摘要 + **活证据** + 归属 + 重启状态。★ 进页签拉一次即可，别跟着 3 秒轮询。 */
+  servers: () => request<ServersResult>('GET', '/api/servers'),
+  /** 人工指令：**只有 retry / abandon**（start/stop 走 CLI，那条路上是人在做）。 */
+  serversAction: (serverId: string, action: 'retry' | 'abandon') =>
+    request<ServersActionResult>('POST', '/api/servers/action', { serverId, action }),
+}
+
+// ── 0.3.2 服务器监测（CONFIG-UI.md §2.12）─────────────────────────────────
+
+/** 一台服务器在界面上的样子。★ **不含密码** —— 只有 `passwordSet` 这个布尔。 */
+export interface ServerRow {
+  id: string
+  name: string
+  enabled: boolean
+  host: string
+  port: number | null
+  rconPort: number | null
+  /** 只说明"配没配"，**永远不回密码本身** */
+  passwordSet: boolean
+  /** 同上：那是使用者的机器信息（可能含路径与 JVM 参数） */
+  startCommandSet: boolean
+  failThreshold: number | null
+  rules: { minTps: number | null; maxPlayers: number | null }
+  /** 活证据：这台采过样才有（`null` = 还没采过） */
+  monitor: {
+    phase: 'up' | 'down'
+    samples: number
+    failures: number
+    lastAt: number | null
+    lastReachable: boolean | null
+    lastPlayers: number | null
+    lastTps: number | null
+    lastVersion: string | null
+    lastError: string | null
+  } | null
+  /** 归属：**"能不能重启"的唯一依据**（不是 `bridge` 就只能只报告） */
+  ownership: { owner: 'bridge' | 'external' | 'unknown'; pid?: number | null; startedAt?: number | null; portOpen?: boolean; weak?: boolean; why: string } | null
+  /** 重启状态机（冷却 / 等指令 / 上次结果） */
+  restart: { attempts: number; lastOutcome: string | null; lastAttemptAt: number | null; cooldownUntil: number | null; waitingForAdmin: boolean } | null
+  lastSample: number | null
+}
+
+export interface ServersResult {
+  ok: boolean
+  /** 配了服务器吗（功能层） */
+  enabled: boolean
+  /** 监测循环跑着吗（**与上一个是两个不同的问题**） */
+  running: boolean
+  pollMs: number | null
+  servers: ServerRow[]
+  recentEvents: { at?: number; event?: string; serverName?: string; text?: string }[]
+}
+
+export interface ServersActionResult {
+  ok?: boolean
+  serverId?: string
+  action?: string
+  attempts?: number
+  waitingForAdmin?: boolean
+  cooldownUntil?: number | null
+  /** ★ 后端如实给的提醒（"这条指令不会立刻重启"）—— 界面照着显示，别自己编 */
+  hint?: string
+}
+
+// ── 0.3.2 定时任务（CONFIG-UI.md §2.11）────────────────────────────────────
+
+/**
+ * 一条任务在界面上的样子。
+ *
+ * ★ `nextInMs` / `dueNow` **两个字段分开给**，别合成一个数字：
+ *   `nextInMs === 0` 意思是"**现在就该发**（欠着一次）"，`null` 意思是"没有下一次"
+ *   （停用 / once 已发过）。合成一个数字会让界面写出错话。
+ */
+export interface ScheduleTask {
+  id: string
+  title: string
+  enabled: boolean
+  repeat:
+    | { kind: 'daily'; at: string; weekdays: number[] | null }
+    | { kind: 'interval'; everyMs: number }
+    | { kind: 'once'; at: string }
+  target: { kind: 'group' | 'private'; peerId: string }
+  prompt: string
+  requestedBy: string
+  ignoreQuietHours: boolean
+  lateToleranceMs: number
+  timezone: string
+  lastFiredAt: number | null
+  lastScheduledAt: number | null
+  createdAt: number
+  effectiveFrom: number
+  /** 距下一次触发的毫秒；`0` = **现在就该发**；`null` = 没有下一次 */
+  nextInMs: number | null
+  dueNow: boolean
+  dueScheduledAt: number | null
+  dueLateMs: number
+}
+
+/** 新建/覆盖时提交的形状（`id` 必填且只允许字母数字与 `_.-`）。 */
+export type ScheduleTaskDraft = Omit<ScheduleTask, 'nextInMs' | 'dueNow' | 'dueScheduledAt' | 'dueLateMs' | 'effectiveFrom'>
+
+export interface ScheduleLedgerRow {
+  at?: number
+  key?: string
+  taskId?: string
+  title?: string
+  scheduledAt?: number
+  status?: string
+  detail?: string
+  lateByMs?: number
+  text?: string
+  via?: string
+}
+
+export interface ScheduleListResult {
+  ok: boolean
+  /** 功能总开关（`schedule.enabled`）。★ 控件在**插件卡**上，这里只用于显示状态，不渲染第二个开关 */
+  enabled: boolean
+  tasks: ScheduleTask[]
+  /** 读不出来的任务（**要显示**，别静默少几条） */
+  problems: { id: string; why: string }[]
+  /** 触发台账里读不出来的行数 */
+  ledgerBad: number
+  missed: ScheduleLedgerRow[]
+  history: ScheduleLedgerRow[]
+  knownChats: string[]
+  timezone: string
+}
+
+export interface ScheduleHistoryResult {
+  ok: boolean
+  fires: ScheduleLedgerRow[]
+  missed: ScheduleLedgerRow[]
+  history: ScheduleLedgerRow[]
 }
 
 // ── 0.2.2 联系人昵称的类型（格式只有后端一处实现，界面不拼文件文本）──────────

@@ -151,8 +151,23 @@ function normalizeStickerSkill(value) {
   }
 }
 
-export function normalizeConfig(c) {
-  const src = c ?? {}
+/**
+ * 「这个数配了吗」——**区分"没配"与"配了 0"**。
+ *
+ * ★★ 为什么需要一个专门的函数（本项目已栽过两次）：`Number(null) === 0`、
+ *   `Number('') === 0`，而 `Number.isFinite(0)` 是 `true`。于是
+ *   `Number.isFinite(Number(x)) ? Number(x) : null` 这种常见写法会把
+ *   **"没配"判成"0"** —— 对阈值类字段来说，那意味着"阈值 0" ⇒ **无条件告警**。
+ *   同一个坑在 `servers/monitor.mjs` 的渲染那侧也出现过（"人数拿不到"被渲染成"0 人"）。
+ */
+function numOrNull(v) {
+  if (v === null || v === undefined) return null
+  if (typeof v === 'string' && v.trim() === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+export function normalizeConfig(c) {  const src = c ?? {}
 
   // DSH 的额外安装位置候选要在 `findDshCli()` 之前算好 —— 它直接吃这张表。
   // 这样"DSH 装在非标准位置"就是一个**配置**问题，而不是"去改 src/local.mjs"。
@@ -521,6 +536,66 @@ export function normalizeConfig(c) {
       //   其余技能（pixiv 等）仍然原样保留、默认值由各自清单给。
       return { ...map, sticker: normalizeStickerSkill(map.sticker) }
     })(),
+    // ── 0.3.2：定时任务的功能总开关 ────────────────────────────────────────
+    //
+    // ★ **默认关**：定时任务是本项目唯一一个"不用谁开口就往外发消息"的能力，
+    //   按"危险的能力默认关"的口径（同截图技能）。显式写 `true` 才开。
+    // ★ `tickMs` 有**下限**（`schedule-runner.mjs` 的 `MIN_TICK_MS`）：
+    //   手滑写成毫秒会把 CPU 打满。
+    schedule: {
+      enabled: src.schedule?.enabled === true,
+      tickMs: Number.isFinite(Number(src.schedule?.tickMs)) ? Number(src.schedule.tickMs) : undefined,
+    },
+    // ── 0.3.2 P2：服务器监测（RCON）────────────────────────────────────────
+    //
+    // 形状（**每台服务器一条**）：
+    //   { id, name, host, port, password, rconPort, failThreshold, rules:{minTps,maxPlayers} }
+    // ★ 默认**空**（没有服务器 = 这一层完全不工作，且**一次网络请求都不发**）。
+    // ★ `password` 只进 config.json（属于 `user` 类受保护路径，永不进包、不进日志）。
+    servers: (() => {
+      const raw = Array.isArray(src.servers) ? src.servers : []
+      const list = []
+      for (const item of raw) {
+        if (!item || typeof item !== 'object') continue
+        const id = String(item.id ?? '').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 40)
+        if (!id) continue // 没有 id 就没有文件名 ⇒ 跳过（**不猜**）
+        list.push({
+          id,
+          name: String(item.name ?? id).slice(0, 60),
+          host: String(item.host ?? '127.0.0.1').trim() || '127.0.0.1',
+          port: Number.isFinite(Number(item.port)) ? Number(item.port) : 25565,
+          rconPort: Number.isFinite(Number(item.rconPort)) ? Number(item.rconPort) : 25575,
+          // ★ 密码原样保留（含空串）：空 = 没配，用的时候会**如实报"没配密码"**，不猜默认值
+          password: typeof item.password === 'string' ? item.password : '',
+          enabled: item.enabled !== false,
+          failThreshold: Number.isFinite(Number(item.failThreshold)) ? Math.max(1, Number(item.failThreshold)) : 2,
+          // ── 0.3.2 P4：守护与重启要的那几项 ──────────────────────────────
+          //
+          // ★ **`startCommand` 留空 = 我们不知道怎么启动它** ⇒ `supervise.launch()`
+          //   会如实拒绝（**绝不猜一个 `java -jar server.jar`**：模组服的启动方式
+          //   各不相同，猜错就是"我试过重启了"的假象）。
+          //   ⚠️ 它在 config.json 里是**明文命令**（可能含路径与 JVM 参数）——
+          //   属于使用者的机器信息，与密码同一类保护（配置本身永不进 git/发布包）。
+          startCommand: typeof item.startCommand === 'string' ? item.startCommand.slice(0, 500) : '',
+          cwd: typeof item.cwd === 'string' ? item.cwd.slice(0, 300) : '',
+          // 默认用 shell 起（模组服的启动行常带 `&&` / 变量 / `@args.txt`）
+          shell: item.shell !== false,
+          // ★★ 阈值必须区分"没配"与"配了 0"：`Number(null) === 0` 而且 `isFinite(0)` 为真，
+          //   于是 `rules.minTps: null`（= 不判这一项）会被归一化成 **0**，
+          //   接着 `monitor.mjs` 就会认为"TPS 低于 0 算异常"、"人数超过 0 算异常" ⇒ **误报**。
+          //   这个坑在本项目里出现过两次（渲染那侧一次、这里一次），∴ 判据统一写成
+          //   "先排除 null/undefined/空串，再谈数值"。
+          rules: {
+            minTps: numOrNull(item.rules?.minTps),
+            maxPlayers: numOrNull(item.rules?.maxPlayers),
+          },
+        })
+      }
+      return list
+    })(),
+    // ★ 采样间隔（毫秒）。**有下限**（`servers/loop.mjs` 的 `MIN_POLL_MS` = 15 秒）：
+    //   模组服的 `list` 偶尔要几秒，再密只是白耗 CPU 与 RCON 连接。
+    serversPollMs: Number.isFinite(Number(src.serversPollMs)) && Number(src.serversPollMs) > 0 ? Number(src.serversPollMs) : undefined,
     // 安全相关的开关（**默认全是保守值**）。
     security: {
       // ★ 允许把"内网/本机地址"的图片发出去（默认关）。

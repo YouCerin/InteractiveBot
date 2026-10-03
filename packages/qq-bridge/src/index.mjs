@@ -1450,6 +1450,406 @@ async function main() {
   //   --tasks --rollback <N> [--mode]  回到第 N 步
   //   --tasks-archive [--apply]        归档过期台账（**默认预演**）
   //   --tasks --forget <会话>          删掉某会话的台账
+  // ── 定时任务（0.3.2 P1）：**离线巡检** ────────────────────────────────────
+  //
+  // 为什么需要它：定时任务是"无人开口也说话"，所以它坏掉时**没有任何人会当场发现**
+  // —— 表现只是"8 点它没响"。机器人没在跑（界面也打不开）时，"现在有几条任务、
+  // 下次什么时候响、上一次到底发出去没有"只有这个入口答得出来。
+  //
+  //   --schedule                 列出任务 + 下次触发 + 最近触发 + 错过台账
+  //   --schedule --fires         把触发台账整份打出来（含"可能已发出"那类残局）
+  //   --schedule --history       最近实际发出去的**原文**（模型现写 ⇒ 唯一能核对的）
+  //
+  // ★ 位置纪律（`AGENT.md` 那条"只读命令不该有启动服务这种副作用"）：
+  //   它必须在下面 `--memory` 那一段**之上**，否则直接跑 `--schedule` 会一路
+  //   走到真的启动桥接（`--delivery` 那次事故就是这么来的）。
+  if (process.argv.includes('--schedule')) {
+    ;(async () => {
+      const {
+        listTasks: listScheduleTasks,
+        writeTask: writeScheduleTask,
+        deleteTask: deleteScheduleTask,
+        dueAt,
+        msUntilNext,
+        readFireIndex,
+        readLedger,
+        readKnownChats,
+        formatStamp,
+        FIRES_REL,
+        MISSED_REL,
+      } = await import('./schedule.mjs')
+      const workspace = config.dsh?.workspace
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace，无法定位定时任务目录')
+        process.exit(2)
+      }
+      const now = Date.now()
+      const idx = readFireIndex({ workspace })
+      const claimed = new Set(idx.map.keys())
+      const listed = listScheduleTasks({ workspace })
+
+      console.log('')
+      console.log('定时任务（只读）：到点了主动说一句 —— **它坏掉时没有任何人会当场发现**，所以要看这里')
+      console.log(`工作区：${workspace}`)
+      console.log(`开关：schedule.enabled = ${config.schedule?.enabled === true ? 'true（已开）' : 'false / 未设（**关着**）'}`)
+      console.log('')
+
+      if (process.argv.includes('--fires')) {
+        const rows = readLedger(FIRES_REL, { workspace }).rows
+        console.log(`触发台账 ${FIRES_REL}：${rows.length} 行${idx.bad > 0 ? `（另有 ${idx.bad} 行读不出来）` : ''}`)
+        for (const r of rows.slice(-40)) {
+          const when = Number.isFinite(Number(r.scheduledAt)) ? formatStamp(r.scheduledAt) : '?'
+          console.log(`   ${when}  ${String(r.status ?? '?').padEnd(9)} ${String(r.title ?? r.taskId ?? r.key ?? '')}` +
+            `${r.detail ? `  ← ${String(r.detail).slice(0, 60)}` : ''}`)
+        }
+        console.log('')
+        console.log('   （`sending` = **已经开工但没结果**：可能已经说出去了 ⇒ 按投递账本同一条纪律，**不自动重做**）')
+        console.log('')
+        process.exit(0)
+      }
+
+      if (process.argv.includes('--history')) {
+        const rows = readLedger('runtime/schedule-history.jsonl', { workspace }).rows
+        console.log(`执行历史（**实际发出去的原文**，共 ${rows.length} 条）：`)
+        for (const r of rows.slice(-20)) {
+          const when = Number.isFinite(Number(r.scheduledAt)) ? formatStamp(r.scheduledAt) : '?'
+          console.log(`   ${when}  「${String(r.title ?? '')}」→ ${String(r.text ?? '')}`)
+        }
+        console.log('')
+        console.log('   （内容是**模型现写**的 ⇒ 这是唯一能事后核对"它到底说了什么"的地方）')
+        console.log('')
+        process.exit(0)
+      }
+
+      if (!listed.ok) {
+        console.error(`❌ 列不出任务：${listed.why}`)
+        process.exit(1)
+      }
+      if (listed.tasks.length === 0) {
+        console.log('   （还没有定时任务 —— 在控制台的「任务」页里建，或直接写）')
+        console.log(`   任务目录：${workspace}/runtime/schedule/`)
+      }
+      for (const t of listed.tasks) {
+        const rep = t.repeat
+        const repText =
+          rep.kind === 'daily'
+            ? `每天 ${rep.at}${Array.isArray(rep.weekdays) ? `（周 ${rep.weekdays.join('/')}）` : ''}`
+            : rep.kind === 'interval'
+              ? `每 ${Math.round(rep.everyMs / 60000)} 分钟`
+              : `仅一次 ${formatStamp(Date.parse(rep.at), t.timezone)}`
+        const until = msUntilNext(t, { now, isClaimed: (k) => claimed.has(k) })
+        const nextText =
+          until === null ? '**没有下一次**' : until === 0 ? '⚠️ 现在就该发（欠着一次）' : `${Math.round(until / 1000)} 秒后`
+        const due = dueAt(t, { now, isClaimed: (k) => claimed.has(k) })
+        console.log(`  ── ${t.title}（${t.id}）──`)
+        console.log(`     ${t.enabled ? '✅ 启用' : '⛔ 停用'} · ${repText} · 时区 ${t.timezone}`)
+        console.log(`     目标：${t.target.kind === 'group' ? '群' : '私聊'} ${t.target.peerId}`)
+        console.log(`     下次：${nextText}${due ? `（触发点 ${formatStamp(due.scheduledAt, t.timezone)}，迟到 ${Math.round(due.lateByMs / 60000)} 分钟）` : ''}`)
+        console.log(`     上次：${t.lastFiredAt ? new Date(t.lastFiredAt).toLocaleString() : '（还没发过）'}`)
+        console.log(`     内容：${String(t.prompt).slice(0, 80)}`)
+        console.log('')
+      }
+      if (listed.problems.length > 0) {
+        console.log(`   ⚠️ 有 ${listed.problems.length} 条任务读不出来（**跳过它、其它照常**）：`)
+        for (const p of listed.problems) console.log(`      · ${p.id}：${p.why}`)
+        console.log('')
+      }
+
+      const missed = readLedger(MISSED_REL, { workspace }).rows
+      console.log(`错过台账：${missed.length} 条（**不补发**，但会在下一轮对话里如实提一句）`)
+      for (const r of missed.slice(-10)) {
+        console.log(`   ${formatStamp(r.scheduledAt)}  「${r.title ?? r.taskId}」晚了约 ${Math.round((r.lateByMs ?? 0) / 60000)} 分钟`)
+      }
+      if (missed.length === 0) console.log('   （没有错过 —— 或者还没发生过）')
+      console.log('')
+
+      const chats = readKnownChats({ workspace })
+      console.log(`已知会话名单：${chats.chats.length} 个（定时任务的目标必须在这份名单里，否则拒发）`)
+      if (!chats.ok) console.log(`   ⚠️ ${chats.why}`)
+      for (const c of chats.chats.slice(-10)) console.log(`   · ${c}`)
+      console.log('')
+      console.log('   （这份名单是**落盘**的：内存判据会让"晚上重启、早上 8 点要发"被误判成陌生号码）')
+      console.log('')
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 读定时任务失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+  // ── 服务器监测（0.3.2 P2）：**离线巡检 + 真连一次** ────────────────────────
+  //
+  //   --servers            列出配置里的服务器 + 监测状态 + **真采一次**（只用只读命令 `list`）
+  //   --servers --dry      只看配置与历史状态，**不发任何网络请求**
+  //
+  // ★ 为什么必须真连一次才算数：`--check` 只能验"配置写对了没有"，
+  //   而"这个 RCON 到底通不通"只有真连才知道 —— 两者是不同的问题，
+  //   混起来会让人以为"自检过了就一定能用"。
+  // ★ 位置纪律同上：**必须在启动桥接之前**（只读命令不许有启动服务这种副作用）。
+  if (process.argv.includes('--servers')) {
+    ;(async () => {
+      const { createServerLoop, readRecentEvents } = await import('./servers/loop.mjs')
+      const { createMonitor, describeSnapshot } = await import('./servers/monitor.mjs')
+      const workspace = config.dsh?.workspace
+      const list = Array.isArray(config.servers) ? config.servers : []
+      const dry = process.argv.includes('--dry')
+
+      console.log('')
+      console.log('服务器监测（0.3.2 P2）：配置 + 监测状态' + (dry ? '（**不发任何网络请求**）' : '（含一次真采样，只用只读命令）'))
+      if (!workspace) console.log('⚠️ 配置里没有 dsh.workspace —— 读不到监测状态与事件台账')
+
+      if (list.length === 0) {
+        console.log('')
+        console.log('   （还没配服务器 —— 在 config.json 的 `servers` 段里加一条：[{id,name,host,rconPort,password}]）')
+        console.log('   没有服务器时这一层**完全不工作**，而且**一次网络请求都不发**。')
+        console.log('')
+        process.exit(0)
+      }
+
+      // ── 真采一次（默认做；`--dry` 跳过）──────────────────────────────────
+      let tick = null
+      if (!dry) {
+        const loop = createServerLoop({ workspace, servers: () => list, log: (m) => console.log(`   ${m}`) })
+        tick = await loop.tick()
+      }
+      const byId = new Map((tick?.results ?? []).map((r) => [r.serverId, r]))
+
+      for (const s of list) {
+        console.log('')
+        console.log(`  ── ${s.name}（${s.id}）──`)
+        console.log(`     ${s.enabled ? '✅ 启用' : '⛔ 停用'} · 游戏 ${s.host}:${s.port} · RCON ${s.host}:${s.rconPort}`)
+        console.log(`     密码：${s.password ? '已配置（不回显）' : '⚠️ **没配**（server.properties 里的 rcon.password）'}`)
+        console.log(`     判 down 需要连续失败 ${s.failThreshold} 次 · 异常阈值：${s.rules.minTps ?? '—'} TPS / ${s.rules.maxPlayers ?? '—'} 人`)
+
+        if (workspace) {
+          const mon = createMonitor({ workspace, serverId: s.id, failThreshold: s.failThreshold, log: () => {} })
+          const restored = mon.load()
+          const st = mon.snapshot()
+          console.log(
+            `     监测状态：${st.phase === 'down' ? '🔴 down' : '🟢 up'}` +
+              `${restored.restored ? '' : '（还没有历史 —— 这一层还没跑过）'}` +
+              ` · 采样 ${st.samples} 次 · 失败 ${st.failures} 次`,
+          )
+          if (st.lastReachable !== null) {
+            console.log(
+              `     上次采样：${describeSnapshot({
+                reachable: st.lastReachable === true,
+                players: st.lastPlayers,
+                tps: st.lastTps,
+                version: st.lastVersion,
+                error: st.lastError,
+              })}`,
+            )
+          }
+        }
+
+        // ── ★★ 归属与重启状态（P4）：**"能不能重启"必须看得见** ──
+        //   归属不是 `bridge` 时，"尝试一次重启"**会**被拒（那是纪律）；不显示出来的话，
+        //   使用者只会看到"服务器挂了它没动作"，而原因完全猜不到。
+        try {
+          const { createSupervisor } = await import('./servers/supervise.mjs')
+          const { createRestarter } = await import('./servers/restart.mjs')
+          if (workspace) {
+            const sup = createSupervisor({ workspace, log: () => {} })
+            const own = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
+            const mark = own.owner === 'bridge' ? '✅ 是我起的' : own.owner === 'external' ? '⚠️ 不是我起的' : '⛔ 没在跑'
+            console.log(`     归属：${mark}${own.weak ? '（弱证据：命令行比对）' : ''} —— ${own.why}`)
+            console.log(`     重启能力：${own.owner === 'bridge' && s.startCommand ? '✅ 可用' : '⛔ 不可用'}（需要"归属是我" + 配了 startCommand）`)
+            const rst = createRestarter({ workspace, serverId: s.id, log: () => {} })
+            rst.load()
+            const st = rst.state()
+            console.log(
+              `     重启状态：尝试 ${st.attempts} 次 · 上次结果 ${st.lastOutcome ?? '—'}` +
+                `${st.cooldownUntil ? ` · 冷却到 ${new Date(st.cooldownUntil).toLocaleTimeString()}` : ''}` +
+                `${st.waitingForAdmin ? ' · ⏳ **等管理员指令**（retry / abandon）' : ''}`,
+            )
+          }
+        } catch (error) {
+          // 增强路径：读不到就说读不到（别让整个巡检挂掉）
+          console.log(`     ⚠️ 归属/重启状态读不出来：${error?.message ?? error}`)
+        }
+
+        // ── 这一跳的活证据（比任何"监测中"都可信）──
+        const r = byId.get(s.id)
+        if (r?.snapshot?.skipped === 'disabled') {
+          console.log('     本次：⏭️ 停用 —— **一个网络请求都没发**')
+        } else if (r?.snapshot?.misconfigured) {
+          console.log(`     本次：⏭️ 没配密码 —— **没有发起连接**`)
+        } else if (r?.snapshot) {
+          // ★ 不写 `连不上（连不上那个…）`：失败时 `describeSnapshot` 自己已经说了"连不上"，
+          //   外面再加一层就变成重复嵌套（实测看到的措辞 bug）。
+          console.log(`     本次：${r.snapshot.reachable ? '🟢' : '🔴'} ${describeSnapshot(r.snapshot)}`)
+        } else if (r?.error) {
+          console.log(`     本次：❌ 采样失败：${r.error}`)
+        }
+        if (r?.events?.length > 0) {
+          for (const ev of r.events) console.log(`     ⚡ 产出事件：${ev.event} —— ${ev.text}`)
+        }
+      }
+
+      if (workspace) {
+        const recent = readRecentEvents({ workspace, limit: 8 })
+        console.log('')
+        console.log(`最近事件（${recent.rows.length} 条，来自 runtime/servers/events.jsonl）：`)
+        if (recent.rows.length === 0) console.log('   （还没有 —— 或者一直都没出事）')
+        for (const r of recent.rows) {
+          console.log(`   ${new Date(Number(r.at) || 0).toLocaleString()}  [${r.event}] ${r.serverName}：${r.text}`)
+        }
+      }
+      console.log('')
+      if (dry) console.log('   （去掉 `--dry` 会真采一次；采样只用只读命令 `list`，不改服务端任何状态）')
+      console.log('')
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 服务器巡检失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+  // ── 服务端守护（0.3.2 P4）：**由机器人拉起服务端** ──────────────────────
+  //
+  // 为什么必须有这个入口：`restart.mjs` 只在**归属是我**（`running.json` 的
+  // `pid@启动时刻` 对得上）时才肯动手。而"归属是我"只有一个来源 ——
+  // **服务端是被我们拉起来的**。没有这个入口，配好的服务器永远是 `external`，
+  // 「尝试一次重启」这条需求就只会退化成"只报告"。
+  //
+  //   --supervise status [--id <服务器>]   看归属：是我起的 / 别人的 / 没在跑
+  //   --supervise start  [--id <服务器>]   ★ 拉起它（detached + unref + 输出落盘）
+  //   --supervise stop   [--id <服务器>]   通过 RCON 优雅停服（**会真的停服务端**）
+  //   --supervise retry  [--id <服务器>]   管理员说"再试一次重启"
+  //   --supervise abandon[--id <服务器>]   管理员说"放弃，别再自动动它"
+  //
+  // ★ `stop` / `retry` / `abandon` 都是**会改状态**的动作，所以必须显式带 `--id`
+  //   （或配置里只有一台时自动选它）—— 不许"猜一台"。
+  // ★ 位置纪律同上：**必须在启动桥接之前**。
+  if (process.argv.includes('--supervise')) {
+    ;(async () => {
+      const { createSupervisor } = await import('./servers/supervise.mjs')
+      const { createRestarter } = await import('./servers/restart.mjs')
+      const { createRconClient } = await import('./servers/rcon.mjs')
+      const workspace = config.dsh?.workspace
+      const list = Array.isArray(config.servers) ? config.servers : []
+      const argOf = (n) => {
+        const i = process.argv.indexOf(n)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+      const action = ['status', 'start', 'stop', 'retry', 'abandon'].find((a) => process.argv.includes(a)) ?? 'status'
+
+      console.log('')
+      console.log(`服务端守护（0.3.2 P4）：${action}`)
+      if (!workspace) {
+        console.error('❌ 配置里没有 dsh.workspace —— 没有它就没有归属档可读写')
+        process.exit(2)
+      }
+      if (list.length === 0) {
+        console.log('   （配置里没有服务器 —— 先在 config.json 的 `servers` 段里加一条）')
+        process.exit(0)
+      }
+
+      // ★ 选哪一台：显式 `--id`；只有一台时自动选；多台且没给 ⇒ **报错**（不猜）
+      const wanted = argOf('--id')
+      let targets = []
+      if (wanted) {
+        targets = list.filter((s) => s.id === wanted)
+        if (targets.length === 0) {
+          console.error(`❌ 配置里没有 id 为「${wanted}」的服务器（有：${list.map((s) => s.id).join('、')}）`)
+          process.exit(2)
+        }
+      } else if (list.length === 1) {
+        targets = list
+      } else if (action === 'status') {
+        targets = list // status 可以看全部
+      } else {
+        console.error(`❌ 配了 ${list.length} 台服务器，必须用 --id 指明是哪一台（**不猜**）`)
+        process.exit(2)
+      }
+
+      const sup = createSupervisor({ workspace, log: (m) => console.log(`   ${m}`) })
+      for (const s of targets) {
+        console.log('')
+        console.log(`  ── ${s.name}（${s.id}）──`)
+
+        if (action === 'status') {
+          const own = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
+          const mark = own.owner === 'bridge' ? '✅ 是我起的' : own.owner === 'external' ? '⚠️ 不是我起的' : '⛔ 没在跑'
+          console.log(`     归属：${mark} —— ${own.why}`)
+          console.log(`     ${s.enabled ? '✅ 启用' : '⛔ 停用'} · startCommand：${s.startCommand ? '已配置' : '⚠️ **没配**（那就只能"只报告、不重启"）'}`)
+          const rec = sup.readState(s.id)
+          if (rec) {
+            console.log(`     归属档：pid ${rec.pid} · 起于 ${new Date(rec.startedAt).toLocaleString()} · 输出 → ${rec.logFile}`)
+          }
+          continue
+        }
+
+        if (action === 'start') {
+          if (!s.startCommand) {
+            console.log(`     ❌ 没配 \`startCommand\` —— **我不知道怎么启动它**（绝不猜一个 java -jar）`)
+            continue
+          }
+          const st = await sup.ownership({ serverId: s.id, host: s.host, port: s.port })
+          if (st.portOpen && st.owner === 'external') {
+            console.log(`     ⚠️ 端口已经有东西在听（${st.why}）—— **不重复拉起**（那会变成两个 JVM 同写世界）`)
+            console.log('       如果那个是旧进程、你确认可以接管，请先自己停掉它，再跑这条命令。')
+            continue
+          }
+          if (st.owner === 'bridge') {
+            console.log(`     ⏭️ 已经在跑且归属是我（${st.why}）—— 什么也不做`)
+            continue
+          }
+          const r = await sup.launch(s)
+          console.log(r.ok ? `     ✅ 已拉起（pid ${r.pid}）· 输出 → ${r.logFile}` : `     ❌ 没起来：${r.why}`)
+          console.log('     ⚠️ 服务端要几秒到几分钟才能接受连接（模组服更久）—— 用 `--servers` 看它到底通没通。')
+          continue
+        }
+
+        if (action === 'stop') {
+          if (!s.password) {
+            console.log('     ❌ 没配 RCON 密码 —— 没有命令通道可以叫它停')
+            continue
+          }
+          const c = createRconClient({ host: s.host, port: s.rconPort, password: s.password, log: () => {} })
+          const conn = await c.connect()
+          if (!conn.ok) {
+            console.log(`     ❌ RCON 连不上[${conn.layer}]：${conn.text}`)
+            c.close()
+            continue
+          }
+          const r = await c.exec('stop')
+          c.close()
+          console.log(r.ok ? '     ✅ 已发出 stop（服务端会自己优雅关闭）' : `     ⚠️ stop 没发成功：${r.text}`)
+          continue
+        }
+
+        // retry / abandon：管理员的显式指令（改重启状态机）
+        const restarter = createRestarter({ workspace, serverId: s.id, log: (m) => console.log(`   ${m}`) })
+        restarter.load()
+        if (action === 'retry') {
+          restarter.approveRetry()
+          const st = restarter.state()
+          console.log(`     ✅ 已批准再试一次（**累计尝试次数仍是 ${st.attempts}** —— 那是历史，不清）`)
+          console.log('     ⚠️ 真正的重启会在**下一次检测到 down** 时执行（本命令只解除"等指令"与冷却）。')
+        } else {
+          restarter.abandon()
+          console.log('     ✅ 已标记"放弃" —— 不再自动重启它，直到有人重新打开（或再跑一次 retry）。')
+        }
+        const st2 = restarter.state()
+        console.log(
+          `     当前重启状态：尝试 ${st2.attempts} 次 · 上次结果 ${st2.lastOutcome ?? '—'}` +
+            `${st2.cooldownUntil ? ` · 冷却到 ${new Date(st2.cooldownUntil).toLocaleTimeString()}` : ''}` +
+            `${st2.waitingForAdmin ? ' · ⏳ 等指令' : ''}`,
+        )
+      }
+      console.log('')
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 守护命令失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
   if (process.argv.includes('--tasks') || process.argv.includes('--tasks-archive')) {
     ;(async () => {
       const {
@@ -2818,6 +3218,128 @@ async function main() {
           }
         }
         return { scanned, hitCount: hits.length, hits, byCategory, categories: PRIVACY_CATEGORIES }
+      },
+
+      // ③-e 定时任务（0.3.2 P5，任务页签）──────────────────────────────────
+      //
+      // ★ 这一段是**任务页签的全部后端**。四个入口刻意收得很窄：
+      //   列 / 存 / 删 / 历史 —— 页签不需要别的东西，而收窄的接口面本身是一种防线。
+      // ★★ 三条纪律照抄上面记忆那几条：
+      //   ① 读不出来**不抛**（回 ok:false + why，界面照实显示）；
+      //   ② 保存走 `writeTask`（**校验不过一个字都不写**，不许写半个任务）；
+      //   ③ 删单个任务走 `deleteTask`（内部用 `unlinkSync`，不用 `rmSync` —— AGENT.md 第 8 条）。
+      scheduleList: async () => {
+        const workspace = config.dsh?.workspace
+        if (!workspace) return { ok: false, why: '配置里没有 dsh.workspace' }
+        const listed = listScheduleTasks({ workspace })
+        const now = Date.now()
+        // 认领集合：判"下次什么时候响 / 现在是不是欠着一次"要用它
+        const idx = readFireIndex({ workspace })
+        const claimed = new Set(idx.map.keys())
+        const tasks = listed.tasks.map((t) => {
+          const due = dueAt(t, { now, isClaimed: (k) => claimed.has(k) })
+          const until = msUntilNext(t, { now, isClaimed: (k) => claimed.has(k) })
+          return {
+            ...t,
+            // ★ 界面上"下次"这一栏的两个事实分开给：0 = **现在就该发**（欠着一次），
+            //   null = 没有下一次（停用 / once 已发过）。含糊成一个数字会让界面写错话。
+            nextInMs: until,
+            dueNow: Boolean(due),
+            dueScheduledAt: due ? due.scheduledAt : null,
+            dueLateMs: due ? due.lateByMs : 0,
+          }
+        })
+        const missed = readLedger(MISSED_REL, { workspace }).rows.slice(-20)
+        const history = readLedger('runtime/schedule-history.jsonl', { workspace }).rows.slice(-20)
+        return {
+          ok: true,
+          enabled: config.schedule?.enabled === true,
+          tasks,
+          problems: listed.problems,
+          // 台账坏行数要带出去：界面得能说"有 N 行读不出来"，不许静默少几条
+          ledgerBad: idx.bad,
+          missed,
+          history,
+          knownChats: readKnownChats({ workspace }).chats,
+          timezone: 'Asia/Shanghai',
+        }
+      },
+
+      scheduleSave: async ({ task } = {}) => {
+        const workspace = config.dsh?.workspace
+        if (!workspace) return { ok: false, why: '配置里没有 dsh.workspace' }
+        const r = writeScheduleTask({ workspace, task })
+        return r.ok ? { ok: true, task: r.task } : { ok: false, why: r.why }
+      },
+
+      scheduleDelete: async ({ id } = {}) => {
+        const workspace = config.dsh?.workspace
+        if (!workspace) return { ok: false, why: '配置里没有 dsh.workspace' }
+        if (!id) return { ok: false, why: '缺少 id' }
+        const r = deleteScheduleTask({ workspace, id })
+        return r.ok ? { ok: true } : { ok: false, why: r.why }
+      },
+
+      scheduleHistory: async ({ limit = 50 } = {}) => {
+        const workspace = config.dsh?.workspace
+        if (!workspace) return { ok: false, why: '配置里没有 dsh.workspace' }
+        const n = Math.max(1, Math.min(500, Number(limit) || 50))
+        return {
+          ok: true,
+          fires: readLedger(FIRES_REL, { workspace, limit: n }).rows,
+          missed: readLedger(MISSED_REL, { workspace, limit: n }).rows,
+          history: readLedger('runtime/schedule-history.jsonl', { workspace, limit: n }).rows,
+        }
+      },
+
+      // ③-f 服务器监测快照（0.3.2 P2/P4，服务器页签）────────────────────────
+      //
+      // ★ 组装在桥接里（它才有运行时对象）；这里只转发。
+      // ★ `bridge` 还没建好时（早期启动窗口）如实回"拿不到"，**不抛**。
+      serversList: async () => {
+        try {
+          if (typeof bridge?.serversSnapshotForApi === 'function') return await bridge.serversSnapshotForApi()
+          return { ok: true, enabled: false, running: false, servers: [], recentEvents: [], why: '桥接还没起来' }
+        } catch (error) {
+          return { ok: false, why: `读服务器监测状态失败：${error?.message ?? error}` }
+        }
+      },
+
+      // ③-g 服务器监测的**人工指令**（0.3.2 P4）：只有 `retry` / `abandon`
+      //
+      // ★ 它们改的是**重启状态机**（冷却 / 等指令），不是配置；改完下一次 `down`
+      //   才可能真的重启。∴ 界面上要写清"这不会立刻重启"（`--supervise retry` 的文案同款）。
+      serversAction: async ({ serverId, action } = {}) => {
+        const list = Array.isArray(config.servers) ? config.servers : []
+        const server = list.find((s) => s.id === String(serverId))
+        if (!server) return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+        const workspace = config.dsh?.workspace
+        if (!workspace) return { ok: false, why: '配置里没有 dsh.workspace' }
+        if (action !== 'retry' && action !== 'abandon') return { ok: false, why: `不认识的动作「${action}」` }
+        try {
+          const { createRestarter } = await import('./servers/restart.mjs')
+          const r = createRestarter({ workspace, serverId: server.id, log })
+          r.load()
+          if (action === 'retry') r.approveRetry()
+          else r.abandon()
+          const st = r.state()
+          log(`[servers] 管理员指令：${action}（${server.id}）—— 现在 尝试 ${st.attempts} 次、等指令=${st.waitingForAdmin}`)
+          return {
+            ok: true,
+            serverId: server.id,
+            action,
+            attempts: st.attempts,
+            waitingForAdmin: st.waitingForAdmin === true,
+            cooldownUntil: st.cooldownUntil ?? null,
+            // ★ 如实提醒：这条指令**不会立刻重启**（避免界面给人错误的期待）
+            hint:
+              action === 'retry'
+                ? '已解除「等指令」与冷却。**真正的重启会在下一次检测到它连不上时执行。**'
+                : '已标记放弃 —— 不再自动重启它，直到你重新打开或再点一次「再试一次」。',
+          }
+        } catch (error) {
+          return { ok: false, why: `执行 ${action} 失败：${error?.message ?? error}` }
+        }
       },
 
       // ④ 日志流：按游标增量取（**轮询，不是 SSE** —— 见 CONFIG-UI.md 里的说明与理由）

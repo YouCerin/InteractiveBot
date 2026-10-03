@@ -338,7 +338,7 @@ Releases，仓库只留源码 + `config-ui` 构建产物）。所以 zip 与目�
 ### 打包后必须跑一次验收脚本
 
 ```powershell
-node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractiveBot-0.3.1-win-x64"
+node packages\qq-bridge\scripts\check-release-package.mjs "$env:USERPROFILE\Desktop\_release\InteractiveBot-0.3.2-win-x64"
 ```
 
 它只读、不改文件，检查四件事：**必需件是否齐全**、**不该带的是否混进去**

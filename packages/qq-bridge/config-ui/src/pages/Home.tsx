@@ -14,9 +14,12 @@ import { PaceTab } from '@/sections/PaceTab'
 import { MemoryTab } from '@/sections/MemoryTab'
 import { ExtensionsTab } from '@/sections/ExtensionsTab'
 import { ProtocolTab, type TokenDraft } from '@/sections/ProtocolTab'
+import { ScheduleTab } from '@/sections/ScheduleTab'
+import { ServerTab } from '@/sections/ServerTab'
 import { AdvancedTab } from '@/sections/AdvancedTab'
 import {
   Bot,
+  CalendarClock,
   CircleAlert,
   Eye,
   LayoutDashboard,
@@ -26,6 +29,7 @@ import {
   Plug,
   Puzzle,
   Save,
+  Server,
   Settings2,
   Timer,
   UserRound,
@@ -61,6 +65,15 @@ function pathToTab(path: string): string | null {
     case 'delivery':
     case 'corpus':
       return 'extensions'
+    // ★ 0.3.2：`schedule.enabled`（功能总开关）的控件也在**扩展页的插件卡**上，
+    //   所以改它也点亮「扩展」页签的小圆点 —— 而不是任务页（任务页只有"这页显示什么"，
+    //   它自己的开关是**任务级**的，走的是接口不是 config）。
+    case 'schedule':
+      return 'extensions'
+    // ★ 0.3.2 P2/P4：`servers` / `serversPollMs` 的详细设置就在本页（服务器页签）
+    case 'servers':
+    case 'serversPollMs':
+      return 'servers'
     case 'onebot':
     case 'snowluma':
     case 'access':
@@ -483,6 +496,15 @@ export default function Home() {
               记忆
               {dirtyTabs.has('memory') && <DirtyDot />}
             </TabsTrigger>
+            <TabsTrigger value="schedule" className="gap-1.5">
+              <CalendarClock className="h-3.5 w-3.5" />
+              任务
+            </TabsTrigger>
+            <TabsTrigger value="servers" className="gap-1.5">
+              <Server className="h-3.5 w-3.5" />
+              服务器
+              {dirtyTabs.has('servers') && <DirtyDot />}
+            </TabsTrigger>
             <TabsTrigger value="extensions" className="gap-1.5">
               <Puzzle className="h-3.5 w-3.5" />
               扩展
@@ -520,6 +542,12 @@ export default function Home() {
           </TabsContent>
           <TabsContent value="memory">
             <MemoryTab cfg={cfg} patch={patch} demo={demo} />
+          </TabsContent>
+          <TabsContent value="schedule">
+            <ScheduleTab demo={demo} />
+          </TabsContent>
+          <TabsContent value="servers">
+            <ServerTab demo={demo} />
           </TabsContent>
           <TabsContent value="extensions">
             <ExtensionsTab

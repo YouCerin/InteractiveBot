@@ -287,6 +287,31 @@ export function createApiHandler(deps) {
     buildMemory,
     memoryBuildCursor, // 读游标：每个会话/每个人"已经考虑到哪一条了"（只读）
     logStream, // 日志流（SSE）
+    // ── 0.3.2 P5 定时任务（任务页签）──────────────────────────────────────
+    //
+    // ★★ 与 `memoryStore` 同一条纪律：**注入，不在本模块 import 调度模块**。
+    //   理由有两条：① 让 `api.mjs` 保持"只做接口、不碰业务"；
+    //   ② `verify-api.mjs` 不注入依赖时验的就是 notImplemented 兜底分支，那才是它的本职。
+    //   ⚠️ 但**只读的凑不出来**（如 `verify-apitest.mjs` 那样必须真注入），
+    //      所以这四个入口的**真接线**由 `mocks/verify-api-h13.mjs` 起真 HTTP 服务来验。
+    scheduleList, // () => {ok, tasks:[...], problems:[...], fires, missed, history, chats}
+    scheduleSave, // ({task}) => {ok, task?, why?}
+    scheduleDelete, // ({id}) => {ok, why?}
+    scheduleHistory, // ({limit}) => {ok, fires:[...], missed:[...], history:[...]}
+    // ── 0.3.2 P2/P4 服务器监测（服务器页签，CONFIG-UI.md §2.12）──────────────
+    //
+    // `serversList()` **已经组装好**要给界面的一切（配置摘要 + 活证据 + 归属 + 重启状态）。
+    // ★★ 为什么组装放在 index.mjs 而不是这里：活证据要**运行时对象**（监测循环的
+    //   状态、归属探针、重启状态机），而 `api.mjs` 刻意"只做接口、不碰业务"。
+    // ★★ **密码绝不出去**：这里再兜一次底（见下面路由里的字段白名单）——
+    //   依赖即使不小心带回了密码，也在这一层被剥掉。
+    serversList,
+    // `serversAction({serverId, action})` —— **只允许 `retry` / `abandon`**（见下）。
+    //   ★★ 刻意**不提供** `start` / `stop`：它们会真的拉起/停掉一个服务端进程，
+    //      而"重启编排"要经过冷却与次数纪律。把这两个放进接口，等于给界面一条
+    //      绕过全部纪律的旁路。它们留在 CLI（`--supervise start|stop`），
+    //      那条路上是**人**在明确地做这件事。
+    serversAction,
     // ── 0.2.2 扩展（技能 / 插件）：全部可选，不传就回 501 ──────────────────
     //   ★ 这四条与其余路由的**根本差别**：它们是"即时生效"的通道 ——
     //     实现里既写盘又改活配置对象（见 index.mjs 的 applyExtensionChange），
@@ -771,6 +796,120 @@ export function createApiHandler(deps) {
           }
         }
         return r.ok ? ok(r.data) : fail(r.status ?? 400, r.error)
+      }
+
+      // ── 定时任务（0.3.2 P5，任务页签）─────────────────────────────────────
+      //
+      // ★★ 三条纪律（与记忆那几条同源，改之前先读）：
+      //   ① 每个分支都 `return ok(...)` / `fail(...)` —— 返回自己的对象会触发
+      //      H13 那次真机事故（`res.writeHead(undefined)` → 未处理拒绝 → 整个桥接退出）；
+      //   ② 异步的**必须 await** —— 漏了会返回 Promise 并序列化成 `{}`，
+      //      界面"什么都不显示"却**不报错**；
+      //   ③ 字段名对着后端实现取 —— 这里回的是 `tasks`/`fires`/`missed`/`history`，
+      //      前端不许按自己的想象改名。
+      if (method === 'GET' && path === '/api/schedule') {
+        if (typeof scheduleList !== 'function') return notImplemented('定时任务列表')
+        const r = await scheduleList()
+        return r?.ok === false ? fail(r.status ?? 500, r.why ?? '读定时任务失败') : ok(r)
+      }
+
+      if (method === 'POST' && path === '/api/schedule') {
+        if (typeof scheduleSave !== 'function') return notImplemented('保存定时任务')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        // ★ fail-closed：没有任务对象就直接拒，别用空对象去"保存一条空任务"
+        if (!body.task || typeof body.task !== 'object') return fail(400, '缺少 task 对象')
+        const r = await scheduleSave({ task: body.task })
+        return r?.ok === false ? fail(r.status ?? 400, r.why ?? '保存失败') : ok(r)
+      }
+
+      if (method === 'DELETE' && path === '/api/schedule') {
+        if (typeof scheduleDelete !== 'function') return notImplemented('删除定时任务')
+        const id = queryParam(req, 'id')
+        // ★ fail-closed：没有 id 就不猜（"删掉全部"是最坏的一种猜错）
+        if (!id) return fail(400, '必须带 id（不删全部 —— 那是最坏的一种猜错）')
+        const r = await scheduleDelete({ id })
+        return r?.ok === false ? fail(r.status ?? 400, r.why ?? '删除失败') : ok(r)
+      }
+
+      if (method === 'GET' && path === '/api/schedule/history') {
+        if (typeof scheduleHistory !== 'function') return notImplemented('定时任务执行历史')
+        const limit = Number(queryParam(req, 'limit')) || 50
+        const r = await scheduleHistory({ limit })
+        return r?.ok === false ? fail(r.status ?? 500, r.why ?? '读历史失败') : ok(r)
+      }
+
+      // ── 服务器监测的**人工指令**（0.3.2 P4，服务器页签）────────────────────
+      //
+      // ★★ 只白名单两个动作（**fail-closed**）：
+      //   · `retry`   —— 管理员说"再试一次"（解除"等指令"与冷却，**不清尝试计数**）；
+      //   · `abandon` —— 管理员说"别再自动动它了"。
+      // ★★★ 刻意**不给** `start` / `stop`：那两条会真的拉起/停掉一个服务端进程，
+      //   而重启编排要经过**归属证据 + 冷却 + 次数上限**三道纪律。把它们放进 HTTP 接口，
+      //   等于给界面开一条**绕过全部纪律**的旁路 —— 而"试一次"这条保证正是靠那些纪律成立的。
+      //   它们留在 CLI（`--supervise start|stop`，那条路上是人在做这件事）。
+      if (method === 'POST' && path === '/api/servers/action') {
+        if (typeof serversAction !== 'function') return notImplemented('服务器监测的人工指令')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        const ALLOWED = new Set(['retry', 'abandon'])
+        const action = String(body.action ?? '').trim()
+        const serverId = String(body.serverId ?? '').trim()
+        // ★ fail-closed：缺一个都不猜（"选一台"是最坏的一种猜错）
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        if (!ALLOWED.has(action)) {
+          return fail(400, `只支持 retry / abandon，收到「${action || '空'}」—— start/stop 走 CLI（--supervise）`)
+        }
+        const r = await serversAction({ serverId, action })
+        return r?.ok === false ? fail(r.status ?? 400, r.why ?? '执行失败') : ok(r)
+      }
+
+      // ── 服务器监测（0.3.2 P2/P4，服务器页签 §2.12）──────────────────────────
+      //
+      // ★★ **只读**，而且**字段白名单**：即使依赖把密码带回来，也不许出这个门
+      //   （与 `/api/snowluma/accounts` 同一条纪律 —— 让"泄露凭据"在结构上不可能，
+      //   而不是靠每个实现者记得）。
+      // ★ 它的用途是回答三个问题：配了几台 · **现在连得上吗** · **监测到底有没有在跑**
+      //   （最后一个是活证据 —— 只显示"监测中"的界面与真的在监测的界面在截图上一模一样）。
+      if (method === 'GET' && path === '/api/servers') {
+        if (typeof serversList !== 'function') return notImplemented('服务器监测状态')
+        const raw = await serversList()
+        const rows = Array.isArray(raw?.servers) ? raw.servers : []
+        const safe = rows.map((s) => ({
+          id: s.id ?? '',
+          name: s.name ?? '',
+          enabled: s.enabled !== false,
+          host: s.host ?? '',
+          port: s.port ?? null,
+          rconPort: s.rconPort ?? null,
+          // ★ 只回"配没配"，**绝不回密码本身**
+          passwordSet: s.passwordSet === true,
+          startCommandSet: s.startCommandSet === true,
+          failThreshold: s.failThreshold ?? null,
+          rules: {
+            minTps: s.rules?.minTps ?? null,
+            maxPlayers: s.rules?.maxPlayers ?? null,
+          },
+          // 活证据
+          monitor: s.monitor ?? null,
+          ownership: s.ownership ?? null,
+          restart: s.restart ?? null,
+          lastSample: s.lastSample ?? null,
+        }))
+        const text = JSON.stringify(safe)
+        for (const row of rows) {
+          const pwd = row?.__password
+          if (typeof pwd === 'string' && pwd && text.includes(pwd)) {
+            // 这条断言式兜底：真出现了就整条拒绝，而不是"悄悄少一个字段"
+            return fail(500, '内部错误：响应里出现了凭据（已整条拒绝，请反馈这个缺陷）')
+          }
+        }
+        return ok({
+          ok: true,
+          enabled: raw?.enabled === true,
+          running: raw?.running === true,
+          pollMs: raw?.pollMs ?? null,
+          servers: safe,
+          recentEvents: Array.isArray(raw?.recentEvents) ? raw.recentEvents.slice(0, 30) : [],
+        })
       }
 
       // ── 工作区图片取图（对话页签显示 messages[].images）───────────────────

@@ -112,6 +112,7 @@ node mocks/verify-mcp-tools.mjs    # ★★ QQ 工具纯逻辑：动作名真机
 node mocks/verify-privacy.mjs     # ★★ 隐私硬闸：七类拦得住、**真实记忆 60 条零误拦**、审计不含原文（62 项）
 node mocks/verify-oplog.mjs       # ★★ 操作日志：参数与结果都记下、参数先解析再截值、超时回合也留痕（49 项）
 node mocks/verify-tasks.mjs       # ★★ 任务台账 + 回到第N步：零模型参与也完整、连续回退能恢复、闲置要降级（125 项）
+node mocks/verify-schedule.mjs    # ★★★ 定时任务（0.3.2）：**「恰好一次」**的三条变异断言 + 21 项走完整桥接的接线断言（183 项）
 node mocks/verify-recipes.mjs     # ★★ 配方库：长尾匹配要命中、置信度用平滑、requiredActions 不自动执行（67 项）
 node mocks/verify-extract.mjs     # ★★ 抽取解析：真实 headless 输出（裸词 / 多两个 `}`）都要能解析（71 项）
 node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单拦截、参数校验、错误不外泄）
@@ -227,6 +228,31 @@ node src/index.mjs --tasks                    # 看台账 + 模型每轮看到�
 node src/index.mjs --tasks --inject group:700000001
 node src/index.mjs --tasks-archive [--apply]  # 归档过期台账（默认预演，是移走不是删除）
 node src/index.mjs --tasks --forget group:700000001
+
+# ⑤-b6b 定时任务（0.3.2，只读）：**到点了主动说一句**
+#   ★ 在此之前桥接是**纯镜像** —— 只回答刚收到的那条消息，所以
+#     「8 点叫我一声」「提醒某某人吃饭」这类**无人开口**的需求一处都落不下去。
+#   ★★ 每条提醒**只会发一次**（说两遍比漏一遍更糟）：触发点是**算出来的**，
+#      再加上落盘台账在**调模型之前**认领。
+#   ★ **错过不补发，但一定留证据**：迟到 ≤2 分钟照常发（并如实说"晚了"），
+#      超过就记进错过台账，下次对话里提一句。
+#   ★ 默认**关闭**（`schedule.enabled`）—— 它是唯一一个不用谁开口就往外发消息的能力。
+#   ★ 任务的建/改现在只能直接写 workspace-qq/runtime/schedule/<任务id>.json，
+#      控制台的任务页在 P5（还没做）。
+node src/index.mjs --schedule                 # 任务 + 下次触发 + 错过台账 + 已知会话名单
+node src/index.mjs --schedule --fires         # 触发台账整份（含"可能已发出"的残局）
+node src/index.mjs --schedule --history       # 最近**实际发出去的原文**（模型现写 ⇒ 唯一能核对的）
+
+# ⑤-b6c 服务器监测（0.3.2 P2，只读）
+#   ★ 目前实现的是 **RCON 那一半**：问状态（连通/人数/TPS）+ 发话。
+#     它**不认识任何具体服务端**（没有版本判断）⇒ 原版/Paper/Forge/Fabric/NeoForge 通用。
+#   ★★ RCON 是**自己实现**的（纯 node:net）—— 运行期依赖不走 npm（项目第 5 条纪律）。
+#   ★ 默认空配置 ⇒ 这一层完全不工作，而且**一次网络请求都不发**。
+#   ★ 判据：**默认只把「连不上」算 down**（连续失败 2 次才判，防抖动误报）；
+#     rules 里的 TPS/人数阈值只产出**异常报告**，**不会重启**。
+node src/index.mjs --servers                  # 配置 + 监测状态（**不发任何网络请求**）
+node src/index.mjs --servers --probe          # 真连一次并跑只读命令 list
+node mocks/verify-servers.mjs                 # ★★ 协议与状态机（92 项，含真 TCP 假服务端）
 
 # ⑤-b7 回到第 N 步
 #   ★ 三件如实说明（做不到的必须说清，否则就是个骗人的功能）：

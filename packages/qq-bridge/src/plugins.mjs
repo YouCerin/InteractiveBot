@@ -243,6 +243,30 @@ export const BUILTIN_PLUGINS = [
     uiTab: 'advanced',
   },
   {
+    id: 'schedule',
+    name: '定时任务',
+    icon: '🕒',
+    enabledPath: 'schedule.enabled',
+    // ★ hot：runner **每一跳**都现读 `config.schedule`（`schedule-runner.mjs` 的 `settings()`），
+    //   而 `config` 是活配置对象 ⇒ 开/关**下一跳就生效**（最多 30 秒）。
+    //   ⚠️ 但**已经起床的 runner 不会自己出现**：`#schedule` 是在 `attach()` 里建的，
+    //   所以"从关到开"要重启桥接才会挂上那个定时器 —— 这一点必须写在界面上，
+    //   否则使用者会以为"我打开了它就应该开始跑"，而它其实要等一次重启。
+    hot: false,
+    why:
+      '判定本身是每跳现读 config.schedule（schedule-runner.mjs 的 settings()，hot 的那一半）；' +
+      '但**定时器对象**是 attach() 时建的（bridge.mjs 的 #schedule），' +
+      '所以"从关到开"要重启才会挂上那个 interval —— 关掉是下一跳生效、打开要重启',
+    what:
+      '到点了**主动说一句**（「8 点叫我一声」「提醒某某人吃饭」）—— 桥接第一次能**无人开口也说话**。' +
+      '每条提醒**只发一次**；错过**不补发但会如实留证据**。',
+    offEffect:
+      '关掉后：一条定时任务都不会触发（**一次模型调用都不产生**）。' +
+      '★ 已经写在磁盘上的任务定义**不会被删**（它们在工作区的 `runtime/schedule/` 里，重新打开就还在），' +
+      '错过台账与执行历史也都留着。',
+    uiTab: 'schedule',
+  },
+  {
     id: 'corpus',
     name: '本地语料检索',
     icon: '🗂️',
