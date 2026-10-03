@@ -178,7 +178,7 @@ export function checkUiFreshness({ distDir = defaultUiDist(), pkgRoot = PKG_ROOT
       expectedHash,
       why:
         `产物记录的源码哈希是 ${got.slice(0, 12)}…，当前源码算出来是 ${expectedHash.slice(0, 12)}…` +
-        `（构建于 ${r.stamp?.builtAt ?? '?'}）`,
+        `（构建于 ${fmtBuiltAt(r.stamp?.builtAt)}）`,
       advice: '源码改过但没重新构建 —— 在 config-ui 里跑一次 npm run build，然后重新组装发布包',
     }
   }
@@ -188,9 +188,41 @@ export function checkUiFreshness({ distDir = defaultUiDist(), pkgRoot = PKG_ROOT
     distDir,
     stamp: r.stamp,
     expectedHash,
-    why: `与当前源码一致（构建于 ${r.stamp?.builtAt ?? '?'}）`,
+    why: `与当前源码一致（构建于 ${fmtBuiltAt(r.stamp?.builtAt)}）`,
     advice: '',
   }
+}
+
+/**
+ * 把 `builtAt` 渲染成**给人看**的本地时间。
+ *
+ * ★★ 为什么需要它（用户报的真实问题）：`ui-build.json` 里存的是 **UTC ISO 串**
+ *   （`2026-10-03T18:36:04.186Z`），而上面那两句把它**原样**拼进「（构建于 …）」——
+ *   于是 UTC+8 的使用者读到的是 `18:36`，比他自己那次构建（本地 `02:36`）
+ *   看起来**晚了 8 小时**，像一条过期/未来的时间戳。
+ *   实测那次构建：UTC `18:36:04.186Z` ↔ 本地 `2026/10/4 02:36:04`，
+ *   与 `ui-build.json` 的文件修改时间**逐秒吻合** —— 所以**存的值没错，错的是显示**。
+ *
+ * ★ 保留 `stamp.builtAt` 字段本身不动（那是给机器比对的原始值，改动会破坏可比性）；
+ *   只在**文案**这一层转成本地时间，并**显式标出时区**，免得跨时区调试时又对不上。
+ * ★ 解析不出来时**原样返回**（宁可显示一个丑但真实的值，也不要编一个"现在"）。
+ */
+export function fmtBuiltAt(builtAt) {
+  const raw = String(builtAt ?? '').trim()
+  if (!raw) return '?'
+  const t = Date.parse(raw)
+  if (!Number.isFinite(t)) return raw
+  const d = new Date(t)
+  const pad = (n) => String(n).padStart(2, '0')
+  const local =
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  // ★ 时区偏移按**这个时刻**算（跨夏令时的那一天，今天算出来的偏移可能不同）
+  const offMin = -d.getTimezoneOffset()
+  const sign = offMin >= 0 ? '+' : '-'
+  const off = `UTC${sign}${pad(Math.floor(Math.abs(offMin) / 60))}:${pad(Math.abs(offMin) % 60)}`
+  // 本地时间与 UTC 不是一回事时，把 UTC 也带上（跨时区排查必须两端都能对上）
+  return offMin === 0 ? `${local}（UTC）` : `${local}（${off}）`
 }
 
 /**

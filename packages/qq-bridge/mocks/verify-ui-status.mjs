@@ -29,6 +29,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   checkUiFreshness,
+  fmtBuiltAt,
   isUiFreshnessAlarm,
   uiFreshnessTitle,
 } from '../src/ui-status.mjs'
@@ -123,6 +124,42 @@ section('④ 开发机（本仓库）：只能是 fresh/stale/missing/unstamped�
     r.status !== 'stale' || /哈希/.test(r.why), r.why.slice(0, 80))
   if (r.status !== 'fresh') {
     console.log(`   （提示：本机现在这份 dist 是 ${r.status} —— 发布前要用 npm run build 让它回到 fresh）`)
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('④-b ★★ `builtAt` 必须**按本地时间**显示（用户报的真实问题）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 用户报的原话：「…（构建于 2026-10-03T18:36:04.186Z）中的时间有问题」。
+// 事实：那个值**没错**（UTC↔本地逐秒吻合：18:36:04.186Z = 本地 2026/10/4 02:36:04，
+// 与 `ui-build.json` 的文件修改时间一致），**错的是显示** ——
+// 把 UTC 串原样拼进"（构建于 …）"，UTC+8 的人读到 18:36，比他自己那次构建（本地 02:36）
+// 看起来晚了 8 小时，像一条过期/未来的时间戳。
+{
+  // ★ 用一个固定时刻断言，并把断言写成"与时区无关"：
+  //   换算出来的**本地墙上时间必须与 `Date` 自己算的一致** —— 无论跑在哪台机器上。
+  const iso = '2026-10-03T18:36:04.186Z'
+  const d = new Date(Date.parse(iso))
+  const pad = (n) => String(n).padStart(2, '0')
+  const expectLocal = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  const got = fmtBuiltAt(iso)
+  check('★★★ 渲染成**本地**墙上时间（不再是原始的 UTC 串）', got.includes(expectLocal), got)
+  check('★★★ 而且**显式标出时区**（跨时区排查时两端都能对上）', /UTC[+-]\d\d:\d\d|（UTC）/.test(got), got)
+  check('★ 原始 UTC 串不再原样出现在文案里（那正是用户看到的"时间有问题"）', !got.includes('T18:36:04.186Z'), got)
+
+  // 边界：空值 / 认不出的值 ⇒ **如实原样返回**，绝不编一个"现在"
+  check('★ 空值 ⇒ `?`（不编时间）', fmtBuiltAt('') === '?')
+  check('★ 认不出的值 ⇒ **原样返回**（宁可丑，也要真）', fmtBuiltAt('坏值') === '坏值')
+  check('★ undefined ⇒ `?`', fmtBuiltAt(undefined) === '?')
+
+  // 接线：stale 的 why 里用的必须是这个渲染函数的结果
+  const r = checkUiFreshness()
+  if (r.status === 'stale' && r.stamp?.builtAt) {
+    check('★★ 真实的 stale 文案里也是本地时间（不是原始 UTC 串）',
+      r.why.includes(fmtBuiltAt(r.stamp.builtAt)) && !r.why.includes(r.stamp.builtAt), r.why)
+  } else {
+    console.log(`   （提示：本机 dist 现在是 ${r.status} ⇒ 跳过后半段"真实文案"检查；★ 跳过不算通过）`)
   }
 }
 

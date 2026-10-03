@@ -2419,8 +2419,13 @@ async function main() {
   //    都不会拦住启动（界面新鲜度是增强信息，不该阻断机器人回话）。
   let uiFreshness = null
   try {
-    const { checkUiFreshness } = await import('./ui-status.mjs')
+    const { checkUiFreshness, fmtBuiltAt } = await import('./ui-status.mjs')
     uiFreshness = checkUiFreshness({ distDir: join(PKG_ROOT, 'config-ui', 'dist') })
+    // ★ 顺手把 `builtAt` 换成本地时间（原始值是 UTC ISO 串，直接显示会让
+    //   UTC+8 的人以为那条时间戳晚了 8 小时 —— 见 `fmtBuiltAt` 的注释）
+    if (uiFreshness?.stamp?.builtAt) {
+      uiFreshness.stampBuiltAtLocal = fmtBuiltAt(uiFreshness.stamp.builtAt)
+    }
   } catch (error) {
     uiFreshness = {
       status: 'unknown',
@@ -2437,7 +2442,7 @@ async function main() {
         `｜${uiFreshness.advice}`,
     )
   } else {
-    log(`控制台界面与源码同步（构建于 ${uiFreshness.stamp?.builtAt ?? '?'}）`)
+    log(`控制台界面与源码同步（构建于 ${uiFreshness.stampBuiltAtLocal ?? uiFreshness.stamp?.builtAt ?? '?'}）`)
   }
   // 名单与权限分级。**与 Bridge 共用同一个实例** —— 缓存的好友/群列表
   // 才能被配置接口复用，而不是各拉一份。
