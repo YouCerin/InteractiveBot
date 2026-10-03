@@ -87,6 +87,15 @@ const RECENT_CTX_SCAN = 16
 const RECENT_CTX_MAX = 6
 /** 单条上限（字）：够看清"刚才在说什么"，又不至于把一段长文整段搬进提示词。 */
 const RECENT_CTX_CHARS = 150
+/**
+ * `servers[].manageOnStart` 拉起服务端后，最多等它开放端口多久（默认 3 分钟）。
+ *
+ * ★ 默认这么长是因为模组服**首次**启动要生成世界、加载几百个 mod，实测能到 1~2 分钟；
+ *   可用 `servers[].startWaitMs` 覆盖。
+ * ★ 必须有上限：等不到就**如实说它没起来**，而不是无限等下去
+ *   （无限等会让 start.bat 永远不返回，使用者连界面都看不到）。
+ */
+const DEFAULT_START_WAIT_MS = 180_000
 import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './memory-stats.mjs'
 import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
 import { appendTurnOps, appendOp } from './oplog.mjs'
@@ -118,7 +127,7 @@ import {
 } from './schedule.mjs'
 import { createServerLoop } from './servers/loop.mjs'
 import { createRestarter } from './servers/restart.mjs'
-import { createSupervisor } from './servers/supervise.mjs'
+import { createSupervisor, defaultPortOpen as defaultPortProbe } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
 //   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
 import { writeGrant, clearGrant } from './screenshot-grant.mjs'
@@ -1238,8 +1247,19 @@ export class Bridge extends EventTarget {
     }
   }
 
-  /** 挂到 OneBot 上：事件通道一有消息就进来。 */
-  attach(onebot = this.onebot) {
+  /**
+   * 挂到 OneBot 上：事件通道一有消息就进来。
+   *
+   * ★★ 0.3.2 起它是 **async**（返回 Promise）：`servers[].manageOnStart` 要在启动时
+   *   接手/拉起服务端，并**等到端口真的开放**才算起来 —— 那件事必须能 `await`。
+   *   ∴ **调用方要 `await` 它**（或至少 `.catch()` 接住异常），否则启动期的
+   *   接管失败会变成"未处理的 Promise 拒绝"。
+   *   ★ 踩过的坑如实记下：第一版在这个**同步**方法里写了 `await`，
+   *     而 V8 报的错是 `Private field '#notePersonaShape' must be declared in an
+   *     enclosing class`（报在了类里第一个私有字段上，离真正的位置几百行）——
+   *     一个 `await` 放错地方，报错能离谱到这个程度。
+   */
+  async attach(onebot = this.onebot) {
     // ★★ H15：启动时**先把上一个人留下的烂账报出来**。
     //
     // 为什么这件事必须在启动阶段做（而不是等人来查）：真机上丢过一整条回复，
@@ -1395,7 +1415,106 @@ export class Bridge extends EventTarget {
     } catch (error) {
       this.log(`❌ [servers] 服务器监测启动失败（机器人照常工作）：${error?.message ?? error}`)
     }
+    // ★★★ 启动时接手服务端（`servers[].manageOnStart`，设计文档 §6.3.1）。
+    //
+    // 为什么排在监测之后：先让监测跑起来（"出问题主动播报"越早在线越好），
+    // 而拉起服务端可能等好几分钟。
+    // ★ 它自己吞掉所有异常（一台失败不拖累其它台，也绝不拖垮启动）；
+    //   `await` 是刻意的 —— 如实等出结果，使用者当场就该知道服务端到底起来没有。
+    try {
+      await this.manageServersOnStartInternal()
+    } catch (error) {
+      this.log(`❌ [servers] 启动接管时抛异常（机器人照常工作）：${error?.message ?? error}`)
+    }
     return this
+  }
+
+  /**
+   * 桥接启动时接手服务端（0.3.2 P2「启动接管」，设计文档 §6.3.1）。
+   *
+   * 判据顺序不能换：
+   *   ① 端口活着 + 归属是我 ⇒ 接管（只挂监测，不上手）
+   *   ② 端口活着 + 归属不是我/判不出 ⇒ 如实降级成只报告、不重启
+   *   ③ 端口不通 ⇒ 按 startExe/startCommand 拉起来
+   *
+   * ★★★ 最贵的一条纪律：端口活着时绝不调用 launch()。
+   *   两个 JVM 同时打开同一个世界目录 = 存档损坏（不可逆），比少一个自动重启严重得多。
+   *   所以判据是「端口不通才拉」，而不是「归属不是我」。
+   */
+  async manageServersOnStartInternal() {
+    const servers = Array.isArray(this.config?.servers) ? this.config.servers : []
+    const targets = servers.filter((s) => s && s.enabled !== false && s.manageOnStart === true)
+    if (targets.length === 0) return
+    for (const s of targets) {
+      try {
+        const own = await this.#serverOwnership(s)
+        if (own?.portOpen) {
+          if (own.owner === 'bridge') {
+            const weakNote = own.weak ? '（弱证据：命令行比对）' : ''
+            this.log(`⏭️ [servers] ${s.name ?? s.id} 已在跑且确认是我起的（pid ${own.pid}）${weakNote} ⇒ 接管，不重复拉起`)
+          } else {
+            this.log(`⚠️ [servers] ${s.name ?? s.id} 端口有东西在听，但归属不是我（${own.why}）⇒ 只监测、不接管、不重启（绝不先杀再起去抢别人的服务端）`)
+          }
+          continue
+        }
+        this.log(`▶️ [servers] ${s.name ?? s.id} 没在跑（${own?.why ?? '端口不通'}）⇒ 按 manageOnStart 拉起来`)
+        const r = await this.launchServerInternal(s)
+        if (!r?.ok) {
+          this.log(`❌ [servers] ${s.name ?? s.id} 没起来：${r?.why ?? '未知原因'}`)
+          continue
+        }
+        this.log(`   ✅ 已拉起（pid ${r.pid}）· 输出 → ${r.logFile}`)
+        const configured = Number(s.startWaitMs)
+        const waitMs = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_START_WAIT_MS
+        const up = await this.waitPortListeningInternal(s, waitMs)
+        if (up) {
+          this.log(`   ✅ ${s.name ?? s.id} 端口 ${s.port} 已开放，服务端真的起来了`)
+        } else {
+          const secs = Math.round(waitMs / 1000)
+          this.log(`   ❌ ${s.name ?? s.id} 等了 ${secs} 秒，端口 ${s.port} 一直没开 ⇒ 它没起来。去看控制台输出：${r.logFile}`)
+          this.log('      常见原因：JVM 参数/路径不对、EULA 没同意、端口被占、内存不够。')
+        }
+      } catch (error) {
+        this.log(`❌ [servers] 启动时处理 ${s?.name ?? s?.id} 时抛异常（机器人照常工作）：${error?.message ?? error}`)
+      }
+    }
+  }
+
+  /**
+   * 探端口直到有东西在听或超时。
+   * 用注入的 portOpen（测试）或守护器自己的探针 —— 不自己再实现一遍。
+   */
+  async waitPortListeningInternal(server, waitMs) {
+    const host = server.host ?? '127.0.0.1'
+    const port = server.port ?? 25565
+    const beganAt = Date.now()
+    const deadline = beganAt + waitMs
+    let lastReported = 0
+    for (;;) {
+      const open = this.#testPortOpen
+        ? Boolean(await this.#testPortOpen(host, port))
+        : await defaultPortProbe(host, port)
+      if (open) return true
+      if (Date.now() >= deadline) return false
+      const waited = Math.round((Date.now() - beganAt) / 1000)
+      if (waited - lastReported >= 15) {
+        lastReported = waited
+        this.log(`   … ${server.name ?? server.id} 已等 ${waited} 秒，端口还没开（模组服首次启动可能要几分钟）`)
+      }
+      await new Promise((res) => setTimeout(res, 1500))
+    }
+  }
+
+  /**
+   * 拉起一台服务端（懒建守护器；测试可注入）。
+   * 与 #serverOwnership 同一个懒建模式，避免在构造期就碰盘。
+   */
+  async launchServerInternal(server) {
+    if (this.#testLaunch) return this.#testLaunch(server)
+    if (!this.#supervisor) {
+      this.#supervisor = createSupervisor({ workspace: this.config?.dsh?.workspace, log: this.log })
+    }
+    return this.#supervisor.launch(server)
   }
 
   /**
@@ -1500,6 +1619,9 @@ export class Bridge extends EventTarget {
         // ★ TPS 是**问了才有**：留空表示"我们没问"（不是"问了没拿到"）。
         //   界面必须能区分这两件事，否则"TPS 拿不到"看起来像服务端的毛病。
         tpsCommand: String(s.tpsCommand ?? '').trim(),
+        // ★ 启动接管：桥接启动时要不要管这台（界面显示用）。
+        //   它与"点一下就启动"是两件事 —— 界面**不做**启动按钮（见 CONFIG-UI.md §2.12）。
+        manageOnStart: s.manageOnStart === true,
         failThreshold: s.failThreshold,
         rules: s.rules ?? {},
         monitor,
@@ -1532,6 +1654,20 @@ export class Bridge extends EventTarget {
    */
   onServerEventForTest(row) {
     return this.#onServerEvent(row)
+  }
+
+  /**
+   * **启动时接管/拉起服务端**的测试入口（0.3.2 `servers[].manageOnStart`）。
+   *
+   * ★ 为什么必须有这个入口：这条链的判据是"端口通不通 + 归属对不对 + 要不要拉起"，
+   *   而**最贵的缺陷是"端口活着时还去 launch"**（两个 JVM 同写世界 = 存档损坏，
+   *   不可逆）。那条判据**纯函数断言抓不到** —— 它错在"调用顺序与条件"上。
+   *   所以这里暴露的是**同一个方法**，测试打桩端口与 launch 就能断言
+   *   "端口活着时一次 launch 都没发生"。
+   * ★ 它**不是**给产品代码用的（生产路径由 `attach()` 调用）。
+   */
+  manageServersOnStartForTest() {
+    return this.manageServersOnStartInternal()
   }
 
   /**

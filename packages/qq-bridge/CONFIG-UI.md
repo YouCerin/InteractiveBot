@@ -2910,7 +2910,7 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `servers` | object[] | `[]` | 每台一条：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,startExe,startArgs,startCommand,cwd,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ 空数组 = 不工作、零网络请求 |
+| `servers` | object[] | `[]` | 每台一条：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,manageOnStart,startWaitMs,startExe,startArgs,startCommand,cwd,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ 空数组 = 不工作、零网络请求 |
 | `serversPollMs` | number | 30000 | 多久采样一次（有 15 秒下限）。★ 界面可以给一个只读展示；**不要**做成无下限的输入框 |
 
 ★ 每台服务器的**条目级启用开关**要能单独改（`servers[].enabled`）——
@@ -2962,8 +2962,16 @@ agent 沙箱**）会把它一起收走 ⇒ 从那种环境里点一下"启动"�
 | **被回收** | **戛然而止**（停在 `Preparing start region…`），一行停机记录都没有 |
 
 所以：启动/停止**留在 CLI**，并且明确告诉使用者**要在自己的终端里跑**
-（`supervise-server.bat start --id <服务器>`）。★ 若将来真要做这个按钮，前提是
-服务端由**桥接进程自己**持有（桥接活着它才活着），而不是由一次性的 CLI 命令启动。
+（`supervise-server.bat start --id <服务器>`）。
+
+★ 界面**可以**显示 `manageOnStart` 这个开关（它是"桥接启动时要不要管这台"，
+与"点一下就启动"是两件事）：开着时桥接启动会**接管已在跑的、或拉起没在跑的**，
+判据是「**端口不通才拉**」——端口活着时**绝不 launch**（两个 JVM 同写世界 = 存档损坏）。
+```
+可用  ⇔  归属是我（own.owner === 'bridge'）
+```
+★ 若将来真要做"启动"按钮，前提是服务端由**桥接进程自己**持有（桥接活着它才活着），
+而不是由一次性的 CLI 命令启动 —— 那时点按钮才名副其实。
 
 ---
 

@@ -1410,6 +1410,186 @@ console.log('\n=== ⑰ ★★★ 整条链端到端：down 事件 → 归属 →
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * ⑱ ★★★ 启动时接管（`servers[].manageOnStart`）—— 0.3.2 P2 的"启动接管"
+ *
+ * ★ 这一节存在的**唯一**理由是那条不可逆的纪律：
+ *   **端口活着时绝不 launch** —— 两个 JVM 同写一个世界目录 = 存档损坏。
+ *   它错在"调用顺序与条件"上，所以**纯函数断言抓不到**（本项目栽过：
+ *   任务段的 chatKey 在错作用域里被空 catch 吞掉，124 项纯函数断言全绿）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+{
+  const { Bridge } = await import('../src/bridge.mjs')
+  const { SessionRouter } = await import('../src/session-bridge.mjs')
+  const { SendQueue } = await import('../src/onebot.mjs')
+
+  // ★ 自己造桥接（`makeChainBridge` 是上一节的局部函数，作用域外拿不到 —— 实测报
+  //   `ReferenceError: makeChainBridge is not defined`）。
+  //   这里只需要"一台配了启动方式的服务器 + 可注入的归属/端口/launch"，其余照最小配置。
+  const mkStartBridge = ({ ownership, portOpen, launch }) => {
+    // ★★ 三个探针**缺一不可**，缺了就会回退去探**真端口**（实测踩到两次）：
+    //   这台机器上 25565 真的开着（联调用的 Forge 服）⇒ 不注入 ownership 就判成
+    //   "归属不是我"、不注入 portOpen 就判成"端口活着"，于是**测试走了另一条分支**，
+    //   断言测的是空气。所以这里显式挡一下，缺了就当场炸（比"测了空气"好得多）。
+    if (typeof ownership !== 'function' || typeof portOpen !== 'function' || typeof launch !== 'function') {
+      throw new Error('mkStartBridge：ownership / portOpen / launch 三个探针都必须注入（否则会误探真端口）')
+    }
+    const WS = mkdtempSync(join(tmpdir(), 'qqb-start-'))
+    const router = new SessionRouter({ log: () => {} })
+    const logs = []
+    const log = (m) => logs.push(String(m))
+    const config = {
+      dsh: { workspace: WS, permissionMode: 'workspace-write' },
+      onebot: {},
+      access: { adminUsers: ['100000001'], dmAllowlist: [], groupAllowlist: [] },
+      trigger: { private: true, mention: true, keyword: true, groupEnabled: true, keywords: [] },
+      send: { minGapMs: 0, maxGapMs: 0, maxPerMinute: 100, maxPerHour: 1000, dedupeWindowMs: 0, maxCharsPerMessage: 1500 },
+      turn: { timeoutMs: 5000 },
+      humanize: { enabled: false, chunkChars: 300 },
+      persona: { preset: 'none' },
+      memory: { enabled: false, affect: { prewake: 'off' } },
+      image: { enabled: false },
+      servers: [
+        {
+          id: 'srv1',
+          name: '主服',
+          host: '127.0.0.1',
+          port: 25565,
+          rconPort: 25575,
+          password: 'x',
+          enabled: true,
+          failThreshold: 1,
+          startExe: 'java.exe',
+          startArgs: ['-jar', 'server.jar'],
+          rules: {},
+        },
+      ],
+    }
+    const rpc = new EventTarget()
+    rpc.prompt = async () => ({ messageId: 'm1' })
+    const onebot = new EventTarget()
+    onebot.selfId = '200000001'
+    onebot.call = async () => ({ status: 'ok', retcode: 0, data: null })
+    onebot.send = async () => ({ status: 'ok', retcode: 0, data: { message_id: 's1' } })
+    const sendQueue = new SendQueue({ ...config.send, log })
+    const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, log })
+    bridge.setServerProbesForTest({ ownership, launch, portOpen })
+    return { bridge, logs }
+  }
+
+  // ── ① 端口活着 + 归属是我 ⇒ **接管，一次 launch 都不许发生** ──
+  {
+    let launchCount = 0
+    const { bridge, logs } = mkStartBridge({
+      ownership: async () => ({ owner: 'bridge', pid: 777, startedAt: 1000, portOpen: true, why: '是我起的' }),
+      portOpen: async () => true,
+      launch: async () => {
+        launchCount += 1
+        return { ok: true }
+      },
+    })
+    // 只有显式打开 manageOnStart 的那台才会被处理
+    bridge.config.servers = [{ ...bridge.config.servers[0], enabled: true, manageOnStart: true }]
+    await bridge.manageServersOnStartForTest()
+    eq(launchCount, 0, '★★★ 端口活着 + 归属是我 ⇒ **一次 launch 都没发生**（存档损坏那条底线）')
+    ok(logs.some((l) => l.includes('接管')), '★ 日志写明"接管"（不许静默跳过）')
+    await bridge.close({ timeoutMs: 300 })
+  }
+
+  // ── ② 端口活着 + 归属**不是我** ⇒ 只报告，**也**一次 launch 都不许发生 ──
+  {
+    let launchCount = 0
+    const { bridge, logs } = mkStartBridge({
+      ownership: async () => ({ owner: 'external', pid: null, startedAt: null, portOpen: true, why: '归属档里记的 pid 已经不存在了' }),
+      portOpen: async () => true,
+      launch: async () => {
+        launchCount += 1
+        return { ok: true }
+      },
+    })
+    bridge.config.servers = [{ ...bridge.config.servers[0], enabled: true, manageOnStart: true }]
+    await bridge.manageServersOnStartForTest()
+    eq(launchCount, 0, '★★★ 端口活着但归属不是我 ⇒ **也绝不 launch**（绝不用"先杀再起"去抢别人的服务端）')
+    ok(
+      logs.some((l) => l.includes('归属不是我')),
+      '★★ 如实记下"归属不是我"（降级成只报告，而不是赌一把）',
+    )
+    await bridge.close({ timeoutMs: 300 })
+  }
+
+  // ── ③ 端口不通 ⇒ 真的拉起来，并**等到端口开放**才说成功 ──
+  {
+    let launchCount = 0
+    let listening = false
+    const { bridge, logs } = mkStartBridge({
+      ownership: async () => ({ owner: 'unknown', pid: null, startedAt: null, portOpen: listening, why: '端口上没有东西在听' }),
+      portOpen: async () => listening,
+      launch: async () => {
+        launchCount += 1
+        listening = true // 拉起来之后端口才通
+        return { ok: true, pid: 4242, logFile: 'x.log' }
+      },
+    })
+    bridge.config.servers = [{ ...bridge.config.servers[0], enabled: true, manageOnStart: true, startWaitMs: 5000 }]
+    await bridge.manageServersOnStartForTest()
+    eq(launchCount, 1, '★ 端口不通 ⇒ 拉起来（这正是"服务端要由机器人启动"那条）')
+    ok(logs.some((l) => l.includes('真的起来了')), '★★ 等到端口开放才报"真的起来了"（不拿 launch() 的返回值当成功）')
+    await bridge.close({ timeoutMs: 300 })
+  }
+
+  // ── ④ 拉起来但端口一直不开 ⇒ **如实说它没起来**（不许谎报） ──
+  {
+    const { bridge, logs } = mkStartBridge({
+      ownership: async () => ({ owner: 'unknown', pid: null, startedAt: null, portOpen: false, why: '端口上没有东西在听' }),
+      portOpen: async () => false,
+      launch: async () => ({ ok: true, pid: 4242, logFile: 'x.log' }),
+    })
+    bridge.config.servers = [{ ...bridge.config.servers[0], enabled: true, manageOnStart: true, startWaitMs: 400 }]
+    await bridge.manageServersOnStartForTest()
+    ok(logs.some((l) => l.includes('它没起来')), '★★★ 端口一直不开 ⇒ 如实说"它没起来"（绝不谎报成功）')
+    ok(logs.some((l) => l.includes('x.log')), '★ 并指路控制台输出（否则使用者无从查起）')
+    await bridge.close({ timeoutMs: 300 })
+  }
+
+  // ── ⑤ 没打开开关 / 停用 / 没起来（launch 拒绝）三种"什么都不做" ──
+  {
+    let launchCount = 0
+    const mk = (serverOver) => {
+      const b = mkStartBridge({
+        // ★ 归属也必须注入（实测踩到：不注入就走真探针，而**这台机器上 25565 真的开着**
+        //   —— 于是判成"归属不是我"，根本没走到 launch，断言测的是空气）
+        ownership: async () => ({ owner: 'unknown', pid: null, startedAt: null, portOpen: false, why: '端口上没有东西在听' }),
+        portOpen: async () => false,
+        launch: async () => {
+          launchCount += 1
+          return { ok: true, pid: 1, logFile: 'x.log' }
+        },
+      })
+      b.bridge.config.servers = [{ ...b.bridge.config.servers[0], ...serverOver }]
+      return b
+    }
+    const a = mk({ enabled: true, manageOnStart: false })
+    await a.bridge.manageServersOnStartForTest()
+    eq(launchCount, 0, '★★ 没打开 `manageOnStart` ⇒ 一个都不拉起（默认关，危险能力默认关）')
+    await a.bridge.close({ timeoutMs: 300 })
+
+    const b = mk({ enabled: false, manageOnStart: true })
+    await b.bridge.manageServersOnStartForTest()
+    eq(launchCount, 0, '★ 停用的那台 ⇒ 不拉起')
+    await b.bridge.close({ timeoutMs: 300 })
+
+    const c = mkStartBridge({
+      ownership: async () => ({ owner: 'unknown', pid: null, startedAt: null, portOpen: false, why: '端口上没有东西在听' }),
+      portOpen: async () => false,
+      launch: async () => ({ ok: false, why: '没配启动方式' }),
+    })
+    c.bridge.config.servers = [{ ...c.bridge.config.servers[0], enabled: true, manageOnStart: true }]
+    await c.bridge.manageServersOnStartForTest()
+    ok(c.logs.some((l) => l.includes('没配启动方式')), '★★ launch 拒绝时**如实说原因**（不猜、不假装已拉起）')
+    await c.bridge.close({ timeoutMs: 300 })
+  }
+}
+
 console.log('')
 if (fail === 0) {
   console.log(`🎉 RCON 与服务器监测测试：${pass} 项通过`)

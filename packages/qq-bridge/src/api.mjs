@@ -888,6 +888,7 @@ export function createApiHandler(deps) {
           startExeSet: s.startExeSet === true,
           startExe: typeof s.startExe === 'string' ? s.startExe : '',
           tpsCommand: typeof s.tpsCommand === 'string' ? s.tpsCommand : '',
+          manageOnStart: s.manageOnStart === true,
           failThreshold: s.failThreshold ?? null,
           rules: {
             minTps: s.rules?.minTps ?? null,

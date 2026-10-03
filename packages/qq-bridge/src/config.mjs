@@ -577,6 +577,34 @@ export function normalizeConfig(c) {  const src = c ?? {}
           //   不给配就会一直显示"TPS 拿不到"，看起来像服务端的毛病。
           //   ∴ 由使用者给命令（如 `forge tps`），我们只解析最稳的那段文本。
           tpsCommand: typeof item.tpsCommand === 'string' ? item.tpsCommand.slice(0, 200) : '',
+          // ── 0.3.2 P2「启动接管」：桥接启动时要不要管这台服务端 ──────────
+          //
+          // ★ **默认 false**（按"无人开口就动手的能力默认关"的口径）。
+          //   打开后桥接启动时按顺序：端口活着+归属是我 ⇒ 接管（不上手）；
+          //   端口活着但归属不是我 ⇒ 只报告（绝不"先杀再起"去抢）；
+          //   端口不通 ⇒ 按 startExe/startCommand 拉起来，并**等端口真的开放**。
+          // ★ 为什么需要它：没有它，使用者必须先手动 `--supervise start` 一次，
+          //   "挂了自动拉起一次"才生效 —— 而设计文档 §6.3.1 明说「服务端要由机器人启动」。
+          manageOnStart: item.manageOnStart === true,
+          // 拉起之后最多等多久（毫秒）。0 = 用桥接的默认值（3 分钟，模组服首次启动够用）。
+          startWaitMs:
+            Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0
+              ? Math.min(Number(item.startWaitMs), 3_600_000)
+              : 0,
+          // ── 0.3.2 P2「启动接管」：桥接启动时要不要管这台服务端 ──────────
+          //
+          // ★ **默认 false**（按本项目"无人开口就动手的能力默认关"的口径）。
+          //   打开之后桥接启动时会按顺序：端口活着+归属是我 ⇒ **接管**（不上手）；
+          //   端口活着但归属不是我 ⇒ **只报告**（绝不"先杀再起"去抢）；
+          //   端口不通 ⇒ 按 startExe/startCommand 拉起来，并**等端口真的开放**。
+          // ★ 为什么需要它：没有它，使用者必须先手动 `--supervise start` 一次，
+          //   「挂了自动拉起一次」才生效 —— 而设计文档 §6.3.1 明说
+          //   「**服务端要由机器人启动**」。
+          manageOnStart: item.manageOnStart === true,
+          // 拉起之后最多等多久（毫秒）。默认 3 分钟：模组服首次启动实测 1~2 分钟。
+          startWaitMs: Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0
+            ? Math.min(Number(item.startWaitMs), 3_600_000)
+            : 0,
           // ── 0.3.2 P4：守护与重启要的那几项 ──────────────────────────────
           //
           // ★ **`startCommand` 留空 = 我们不知道怎么启动它** ⇒ `supervise.launch()`

@@ -237,8 +237,8 @@ node src/index.mjs --tasks --forget group:700000001
 #   ★ **错过不补发，但一定留证据**：迟到 ≤2 分钟照常发（并如实说"晚了"），
 #      超过就记进错过台账，下次对话里提一句。
 #   ★ 默认**关闭**（`schedule.enabled`）—— 它是唯一一个不用谁开口就往外发消息的能力。
-#   ★ 任务的建/改现在只能直接写 workspace-qq/runtime/schedule/<任务id>.json，
-#      控制台的任务页在 P5（还没做）。
+#   ★ 任务的建/改：控制台「任务」页签（0.3.2 P5 已加入），或直接写
+#      workspace-qq/runtime/schedule/<任务id>.json。
 node src/index.mjs --schedule                 # 任务 + 下次触发 + 错过台账 + 已知会话名单
 node src/index.mjs --schedule --fires         # 触发台账整份（含"可能已发出"的残局）
 node src/index.mjs --schedule --history       # 最近**实际发出去的原文**（模型现写 ⇒ 唯一能核对的）
@@ -252,7 +252,7 @@ node src/index.mjs --schedule --history       # 最近**实际发出去的原文
 #     rules 里的 TPS/人数阈值只产出**异常报告**，**不会重启**。
 node src/index.mjs --servers                  # 配置 + 监测状态（**不发任何网络请求**）
 node src/index.mjs --servers --probe          # 真连一次并跑只读命令 list
-node mocks/verify-servers.mjs                 # ★★ 协议与状态机（92 项，含真 TCP 假服务端）
+node mocks/verify-servers.mjs                 # ★★ 协议与状态机（255 项，含真 TCP 假服务端）
 
 # ⑤-b7 回到第 N 步
 #   ★ 三件如实说明（做不到的必须说清，否则就是个骗人的功能）：

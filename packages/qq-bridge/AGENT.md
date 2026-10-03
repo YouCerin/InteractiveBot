@@ -1302,6 +1302,11 @@ packages\qq-bridge\supervise-server.bat start --id forge1
 node src/index.mjs --supervise start --id forge1
 ```
 
+**★ 更省事的做法：让桥接自己管**（`servers[].manageOnStart: true`）——
+那样 `start.bat` 启动桥接时会**自动接管已在跑的、或拉起没在跑的**，
+不必每次手动跑上面那条命令（见本文档「启动接管」那一节）。
+两者是**互补**的：`manageOnStart` 管"开机那一次"，`supervise-server.bat` 管"你想手动拉一次"。
+
 ★ 为什么 `--supervise start` 现在要**等到端口真的开放**才算成功：第一版打印
 `launch()` 的结果就收工，于是「✅ 已拉起」只意味着"进程创建成功"。实测：跑完这条
 紧接着跑 `--supervise status`，看到的是「⛔ 没在跑」（那次 Forge 要 18 秒才 `Done`）——
@@ -1315,7 +1320,38 @@ node src/index.mjs --supervise start --id forge1
 **现有的密钥正则抓不到 RCON 密码**（它是任意字符串），所以判据必须是**字段级**的
 （`verify-release-hygiene.mjs` §④-b）。
 
-**★★ TPS 是"问了才有"，不是"问了拿不到"**：`servers[].tpsCommand` 留空 ⇒
+**★★★ 「启动接管」（`servers[].manageOnStart`，0.3.2 P2 收尾）—— 判据顺序不能换**
+
+设计文档 §6.3.1 要求「**服务端要由机器人启动**」，而这条在 0.3.2 收尾前**没实现**
+（`attach()` 只起了监测循环）⇒ 使用者必须先手动 `supervise-server.bat start` 一次，
+"挂了自动拉起一次"才生效。现在桥接启动时按这个顺序办（`servers[].manageOnStart`，默认关）：
+
+```
+① 端口活着 + 归属是我   ⇒ 接管（只挂监测，不上手）
+② 端口活着 + 归属不是我 ⇒ 如实降级成"只报告、不重启"
+③ 端口不通              ⇒ 按 startExe/startCommand 拉起来，并**等端口真的开放**
+```
+
+**★★★ 最贵的一条：判据是「端口不通才拉」，不是「归属不是我」。**
+两个 JVM 同时打开同一个世界目录 = **存档损坏（不可逆）**，比少一个自动重启严重得多。
+∴ `ownership().portOpen` 为真时**一次 `launch()` 都不许发生** —— 这条有专门的断言
+（`verify-servers.mjs` 第 ⑱ 节，5 组共 11 项），而且它**必须**在接线级测：
+纯函数断言抓不到"调用顺序与条件"这类错。
+
+★ 三个探针（`ownership` / `portOpen` / `launch`）**缺一不可**地注入测试桩，
+否则会回退去探**真端口** —— 实测踩到两次：开发机上 25565 真的开着（联调用的 Forge 服），
+于是不注入就判成"归属不是我"，**测试走了另一条分支、断言测的是空气**。
+现在 `mkStartBridge` 缺任一探针就当场抛错。
+
+★★ **踩过的坑（值得单独记，因为它浪费了最多时间）**：`attach()` 原本是**同步**方法，
+而我在里面写了 `await`。V8 报的错是
+`Private field '#notePersonaShape' must be declared in an enclosing class`
+—— 报在了**类里第一个私有字段**上，离真正的位置**几百行**。
+∴ 教训：`await` 放进非 async 方法里，报错会离谱到让你去查一个完全无关的私有字段。
+`attach()` 现在是 `async`，**调用方要接住它的 Promise**（`index.mjs` 用 `.catch()`）。
+
+**★★ TPS 是"问了才有"，不是"问了拿不到"**：
+`servers[].tpsCommand` 留空 ⇒
 我们**不问**（`tps: null`）。为什么不让代码猜一个：TPS 不是通用命令
 （vanilla 要 datapack、各端措辞不同），猜错只会在真机上拿到一句报错，
 然后把"我猜错了"显示成"服务器有问题"。填了（如 Forge 的 `forge tps`）就采，

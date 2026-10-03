@@ -665,7 +665,15 @@ export function createSupervisor({
  * 默认端口探针：一次 TCP connect。**只要"有没有东西在听"**，不做任何协议交互
  * （RCON 登录要密码，而这里只是判断进程死活）。
  */
-function defaultPortOpen(host, port, timeoutMs = 1500) {
+/**
+ * 默认端口探针：一次 TCP connect。**只要"有没有东西在听"**，不做任何协议交互
+ * （RCON 登录要密码，而这里只是判断进程死活）。
+ *
+ * ★ `export` 是**故意的**：桥接"启动时接管"要等端口真的开放，而它必须与这里
+ *   **同一份实现** —— 两处各写一份必然分叉，而分叉的表现是
+ *   「`--supervise start` 说起来了、桥接说没起来」（实测最容易被当成"服务端有毛病"）。
+ */
+export function defaultPortOpen(host, port, timeoutMs = 1500) {
   return new Promise((resolve) => {
     let settled = false
     const done = (v) => {

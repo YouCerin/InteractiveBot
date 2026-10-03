@@ -260,6 +260,9 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                 <span>
                   异常阈值：{s.rules.minTps ?? '—'} TPS / {s.rules.maxPlayers ?? '—'} 人
                   {s.tpsCommand ? `（TPS 命令：${s.tpsCommand}）` : '（没配 `tpsCommand` ⇒ **不问 TPS**，不是拿不到）'}
+                  {s.manageOnStart
+                    ? ' · 启动接管：开（桥接启动时会接管已在跑的、或拉起没在跑的；端口活着时绝不重复拉起）'
+                    : ' · 启动接管：关（要手动 `supervise-server.bat start`）'}
                 </span>
               </div>
             </CardContent>

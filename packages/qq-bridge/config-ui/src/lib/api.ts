@@ -627,6 +627,12 @@ export interface ServerRow {
    * 否则"TPS 拿不到"看起来像服务端的毛病。
    */
   tpsCommand: string
+  /**
+   * 桥接启动时要不要管这台服务端（0.3.2 P2「启动接管」）。
+   * ★ 它与"点一下就启动"是两件事：界面**不做**启动按钮
+   * （那种环境里点一下，服务端起来就会被进程树回收，而界面显示"成功"）。
+   */
+  manageOnStart: boolean
   failThreshold: number | null
   rules: { minTps: number | null; maxPlayers: number | null }
   /** 活证据：这台采过样才有（`null` = 还没采过） */

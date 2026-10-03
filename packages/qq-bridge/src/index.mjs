@@ -2823,7 +2823,13 @@ async function main() {
   const sendQueue = new SendQueue({ ...config.send, log })
   const router = new SessionRouter({ log })
   const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey })
-  bridge.attach(onebot)
+  // ★★ 0.3.2 起 `attach()` 是 async（`servers[].manageOnStart` 要等到服务端端口真的开放）。
+  //   这里**必须接住它的拒绝**：否则启动期的接管失败会变成未处理的 Promise 拒绝。
+  //   而且**不阻塞**后面连 OneBot —— 服务端可能要好几分钟才起来，
+  //   没理由让"收消息"等它（`attach()` 内部把进度写进日志，不会静默）。
+  bridge.attach(onebot).catch((error) => {
+    log(`❌ [servers] 启动接管失败（机器人照常工作）：${error?.message ?? error}`)
+  })
 
   // 记下登录信息，供配置接口的 /api/status 使用
   let loginInfo = null
