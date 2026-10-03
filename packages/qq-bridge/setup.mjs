@@ -34,7 +34,7 @@
 import { cpSync, mkdirSync, existsSync, statSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DIRS, PKG_ROOT, findNodeBinary, findDshCli, findDshCliWithSource, describeDshCandidates, describeLayout, resolveDshHome, readSearchPathsFromConfig } from './src/local.mjs'
+import { DIRS, PKG_ROOT, findNodeBinary, findDshCli, findDshCliWithSource, findDshAsar, dshAsarFixHint, describeDshCandidates, describeLayout, resolveDshHome, readSearchPathsFromConfig } from './src/local.mjs'
 
 const args = process.argv.slice(2)
 const CHECK_ONLY = args.includes('--check')
@@ -203,6 +203,14 @@ if (CHECK_ONLY) {
     line('      它是**运行环境**，本包不分发，需要你自己装。已查过这些位置：')
     for (const c of describeDshCandidates({ searchPaths })) line(`        · ${c.source}`)
     line('        · 还可用环境变量 DSH_DESKTOP_APP 或 config.json 的 dsh.searchPaths 指定')
+    // ★ 实机 BUG-5：装好了却说"没找到"的最常见原因就在这里 —— DSH 桌面版把 CLI
+    //   打包在 app.asar 里（普通 node 读不了）。这两种"没找到"必须给不同的出路，
+    //   否则用户只会以为"装了也没用"，然后去反复重装。
+    const asar = findDshAsar({ searchPaths })
+    if (asar) {
+      line('')
+      for (const l of dshAsarFixHint(asar).split('\n')) line(`      ${l}`)
+    }
   }
   line('')
   process.exit(0)
@@ -274,8 +282,18 @@ line('')
 line('ℹ️  DSH 本体不复制（这是既定设计）。桥接会自动在这些位置找它：')
 line('      1. vendor/dsh/                          （你若手工放了一份就用它）')
 line('      2. 环境变量 DSH_DESKTOP_APP 指向的安装根')
-line('      3. DSH 桌面版默认安装位置')
-line(`    当前解析结果：${findDshCli() ?? '（没找到，请检查 DSH 是否已安装）'}`)
+line('      3. DSH 桌面版默认安装位置（目录名两种都认：DeepSeek Harness / DeepSeekHarness）')
+const dshNow = findDshCli()
+line(`    当前解析结果：${dshNow ?? '（没找到，请检查 DSH 是否已安装）'}`)
+if (!dshNow) {
+  // ★ 实机 BUG-5：桌面版把 CLI 打包在 app.asar 里 —— 这是"装了却说没找到"的头号原因，
+  //   而它有一条**一步**的出路。不说的话用户只会得出"这个包用不了"的结论。
+  const asarNow = findDshAsar({ searchPaths: readSearchPathsFromConfig('dsh.searchPaths') })
+  if (asarNow) {
+    line('')
+    for (const l of dshAsarFixHint(asarNow).split('\n')) line(`    ${l}`)
+  }
+}
 
 // ── 5. SnowLuma（可选，**且发布包不要用它**）─────────────────────────────
 //

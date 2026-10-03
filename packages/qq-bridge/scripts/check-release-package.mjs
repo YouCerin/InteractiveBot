@@ -10,6 +10,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join, relative, extname, sep } from 'node:path'
+import { batchHazardMessage, findBatchParenHazards } from '../src/batch-safety.mjs'
 
 const root = process.argv[2]
 if (!root) {
@@ -199,6 +200,29 @@ if (existsSync(join(root, 'src', 'index.mjs'))) {
   }
 } else {
   warnings.push('包里没有 src/index.mjs，跳过界面新鲜度自检')
+}
+
+// ── ⑦ 包里的 `.bat` 启动器：静态查"会让 cmd 提前闭合括号块"的行 ─────────
+//
+// ★ 为什么必须有这条（2026-10-03 实机测试报告 BUG-4）：`start.bat` 的成功分支里写着
+//   `echo [!] Could not start (exit %EXITCODE%) -- see the message above.` ——
+//   cmd 在**解析期**就读完整个 `( … )` 块，块内那个裸 `)` 提前闭合了它，
+//   剩下的内容被当成新命令 ⇒ 启动器以 255 中止。实测：**即使 if 条件为假、
+//   走 else 分支也照样崩**（机器人其实起来了，窗口却报错；或者机器人没起来，
+//   窗口什么都不说）。这类缺陷"跑测试"永远发现不了 —— 启动器只在用户机器上被双击。
+//   判据与实测记录见 `src/batch-safety.mjs`。
+for (const p of files) {
+  const r = rel(p)
+  if (!/\.bat$/i.test(r)) continue
+  let text
+  try {
+    text = readFileSync(p, 'utf8')
+  } catch {
+    continue
+  }
+  for (const hazard of findBatchParenHazards(text)) {
+    problems.push(batchHazardMessage(r, hazard))
+  }
 }
 
 // ── 报告 ───────────────────────────────────────────────────────────────

@@ -252,6 +252,13 @@ node src/index.mjs --recipes --extract --inject private:<QQ> [--dry]
 node src/index.mjs --ui               # fresh=0；packaged=0（发布包形态：包里没源码，本机无法核对）；stale/unstamped=1
 node src/index.mjs --ui --dist <某个包的 config-ui/dist>   # 查别人给的那份
 
+# ⑤-d DSH 装在 asar 里时抽出来（只读 asar，写到本包 vendor/dsh）
+#   ★ 新版 DSH 桌面版把 CLI 打包进 resources\app.asar，而普通 node 读不了归档 ——
+#   症状是"装好了却说找不到 DSH"。抽完不用再配任何东西（vendor/dsh 是第 1 优先级候选）。
+node src/index.mjs --extract-dsh                                  # 自动寻找 app.asar
+node src/index.mjs --extract-dsh --asar "<路径>\resources\app.asar"
+node src/index.mjs --extract-dsh --target <别的目录> [--force]     # 默认抽到 vendor/dsh
+
 # ⑥ 启动
 start.bat                        # 双击；或 node src/index.mjs
 # 也可以双击带图标的快捷方式：InteractiveBot.lnk（自己生成，见 首次使用.txt ②）
@@ -282,7 +289,7 @@ start.bat                        # 双击；或 node src/index.mjs
 | 需要 | 谁提供 | 为什么不在包里 |
 |---|---|---|
 | **QQ 桌面版（NTQQ）** | 用户 | 腾讯的软件，本来就得自己装；SnowLuma 靠注入它工作 |
-| **DSH 本体** | 用户 | 约 274.7 MB / 15069 文件，属**运行环境**（像 Node）。用 `dsh.searchPaths` / 环境变量 `DSH_DESKTOP_APP` / 默认位置定位 |
+| **DSH 本体** | 用户 | 约 274.7 MB / 15069 文件，属**运行环境**（像 Node）。用 `dsh.searchPaths` / 环境变量 `DSH_DESKTOP_APP` / 默认位置定位。★ 新版桌面版把 CLI 打包在 `resources\app.asar` 里（普通 node 读不了归档），那种情况跑一次 `node src/index.mjs --extract-dsh` 抽到 `vendor/dsh` 即可（见下方"DSH 找不到怎么办"） |
 | **SnowLuma** | 用户 | ★ **许可证不允许随第三方安装包分发**（EULA §5.4、LICENSE §5）。去 [官方 Releases](https://github.com/SnowLuma/SnowLuma/releases) 下载 `win-x64` 完整版 |
 | **模型 API key** | 用户 | 账号级凭据。界面「高级」页填一次；已装 DSH 桌面版并填过的**不用重复填** |
 
@@ -328,6 +335,19 @@ npm test                                 # 全量离线测试
 复制进来会把包从 86 MB 撑到 360 MB。DSH 属于**运行环境**（像 Node 一样），
 由 `src/local.mjs` 的 `findDshCli()` 按候选顺序定位，或用环境变量
 `DSH_DESKTOP_APP` 指定。
+
+#### DSH 找不到怎么办（装好了却报"没找到"）
+
+两种原因必须分开说 —— 它们的出路完全不同（2026-10-03 实机测试报告 BUG-5）：
+
+| 你看到的 | 真实原因 | 怎么办 |
+|---|---|---|
+| `--check` 列出候选位置，全都不存在 | 目录名或形态没覆盖：装出来可能是 `DeepSeek Harness`（**带空格**）；也可能 CLI 在 `resources\app` 下 | 现在候选表两种目录名 × 三种形态都覆盖，先重跑 `node src/index.mjs --check` |
+| 提示里出现 `resources\app.asar` 与"普通 node 读不了" | 新版桌面版把 CLI 打包在 **asar 归档**里 | `node src/index.mjs --extract-dsh`（自动找到并抽到 `vendor/dsh`，抽完不用再配）。指定路径/目录：`--asar <app.asar>` / `--target <目录>`；覆盖已有目录要 `--force` |
+
+抽取器与格式踩点写在 `src/dsh-extract.mjs`（含 `unpacked` 原生模块从
+`app.asar.unpacked` 合并、前缀自动剥离、路径逃逸拒绝），回归在
+`mocks/verify-dsh-locate.mjs`（用真实归档验过解析器）。
 
 ### 2. 唤醒规则：被 @ / 私聊 / 关键词 → **必须回答**
 

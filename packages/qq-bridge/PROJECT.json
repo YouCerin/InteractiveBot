@@ -457,6 +457,27 @@
       "assertions": 7
     },
     {
+    "cmd": "node mocks/verify-token-sync.mjs",
+    "purpose": "解析出来的 token 真的接到 OneBotClient 上（实机 BUG-2 的最后一公里）",
+    "network": "local-only",
+    "costs": "none",
+    "assertions": 49
+  },
+    {
+    "cmd": "node mocks/verify-snowluma-console.mjs",
+    "purpose": "SnowLuma 控制台输出落盘 + 首次登录凭据提示（实机 BUG-3，含真 spawn 端到端）",
+    "network": "local-only",
+    "costs": "none",
+    "assertions": 30
+  },
+    {
+    "cmd": "node mocks/verify-dsh-locate.mjs",
+    "purpose": "DSH 候选表（两种目录名 × 三种形态）与 app.asar 抽取（实机 BUG-5）",
+    "network": "local-only",
+    "costs": "none",
+    "assertions": 31
+  },
+    {
       "cmd": "node mocks/verify-doctor.mjs",
       "purpose": "体检工具自身的准确性",
       "network": "local-only",
@@ -651,6 +672,10 @@
     "mocks/verify-memory-supersede.mjs": "★★ 记忆更正测试（50 项）。**最值钱的是边界那几条**：先把实测数字固化（0.273 vs 0.286 差 0.013），再断言 `换成/改成/其实/不再用/更新为` **不许**被当成更正信号（宁可漏也不误伤），而 `纠正一下/更正/我之前说错了/记错了/收回刚才` 要认。另含：标注格式（可读、可解析、**幂等**、摘要截断）、两条通道（`fix` 档与自指措辞）都真的落盘、**旧条目仍在**、注入里没有被推翻的结论且如实提示\"另有 N 条已被更正\"、整理时**原样保留且不参与合并**、以及\"标注后不被篡改检测回滚\"（与快照配合，同类坑踩过）。",
     "src/corpus.mjs": "★★ **本地语料库 + 中文全文检索**（H7）：每条消息落 SQLite，支持\"用关键词搜过去说过什么\"。在此之前回看历史只有一条路 —— `qq_group_history` 现拉（拉一次算一次、不能检索、协议端一重启就没了），所以\"我上次说的那个方案叫什么来着\"这类问题机器人**真的答不了**。★ **纯词法检索**（零模型调用、零网络）：FTS5 + `tokenize='trigram'`；★★ **trigram 对 1~2 个汉字几乎无效**（实测 `MATCH '茶姬'` 返回 0 条，而 `LIKE '%茶姬%'` 命中），所以短查询自动走 **LIKE 回退**，FTS 抛错或 0 命中且含中文时也回退。★ FTS 用**外部内容表**（正文只有一份来源）+ 插入/删除**双触发器**（只建插入触发器的话，prune 之后 FTS 里会留下指向已删行的幽灵条目）。★ 结果带 `[mid:<消息id>]`，与 H6 的 `[reply:<id>]` **闭环**（搜到的消息可以被真正引用）。★ 三条边界（**用户确认过**）：① **七类隐私不落库**（入库前过 `screenForStore`，命中只往审计记类别与长度 —— \"写之前拦\"与\"写完再删\"是两件事）；② **30 天 TTL**（`--corpus --prune`，默认预演）；③ **不存媒体本体、也不存媒体路径**（只留张数 —— 存路径会留下一堆指向空气的路径）。★ 只读模式（`readOnly: true`）给 MCP 工具用：桥接是唯一写入方。 ★★ **0.2.3：给了它一个开关 `corpus.enabled`（默认 true = 升级前的行为）并登记成插件**。开关落在**接线**上而不是模块里（`corpus.mjs` 本身没有 `enabled` 这个概念）：写入侧 `bridge.mjs` 的 `#recordCorpus` **每条消息现读**、读取侧桥接内 `searchHistory`、MCP 工具侧 `runTool` 分派处用 `readLiveConfig()` **每次调用现读 config.json** ⇒ **hot**（三处取证写在 `src/plugins.mjs` 的 `why` 里）。★ 句柄照旧在构造时建，但 `createCorpus()` **不碰磁盘**（`node:sqlite` 与建表都推迟到第一次真正用）⇒ 关着时是**零 fs 成本**，不是「少一次写入」。★★ 两条容易做错的边界：① MCP 侧关掉时必须回「**被关掉了**」而**不能**回「没搜到」 —— 后者会被模型转述成「语料库里没有这条记录」，那是一句谎话；② 配置读不到时**按「开着」处理**（方向与 `runSendImage` 的保守**相反**），理由是这里**只读**：误判成「关」会让模型平白说一句「我搜不了」，误判成「开」最多是照常查一次本地库。 ★★ **`recent({latest:true})`**（2026-09-30）：取**最近 N 条**（老的 `afterId` 语义是「从某条往后最早的 N 条」，表达不了「最近」 —— 用它得先知道最大 id，而那正是调用方不掌握的东西）。返回顺序仍是**由旧到新**。用途是 `bridge.mjs` 的「你被叫到之前群里刚说了什么」。",
     "mocks/verify-corpus.mjs": "★★ 本地语料库测试（52 项）。四组：① **中文要真能搜到** —— 3 字走 FTS、**2 字必须走 LIKE 回退**（实测出来的边界）、英文、多词、按会话过滤、机器人自己说过的话也在库里；② **幂等与上限**（同一 message_id 只写一行、超长内容截断、limit/query 被夹到上限）；③ **隐私不落库**（含手机号的消息搜不到、审计里**没有原文**、side=corpus）；④ **TTL 默认只预演**（预演不动手、`--apply` 才删、删完 FTS 也不留幽灵、没超期的不受影响）。另含渲染（`[mid:]` + \"只能引用上面出现过的 id\"）与失败路径（库打不开时**只报一次**、必须留证据）。★★ **0.2.3 新增第⑦节（走完整 Bridge，7 项）** —— 开关的三条接线事实：缺 `corpus.enabled` 照旧落库（默认 = 升级前的行为，零回归）、`enabled=false` 时**一个字节都没写**（`corpus.sqlite` 文件都不产生 ⇒ 关着是**零 fs 成本**，不是\"少写一条\"）、**运行中只改活配置对象就能立刻开关**（这是 `hot: true` 的取证）。为什么必须走真 Bridge：`corpus.mjs` 本身没有 `enabled` 这个概念，开关落在**接线**上，而纯函数测试看不见接线。",
+    "src/token-sync.mjs": "★★ token 发现的**最后一公里**（实机 BUG-2）：把 resolveOnebotTokens() 的结果真正交给 OneBotClient。起因是它在包里只有两处调用、**两处都不参与建连** —— 客户端拿着 config.json 里那份空副本去连，两个通道同时 401，而日志还写着「来源：SnowLuma 自己的配置（…与 config.json 一致）」（那句的判据 differsFromConfig 只比较「两边都非空且不同」，所以「我们这边是空的」会走成一切正常，实测就是这么误导的）。★ 安全底线照旧遵守 token-discovery.mjs 立的「宁可找不到、也不要猜」：只有 matched-config: / explicit-selfId / 只有一个账号这三种**确定性**情形才自动接，多账号认不出自己时只警告并给出两条出路（填 onebot.selfId 或直接填 token）——接错账号等于用别人的身份收发消息，比连不上严重得多。★ 写盘沿用 /api/config 的同一套纪律：mergeConfigPatch → validateConfig(normalizeConfig(…)) → 备份 .bak → 落盘；一旦校验出致命项就**绝不落盘**（宁可这次只接在内存里），否则会把用户配置写成起不来的样子。★ 日志只说来源与账号，**绝不打印 token 本身**。回归 mocks/verify-token-sync.mjs（49 项，含「applyOnebotTokens 必须排在 new OneBotClient **之前**」的接线守卫 —— 顺序反了就是这次事故）。",
+    "src/snowluma-console.mjs": "★ 把 SnowLuma 的**控制台输出**落盘，并回答「首次登录凭据在哪」（实机 BUG-3）。三条各自都合理的决定叠起来正好把凭据吞掉：① 它只把引导密码写 stdout（不写自己的日志文件）；② 桥接拉起它时用 stdio:ignore；③ 桥接又只读它自己的日志文件（那份里恰好没有）。后果是**首次配置被卡死**：网页端 5099 能打开，但登录页要一个从未展示过的密码，对非技术用户来说「重新下载一份 / 重新注册一遍」就成了唯一看得见的路（报告实测里用户真这么做了）。现在用**文件句柄**（stdio:['ignore', fd, fd]，不建管道，所以「管道一端消失后子进程写日志会 EPIPE」的顾虑仍然不成立）把输出落到 logs/snowluma-console.log。★ 旧注释里「重定向会 GBK 乱码」是**用 pipe 测出来的**，不适用于文件句柄 —— 本机实测 179 字节 UTF-8 完全正确（中文与 initial credentials: 行逐字对得上），该结论已在 snowluma-log.mjs 里更正。★ **不回显密码本身**：只报「去哪个文件、搜 initial credentials」，少一份副本就少一个泄漏面。★ 未初始化（config/webui.json 的 mustChangePassword=true）而文件里又没有时，明确说「再启动一次会轮换出新密码，不需要重新下载、也不需要重新注册」—— 直接把「重装」这条错误路径掐掉。回归 mocks/verify-snowluma-console.mjs（含真 spawn 的端到端）。",
+    "src/batch-safety.mjs": "★★ .bat 启动器的静态安全检查（实机 BUG-4）。起因是一次**成功路径也一起崩**的事故：start.bat 的成功分支里写着 echo [!] Could not start (exit %EXITCODE%) -- …，而 cmd 在**解析期**就把整个 if ( … ) 块读完 —— 块内那个裸 ) 提前闭合了它，剩下的内容被当成新命令，批处理以 255 中止、一行成功提示都打不出来。实测最反直觉的一点：**即使 if 条件为假、走 else 分支也照样崩**（机器人其实起来了，窗口却报错；或者机器人没起来，窗口什么都不说）。判据全部来自本机 cmd.exe 逐条实测：块内 echo A (paren) B / echo A ) B / 嵌套块 / 块尾 ) 后面接命令 → 255；而 echo A (B、行尾左括号、单行 if 2==2 ( echo Y )、for %%i in (a b) do、一行关两层 ))、) & echo Y、双引号内、^ 转义、rem 行 → 全部正常；**顶层**的括号一律是普通字符（顶层单独一行 ) 也正常）。所以只报「行开始时就处在块内、且非行首的 ) 后面还有内容」这一种形态，宁窄不宽 —— 误报会让人去修一个不存在的问题。接在 scripts/check-release-package.mjs（发布包验收第 ⑦ 步：扫包里每个 .bat）与 mocks/verify-release-hygiene.mjs（含事故原文那条）。",
+    "src/dsh-extract.mjs": "★★ 从 DSH 桌面版的 app.asar 里抽出 CLI（实机 BUG-5 的受支持做法）。背景：0.2.0-rc.2 把 CLI 打在 resources\\app.asar 里，而普通 node **不认 asar**（实测 Cannot find module …app.asar\\…），于是「按文档装好了却说找不到 DSH」——抽出来之后完全可用（实测 --version → 0.2.0-rc.2、桥接 [rpc] initialize 成功 + ✅ DSH 就绪），所以这不是版本不兼容，只是少了一步。格式踩点（别凭印象写）：文件头 8 字节是一个 pickle，其载荷是 header pickle 的长度；header pickle 的第 8 字节起是 JSON；**文件体偏移基准 = 8 + headerPickleSize**；标记 unpacked: true 的条目**不在归档里**，要去旁边的 app.asar.unpacked\\<同相对路径> 取（node-pty / sharp / sherpa-onnx / koffi 等原生模块都在这一类，漏了它们 DSH 会在加载时才报错），缺了必须报出来。★ 前缀自动判定：在归档里搜 bin.js 反推「哪一层才是 CLI 安装根」并剥掉它（实测归档根下先有一层 dsh/），这样抽完正好落在 vendor/dsh（第 1 优先级候选，抽完不用再配）。★ 解析器用**真实归档**验证过：本机三份 Electron 应用的 app.asar （含 24572 个条目的百度网盘那份），按 bodyOffset + offset 取出的 package.json 能 JSON.parse 通过。CLI：node src/index.mjs --extract-dsh [--asar <路径>] [--target <目录>] [--force]。回归 mocks/verify-dsh-locate.mjs。",
     "src/token-discovery.mjs": "★★ **OneBot 凭据发现（保守读）**（H8）：从 SnowLuma 自己的配置里读 token，规矩是「**宁可找不到，也不要猜**」—— 猜错的症状是**令牌被拒 + 机器人完全不说话**（本项目踩过两次，且不报错）。采用参考项目的四条：① 只读明确的配置文件（不写 .env、不调 WebUI、**不发网络请求**）；② 只接受常规文件（`lstat` **拒符号链接**）+ 2MB 体积上限 + token 长度上限 + **拒控制字符**（后者会进 HTTP 头，症状是莫名其妙的 400）；③ 只采纳 `enabled !== false` 且 host **回环**的服务器条目；④ ★★ **显式指定账号时找不到它的文件就返回「没有」—— 绝不复用别的账号的 token**（原实现是「退到目录里任意一个 onebot_<数字>.json」，那是猜）。★ **一处刻意与参考项目不同**：NapCat 那条「http 与 ws token 不一致就放弃猜测」**不照搬** —— 他们的 http/ws 是同一连接的两个候选，而我们是**两条通道同时使用、各用各的凭据**（http 发消息、ws 收事件），照搬会让一份完全正常的配置直接失效；我们保留其**精神**：不一致时不静默（`differsFromConfig` + `why`）。★ `readAccountFile` 的 `lstat` **可注入** —— Windows 上建符号链接要开发者模式，而这条安全判据不能因为环境限制就没测试。另提供 `listAccountNames()`：给界面选账号用，**只给 ID、永不给密钥**。 ★★★ **真机上抓到的一条（必须留着）**：没写 `onebot.selfId` 时，**不能只看\"最新修改的那个账号文件\"** —— 真机取证：`snowluma/config/` 下有**两个**账号（机器人自己的 `onebot_200000001` 与使用者的 `onebot_100000001`），而**最新的是使用者的那个**；只按 mtime 挑就会挑到**别人的账号**，症状正是 401 + 机器人完全不说话。所以加了确定性判据：**哪个账号文件的 token 与 `config.json` 里的一致，就用它**（一致 = 确实就是这个账号）；都不一致时才退回\"最新\"，并**大声警告**（列出全部候选 + 让人去写 `onebot.selfId`）；若多个账号用同一组 token → 判为\"无法确定\"，**不猜**。修复后在真机复验：`picked: matched-config:onebot_200000001.json`、`differsFromConfig: false`（修复前是使用者的账号 + `true`）。",
     "mocks/verify-token-discovery.mjs": "★ 凭据发现测试（53 项）。三组核心断言：① ★★ **显式账号找不到 → 必须返回「没有」**，绝不复用目录里别的账号的 token；② 只采纳 enabled 且 host 回环的条目（非回环条目在本机协议端配置里可疑）；③ 非法 token 一律不采纳（非字符串/超长/**含控制字符**）。另含：回环判定（`127.x`/localhost/`::1` 认，`0.0.0.0`/内网/域名不认）、保守读文件（**符号链接拒读** —— 用**注入的 lstat** 覆盖，不依赖本机能不能建链接；超大/坏 JSON/目录都拒）、以及**与参考项目刻意不同的那条**（http 与 ws token 不同**照样各取各的**）。",
     "src/transport.mjs": "★★ **传输契约**（H9）：把\"出错了\"变成**结构化的、可判定的**东西。以前 `onebot.mjs` 是\"遇到情况就 throw 一句人话\"，消息写得不错但**没有任何机器可读字段** —— 上层想说\"这个能重试、那个重试也没用\"只能去**匹配错误字符串**（脆得要命）。现在 `classifyTransport()` 是**表驱动**的纯函数，`retryable` 是**一等字段**（借鉴参考项目的 TransportDescriptor）。三条纪律：① **不认识的情况不猜成\"可重试\"**（unknown 层 + 不可重试 —— 猜错方向会把\"其实对方已经收到了\"的操作再发一遍）；② **认证类错误给可执行提示**（本项目两次事故都是 token 漂移，症状是\"令牌被拒 + 机器人完全不说话\"）；③ 纯函数、可离线测。另含两个小工具：**投递幂等键** `deliveryKey()`（`sha256(会话|引用|表情|文本)[:32]`）与**断线缺口标注** `describeGap()`。",
@@ -1391,6 +1416,41 @@
   },
   "knownFailureSignatures": [
     {
+    "symptom": "Cannot find module …\\scripts\\ui-build-stamp.cjs（启动横幅说你看到的是旧界面）",
+    "cause": "发布包按设计不含 scripts/ 与 config-ui/src，而界面新鲜度检查在模块顶层硬 require 那个构建标记工具",
+    "fix": "改成惰性 + try/catch 加载，并在包里得出 packaged（本机无法核对）且退出码 0；发布验收会真的在包里跑一次 --ui（退出码非 0 即拦住）"
+  },
+    {
+    "symptom": "控制台报「协议端不可达 · HTTP 401 unauthorized」/「令牌被拒」，日志却写着 token 来源正确",
+    "cause": "解析出来的 SnowLuma token 只被用来打日志，建连用的仍是 config.json 里那份（模板默认空）——「最后一公里」没接上",
+    "fix": "建连前把解析结果接到运行期配置（仅 matched-config / explicit-selfId / 单账号三种确定性情形），并按 /api/config 的纪律写回 config.json（另存 .bak）；日志改成只有真接上了才说来源"
+  },
+    {
+    "symptom": "进不去 SnowLuma 网页端（看不到首次登录的临时密码），只能想到「重新下载/重新注册一遍」",
+    "cause": "它把引导密码只写 stdout，而桥接拉起它时用 stdio:ignore 丢掉了；桥接又只读它自己的日志文件（那份里恰好没有这行）",
+    "fix": "stdout/stderr 用文件句柄重定向到 logs/snowluma-console.log，并在启动日志/控制台里说明「去那个文件搜 initial credentials」；未初始化时另说一句「重启 SnowLuma 会轮换出新密码，不需要重装」"
+  },
+    {
+    "symptom": "双击 start.bat：窗口一闪，报 [!] Could not start (exit N)，stderr 是「-- was unexpected at this time.」，退出码 255，成功提示一行都看不到",
+    "cause": "if ( … ) 块内的 echo 文案里有未转义的右括号 —— cmd 在解析期就把块读完，那个 ) 提前闭合了块（与 if 条件真假无关，走 else 分支也照样崩）",
+    "fix": "去掉文案里的括号；另加静态检查 src/batch-safety.mjs（发布验收第 ⑦ 步会扫包里每个 .bat，判据来自本机 cmd.exe 逐条实测）"
+  },
+    {
+    "symptom": "按文档装好 DSH 桌面版，桥接还是说「没找到 DSH」（已查过 Program Files / %LOCALAPPDATA%\\Programs）",
+    "cause": "两个叠加：① 装出来的目录名带空格（DeepSeek Harness），候选表只写了不带空格的；② CLI 被打包在 resources\\app.asar 里，而普通 node 读不了 asar",
+    "fix": "候选表覆盖两种目录名 × 三种形态（app / app.asar / app.asar.unpacked），并把「asar 存在但读不了」单独检出；跑 node src/index.mjs --extract-dsh 抽到 vendor/dsh 即可（抽完不用再配）"
+  },
+    {
+    "symptom": "体检说「还有 1 个桥接在跑」并叫你去 --kill，可那其实是 SnowLuma（或唯一那个桥接）",
+    "cause": "进程统计没有按 profile 过滤，把外部进程登记（snowluma / chat-review）也算成了桥接",
+    "fix": "只统计 profile=bridge（1 条正常、≥2 条才是真冲突），外部登记另起一行且永不算故障；--kill 建议只在真冲突时出现"
+  },
+    {
+    "symptom": "体检把「群聊开关」标成 ❌，结论显示「能启动，但上面有 ❌ 项需要处理」，看起来像坏了",
+    "cause": "trigger.groupEnabled=true 是出厂默认值，却被当成故障判 ❌",
+    "fix": "降级成 ⚠️ 提醒（ok 仍为 true、不计入 allOk），结论句改成「全部就绪（有 N 项提醒，不是故障）」"
+  },
+    {
       "symptom": "HTTP 426 Upgrade Required",
       "cause": "httpUrl 填成了 WebSocket 端口",
       "fix": "SnowLuma 默认 3000=HTTP、3001=WS"
@@ -1504,6 +1564,7 @@
   "verificationStatus": {
     "_说明": "如实标注，不要把它当成\"全都验证过了\"。",
     "verified": [
+      "★★ **2026-10-03（0.3.0alpha 实机测试报告 7 个 bug 全部修完）**：链上套件 69 → **72 套**（新增 mocks/verify-token-sync.mjs 49 项、mocks/verify-snowluma-console.mjs 30 项、mocks/verify-dsh-locate.mjs 31 项；mocks/verify-doctor.mjs 30 → 48 项、mocks/verify-release-hygiene.mjs 35 → 56 项）。★ 这一轮**每一条判据都先在本机实测再写进断言**，值得单独记下来的几条：① **cmd.exe**：`if (` 块内 `echo A (paren) B` / `echo A ) B` / 嵌套块 / 块尾 `)` 后接命令 → 退出码 255，而 `echo A (B`、单行 `if 2==2 ( echo Y )`、`for %%i in (a b) do`、`))`、`) & echo Y`、双引号内、`^` 转义、rem 行、以及**顶层**的任何括号 → 全部正常（所以静态检查只报\"块内非行首的 ) 后面还有内容\"这一种，宁窄不宽）；★ 且**即使 if 条件为假、走 else 分支也照样 255** —— \"成功路径不受影响\"是错的。② **stdout 文件句柄重定向**：Node 子进程同时写 stdout/stderr（中文 + `initial credentials:` 行）→ 落盘 179 字节、UTF-8 完全正确、无替换字符 ⇒ snowluma-log.mjs 里\"重定向会 GBK 乱码\"的旧结论（用 pipe 测的）已在源码里更正。③ **asar**：解析器用**真实归档**验证（本机三份 Electron 应用，含 24572 个条目的那份）：文件体偏移基准 `8 + headerPickleSize`、按 `bodyOffset + offset` 取出的 `package.json` 能 JSON.parse 通过；同时确认\"普通 node 读 asar 内部路径\"仍然失败（报告的决定性实验反向成立）。④ **token 接线**：`applyOnebotTokens(...)` 必须在 `new OneBotClient(...)` 之前 —— 这条顺序断言就是 BUG-2 的回归（顺序反了 = 判定结果又被丢掉），另有\"误导人的「与 config.json 一致」不许出现在代码行里\"的文本守卫。★ 这份 PROJECT.json 的 files 157 → 161、commands 71 → 74。",
       "【0.3.0alpha 更正】下面那句「离线 64 套」是历史值，**已经过期**：0.3.0alpha 收尾时实测链上是 **66 套**（判据：从 `package.json` 的 `test` 脚本里数 `mocks/verify-*.mjs`；`mocks/` 下共 67 个，不在链上的是花钱的 `verify-live.mjs`）。⚠️ 中途一度是 67 套：那时链上有 `mocks/verify-voice-style.mjs`，0.3.0alpha 第二步把说话方式搬进人设文件之后那个套件被删除、内容断言归位到 `verify-persona.mjs`，所以现在是 66。**本段余下的历史叙述刻意保留**（它记的是\"登记值 ≠ 核对过的值\"这条教训，以及为什么本仓库不发布\"总断言数\"），只在前面挂这一句更正。另：0.3.0alpha 收尾时逐个实跑，**只有 35 套会自己报项数**（合计 2363 项），32 套连收尾行都不报 —— ⇒ 任何\"总断言数\"都只能是**下界**，别把它当覆盖率。\n\n★ 离线 **64 套**（`npm test` 全链退出码 0）",
       "★★ **2026-09-30（0.2.7 发布前）：62 套第一次在「放开 spawn」的会话里完整跑通（退出码 0）—— 而这一跑当场抓到 17 项红。** 原因不是这几套坏了，而是它们此前**一直在跳过**（受限沙箱不能起带管道的子进程，`verify-onebot` / `verify-mcp` / `verify-live` 整份打印 ⏭️ 后 `exit 0`），而 `npm test` 用 `&&` 串联 ⇒ **「跳过」与「通过」在退出码上长得一模一样**，于是那句「全链 62 套全绿」里从来没有包含它们。17 项红分两类：① **1 条是真产品问题** —— 隐私闸「生物特征」判据认裸词（连类别名 `生物特征` 本身都算），于是**我们自己的提示词**（写着「不要记隐私：…生物特征（指纹/人脸/声纹）」）被判成含隐私，输出侧把**整条回复吞掉**换成人话术；真机上「指纹锁坏了怎么办」这类正常回答同样会被吞。已按判据纪律收紧为只认**数据形态**（`指纹数据`/`声纹样本`/`DNA 检测报告`…），正反例各留锚点，`verify-privacy` 62→67 项。② **16 条是套件自身陈旧**（从没跑过 ⇒ 与实现慢慢脱节）：`verify-onebot` 10 条 = 分片时序（回显的提示词被切成 8~10 条，而用例只等「收到第一条」就取快照）+ 投递终检门会把 `【长期记忆】` 这类段标题**整行删掉**（拿「用户收到的那条」断言「提示词里有没有记忆段」必然假红）+ 0.2.7 给来源标注加的 `#id` 没进断言的字符类；`verify-mcp` 7 条 = 0.2.2 起 `qq_api` 改走只读白名单，回绝话术从「禁用了」变成「不在允许清单里」，而断言只认前者。逐条记录见 `docs/0.2.7-release-notes.md` §5。",
       "★ 真实 QQ 端到端（2026-09-25 实测）：管理员的真实私聊消息 → 桥接 → DSH → 模型 → QQ 回复，全程无人工干预",

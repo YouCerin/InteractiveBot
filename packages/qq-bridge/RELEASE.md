@@ -14,7 +14,7 @@
 
 | 依赖 | 为什么不在包里 |
 |---|---|
-| **DSH 本体** | 约 274.7 MB / 15069 个文件，且它是**运行环境**（像 Node）。定位方式：`vendor/dsh` → 环境变量 `DSH_DESKTOP_APP` → `dsh.searchPaths` → 默认安装位置 |
+| **DSH 本体** | 约 274.7 MB / 15069 个文件，且它是**运行环境**（像 Node）。定位方式：`vendor/dsh` → 环境变量 `DSH_DESKTOP_APP` → `dsh.searchPaths` → 默认安装位置（目录名两种都认：`DeepSeek Harness` / `DeepSeekHarness`；`resources` 下三种形态都查：`app` / `app.asar` / `app.asar.unpacked`）。★ 打包在 `app.asar` 里的那种普通 node 读不了，用 `node src/index.mjs --extract-dsh` 抽到 `vendor/dsh`（实机报告 BUG-5） |
 | **SnowLuma** | ★ **许可证不允许**。EULA §5.4 明确禁止"将其并入第三方安装包"，LICENSE §5 不授予原生组件（`snowluma-*.node` / `*.dll`）的再分发权利，§3(d) 要求公开发布衍生版须事先取得书面许可。让用户去 [官方 Releases](https://github.com/SnowLuma/SnowLuma/releases) 自取 |
 | **模型 API key** | 属于用户的账号凭据，不能替用户分发 |
 
@@ -276,7 +276,7 @@ node scripts/assemble-release.mjs --force     # 覆盖已有同名目录（会�
 | ② | 输出目录已存在就**拒绝**（要覆盖得显式 `--force`，且先删干净再建） | 老版本要留着对照；而且 `cpSync` 往已有目录上拷会抛难懂的 EIO |
 | ③ | 清点源文件，缺一个都不组装 | 漏项不报错，所以要在组装**之前**数一遍 |
 | ④ | 组装 + **自校验包里的 config.json 确实是空白** | 光"从模板复制"不够，复制完要再验一次结果 |
-| ⑤ | 跑 `check-release-package.mjs`，看**退出码** | 不要挑它的输出文案判通过。它还会**在包里真的跑一次** `src/index.mjs --ui`（判据同样只有退出码）—— 静态清单查不出"缺的是运行时依赖" |
+| ⑤ | 跑 `check-release-package.mjs`，看**退出码** | 不要挑它的输出文案判通过。它还会**在包里真的跑一次** `src/index.mjs --ui`（判据同样只有退出码）—— 静态清单查不出"缺的是运行时依赖"；第 ⑦ 步还会扫包里**每个 `.bat`**（`if (…)` 块内未转义的 `)` 会让启动器以 255 中止，见实机报告 BUG-4） |
 | ⑥ | 可选 `--zip` | 用 `tar -a`（bsdtar），比 `Compress-Archive` 快且条目名用正斜杠 |
 
 版本号**只从 `package.json` 读**（脚本里不写第二遍）。升级版本要改的地方由

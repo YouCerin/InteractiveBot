@@ -15,7 +15,7 @@
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runDoctor } from '../src/doctor.mjs'
+import { runDoctor, printDoctor } from '../src/doctor.mjs'
 import { resolveInPackage, DIRS, findDshCliWithSource, readSearchPathsFromConfig } from '../src/local.mjs'
 import { startMockOneBot } from './mock-onebot-server.mjs'
 
@@ -252,7 +252,15 @@ async function main() {
       config: makeConfig({ trigger: { groupEnabled: true } }),
       validate: makeValidate(),
     })
-    check('开启群聊被标出（有风控风险）', rowOf(r3, '群聊开关')?.ok === false)
+    // ⚠️ 语义在实机测试报告 BUG-7 之后改了：群聊开着是**风险提示**，不是故障。
+    // 旧断言（ok === false）会让"默认配置的机器"一律在体检末尾看到 ❌ 与
+    // 「能启动，但上面有 ❌ 项需要处理」—— 用户以为程序坏了。
+    check('开启群聊被标为 ⚠️ 提醒（ok 仍为 true，不计入故障）',
+      rowOf(r3, '群聊开关')?.ok === true && rowOf(r3, '群聊开关')?.level === 'warn',
+      `ok=${rowOf(r3, '群聊开关')?.ok} level=${rowOf(r3, '群聊开关')?.level}`)
+    check('提醒文字说明了风险与关闭方法',
+      /风控风险/.test(rowOf(r3, '群聊开关')?.detail ?? '') && /groupEnabled/.test(rowOf(r3, '群聊开关')?.detail ?? ''),
+      rowOf(r3, '群聊开关')?.detail)
 
     const r4 = await runDoctor({
       config: makeConfig({ onebot: { wsToken: '', httpToken: '' } }),
@@ -305,6 +313,100 @@ async function main() {
       !/[{,]\s*validate\s*[,}]/.test(indexSrc),
       '',
     )
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  section('用例 9：★ 其它插件的登记不能被算成"多余的桥接"（实机 BUG-6）')
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // 真机事故（2026-10-03 实机测试报告 BUG-6）：
+    //   同一张进程登记表里还躺着 SnowLuma 与 chat-review 的条目，而旧代码写的是
+    //   `running.filter(p => !p.isSelf)` —— 于是体检在一台**完全正常**的机器上报
+    //   ❌「还有 2 个在跑」并叫用户去 `--kill` 它们。照做就会把协议端和审核台杀掉。
+    //   判定口径必须只看 `profile === 'bridge'`（见 process-guard.runningBridges）。
+    const threeProcs = [
+      { profile: 'bridge', state: 'alive', pid: 100, isSelf: true, reason: null },
+      { profile: 'snowluma', state: 'alive', pid: 200, reason: null },
+      { profile: 'chat-review', state: 'alive', pid: 300, reason: null },
+    ]
+    const mixed = await runDoctor({
+      config: makeConfig(),
+      validate: makeValidate(),
+      processes: threeProcs,
+    })
+    const bridgeRow = rowOf(mixed, '同时运行的桥接数量')
+    check('★ 一个桥接 + 两个其它插件 → 不报警', bridgeRow?.ok === true, bridgeRow?.detail)
+    check('★ 不再给出"去 kill 多余进程"的错误建议', !/--kill/.test(bridgeRow?.detail ?? ''), bridgeRow?.detail)
+    const otherRow = rowOf(mixed, '其它插件的登记（不算桥接）')
+    check('非桥接登记单独成行（供参考，永不算故障）', otherRow?.ok === true, otherRow?.detail)
+    check('该行点名了 profile，便于人对号入座',
+      /snowluma/.test(otherRow?.detail ?? '') && /chat-review/.test(otherRow?.detail ?? ''),
+      otherRow?.detail)
+
+    // 真有两个桥接在跑 = 真冲突，这时**必须**报 ❌ 并给 kill 建议
+    const conflict = await runDoctor({
+      config: makeConfig(),
+      validate: makeValidate(),
+      processes: [
+        { profile: 'bridge', state: 'alive', pid: 100, isSelf: true, reason: null },
+        { profile: 'bridge', state: 'alive', pid: 101, reason: null },
+        { profile: 'snowluma', state: 'alive', pid: 200, reason: null },
+      ],
+    })
+    const conflictRow = rowOf(conflict, '同时运行的桥接数量')
+    check('两个桥接在跑 → 报 ❌', conflictRow?.ok === false, conflictRow?.detail)
+    check('且给出可执行的处置建议', /--processes --kill/.test(conflictRow?.detail ?? ''), conflictRow?.detail)
+
+    // ★ CLI 视角：`--processes` 是**另一个进程**，`isSelf` 恒为 false。
+    //   旧写法会把唯一那条在跑的桥接算成"其它"，报「有 1 个在跑」并教你杀掉它。
+    //   正确口径按**数量**：1 条 = 正常。
+    const cliView = await runDoctor({
+      config: makeConfig(),
+      validate: makeValidate(),
+      processes: [{ profile: 'bridge', state: 'alive', pid: 100, reason: null }],
+    })
+    const cliRow = rowOf(cliView, '同时运行的桥接数量')
+    check('★ CLI 视角下唯一那条桥接不算冲突（isSelf 恒为 false 的坑）',
+      cliRow?.ok === true, cliRow?.detail)
+    check('并且说明了这是正常的 1 个', /1 个/.test(cliRow?.detail ?? ''), cliRow?.detail)
+
+    const none = await runDoctor({
+      config: makeConfig(),
+      validate: makeValidate(),
+      processes: [{ profile: 'snowluma', state: 'alive', pid: 200, reason: null }],
+    })
+    check('一个桥接都没有时也不报错（只是如实说明）',
+      rowOf(none, '同时运行的桥接数量')?.ok === true,
+      rowOf(none, '同时运行的桥接数量')?.detail)
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  section('用例 10：★ ⚠️ 提醒必须看得见，且不能污染"全部就绪"（实机 BUG-7）')
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // 打印层与判定层是两件事：判定层（上面的 ok/level）说"不是故障"，
+    // 但打印层如果只按 ok 渲染，这一行就会和"一切正常"长得一模一样 —— 提示等于没写。
+    // 这里直接把 printDoctor 的 stdout 抓下来看它到底印了什么。
+    const result = await runDoctor({
+      config: makeConfig({ trigger: { groupEnabled: true } }),
+      validate: makeValidate(),
+    })
+    const lines = []
+    const realLog = console.log
+    console.log = (...args) => lines.push(args.join(' '))
+    let allOk
+    try {
+      allOk = printDoctor(result)
+    } finally {
+      console.log = realLog
+    }
+    const text = lines.join('\n')
+    check('★ 提醒行渲染成 ⚠️ 而不是 ✅', /⚠️ 群聊开关/.test(text), text.split('\n').find((l) => l.includes('群聊开关')))
+    check('★ 提醒行不会被渲染成 ❌', !/❌ 群聊开关/.test(text))
+    check('ok 语义不变：没有故障 → allOk 仍为 true（退出码 0）', allOk === true)
+    check('★ 结论句承认"有提醒"，不再只说"全部就绪"',
+      /全部就绪（有 \d+ 项提醒/.test(text), lines[lines.length - 1])
+    check('提醒行本身不出现在"必须修复"一节里', !/必须修复[\s\S]*群聊开关/.test(text))
   }
 
   await server.close()

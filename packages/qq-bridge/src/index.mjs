@@ -29,7 +29,7 @@ import { OneBotClient, SendQueue } from './onebot.mjs'
 import { SessionRouter } from './session-bridge.mjs'
 import { Bridge } from './bridge.mjs'
 import { makeSessionId } from './session-id.mjs'
-import { PKG_ROOT, DIRS, resolveDshHome, resolveInPackage } from './local.mjs'
+import { PKG_ROOT, DIRS, resolveDshHome, resolveInPackage, findDshAsar, DSH_APP_DIR_NAMES } from './local.mjs'
 import { runDoctor, printDoctor } from './doctor.mjs'
 import { normalizeConfig, validateConfig } from './config.mjs'
 import { createApiHandler, serveApi } from './api.mjs'
@@ -49,6 +49,8 @@ import { resolveModelCredentials } from './credentials.mjs'
 // ★ 不再直接 import `detectSnowluma` —— 所有探测都经 `makeLaunchDetect` 这一个工厂，
 //   目的就是让"两条调用路径传的判据一致"变成结构上必然成立（见该函数的注释）。
 import { startSnowluma, openSnowlumaConsole, resolveOnebotTokens, makeLaunchDetect, waitForSnowlumaReady } from './snowluma.mjs'
+import { applyOnebotTokens, persistOnebotTokens } from './token-sync.mjs'
+import { bootstrapCredentialInfo } from './snowluma-console.mjs'
 import { createSnowlumaLogReader } from './snowluma-log.mjs'
 // ★ H13：账号发现（**只回摘要，绝不回 token**）与本地语料检索
 import { discoverOnebotConfig, listAccountNames } from './token-discovery.mjs'
@@ -468,6 +470,69 @@ async function main() {
       process.exit(r.status === 'fresh' || r.status === 'packaged' ? 0 : 1)
     })().catch((error) => {
       console.error(`❌ 界面检查失败：${error?.message ?? error}`)
+      process.exit(1)
+    })
+    return
+  }
+
+  // ── 抽取 DSH 桌面版打包在 app.asar 里的 CLI（实机 BUG-5）──────────────
+  //
+  // 为什么要有这个入口：DSH 桌面版（实测 0.2.0-rc.2）把 CLI 打在
+  // `resources\app.asar` 里，而普通 node **读不了 asar**：
+  //     node "…\app.asar\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js" --version
+  //     → Error: Cannot find module '…app.asar\…'
+  // 抽出来就完全可用（实测 --version → 0.2.0-rc.2、`✅ DSH 就绪`）。
+  // 抽取逻辑与踩点记录在 `src/dsh-extract.mjs`（它有独立的回归测试）。
+  //
+  // 用法：
+  //   node src/index.mjs --extract-dsh                       （自动找 app.asar）
+  //   node src/index.mjs --extract-dsh --asar <app.asar 路径>
+  //   node src/index.mjs --extract-dsh --target <目录>        （默认 vendor/dsh）
+  //   …--force                                               （目标非空时覆盖）
+  if (process.argv.includes('--extract-dsh')) {
+    ;(async () => {
+      const { extractDshFromAsar } = await import('./dsh-extract.mjs')
+      const argOf = (name) => {
+        const i = process.argv.indexOf(name)
+        return i >= 0 ? process.argv[i + 1] : null
+      }
+      const forced = argOf('--asar')
+      const targetArg = argOf('--target')
+      const target = targetArg ? resolveInPackage(targetArg) : DIRS.vendorDsh
+      const found = forced
+        ? { asarPath: resolve(forced), source: '命令行 --asar' }
+        : findDshAsar({ searchPaths: config.dsh.searchPaths ?? [] })
+
+      if (!found) {
+        console.error(
+          '❌ 没有找到 DSH 桌面版的 app.asar。已查过 Program Files 与 %LOCALAPPDATA%\\Programs 下的\n' +
+            `   ${DSH_APP_DIR_NAMES.join(' 与 ')}（两种目录名），以及 config.json 的 dsh.searchPaths。\n` +
+            '   如果你知道它在哪：node src/index.mjs --extract-dsh --asar "<路径>\\resources\\app.asar>"',
+        )
+        process.exit(1)
+      }
+      // 目标非空就拒绝（避免把用户手工放的 vendor/dsh 覆盖掉）——除非显式 --force
+      if (existsSync(target) && readdirSync(target).length > 0 && !process.argv.includes('--force')) {
+        console.error(
+          `❌ 目标目录已存在且非空：${target}\n` +
+            '   它可能是一份已经能用的 DSH。确认要覆盖就加 --force，或换目录：--target <别的目录>',
+        )
+        process.exit(1)
+      }
+      console.log(`正在抽取：${found.asarPath}`)
+      console.log(`   （来源：${found.source}）`)
+      const r = extractDshFromAsar({ asarPath: found.asarPath, targetDir: target, log: (m) => console.log(m) })
+      if (!r.ok) {
+        console.error(`❌ 抽取失败：${r.error}`)
+        process.exit(1)
+      }
+      console.log('')
+      console.log(`✅ 完成。CLI 现在在这里：${r.binPath}`)
+      console.log('   接下来直接双击 start.bat 即可（vendor/dsh 是第 1 优先级候选，不用改配置）。')
+      console.log(`   自检：node src/index.mjs --check`)
+      process.exit(0)
+    })().catch((error) => {
+      console.error(`❌ 抽取失败：${error?.message ?? error}`)
       process.exit(1)
     })
     return
@@ -1924,6 +1989,19 @@ async function main() {
       })
       if (ready.ok) console.log(`✅ ${ready.hint}`)
     }
+    // ★ 实机 BUG-3：此刻 SnowLuma 已经起来了，如果它这次打印了**首次登录的引导密码**，
+    //   那句话就在我们重定向出来的文件里。用户下一步就是去 5099 登录 ——
+    //   所以这里是告诉"密码在哪"的最佳时机（仍然只报位置，不回显密码本身）。
+    try {
+      const bs = bootstrapCredentialInfo({
+        pkgRoot: PKG_ROOT,
+        installDir: config.snowluma?.installDir || undefined,
+        consoleUrl: config.snowluma?.consoleUrl || undefined,
+      })
+      console.log(`ℹ️ ${bs.hint}`)
+    } catch {
+      /* 拿不到提示不影响打开控制台 */
+    }
     // 打开 SnowLuma 的网页端（浏览器）
     const r = await openSnowlumaConsole({ config, log })
     console.log(r.ok ? `✅ ${r.data.hint}` : `❌ ${r.error}`)
@@ -1936,9 +2014,14 @@ async function main() {
       config,
       installDir: config.snowluma?.installDir || undefined,
     })
+    // ⚠️ 措辞在实机 BUG-2 之后改准：这里**不做**同步（这个进程只负责拉起 SnowLuma，
+    //   它自己不连 QQ），真正"接上 token + 写回 config.json"发生在桥接进程启动时。
+    //   旧文案说"实际用的是【…】那一组"，而当时桥接**根本没接** —— 那是假的。
     if (tokens.differsFromConfig) {
-      console.log('⚠️  config.json 里的 token 与 SnowLuma 自己的配置不一致。')
-      console.log(`   实际用的是【${tokens.source}】里的那一组（见 src/snowluma.mjs）。`)
+      console.log(`ℹ️  config.json 里的 token 与 SnowLuma 自己的配置不同。`)
+      console.log(
+        `   桥接启动时会以 SnowLuma 自己的那一组为准（${tokens.picked}）并同步写回 config.json。`,
+      )
     }
     const r = await startSnowluma({
       config,
@@ -1960,6 +2043,10 @@ async function main() {
       console.log(r.data.started ? `✅ ${r.data.hint}` : `ℹ️  ${r.data.hint}`)
       if (r.data.cmd) console.log(`   入口：${r.data.cmd}（来源：${r.data.discoveredBy}）`)
       if (config.snowluma?.consoleUrl) console.log(`   网页端：${config.snowluma.consoleUrl}`)
+      // ★ 实机 BUG-3：SnowLuma 的首次登录引导密码**只在它的启动输出里**出现过一次 ——
+      //   那句话现在被写到 logs/snowluma-console.log。这里必须说一声，
+      //   否则用户打开 5099 看到登录页却没有任何地方能拿到密码，只能想到"重装一遍"。
+      if (r.data.bootstrapHint) console.log(`ℹ️  ${r.data.bootstrapHint}`)
     } else {
       console.log(`❌ ${r.error}`)
       process.exitCode = 1
@@ -2185,6 +2272,57 @@ async function main() {
     console.error(`❌ 无法启动 DSH：${error.message}`)
     log(`❌ 无法启动 DSH：${error.message}`)
     process.exit(1)
+  }
+
+  // ── 凭据：把解析结果**真正接上**，并按纪律写回 config.json（实机 BUG-2）──
+  //
+  // ══════════════════════════════════════════════════════════════════════════
+  // 为什么这一小段必须排在 `new OneBotClient` **之前**
+  // ══════════════════════════════════════════════════════════════════════════
+  // 2026-10-03 实机测试报告 BUG-2：`resolveOnebotTokens()`（"该用哪一组 token"的判定）
+  // 过去在包里只有两处调用，**两处都不参与建连** —— 一处打印"两边不一致"，一处打印来源。
+  // 而建连用的是 `config.json` 里那份静态副本（模板默认是空串），SnowLuma 的 token
+  // 只写在它自己的 `config/onebot_<QQ>.json` 里。于是**客户端空手去连、两个通道同时 401**，
+  // 而日志还写着「来源：SnowLuma 自己的配置（…与 config.json 一致）」——
+  // 那个"一致"的判据只比较"两边都非空且不同"，所以"我们这边是空的"会走成"一切正常"。
+  // token 由 SnowLuma 生成/轮换，两处**必然漂移**；唯一解是启动时以它为准并同步回来。
+  //
+  // 安全底线（见 `src/token-sync.mjs` 文件头）：只有**确定性**情形才自动接
+  // （`matched-config:` / `explicit-selfId` / 只有一个账号）；多账号且认不出自己时
+  // **只警告**，绝不猜 —— 接错账号等于用别人的身份收发消息。
+  let credentialReport = { applied: false, saved: false, source: null, picked: null, why: '', broken: '' }
+  try {
+    const tokens = resolveOnebotTokens({
+      config,
+      installDir: config.snowluma?.installDir || undefined,
+    })
+    credentialReport = {
+      ...credentialReport,
+      source: tokens.source ?? null,
+      picked: tokens.picked ?? null,
+      why: tokens.why ?? '',
+    }
+    if (tokens.warn) log(`⚠️ ${tokens.warn}`)
+    if (tokens.why) log(`[凭据] 没有采用 SnowLuma 自己的配置：${tokens.why}`)
+    const applied = applyOnebotTokens({ config, tokens, log })
+    credentialReport.applied = applied.applied
+    credentialReport.broken = applied.applied ? '' : applied.detail
+    if (applied.applied) {
+      // ★ 接上之后**才**说"来源" —— 这句话以前会在"其实用的是空 token"时照说。
+      const saved = persistOnebotTokens({ configPath, tokens, log })
+      credentialReport.saved = saved.saved
+    }
+  } catch (error) {
+    log(`[凭据] 解析失败（不影响启动）：${error?.message ?? error}`)
+  }
+  if (!credentialReport.applied) {
+    // 一行**如实**的结论：现在到底拿的是什么在连。过去这里既不说"没接上"、
+    // 也不说"用的是空 token"，是这次事故最难查的一段。
+    const empty = !config.onebot?.wsToken && !config.onebot?.httpToken
+    log(
+      `[凭据] 来源：config.json${empty ? '（**两个 token 都是空的**）' : ''}` +
+        `${credentialReport.broken ? ` —— ${credentialReport.broken}` : ''}`,
+    )
   }
 
   // ── 连 QQ ──
@@ -2869,36 +3007,22 @@ async function main() {
     void shutdown('unhandledRejection', { exitDelayMs: 200 })
   })
 
-  // ── 启动时把**凭据来源**说清楚（H8）────────────────────────────────────
+  // ── 启动时把**凭据来源**说清楚（H8，措辞在实机 BUG-2 之后改准）──────────
   //
-  // 为什么值得多读两个小 JSON：token 是"存在两处必然漂移"的东西，
-  // 而漂移的症状是**令牌被拒 + 机器人完全不说话** —— 启动时不说，
-  // 等到用户抱怨"它怎么不理我"时才查，代价大得多。
-  // ★ 只说来源与原因，**绝不打印 token 本身**。
-  try {
-    const tokens = resolveOnebotTokens({
-      config,
-      installDir: config.snowluma?.installDir || undefined,
-    })
-    if (tokens.warn) log(`⚠️ ${tokens.warn}`)
-    if (tokens.why) log(`[凭据] 没有采用 SnowLuma 自己的配置：${tokens.why}`)
-    if (tokens.differsFromConfig) {
-      log(
-        `⚠️ config.json 里的 token 与 SnowLuma 自己的配置不一致，实际用的是【${tokens.source}】那一组` +
-          `（挑中的账号文件：${tokens.picked}）。`,
-      )
-    } else if (tokens.source === 'SnowLuma 自己的配置') {
-      // ★ 一行"一切正常"的正面证据。为什么值得占一行日志：
-      //   "现在到底用的是哪一组 token"过去要**两次事故**才查得出来，
-      //   而启动时一行就能回答（仍然只报来源与账号，**不含 token 本身**）。
-      log(
-        `[凭据] 来源：SnowLuma 自己的配置（${tokens.picked}${tokens.accounts?.length > 1 ? `，共 ${tokens.accounts.length} 个账号` : ''}；与 config.json 一致）`,
-      )
-    } else {
-      log(`[凭据] 来源：config.json（没有读到 SnowLuma 自己的配置）`)
-    }
-  } catch (error) {
-    log(`[凭据] 启动自检失败（不影响运行）：${error?.message ?? error}`)
+  // token 的解析与应用已经排在 `new OneBotClient` 之前（见上面那段），这里只补一句
+  // **接上之后**的结论。为什么值得占一行日志：token 是"存在两处必然漂移"的东西，
+  // 而漂移的症状是**令牌被拒 + 机器人完全不说话** —— 启动时不说，等到用户抱怨
+  // "它怎么不理我"时才查，代价大得多。★ 只说来源与账号，**绝不打印 token 本身**。
+  //
+  // ⚠️ 旧文案在这里写过「与 config.json 一致」，而它的判据
+  //   （`differsFromConfig`）只比较"两边都非空且不同" —— 于是"config.json 是空的"
+  //   会打印成一行看似一切正常的话，紧接着第一行连接就是 401。
+  //   现在改成：只有**真的接上了**才说来源，否则明说"没接上"。
+  if (credentialReport.applied) {
+    log(
+      `[凭据] 本次连 QQ 用的是 SnowLuma 自己的配置（${credentialReport.picked ?? '?'}` +
+        `${credentialReport.saved ? '；已写回 config.json' : '；未写回 config.json'}）`,
+    )
   }
 
   log('桥接已启动，等待消息…（Ctrl+C 退出）')

@@ -22,7 +22,13 @@
 【2】DeepSeek Harness（简称 DSH，机器人的"大脑"）
      下载：https://github.com/deepseek-ai/deepseek-harness/releases
      说明：★ 这个包**不含**它，必须自己装（它很大）。
-           装完不用做任何配置，机器人会自己去找它。
+           ★ 新版桌面版把命令行工具打包在 app.asar 里，普通程序读不了 ——
+             这时机器人会说"没找到 DSH"。**不是版本不兼容**，抽一步就好：
+             在本目录执行
+                 node src\index.mjs --extract-dsh
+             它会自动找到那份 app.asar 并抽到本目录的 vendor\dsh，
+             之后不需要再配任何东西（抽完再跑一次 node src\index.mjs --check 确认）。
+           ★ 只有"绿色版/解压版"（CLI 直接是文件、没打进 asar）才是装完即用。
            ★ 如果上面这个地址打不开或找不到，就在搜索引擎里搜
              "DeepSeek Harness 桌面版 下载"，认准官方来源。
 
@@ -89,7 +95,12 @@
 SnowLuma 启动后，打开它的控制台：http://127.0.0.1:5099/
 （如果打不开，先确认 SnowLuma 已经在运行）
 
-· 首次启动会在控制台或日志里打印一个**一次性临时密码**，用它登录
+· 首次启动会打印一个**一次性临时密码**。★ 它只出现在 SnowLuma 的**启动输出**里
+  （它自己的日志文件里**没有**这一行）。桥接已经把那份输出存到了
+  logs\snowluma-console.log —— 用记事本打开它，搜 "initial credentials" 就能拿到；
+  机器人启动日志里也会直接告诉你这个文件在哪。
+· 万一那里也没有：**再启动一次 SnowLuma** 就会轮换出一个新密码并重新打印
+  —— 不需要重新下载，也不需要重新注册。
 · 登录 QQ **只支持扫码**：用手机 QQ 扫电脑上 QQ 窗口里的二维码
 · QQ 和 SnowLuma 谁先开都行，但两个都要用**同一个 Windows 用户**运行
 
@@ -167,8 +178,14 @@ SnowLuma 启动后，打开它的控制台：http://127.0.0.1:5099/
      → API Key 没填或填错了
 
    协议端一直"令牌被拒" / 连不上
-     → SnowLuma 那边的两个 token 和配置不一致；
-       去 http://127.0.0.1:5099/ 的配置页复制正确的 token
+     → 多半是桥接手上的 token 和 SnowLuma 的不一致。
+       正常情况下**不用你抄**：机器人启动时会自动以 SnowLuma 自己的
+       config\onebot_<你的QQ号>.json 为准，并把它同步写回本目录的 config.json
+       （旧的那份备份成 config.json.bak）。看 logs\bridge.log 里的 [凭据] 那几行。
+     → 若日志写着「有多个账号，无法确定哪个是你自己的」：SnowLuma 下有多份账号文件，
+       程序**不敢替你猜**（接错账号等于用别人的身份收发消息）。这时才需要手动二选一：
+       在本目录 config.json 的 onebot.selfId 填上你自己的 QQ 号，
+       或把该账号的 token 直接填进 onebot.wsToken / onebot.httpToken。
 
    网页控制台打不开
      → 机器人没启动成功。看本目录 logs\bridge.log 的最后几行

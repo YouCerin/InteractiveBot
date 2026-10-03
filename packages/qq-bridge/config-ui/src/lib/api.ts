@@ -320,8 +320,26 @@ export interface SnowlumaDetect {
   consoleReachable?: boolean | null
   /** token 实际来自哪里（SnowLuma 自己的配置 / config.json） */
   tokenSource?: string
-  /** 两处 token 不一致时为 true：config.json 里那份是过期的，别用它 */
+  /** 两处 token 不一致时为 true：config.json 里那份是过期的 */
   tokenDiffersFromConfig?: boolean
+  /**
+   * 挑账号的依据（`matched-config:` / `explicit-selfId` / `auto-newest:` /
+   * `ambiguous` / `none`）。界面据此区分"多个账号认不出自己"与"只是没同步"。
+   */
+  tokenPicked?: string
+  /**
+   * 首次登录凭据在哪（实机 BUG-3）。★ **不含密码本身** —— 只告诉用户去哪个文件搜。
+   * 之所以要显示：那个一次性密码只在 SnowLuma 的启动输出里出现过一次，
+   * 而它的日志文件里没有 ⇒ 没有这条提示，用户只能想到"重装一遍"。
+   */
+  bootstrap?: {
+    consoleLogFile: string
+    relFile: string
+    found: boolean
+    user: string | null
+    mustChangePassword: boolean | null
+    hint: string
+  }
   launch?: { configured: boolean; cmd?: string; cwd?: string; from?: string }
   hint?: string
 }

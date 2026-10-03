@@ -20,7 +20,8 @@
 
 import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { DIRS, findDshCli, findNodeBinary } from './local.mjs'
+import { DIRS, findDshCli, findDshAsar, dshAsarFixHint, findNodeBinary } from './local.mjs'
+import { runningBridges } from './process-guard.mjs'
 import { assertVendored, vendorRequire } from './vendor.mjs'
 
 const TIMEOUT_MS = 5000
@@ -208,19 +209,38 @@ export async function runDoctor({ config, validate, expectedHttpPort, expectedWs
   // 的故障 —— 两个桥接同时从同一个 OneBot 收事件时，同一句话可能被回两次，
   // 而每一个实例自己看上去都完全正常。
   if (Array.isArray(processes)) {
-    const running = processes.filter((p) => p.state === 'alive' || p.state === 'stale')
-    const others = running.filter((p) => !p.isSelf)
+    // ⚠️ 这里**必须**按 profile 过滤，不能拿"全部在跑的登记"当桥接数。
+    // 实测（实机测试报告 BUG-6）：同一台机器上还跑着 SnowLuma 与 chat-review，
+    // 它们的登记条目也在同一张表里 —— 旧的写法会把它们算成"另外两个桥接"，
+    // 于是体检在完全正常的机器上报 ❌「还有 2 个在跑」，并叫用户去 kill 它们。
+    // 判定口径见 process-guard.mjs 的 runningBridges()：**在跑的桥接 ≥2 才算冲突**。
+    const bridges = runningBridges(processes)
     rows.push({
       group: '进程',
       name: '同时运行的桥接数量',
-      ok: others.length === 0,
+      ok: bridges.length <= 1,
       detail:
-        others.length === 0
-          ? `只有本进程（pid ${processes.find((p) => p.isSelf)?.pid ?? '?'}）`
-          : `**还有 ${others.length} 个**：` +
-            others.map((p) => `pid ${p.pid}（${p.reason ?? p.state}）`).join('、') +
-            '。同时跑两个会抢同一个 OneBot 事件流 —— 用 `node src/index.mjs --processes --kill <pid>` 停掉多余的',
+        bridges.length === 0
+          ? '没有登记在运行的桥接'
+          : bridges.length === 1
+            ? `1 个，正常（pid ${bridges[0].pid}${bridges[0].isSelf ? '，就是本进程' : ''}）`
+            : `**${bridges.length} 个**：` +
+              bridges.map((p) => `pid ${p.pid}（${p.reason ?? p.state}）`).join('、') +
+              '。同时跑两个会抢同一个 OneBot 事件流 —— 用 `node src/index.mjs --processes --kill <pid>` 停掉多余的',
     })
+    // 非桥接的登记条目（SnowLuma / chat-review）单独列一行**仅供参考**。
+    // 它们与"抢事件流"无关，所以永远是 ok，不能拖累整体结论。
+    const nonBridge = processes.filter(
+      (p) => p.profile && p.profile !== 'bridge' && (p.state === 'alive' || p.state === 'stale'),
+    )
+    if (nonBridge.length) {
+      rows.push({
+        group: '进程',
+        name: '其它插件的登记（不算桥接）',
+        ok: true,
+        detail: nonBridge.map((p) => `pid ${p.pid}（${p.profile}，${p.state}）`).join('、'),
+      })
+    }
     const stale = processes.filter((p) => p.state === 'stale')
     if (stale.length) {
       rows.push({
@@ -281,6 +301,10 @@ export async function runDoctor({ config, validate, expectedHttpPort, expectedWs
   // 用配置里那份 cliPath；没有就按**同一张候选表**去找，并**带上配置的 searchPaths**
   // —— 否则会出现"启动能找到、体检说找不到"这种自相矛盾（用户会以为程序坏了）。
   const cli = config.dsh.cliPath ?? findDshCli({ searchPaths: config.dsh.searchPaths ?? [] })
+  // ★ 实机 BUG-5：`resources\app.asar` 形态下普通 node 读不了 asar —— 那是"装好了却说
+  //   找不到"的头号原因，且有一条一步出路。这里必须把两种"没找到"分开说清楚，
+  //   否则用户只会反复重装 DSH（报告里用户就是这么做的）。
+  const asarFound = cli && existsSync(cli) ? null : findDshAsar({ searchPaths: config.dsh.searchPaths ?? [] })
   rows.push({
     group: 'DSH',
     name: 'DSH CLI 能否定位',
@@ -288,7 +312,9 @@ export async function runDoctor({ config, validate, expectedHttpPort, expectedWs
     detail:
       cli && existsSync(cli)
         ? cli
-        : '未找到。DSH 不随本包分发，需要自己安装；可用环境变量 DSH_DESKTOP_APP 或 config.json 的 dsh.searchPaths 指定',
+        : asarFound
+          ? dshAsarFixHint(asarFound)
+          : '未找到。DSH 不随本包分发，需要自己安装；可用环境变量 DSH_DESKTOP_APP 或 config.json 的 dsh.searchPaths 指定',
   })
   rows.push({
     group: 'DSH',
@@ -347,11 +373,18 @@ export async function runDoctor({ config, validate, expectedHttpPort, expectedWs
       `${new URL(config.onebot.httpUrl).port}(HTTP) / ${new URL(config.onebot.wsUrl).port}(WS)`,
   })
 
+  // ⚠️ 群聊开启**不是错误**（实机测试报告 BUG-7）：默认配置里它就是开的，
+  // 于是每台按默认配置跑的机器都会在体检末尾看到 ❌ 与「能启动，但上面有 ❌ 项需要处理」，
+  // 用户第一反应是"程序坏了"。它只是一个**风险提示**，所以 ok: true + level: 'warn'，
+  // 由 printDoctor 渲染成 ⚠️，并且不计入 allOk。
   rows.push({
     group: '配置',
     name: '群聊开关',
-    ok: config.trigger.groupEnabled === false,
-    detail: config.trigger.groupEnabled ? '已开启（有账号风控风险）' : '已关闭（第一版决策）',
+    ok: true,
+    level: config.trigger.groupEnabled ? 'warn' : 'ok',
+    detail: config.trigger.groupEnabled
+      ? '已开启（默认值）—— 群里任何人 @ 都会触发，有账号风控风险；不想要就在 config.json 里把 trigger.groupEnabled 设为 false'
+      : '已关闭',
   })
 
   rows.push({
@@ -425,7 +458,10 @@ export function printDoctor({ fatal, warn, rows }) {
   for (const group of groups) {
     console.log(`\n── ${group} ──`)
     for (const row of rows.filter((r) => r.group === group)) {
-      console.log(`  ${row.ok ? '✅' : '❌'} ${row.name}`)
+      // level: 'warn' 的行 ok 也是 true（只是有风险，不是故障）——
+      // 若只按 ok 渲染，它就会和"一切正常"长得一模一样，提示等于没写。
+      const mark = row.ok ? (row.level === 'warn' ? '⚠️' : '✅') : '❌'
+      console.log(`  ${mark} ${row.name}`)
       console.log(`      ${row.detail}`)
     }
   }
@@ -438,6 +474,16 @@ export function printDoctor({ fatal, warn, rows }) {
     for (const f of fatal) console.log(`  ❌ ${f}`)
   }
   const allOk = fatal.length === 0 && rows.every((r) => r.ok)
-  console.log(`\n${allOk ? '🎉 全部就绪' : fatal.length ? '⛔ 有致命问题，先修上面标 ❌ 的项' : '⚠️ 能启动，但上面有 ❌ 项需要处理'}\n`)
+  // ⚠️ 行仍然算"就绪"（退出码为 0），但结论句不能只说"全部就绪" ——
+  // 上面明明印了一个 ⚠️，下面却说一切正常，用户会以为是渲染错位。
+  const warnRows = rows.filter((r) => r.ok && r.level === 'warn').length
+  const headline = allOk
+    ? warnRows
+      ? `🎉 全部就绪（有 ${warnRows} 项提醒，不是故障）`
+      : '🎉 全部就绪'
+    : fatal.length
+      ? '⛔ 有致命问题，先修上面标 ❌ 的项'
+      : '⚠️ 能启动，但上面有 ❌ 项需要处理'
+  console.log(`\n${headline}\n`)
   return allOk
 }

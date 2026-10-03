@@ -23,8 +23,15 @@
  * 最后一行是 `pause`，正是为了留住那个 cmd 窗口）。我们这里的对策是
  * `detached: true` + `unref()`：让子进程**脱离**桥接的进程组并独立存活，
  * 于是**关掉桥接不会连带杀掉 SnowLuma**。
- * `stdio: 'ignore'` 也是必须的 —— 用 `pipe` 的话，管道一端消失时
- * 子进程写日志会触发 EPIPE 而挂掉。
+ *
+ * ── 关于子进程的输出（0.3.0alpha 实机 BUG-3 之后改的）────────────────────
+ * 原来这里是 `stdio: 'ignore'`，理由是"用 `pipe` 的话，管道一端消失时子进程
+ * 写日志会触发 EPIPE 而挂掉"。那个理由只否掉了 **pipe**，却顺手把
+ * **文件句柄**也一起否掉了 —— 而 SnowLuma 的**首次登录引导密码只写 stdout**
+ * （不写它自己的日志文件），丢掉 stdout 等于让用户永远拿不到那个密码
+ * （详见 `snowluma-console.mjs` 文件头）。
+ * 现在用 `stdio: ['ignore', fd, fd]`：既不建管道（EPIPE 的顾虑仍然不成立），
+ * 又把输出留在 `logs/snowluma-console.log` 里。
  */
 
 import { spawn } from 'node:child_process'
@@ -34,6 +41,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { findSnowluma, findNodeBinary, PKG_ROOT } from './local.mjs'
 import { checkPortFree, probeHttpAnswered } from './ports.mjs'
 import { registerExternal } from './process-guard.mjs'
+import { bootstrapCredentialInfo, closeConsoleLog, openConsoleLog } from './snowluma-console.mjs'
 
 /** 界面用的状态。判定顺序见 `detect()`，**顺序本身就是规则**。 */
 export const SNOWLUMA_STATUS = {
@@ -195,6 +203,13 @@ export async function detectSnowluma({ config, wsConnected, getLogin, bridgeRunn
     // 控制台地址也报给界面：它既是"打开控制台"入口的来源，
     // 也是排查"我明明改过雪露马端口"时唯一能对照的值。
     consoleUrl: config?.snowluma?.consoleUrl || DEFAULT_CONSOLE_URL,
+    // ★ 实机 BUG-3：首次登录的**引导密码**在哪里（**绝不含密码本身**）。
+    //   界面/日志据此告诉用户"去哪个文件、搜什么"，从而掐掉"重装一遍"这条错误路径。
+    bootstrap: bootstrapCredentialInfo({
+      pkgRoot: PKG_ROOT,
+      installDir: installDir ?? located.cwd ?? (located.cmd ? dirname(located.cmd) : null),
+      consoleUrl: config?.snowluma?.consoleUrl || DEFAULT_CONSOLE_URL,
+    }),
     // ★ 控制台可达性（§2.7.0）：只在"3000 连不上"时才去探（平时不必多花这次请求）。
     //   null = 没探过；true/false = 探过的结果。界面用它区分
     //   「SnowLuma 没在跑」与「在跑但没钩住 QQ」——两者排查方向完全不同。
@@ -202,6 +217,10 @@ export async function detectSnowluma({ config, wsConnected, getLogin, bridgeRunn
     // token 从哪来的、有没有和 config.json 打架 —— 排查 401 时这两条是关键线索
     tokenSource: tokens.source,
     tokenDiffersFromConfig: tokens.differsFromConfig,
+    // ★ 挑账号的依据（`matched-config:` / `explicit-selfId` / `auto-newest:` /
+    //   `ambiguous` / `none`）：界面据此区分"多个账号认不出自己"与"只是还没同步"，
+    //   这两种情况的处置方式完全不同。不含任何密钥内容。
+    tokenPicked: tokens.picked,
     launch: {
       // ★ 语义是"**现在能不能启动**"，而不是"配置里填没填"。
       //   因为 `launchCmd` 留空时实现会自动发现 —— 那时填没填都是能启动的，
@@ -848,23 +867,55 @@ export async function startSnowluma({
   // 放在那里是因为"端口已被占用"比"找不到安装"更该先说。
 
   try {
-    const child = spawn(spawnCmd, spawnArgs, {
-      cwd,
-      // ⚠️ 只有 .bat/.cmd 才走 shell。给 .mjs 也加 shell 会让参数被 cmd 再解析一遍，
-      //    路径里有空格或特殊字符时就会出问题。
-      shell: !isMjs,
-      // ★ 脱离桥接的进程组：关掉桥接**不会**连带杀掉 SnowLuma。
-      detached: true,
-      // ★ 必须 ignore：用 pipe 的话，管道一端消失后子进程写日志会 EPIPE 而挂掉。
-      stdio: 'ignore',
-      windowsHide: true,
-    })
+    // ★★ 实机 BUG-3 的修复：不再用 `stdio: 'ignore'` 把 SnowLuma 的输出丢掉。
+    //
+    // 为什么这**不只是**"多一份日志"：SnowLuma 把**首次登录的引导密码**只写 stdout
+    // （不写它自己的日志文件），而桥接只读它的日志文件 —— 两条路都不通，用户就
+    // 永远看不到那个密码，5099 的登录页进不去，于是"重新下载一份 / 重新注册一遍"
+    // 成了唯一看得见的路。代价是整整一轮首次配置。
+    //
+    // ★ 用**文件句柄**而不是 pipe：老注释担心"管道一端消失后子进程写日志会 EPIPE"，
+    //   文件句柄没有这个问题（文件比父进程活得久）。而"重定向会 GBK 乱码"那条
+    //   是用 pipe 测出来的，不适用于文件句柄 —— 本机实测 UTF-8 完全正确
+    //   （中文与 `initial credentials:` 行逐字对得上，见 snowluma-console.mjs 文件头）。
+    const out = openConsoleLog({ pkgRoot, log })
+    let child
+    try {
+      child = spawn(spawnCmd, spawnArgs, {
+        cwd,
+        // ⚠️ 只有 .bat/.cmd 才走 shell。给 .mjs 也加 shell 会让参数被 cmd 再解析一遍，
+        //    路径里有空格或特殊字符时就会出问题。
+        shell: !isMjs,
+        // ★ 脱离桥接的进程组：关掉桥接**不会**连带杀掉 SnowLuma。
+        detached: true,
+        // stdout/stderr 都进同一个文件；stdin 仍然 ignore（SnowLuma 不需要输入）。
+        stdio: ['ignore', out.fd ?? 'ignore', out.fd ?? 'ignore'],
+        windowsHide: true,
+      })
+    } finally {
+      // 父进程这一份句柄用完就关：子进程已经继承了自己的副本，
+      // 不关的话桥接每拉起一次 SnowLuma 就泄漏一个句柄。
+      closeConsoleLog(out.fd)
+    }
     // 让它独立存活（父进程不再持有引用）
     child.unref()
     log(
       `已发起启动 SnowLuma：${cmdPath}` +
         `${useAuto ? `（自动发现：${locate.from}）` : '（来自 snowluma.launchCmd）'}` +
         ` pid ${child.pid ?? '?'}`,
+    )
+    // ★ 实机 BUG-3：把"凭据在哪个文件"**当场**说清楚。
+    //   此刻 SnowLuma 刚起，凭据（如果这次会打印）还没写出来 —— 所以这里只有位置；
+    //   真正扫到凭据后的提示由 `detectSnowluma()` 的 `bootstrap.hint` 给（界面会轮询）。
+    const bootstrapAtLaunch = bootstrapCredentialInfo({
+      pkgRoot,
+      installDir: locate.cwd ?? (cmdPath ? dirname(cmdPath) : null),
+      consoleUrl,
+      text: '',
+    })
+    log(
+      `ℹ️ SnowLuma 的输出已写到 ${bootstrapAtLaunch.relFile}` +
+        `（首次登录的引导密码只在它的启动输出里，去那个文件搜 "initial credentials"）`,
     )
 
     // ★ 登记这个 PID（缺陷 4）。以前它只出现在这一行日志里 ——
@@ -907,6 +958,9 @@ export async function startSnowluma({
         consoleUrl,
         // 让界面/日志能说清"这个 PID 我已经记下来了，可以用 --kill 停"
         pidRegistered: registered,
+        // ★ 实机 BUG-3：凭据文件位置（与 detect 那条路同一份实现，界面两边看到的一样）
+        consoleLogFile: bootstrapAtLaunch.consoleLogFile,
+        bootstrapHint: bootstrapAtLaunch.hint,
         // ★ 只负责"发起"，不负责"等它连上" —— 界面要轮询 detect。
         hint: registered
           ? `已发起启动（pid ${child.pid}，已记入进程登记）。SnowLuma 需要几秒钟才能接受连接，请等状态变成已连接。`

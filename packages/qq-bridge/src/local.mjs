@@ -29,7 +29,7 @@
 
 import { dirname, join, resolve, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -107,15 +107,41 @@ export function findNodeBinary() {
 }
 
 /**
+ * DSH 桌面版**装出来的目录名**：两种都见过。
+ *
+ * ★ 实测（2026-10-03 实机测试报告 BUG-5）：0.2.0-rc.2 装出来的是
+ *   `%LOCALAPPDATA%\Programs\DeepSeek Harness`（**带空格**），而候选表从前
+ *   只写了 `DeepSeekHarness`（无空格）—— 于是"装完什么都不用配"直接不成立：
+ *   桥接说找不到 DSH，而用户明明装好了。
+ */
+export const DSH_APP_DIR_NAMES = ['DeepSeek Harness', 'DeepSeekHarness']
+
+/**
+ * asar 形态里 CLI 之前的**额外一层目录名**。
+ *
+ * 实测路径：`…\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js`
+ * —— 归档根下先有一层 `dsh/`，所以"安装根"是归档里的 `dsh/` 而不是归档根本身
+ * （抽取时要把这一层剥掉，见 `src/dsh-extract.mjs`）。
+ */
+const ASAR_CLI_SUBDIR = 'dsh'
+
+/**
  * DSH 安装根的**唯一**候选表（`findDshCli` / 带来源版 / doctor 都从这里取）。
  *
  * 为什么抽出来：这张表以前在三个地方各写一遍，于是"加一个候选位置"很容易只改
  * 其中一处，而症状是"某个入口能找到 DSH、另一个找不到"—— 这类不一致最难查。
  *
+ * ── 0.3.0alpha 实机 BUG-5 之后补的两件事 ────────────────────────────────
+ * ① **两种目录名**（带空格 / 不带空格）都要覆盖；
+ * ② `resources` 下有两种**形态**：`app\`（解包目录）与 `app.asar`（打进归档）。
+ *    asar 那种普通 Node **读不了**，所以它的条目带 `kind: 'asar'`，
+ *    查找时**明确跳过**（找到它等于没找到），改用 `findDshAsar()` 检出后
+ *    提示用户/自动抽取（见 `src/dsh-extract.mjs`）。
+ *
  * @param {object} [opts]
  * @param {string} [opts.envVar]        指定安装根的环境变量名
  * @param {string[]} [opts.searchPaths] 额外的安装根候选（已解析成绝对路径，来自 config.json）
- * @returns {{path: string, source: string}[]}
+ * @returns {{path: string, source: string, kind?: string}[]}
  */
 function dshInstallRootCandidates({ envVar = 'DSH_DESKTOP_APP', searchPaths = [] } = {}) {
   const rel = join('node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -124,19 +150,91 @@ function dshInstallRootCandidates({ envVar = 'DSH_DESKTOP_APP', searchPaths = []
     .filter((p) => typeof p === 'string' && p.trim() !== '')
     .map((p) => ({ path: join(p, rel), source: 'config.json 的 dsh.searchPaths' }))
 
+  /**
+   * 一个"DSH 应用根"（即 `resources` 的父目录）对应的全部形态。
+   * 三种都要列：解包目录 / 归档内 / 归档的 unpacked 旁路目录。
+   */
+  const layoutsOf = (root, label) => [
+    { path: join(root, 'resources', 'app', rel), source: `${label}\\resources\\app`, kind: 'app' },
+    {
+      path: join(root, 'resources', 'app.asar', ASAR_CLI_SUBDIR, rel),
+      source: `${label}\\resources\\app.asar（打包在归档里，普通 node 读不了，需先抽取）`,
+      kind: 'asar',
+    },
+    {
+      path: join(root, 'resources', 'app.asar.unpacked', ASAR_CLI_SUBDIR, rel),
+      source: `${label}\\resources\\app.asar.unpacked`,
+      kind: 'unpacked',
+    },
+  ]
+
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
+  const localAppData = process.env.LOCALAPPDATA
+  const defaults = [
+    ...DSH_APP_DIR_NAMES.flatMap((n) => layoutsOf(join(programFiles, n), `DSH 默认安装位置（Program Files\\${n}）`)),
+    ...(localAppData
+      ? DSH_APP_DIR_NAMES.flatMap((n) =>
+          layoutsOf(join(localAppData, 'Programs', n), `DSH 默认安装位置（%LOCALAPPDATA%\\Programs\\${n}）`),
+        )
+      : []),
+  ]
+
   return [
     { path: join(DIRS.vendorDsh, rel), source: 'vendor/dsh（包内自带）' },
     { path: fromEnv ? join(fromEnv, rel) : null, source: `环境变量 ${envVar}` },
     ...extras,
-    {
-      path: join('C:\\Program Files\\DeepSeekHarness\\resources\\app', rel),
-      source: 'DSH 默认安装位置（Program Files）',
-    },
-    {
-      path: join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeekHarness', 'resources', 'app', rel),
-      source: 'DSH 默认安装位置（%LOCALAPPDATA%\\Programs）',
-    },
+    ...defaults,
   ].filter((c) => Boolean(c.path))
+}
+
+/**
+ * 找一个"DSH 桌面版的 `app.asar`"（**它存在 ≠ CLI 能用**，需要先抽取）。
+ *
+ * 为什么要单独有这个函数：asar 是一个**文件**，普通 Node 的 `existsSync` 对
+ * `app.asar\dsh\node_modules\…` 永远返回 false —— 所以"没找到 DSH"有两种完全不同的
+ * 原因（没装 / 装了但打包在 asar 里），用户需要的是**不同的处置办法**。
+ *
+ * @param {object} [opts] 见 {@link dshInstallRootCandidates}
+ * @returns {{asarPath: string, source: string}|null}
+ */
+export function findDshAsar({ searchPaths = [] } = {}) {
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
+  const localAppData = process.env.LOCALAPPDATA
+  const roots = [
+    ...DSH_APP_DIR_NAMES.map((n) => ({ dir: join(programFiles, n), source: `Program Files\\${n}` })),
+    ...(localAppData ? DSH_APP_DIR_NAMES.map((n) => ({ dir: join(localAppData, 'Programs', n), source: `%LOCALAPPDATA%\\Programs\\${n}` })) : []),
+    ...(Array.isArray(searchPaths) ? searchPaths : [])
+      .filter((p) => typeof p === 'string' && p.trim() !== '')
+      .map((p) => ({ dir: p, source: 'config.json 的 dsh.searchPaths' })),
+  ]
+  for (const { dir, source } of roots) {
+    const candidates = /(^|[\\/])app\.asar$/i.test(dir)
+      ? [dir] // 用户直接把 app.asar 的路径填进来了
+      : [join(dir, 'resources', 'app.asar'), join(dir, 'app.asar')]
+    for (const c of candidates) {
+      try {
+        if (existsSync(c) && !statSync(c).isDirectory()) return { asarPath: c, source }
+      } catch {
+        /* 权限等异常跳过该候选 */
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 给"装了 DSH 桌面版但 CLI 在 asar 里"这种情况的**可执行**提示。
+ *
+ * 单一来源：`--check`、`--doctor`、界面都用这一份文案，避免三处说法不一致
+ * （过去"某个入口能找到、另一个找不到"就是这么来的）。
+ */
+export function dshAsarFixHint({ asarPath, source = null } = {}) {
+  return (
+    `DSH 桌面版把命令行工具打包在 ${asarPath}${source ? `（来自 ${source}）` : ''} 里，` +
+    '而普通 node 读不了 asar —— 这不是版本不兼容，抽一步就能用：\n' +
+    `    node src\\index.mjs --extract-dsh --asar "${asarPath}"\n` +
+    '  抽完会自动落到 vendor\\dsh（第 1 优先级候选），之后不需要再配任何东西。'
+  )
 }
 
 /**
@@ -149,7 +247,9 @@ function dshInstallRootCandidates({ envVar = 'DSH_DESKTOP_APP', searchPaths = []
  *   1. vendor/dsh/                    ← 你愿意复制时放这里（最可搬迁）
  *   2. DSH_DESKTOP_APP 环境变量        ← 显式指定安装根
  *   3. **用户配置的搜索路径**           ← config.json 的 `dsh.searchPaths`
- *   4. DSH 桌面版默认安装位置           ← 常见情况（Program Files / %LOCALAPPDATA%）
+ *   4. DSH 桌面版默认安装位置           ← 常见情况（Program Files / %LOCALAPPDATA%，
+ *      目录名可能是 `DeepSeek Harness`（带空格）或 `DeepSeekHarness`，
+ *      `resources` 下可能是 `app\` 目录也可能是 `app.asar` 归档）
  *
  * ★ 这里**刻意不再写死任何机器专属的绝对路径**。以前有一行
  * `D:\DeepSeekHarness\DSH Desktop\resources\app` —— 那只是开发机上的位置，
@@ -158,11 +258,18 @@ function dshInstallRootCandidates({ envVar = 'DSH_DESKTOP_APP', searchPaths = []
  *
  * 想彻底自包含：把 DSH 安装根复制到 vendor/dsh/ 即可，无需改任何代码。
  *
+ * ⚠️ `kind: 'asar'` 的候选**不算找到**（普通 node 读不了归档内部）——
+ *    `findDshAsar()` 负责检出那种情况并给出抽取指引。
+ *
  * @param {object} [opts] 见 {@link dshInstallRootCandidates}
  * @returns {string|null}
  */
 export function findDshCli(opts = {}) {
-  return firstExisting(dshInstallRootCandidates(opts).map((c) => c.path))
+  return firstExisting(
+    dshInstallRootCandidates(opts)
+      .filter((c) => c.kind !== 'asar')
+      .map((c) => c.path),
+  )
 }
 
 /**
@@ -176,6 +283,7 @@ export function findDshCli(opts = {}) {
  */
 export function findDshCliWithSource(opts = {}) {
   for (const c of dshInstallRootCandidates(opts)) {
+    if (c.kind === 'asar') continue // 归档内部：普通 node 读不了，见 findDshCli 的说明
     try {
       if (existsSync(c.path)) return { cliPath: c.path, source: c.source }
     } catch {

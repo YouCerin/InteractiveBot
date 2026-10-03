@@ -2965,6 +2965,18 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
   "loggedIn": true,
   "login": { "userId": "200000001", "nickname": "DeepSeek小鲸鱼" },
   "endpoint": { "httpUrl": "http://127.0.0.1:3000", "wsUrl": "ws://127.0.0.1:3001" },
+  "consoleUrl": "http://127.0.0.1:5099/",
+  "tokenSource": "SnowLuma 自己的配置",
+  "tokenDiffersFromConfig": false,
+  "tokenPicked": "matched-config:onebot_200000001.json",
+  "bootstrap": {
+    "consoleLogFile": "C:\\...\\logs\\snowluma-console.log",
+    "relFile": "logs\\snowluma-console.log",
+    "found": false,
+    "user": null,
+    "mustChangePassword": true,
+    "hint": "SnowLuma 还没改过初始密码，而那个引导密码只在它的启动输出里出现过一次 —— …"
+  },
   "launch": { "configured": true, "cmd": "D:\\...\\snowluma\\launcher.bat", "cwd": "D:\\...\\snowluma" },
   "hint": "一切正常"
 }
@@ -3112,12 +3124,27 @@ config.json 里的 token 与【正在跑的那个】SnowLuma 不一致
 病根是 **token 存在两处，必然漂移**。那份数据本来就是 SnowLuma 的
 （它启动时按它校验），我们存副本只会有分歧、没有好处。
 
-`GET /api/snowluma/detect` 会额外返回两个字段，专门用于排查：
+`GET /api/snowluma/detect` 会额外返回几个字段，专门用于排查：
 
 | 字段 | 含义 |
 |---|---|
 | `tokenSource` | token 实际来自哪里（`SnowLuma 自己的配置` / `config.json`） |
-| `tokenDiffersFromConfig` | 两者**不一致**时为 `true` —— 看到它就说明 `config.json` 里那份是过期的，**别用它** |
+| `tokenDiffersFromConfig` | 两者**不一致**时为 `true` —— 说明 `config.json` 里那份是过期的 |
+| `tokenPicked` | 挑账号的依据（`matched-config:` / `explicit-selfId` / `auto-newest:` / `ambiguous` / `none`）。界面用它区分**两种完全不同**的情况（见下） |
+| `bootstrap` | `{ consoleLogFile, relFile, found, user, mustChangePassword, hint }` —— 首次登录的**引导密码在哪个文件**。★ **不含密码本身**（只报位置，少一份副本就少一个泄漏面） |
+
+**★ `tokenDiffersFromConfig = true` 的两种情形，界面文案必须分开**（实机报告 BUG-2）：
+
+| 情形 | 判据 | 该说的话 |
+|---|---|---|
+| 只是还没同步 | `tokenPicked` 是确定性的（`matched-config:` / `explicit-selfId` / 单账号 `auto-newest:`） | 「桥接**启动时**会以 SnowLuma 自己的那一组为准并同步写回 `config.json`（备份 `.bak`）」—— 重启后这条提示自行消失。**不要**再写"别用它／去 5099 手抄"：那座桥已经接了 |
+| 多个账号认不出自己 | `tokenPicked` = `ambiguous` 或 `none` | ★ 这时桥接**故意不接**（接错账号等于用别人的身份收发消息）：要明确让用户二选一 —— 填 `onebot.selfId`，或直接把该账号的 token 填进 `onebot.wsToken`/`httpToken` |
+
+**★ 首次登录凭据提示（`bootstrap`）**：SnowLuma 把引导密码**只写 stdout**（它自己的日志文件里没有），
+而桥接过去用 `stdio: 'ignore'` 把它丢了 ⇒ 用户打开 5099 却拿不到密码，只能想到"重装一遍"。
+现在它的启动输出落到 `logs/snowluma-console.log`，`bootstrap.hint` 就是那句"去这个文件搜
+`initial credentials`"；`mustChangePassword === true` 时还会说明「再启动一次 SnowLuma 会轮换出新密码，
+**不需要重新下载、也不需要重新注册**」。协议端卡片在 `found` 或 `mustChangePassword` 为真时显示它。
 
 ### 5.2 记忆文件接口（**已实现**）
 

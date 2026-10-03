@@ -74,6 +74,15 @@ const DEMO_DETECT: SnowlumaDetect = {
   consoleReachable: null,
   tokenSource: 'SnowLuma 自己的配置',
   tokenDiffersFromConfig: false,
+  tokenPicked: 'matched-config:onebot_200000001.json',
+  bootstrap: {
+    consoleLogFile: 'logs\\snowluma-console.log',
+    relFile: 'logs\\snowluma-console.log',
+    found: false,
+    user: null,
+    mustChangePassword: false,
+    hint: 'SnowLuma 的启动输出已重定向到 logs\\snowluma-console.log（首次登录凭据会在里面，搜 "initial credentials"）。',
+  },
   launch: { configured: true, cmd: 'D:\\...\\snowluma\\launcher.bat', cwd: 'D:\\...\\snowluma' },
   hint: '一切正常。',
 }
@@ -380,6 +389,30 @@ function SnowlumaCard({ demo }: { demo: boolean }) {
               <InlineNote level="warn">
                 config.json 里的 token 与正在跑的 SnowLuma <strong>不一致</strong>——
                 那份是过期的，<strong>别用它</strong>（以 SnowLuma 自己的 config/onebot_&lt;uin&gt;.json 为准）。
+                {det.tokenPicked?.startsWith('ambiguous') || det.tokenPicked === 'none' ? (
+                  <>
+                    <br />
+                    ★ SnowLuma 那边有<strong>多个账号</strong>，桥接<strong>不敢替你猜</strong>哪个是你自己的
+                    （接错账号等于用别人的身份收发消息）。请二选一：在下面把{' '}
+                    <code className="rounded bg-muted px-1">onebot.selfId</code> 填成你自己的 QQ 号，
+                    或直接填对的那组 token。
+                  </>
+                ) : (
+                  <>
+                    <br />
+                    桥接<strong>启动时</strong>会以 SnowLuma 自己的那一组为准，并同步写回 config.json
+                    （备份 config.json.bak）—— 所以这条提示会在机器人<strong>重启后</strong>自行消失。
+                  </>
+                )}
+              </InlineNote>
+            )}
+            {/* ★ 首次登录凭据（实机 BUG-3）：那个一次性密码只在 SnowLuma 的启动输出里出现过一次， */}
+            {/*   它的日志文件里没有 —— 不说清"在哪儿"，用户只能想到"重装一遍"。 */}
+            {det.bootstrap && (det.bootstrap.found || det.bootstrap.mustChangePassword === true) && (
+              <InlineNote level="warn">
+                <strong>首次登录 SnowLuma 需要那个一次性密码</strong>
+                <br />
+                {det.bootstrap.hint}
               </InlineNote>
             )}
           </div>

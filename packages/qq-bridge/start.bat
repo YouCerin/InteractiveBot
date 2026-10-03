@@ -141,7 +141,12 @@ set "EXITCODE=%ERRORLEVEL%"
 
 if not "%EXITCODE%"=="0" (
   echo.
-  echo [!] Could not start (exit %EXITCODE%) -- see the message above.
+  rem NOTE: no parentheses in these echo lines. Inside an "if (...)" block an
+  rem unescaped ")" terminates the block early -- the rest of the line is then
+  rem parsed as a separate command and cmd aborts with a syntax error before
+  rem printing anything, so the user sees a broken launcher instead of the
+  rem reason it failed. (Measured on the 0.3.0alpha package.)
+  echo [!] Could not start. Exit code %EXITCODE% -- see the message above.
   echo.
   pause
 ) else (

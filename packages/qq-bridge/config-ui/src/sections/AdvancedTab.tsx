@@ -95,7 +95,15 @@ export function AdvancedTab({
           </CardTitle>
         </CardHeader>
         <CardContent className="divide-y">
-          <FieldRow label="DSH 安装路径" hint="留空自动查找（vendor/dsh 优先 → 环境变量 → 默认安装位置）。">
+          <FieldRow
+            label="DSH 安装路径"
+            hint={
+              '留空自动查找（vendor/dsh 优先 → 环境变量 → 默认安装位置）。' +
+              '默认位置两种目录名都认：DeepSeek Harness 与 DeepSeekHarness。' +
+              '★ 新版桌面版把 CLI 打包在 resources\\app.asar 里，普通 node 读不了 —— ' +
+              '这时本页/体检会提示你跑 node src\\index.mjs --extract-dsh 抽到 vendor\\dsh。'
+            }
+          >
             <Input
               value={getStr(cfg, 'dsh.cliPath')}
               onChange={(e) => patch('dsh.cliPath', e.target.value)}
@@ -177,7 +185,13 @@ export function AdvancedTab({
 
           <FieldRow
             label="额外搜索路径"
-            hint="一行一个。DSH 装在非标准位置时用它（相对本包根目录解析）；留空则只查 vendor/dsh、环境变量 DSH_DESKTOP_APP 和 DSH 的默认安装位置。"
+            hint={
+              '一行一个，指向**含 node_modules\\@deepseek-ai\\dsh\\lib\\bin.js 的那个目录**' +
+              '（相对本包根目录解析）。' +
+              '★ 指向 resources 或 app.asar 都无效 —— 桌面版把 CLI 打包在 app.asar 里，' +
+              '普通 node 读不了归档内部；那种情况要用 node src\\index.mjs --extract-dsh 抽到 vendor\\dsh。' +
+              '留空则只查 vendor/dsh、环境变量 DSH_DESKTOP_APP 和 DSH 的默认安装位置。'
+            }
           >
             <textarea
               value={getStrArr(cfg, 'dsh.searchPaths', []).join('\n')}

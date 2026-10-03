@@ -29,6 +29,7 @@ import {
   normalizeRel,
   renderProtectedList,
 } from '../src/protected-files.mjs'
+import { batchHazardMessage, findBatchParenHazards } from '../src/batch-safety.mjs'
 
 const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -156,6 +157,71 @@ section('⑤ 接线：发布脚本**真的**用了这些检查（纯函数测过
   const checker = existsSync(checkerPath) ? readFileSync(checkerPath, 'utf8') : ''
   check('★★ 验收脚本把 node_modules 限制在 vendor/ 下（锚定前缀，不是按包名放行）',
     /VENDOR_PKG_ALLOW\s*=\s*\/\^vendor\\\/node_modules/.test(checker) && /\(ws\|undici\)/.test(checker))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('⑥ 批处理启动器：`if (` 块里的裸 `)` 会让启动器在**成功路径上也**崩掉')
+// ══════════════════════════════════════════════════════════════════════════
+{
+  // 真机事故（2026-10-03 实机测试报告 BUG-4）：
+  //   `start.bat` 的成功分支里有一行 `echo [!] Could not start (exit %EXITCODE%) -- …`。
+  //   cmd 在**解析期**就把 `( … )` 块读完，块内那个裸 `)` 提前闭合了它，
+  //   剩下的 `-- see the message above.` 被当成新命令 ⇒ 启动器以 255 中止。
+  //   实测最反直觉的一点：**即使 if 条件为假、走 else 分支，也照样崩** ——
+  //   所以"机器人明明起来了，窗口却报错"和"机器人没起来，窗口什么都不说"是同一个 bug。
+  //
+  // 这里把当时实测过的每一种写法都钉一条断言（含"不该报"的那些）——
+  // 判据错成"块内所有括号都报"就会把 `for %%i in (…）` 这类正常写法一起禁掉。
+  const CR = '\r\n'
+  const bat = (body) => `@echo off${CR}${body}`
+  const cases = [
+    ['块内 `echo A (paren) B` → 报', bat(`if 1==1 (${CR}  echo A (paren) B${CR})${CR}echo AFTER`), 1],
+    ['块内 `echo A ) B` → 报', bat(`if 1==1 (${CR}  echo A ) B${CR})${CR}echo AFTER`), 1],
+    ['嵌套块内的 `(paren)` → 报', bat(`if 1==1 (${CR}  if 2==2 (${CR}    echo A (x) B${CR}  )${CR})`), 1],
+    ['块尾 `)` 后面接命令（`) echo Y`）→ 报', bat(`if 1==1 (${CR}  echo X${CR}) echo Y`), 1],
+    ['★ 事故原文的那一行 → 报', bat(`if not "%EXITCODE%"=="0" (${CR}  echo [!] Could not start (exit %EXITCODE%) -- see the message above.${CR})`), 1],
+    ['块内只有左括号 `echo A (B` → 不报（实测正常）', bat(`if 1==1 (${CR}  echo A (B${CR})`), 0],
+    ['块内单行 `if 2==2 ( echo Y )` → 不报（实测正常）', bat(`if 1==1 (${CR}  if 2==2 ( echo Y )${CR})`), 0],
+    ['块内 `for %%i in (a b) do` → 不报（实测正常）', bat(`if 1==1 (${CR}  for %%i in (a b) do echo %%i${CR})`), 0],
+    ['一行关两层块 `))` → 不报（实测正常）', bat(`if 1==1 (${CR}  if 2==2 (${CR}    echo X${CR}))`), 0],
+    ['块尾 `) & echo Y` → 不报（实测正常）', bat(`if 1==1 (${CR}  echo X${CR}) & echo Y`), 0],
+    ['双引号里的括号 → 不报（实测正常）', bat(`if 1==1 (${CR}  echo A "(paren)" B${CR})`), 0],
+    ['`^` 转义过的括号 → 不报（实测正常）', bat(`if 1==1 (${CR}  echo A ^(paren^) B${CR})`), 0],
+    ['rem 行里的括号 → 不报（cmd 不看 rem）', bat(`if 1==1 (${CR}  rem comment (paren) here${CR}  echo OK${CR})`), 0],
+    ['★ 顶层 `echo A (paren) B` → 不报（实测正常）', bat(`echo A (paren) B${CR}echo AFTER`), 0],
+    ['★ 顶层单独一行 `)` → 不报（实测正常）', bat(`)${CR}echo AFTER`), 0],
+  ]
+  for (const [name, text, expected] of cases) {
+    const hits = findBatchParenHazards(text)
+    check(name, hits.length === expected, `命中 ${hits.length} 处（期望 ${expected}）`)
+  }
+  check('  隐患信息里给了行号与修法（否则用户不知道改哪儿）',
+    (() => {
+      const [h] = findBatchParenHazards(cases[4][1])
+      return h?.line === 3 && /删掉括号|\^\\\)/.test(batchHazardMessage('start.bat', h))
+    })())
+
+  // ★ 行级守卫：发布包里每一个 `.bat` 都必须是干净的。
+  //   为什么值得单列：这些启动器**只会在用户机器上被双击**，本地测试从来不会执行它们，
+  //   所以"从没跑过"是常态 —— 静态扫一遍是唯一能在发布前发现它的办法。
+  const batFiles = ['start.bat', 'sticker-label/启动标注.bat', 'sticker-label/预热缩略图.bat', 'chat-review/启动评审.bat']
+  for (const rel of batFiles) {
+    const full = join(PKG_ROOT, ...rel.split('/'))
+    if (!existsSync(full)) {
+      check(`  ${rel} 存在（没在扫空气）`, false, '文件不存在')
+      continue
+    }
+    const hits = findBatchParenHazards(readFileSync(full, 'utf8'))
+    check(`★ ${rel} 没有会让 cmd 提前闭合括号块的行`,
+      hits.length === 0,
+      hits.map((h) => batchHazardMessage(rel, h)).join(' | '))
+  }
+
+  // 接线：发布包验收脚本必须**真的**调用它（纯函数测过 ≠ 接线做过）
+  const checkerPath2 = join(PKG_ROOT, 'scripts', 'check-release-package.mjs')
+  const checker2 = existsSync(checkerPath2) ? readFileSync(checkerPath2, 'utf8') : ''
+  check('★★ 发布包验收脚本调用了括号检查（否则这道门只存在于测试里）',
+    /findBatchParenHazards\s*\(/.test(checker2) && /batchHazardMessage\s*\(/.test(checker2))
 }
 
 console.log('')
