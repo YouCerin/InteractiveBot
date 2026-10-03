@@ -49,7 +49,10 @@ import { pathToFileURL } from 'node:url'
 
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
-const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.3.0alpha' }
+// ★ 版本号只有四个地方有（package.json / PROJECT.json / 这里 / RELEASE.md 的包名），
+//   升级时四处必须一起改 —— `mocks/verify-manifest.mjs` 有一条断言盯着这件事，
+//   症状是"包名写着 0.3.1、MCP 报的却是 0.3.0alpha"这种自相矛盾。
+const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.3.1' }
 
 /**
  * ★ 危险动作黑名单（默认放行其余一切）。

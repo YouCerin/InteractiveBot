@@ -10,7 +10,7 @@
     "name": "qq-bridge",
     "displayName": "「小鲸鱼」QQ 交互式机器人（InteractiveBot）",
     "_displayName说明": "0.2.8 改名：项目名从 InteractBot 换成 InteractiveBot（中文「小鲸鱼」QQ 交互式机器人），原因是英文名 qq-bridge 在同一个生态里已被另一个项目占用（github.com/Derpyu520/qq-bridge，描述几乎一样）。★ 但 `name`（模块名）与目录名**刻意不改**：它是「桥接」这个模块的名字，改它要动几十条路径、文档与断言，收益只有观感。机器人自己的人设名是「小鲸鱼」，在提示词里，与项目名无关。",
-    "version": "0.3.0alpha",
+    "version": "0.3.1",
     "purpose": "把 QQ 私聊消息转给一个拥有完整能力的 DSH agent，再把回答发回 QQ。",
     "relationship": "取代 packages/dsh-qq-bot（旧架构：DSH 进程内插件 + 一次性 llm.stream 调用，没有工具循环、沙箱、权限概念）。旧包仅作参考。",
     "runtime": {

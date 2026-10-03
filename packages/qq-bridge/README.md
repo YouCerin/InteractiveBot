@@ -62,8 +62,13 @@ npm test                         # 全部离线套件（实测：所有套件退
 #
 # ⚠️⚠️ 括号里的数字**不是同一时刻量的**，而且不少已经漂了。0.3.0alpha 收尾时用
 #   「逐个套件实跑、读它自己的收尾行」的方式复核过一部分（写明了量到的值）：
-#     · 已核过并改准：verify-manifest 37、verify-release-hygiene 35、
-#       verify-imports 9、verify-persona 106、verify-personas 103、verify-chat-review 277
+#     · 已核过并改准：verify-manifest 37、verify-release-hygiene **72**、
+#       verify-imports 9、verify-persona 106、verify-personas 103、verify-chat-review 277、
+#       verify-doctor **48**、verify-ui-status 29、
+#       verify-token-sync **43**、verify-snowluma-console **29**、verify-dsh-locate **39**
+#       （0.3.1 打包前量的；后三个是实机报告那一轮新增的套件，它们**不打印自己的总数** ——
+#        上面的数是数 `✅` 行得到的。`verify-dsh-locate` 的 39 含 4 条"本机有真实 asar 才跑"的断言，
+#        没有 Electron 应用的机器上是 35）
 #       （0.3.0alpha 第二步：`verify-voice-style.mjs` **已删除** —— 说话方式从"代码常量 +
 #        每轮替换人设两节"改成"**就写在人设文件里**"，那个套件有一半在测已删的机制；
 #        里面仍然有意义的内容断言已归位到 `verify-persona.mjs`）
@@ -76,11 +81,12 @@ npm test                         # 全部离线套件（实测：所有套件退
 #       verify-session-state 48、verify-memory-supersede 50、verify-memory-stats 29、
 #       verify-memory-usage 54、verify-api-h13 29、verify-marker 46、verify-text-encoding 21
 #     · 复核方式（可复现）：在 `packages/qq-bridge` 下逐个 `node mocks/verify-*.mjs`，
-#       读它的收尾行（「…全部通过（N 项）」）。链上共 **66 套**（0.3.0alpha 收尾实测）。
+#       读它的收尾行（「…全部通过（N 项）」）。链上共 **72 套**（0.3.1 打包前实测；
+#       `mocks/` 下共 73 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
 #   ∴ **不要**把这些数字当权威 —— 权威是 `node mocks/verify-*.mjs` 自己的输出。
 node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（37 项）
 node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）
-node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、接线断言（35 项）
+node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、批处理括号、**包内路径引用**、接线断言（72 项）
 node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制（89 项）
 node mocks/verify-api-h13.mjs    # ★★ H13 四个接口（真起 HTTP 服务）：漏 await、token 泄露、跨会话检索、**畸形返回不拖垮进程**（29 项）
 node mocks/verify-config.mjs     # 配置解析与校验（42 项）
@@ -112,7 +118,10 @@ node mocks/verify-mcp.mjs        # QQ 工具服务器（工具清单、黑名单
 node mocks/verify-rpc.mjs        # 协议层：与模拟 DSH 的 JSON-RPC（★ 需要能起子进程）
 node mocks/verify-onebot.mjs     # 全链路：QQ 事件 → 回复发出（★ 需要能起子进程）
 node mocks/verify-real-dsh.mjs   # 真实 dsh 能否被启动（零费用；★ 需要能起子进程）
-node mocks/verify-doctor.mjs     # 体检工具自身的准确性（30 项）
+node mocks/verify-doctor.mjs     # 体检工具自身的准确性：只统计真桥接、⚠️ 与 ❌ 分得清（48 项）
+node mocks/verify-token-sync.mjs # ★★ SnowLuma token 真的接到客户端上、并按纪律写回 config.json（43 项）
+node mocks/verify-snowluma-console.mjs # ★★ SnowLuma 控制台输出落盘 + 首次登录凭据在哪（29 项，含真 spawn）
+node mocks/verify-dsh-locate.mjs # ★★ DSH 定位（两种目录名 × 三种形态）与 app.asar 抽取（39 项）
 node mocks/verify-live.mjs       # ★ 真实端到端（会调用模型，有少量费用）
 node mocks/verify-live.mjs --clean   # 清理测试留下的临时目录
 
