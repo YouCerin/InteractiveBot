@@ -461,8 +461,11 @@ async function main() {
         if (r.advice) console.log(`  怎么办：${r.advice}`)
         console.log('')
       }
-      // 退出码：fresh=0，其余=1。**unstamped 也算失败** —— 它同样是"无法确认同一份"。
-      process.exit(r.status === 'fresh' ? 0 : 1)
+      // 退出码：fresh=0；**packaged 也是 0** —— 发布包里没有界面源码，"本机无法核对"
+      // 是那个形态的正常结论，不是失败（2026-10-03 实机验证踩到：原来它在包里直接抛
+      // `Cannot find module .../scripts/ui-build-stamp.cjs`，退出码 1）。
+      // 其余（stale / unstamped / missing）=1：那才是"无法确认同一份"。
+      process.exit(r.status === 'fresh' || r.status === 'packaged' ? 0 : 1)
     })().catch((error) => {
       console.error(`❌ 界面检查失败：${error?.message ?? error}`)
       process.exit(1)
@@ -1849,8 +1852,26 @@ async function main() {
 
   // 界面构建溯源：启动时算一次（只读、很便宜），放进 /api/status。
   // 它回答"正在伺服的这份 UI 与源码是不是同一份" —— 见 src/ui-status.mjs 的说明。
-  const { checkUiFreshness } = await import('./ui-status.mjs')
-  const uiFreshness = checkUiFreshness({ distDir: join(PKG_ROOT, 'config-ui', 'dist') })
+  //
+  // ⚠️ 这里**必须**有 try/catch：发布包里没有 `config-ui/src`（也没有 `scripts/`），
+  //    这个检查在用户机器上天生"无法核对"（状态 `packaged`）。2026-10-03 实机验证时，
+  //    旧代码在 `ui-status.mjs` 顶层硬 require 标记模块 ⇒ 用户在包上看到的不是
+  //    "无法核对"，而是一句 `Cannot find module .../scripts/ui-build-stamp.cjs`。
+  //    现在模块内部已经能认出发布包形态；这层护栏是为了**任何**未预料的异常
+  //    都不会拦住启动（界面新鲜度是增强信息，不该阻断机器人回话）。
+  let uiFreshness = null
+  try {
+    const { checkUiFreshness } = await import('./ui-status.mjs')
+    uiFreshness = checkUiFreshness({ distDir: join(PKG_ROOT, 'config-ui', 'dist') })
+  } catch (error) {
+    uiFreshness = {
+      status: 'unknown',
+      distDir: join(PKG_ROOT, 'config-ui', 'dist'),
+      expectedHash: '',
+      why: `界面新鲜度检查自身出错了：${error?.message ?? error}`,
+      advice: '这不影响回话。把这一行贴给开发者即可（检查是增强信息，不是启动前提）。',
+    }
+  }
   if (uiFreshness.status !== 'fresh') {
     // ★ 不静默，但**也不阻止启动** —— 界面不同步不影响机器人回话。
     log(

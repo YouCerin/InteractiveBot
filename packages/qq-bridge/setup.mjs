@@ -442,6 +442,18 @@ async function auditForRelease() {
       )
     } else if (ui.status === 'missing') {
       // 上面已经报过一次，这里不重复
+    } else if (ui.status === 'packaged') {
+      // ★ 发布包形态：包里只带 config-ui/dist、不带 src ⇒ 本机**无法核对**。
+      //   这不是 ❌（2026-10-03 实机验证踩到：原来它会掉进下面的 else，
+      //   于是包里打出一句"✅ 界面产物与源码同步"—— 那是**假话**）。
+      line('')
+      line('  · 这是发布包：界面新鲜度在本机无法核对（包里只带产物，不带源码）—— 不是故障')
+      line(`    ${ui.why}`)
+      line('')
+    } else if (ui.status === 'unknown') {
+      line('')
+      line(`  ⚠️ 界面新鲜度检查自身出错了（不阻断发布，但要看一眼）：${ui.why}`)
+      line('')
     } else {
       // 同步是**好消息**，但也值得留一行：发布记录里能对上是哪次构建
       line('')

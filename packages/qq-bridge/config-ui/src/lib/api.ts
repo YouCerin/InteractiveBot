@@ -34,18 +34,31 @@ export interface ApiStatus {
   }
   /**
    * 界面构建溯源（CONFIG-UI.md「界面产物与源码是不是同一份」）。
-   * fresh = 与当前源码一致；stale = 源码改了没重新构建；unstamped = 没有标记、无法自证来源。
-   * ★ 不是 fresh 时界面必须明确提示"你看到的是旧界面"并给出 advice ——
+   * fresh = 与当前源码一致；stale = 源码改了没重新构建；unstamped = 没有标记、无法自证来源；
+   * packaged = **发布包形态**（包里只带产物、不带源码 ⇒ 本机无法核对）。
+   * ★ 只有"真的可能不是你该看到的那份"才打告警（用 `isUiAlarm`）并给出 advice ——
    *   使用者拿着旧界面报 bug，排查会从完全错误的前提出发。
+   *   ★ `packaged` **不是**告警：2026-10-03 实机验证踩到，它在发布包里被喊成
+   *   "你看到的是旧界面" —— 那是一句假话（界面不旧，只是没有源码可比）。
    */
   ui?: {
-    status: 'fresh' | 'stale' | 'unstamped' | string
+    status: 'fresh' | 'stale' | 'unstamped' | 'packaged' | 'missing' | string
     distDir?: string
     stamp?: { name?: string; pkgVersion?: string; builtAt?: string; sourceHash?: string } | null
     expectedHash?: string
     why?: string
     advice?: string
   }
+}
+
+/**
+ * 这个界面新鲜度状态要不要打告警。
+ *
+ * `fresh`（同步）与 `packaged`（发布包，本机无法核对）都**不是**问题；
+ * 其余（stale / unstamped / missing / 未知值）才是"你可能不是在看该看的那份"。
+ */
+export function isUiAlarm(status: string | undefined): boolean {
+  return status !== 'fresh' && status !== 'packaged'
 }
 
 export interface DoctorRow {

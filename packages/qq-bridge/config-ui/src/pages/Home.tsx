@@ -3,7 +3,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Toaster, toast } from 'sonner'
-import { api, ApiError, type ApiStatus } from '@/lib/api'
+import { api, ApiError, isUiAlarm, type ApiStatus } from '@/lib/api'
 import { DEMO_CONFIG, DEMO_STATUS, setPath } from '@/lib/config'
 import { StatusBar } from '@/components/StatusBar'
 import { ConfirmDialog, InlineNote, type ConfirmRequest } from '@/components/common'
@@ -403,15 +403,23 @@ export default function Home() {
         )}
 
         {/* ★ 构建溯源（CONFIG-UI.md「界面产物与源码是不是同一份」）：
-            不是 fresh 就必须明说"你看到的是旧界面"并给出可执行的修法 ——
+            只有**真的可能不是你该看到的那份**时才打告警并给修法 ——
             使用者拿着旧界面报 bug，排查会从完全错误的前提出发。
-            三种状态分开：stale = 源码改了没重新构建；unstamped = 没有标记、无法自证来源
-            （重新构建也没用，要删掉重建）。 */}
-        {!demo && status?.ui && status.ui.status !== 'fresh' && (
+            状态分开：stale = 源码改了没重新构建；unstamped = 没有标记、无法自证来源
+            （重新构建也没用，要删掉重建）；missing = 产物不存在。
+            ★ `packaged` **不算告警**：发布包里没有界面源码，"本机无法核对"是那个形态的
+            正常结论 —— 2026-10-03 实机上它被打成"你看到的是旧界面"，**那是假话**。 */}
+        {!demo && status?.ui && isUiAlarm(status.ui.status) && (
           <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3">
             <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-amber-900">
               <CircleAlert className="h-4 w-4" />
-              你看到的是旧界面（构建溯源：{status.ui.status === 'stale' ? '源码改了没重新构建' : status.ui.status === 'unstamped' ? '没有构建标记，无法自证来源' : status.ui.status}）
+              {status.ui.status === 'stale'
+                ? '你看到的是旧界面（源码改了没重新构建）'
+                : status.ui.status === 'unstamped'
+                  ? '这份界面无法确认来源（没有构建标记）'
+                  : status.ui.status === 'missing'
+                    ? '界面产物不存在'
+                    : `构建溯源状态未知：${status.ui.status}`}
             </div>
             <p className="text-sm text-amber-900">
               {status.ui.why && <>{status.ui.why}。</>}
@@ -422,6 +430,14 @@ export default function Home() {
               )}
             </p>
           </div>
+        )}
+
+        {/* 发布包形态：不是故障，给一行中性说明（不告警、不喊"旧界面"）。 */}
+        {!demo && status?.ui?.status === 'packaged' && (
+          <p className="mb-4 text-xs text-muted-foreground">
+            界面新鲜度：{status.ui.why}
+            {status.ui.stamp?.builtAt && <>（产物构建于 {String(status.ui.stamp.builtAt)}）</>}
+          </p>
         )}
 
         {fatalList.length > 0 && (

@@ -7,7 +7,8 @@
  * 为什么要有它：发布包出问题的方式几乎都不是"跑不起来"，而是**把不该带的东西带出去了**。
  * 那种错误不会报错、不会崩，只会安静地泄露 —— 所以必须逐项查。
  */
-import { readdirSync, statSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, relative, extname, sep } from 'node:path'
 
 const root = process.argv[2]
@@ -173,6 +174,32 @@ const biggest = files
   .map((p) => ({ r: rel(p), mb: statSync(p).size / 1024 / 1024 }))
   .sort((a, b) => b.mb - a.mb)
   .slice(0, 5)
+
+// ── ⑥ 包内**真的跑一次**界面新鲜度检查（判据只有退出码）────────────────
+//
+// ★ 为什么要一条"会执行代码"的检查：2026-10-03 实机验证踩到的缺陷**静态清单查不出来** ——
+//   发布包按设计不含 `config-ui/src`，而 `src/ui-status.mjs` 原来在**顶层**硬 require
+//   `scripts/ui-build-stamp.cjs`（`scripts/` 也不进包）⇒ 用户机器上：
+//       ❌ 界面检查失败：Cannot find module 'C:\InteractiveBot\scripts\ui-build-stamp.cjs'
+//   退出码 1，而控制台把它渲染成「你看到的是旧界面」（假话）。
+//   缺的是**运行时依赖**，不是清单里列过的文件名 —— 所以这里让包自己回答一次。
+//
+// 判据纪律（与 assemble-release.mjs 同一套）：**只看退出码**，不解析它的排版文本。
+// 在包里它应当得出 `packaged`（本机无法核对）并退出 0；跑不通（含未捕获异常）= 问题。
+if (existsSync(join(root, 'src', 'index.mjs'))) {
+  const ui = spawnSync(process.execPath, [join(root, 'src', 'index.mjs'), '--ui'], {
+    cwd: root,
+    stdio: 'inherit',
+  })
+  if (ui.status !== 0) {
+    problems.push(
+      `包内 \`src/index.mjs --ui\` 没跑通（退出码 ${ui.status ?? '?'}）—— ` +
+        '界面新鲜度检查在用户机器上会失败（发布包必须能自己回答"本机无法核对"）',
+    )
+  }
+} else {
+  warnings.push('包里没有 src/index.mjs，跳过界面新鲜度自检')
+}
 
 // ── 报告 ───────────────────────────────────────────────────────────────
 console.log(`\n发布包验收：${root}`)
