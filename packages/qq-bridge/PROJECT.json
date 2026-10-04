@@ -391,10 +391,10 @@
     },
     {
       "cmd": "node mocks/verify-api-h13.mjs",
-      "purpose": "★★ H13 的四个接口（**真起一个 HTTP 服务**测的，不是直接调 handler —— 真机那次崩溃点在 `serveApi` 里，直接调 handler 永远看不到）：① `/api/preflight` 前置门控（★ 异步接口**必须真的 await**，漏了会返回 Promise 并序列化成 `{}`，界面「什么都不显示」却不报错）；② `/api/snowluma/accounts` **绝不回 token**（路由做**字段白名单**，即使依赖不小心带回 token 也出不去）；③ `/api/logs/stream` 游标增量（游标超出总行数要**夹回开头**，否则日志轮转后永远收不到新日志）；④ `/api/corpus/search` **fail-closed**（缺会话就 400，绝不跨会话检索）；④-c ★ 0.3.2 新增**定时任务四个接口**（`GET/POST/DELETE /api/schedule` 与 `GET /api/schedule/history`，任务页签的全部后端）：非法任务 400 且**磁盘上一条都不多**（不许写半个）、合法的带算出来的 `nextInMs`/`dueNow`、**删除没带 id 就 400**（「删全部」是最坏的一种猜错）、删不存在的 id 如实报错；⑤ ★★★ **畸形返回不许拖垮进程** —— 这条是真机事故的回归锁：一条路由忘了包 `ok()`，`res.writeHead(undefined)` 抛 RangeError 且发生在 async 回调里没人接住 → 未处理拒绝 → **整个桥接退出**（症状是「连不上 3410」，看起来像端口问题）。",
+      "purpose": "★★ H13 的四个接口（**真起一个 HTTP 服务**测的，不是直接调 handler —— 真机那次崩溃点在 `serveApi` 里，直接调 handler 永远看不到）：① `/api/preflight` 前置门控（★ 异步接口**必须真的 await**，漏了会返回 Promise 并序列化成 `{}`，界面「什么都不显示」却不报错）；② `/api/snowluma/accounts` **绝不回 token**（路由做**字段白名单**，即使依赖不小心带回 token 也出不去）；③ `/api/logs/stream` 游标增量（游标超出总行数要**夹回开头**，否则日志轮转后永远收不到新日志）；④ `/api/corpus/search` **fail-closed**（缺会话就 400，绝不跨会话检索）；④-c ★ 0.3.2 新增**定时任务四个接口**（`GET/POST/DELETE /api/schedule` 与 `GET /api/schedule/history`，任务页签的全部后端）：非法任务 400 且**磁盘上一条都不多**（不许写半个）、合法的带算出来的 `nextInMs`/`dueNow`、**删除没带 id 就 400**（「删全部」是最坏的一种猜错）、删不存在的 id 如实报错；④-d-2 ★★★ **真实 HTTP 往返**：不带 `password` 地更新一台服务器 ⇒ 已经配好的 RCON 密码**必须原样还在**（2026-10-04 真事故的回归 —— 使用者控制台突然说「没配 RCON 密码」，链路是「界面从不回显密码 ⇒ 保存时不带这个字段 ⇒ 后端整条替换把它抹成空串」，**而且不报任何错**）。★ 为什么这条非要走真实往返：`dsh.apiKey` 那条「清除永远不生效」的 bug 就是**纯函数断言全绿**时被一次真实往返抓出来的；⑤ ★★★ **畸形返回不许拖垮进程** —— 这条是真机事故的回归锁：一条路由忘了包 `ok()`，`res.writeHead(undefined)` 抛 RangeError 且发生在 async 回调里没人接住 → 未处理拒绝 → **整个桥接退出**（症状是「连不上 3410」，看起来像端口问题）。",
       "network": "local-only",
       "costs": "none",
-      "assertions": 59
+      "assertions": 96
     },
     {
       "cmd": "node mocks/verify-mcp-tools.mjs",
@@ -468,10 +468,10 @@
     },
     {
       "cmd": "node mocks/verify-api.mjs",
-      "purpose": "配置 HTTP 接口（脱敏、空值语义、回环限制、各接口行为）",
+      "purpose": "配置 HTTP 接口（脱敏、空值语义、回环限制、各接口行为）。★ ③-b 是 2026-10-04 真事故的回归：`servers[].password` **既不许读出去、也不许保存时弄丢**。它住在**数组元素**里，所以上不了 `SECRET_FIELDS` 那张固定路径的表 —— 第一版两边都漏了：`GET /api/config` 把 RCON 密码（**op 级别**的凭据）明文发给了浏览器，而两条保存路径的\"整条／整份替换\"又让界面每保存一次就把它抹成空串（界面表单从不回显密码 ⇒ 保存时不带这个字段 ⇒ `normalizeServerEntry` 补 `''`）。这一节钉住：脱敏逐条删干净、**整份回传 ⇒ 密码还在**、**按 `id` 配对而不是按下标**（错位会把 A 的密码贴到 B 上）、三种写法（空串/缺省 = 保留、非空 = 覆盖、`null` = 显式清除）、新增的那台与原本没配的那台**都不许凭空造键**。★ 修复做了**变异测试**（去掉修复 ⇒ 确实变红）。",
       "network": "local-only",
       "costs": "none",
-      "assertions": 95
+      "assertions": 115
     },
     {
       "cmd": "node mocks/verify-apitest.mjs",

@@ -14,7 +14,7 @@
  * 用法：node mocks/verify-api.mjs
  */
 
-import { createApiHandler, redactConfig, mergeConfigPatch, assertLoopbackOnly, serveApi } from '../src/api.mjs'
+import { createApiHandler, redactConfig, mergeConfigPatch, resolveServerPassword, assertLoopbackOnly, serveApi } from '../src/api.mjs'
 import { normalizeConfig, validateConfig } from '../src/config.mjs'
 
 let failures = 0
@@ -166,6 +166,82 @@ section('安全 ③ API key 的三种写法：保持 / 替换 / 显式清除')
   const tokenNull = mergeConfigPatch(RAW, { onebot: { wsToken: null } })
   check('★ 不可清除的字段（token）传 null 仍然是"保持原样"', tokenNull.onebot.wsToken === 'REAL-WS-TOKEN',
     String(tokenNull.onebot.wsToken))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+section('安全 ③-b servers[].password：既不许读出去，也不许保存时弄丢')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ★★★ 这一节是**真事故的回归**（2026-10-04）。使用者的控制台突然说
+//   「⚠️ 没配 RCON 密码」，但他明明填过 —— 查下来是：
+//     · `GET /api/config` **把密码明文发给了浏览器**（`redactConfig` 漏了这个字段，
+//       它住在数组元素里，上不了 `SECRET_FIELDS` 那张固定路径的表）；
+//     · 两条保存路径都**整条／整份替换**（`/api/servers/save` 的 `list[idx] = norm`、
+//       `mergeConfigPatch` 里"数组整体替换"），而界面表单**从不回显密码**、
+//       保存时也就不带这个字段 ⇒ 每次保存都把密码抹成空串，**而且不报任何错**。
+//   真机证据：`config.json.bak`（02:48）里是 5 个字符，`config.json`（14:02）
+//   里是空串 —— 那 14:02 的写入同时把 `gameChat` 打开了，是同一次表单保存的两半。
+{
+  const CUR = {
+    servers: [
+      { id: 'forge1', name: '主服', host: '127.0.0.1', rconPort: 25575, password: 'RCON-SECRET' },
+      { id: 'forge2', name: '副服', host: '127.0.0.1', rconPort: 25576, password: 'OTHER-SECRET' },
+    ],
+  }
+
+  // ── ① 不许读出去 ────────────────────────────────────────────────────────
+  const red = redactConfig(CUR)
+  const text = JSON.stringify(red)
+  check('★★★ 密码的**值**不出现在 GET /api/config 的返回里',
+    !text.includes('RCON-SECRET') && !text.includes('OTHER-SECRET'))
+  check('★★ 字段本身被删除（每一条都删，不是只删第一条）',
+    red.servers.every((s) => !('password' in s)))
+  check('★ 数组的其余字段一个都没少（脱敏不是"把 servers 整个拿掉"）',
+    red.servers.length === 2 && red.servers[0].id === 'forge1' && red.servers[0].rconPort === 25575)
+  check('★ 脱敏不改动原对象（深拷贝）', CUR.servers[0].password === 'RCON-SECRET')
+  check('★ 没有 servers 时也不炸', redactConfig({ dsh: {} }).servers === undefined)
+
+  // ── ② 整份回传（界面最典型的行为）⇒ 密码必须留下 ────────────────────────
+  const roundTrip = mergeConfigPatch(CUR, red)
+  check('★★★ 拿到脱敏配置 → 原样回传 ⇒ 两台服的密码都还在',
+    roundTrip.servers[0].password === 'RCON-SECRET' && roundTrip.servers[1].password === 'OTHER-SECRET',
+    JSON.stringify(roundTrip.servers.map((s) => s.password)))
+  check('★ 并按 **id** 配对（不是按下标 —— 错位会把 A 的密码贴到 B 上）', (() => {
+    const swapped = mergeConfigPatch(CUR, { servers: [{ id: 'forge2' }, { id: 'forge1' }] })
+    return swapped.servers[0].password === 'OTHER-SECRET' && swapped.servers[1].password === 'RCON-SECRET'
+  })())
+
+  // ── ③ 三种写法的语义（与 dsh.apiKey 一致）──────────────────────────────
+  const empty = mergeConfigPatch(CUR, { servers: [{ id: 'forge1', password: '' }] })
+  check('★★ 显式空串 ⇒ **保留**原密码（"界面没动那个框"的常态）', empty.servers[0].password === 'RCON-SECRET')
+  const fresh = mergeConfigPatch(CUR, { servers: [{ id: 'forge1', password: 'NEW-PW' }] })
+  check('★ 非空新值 ⇒ 覆盖', fresh.servers[0].password === 'NEW-PW')
+  const cleared = mergeConfigPatch(CUR, { servers: [{ id: 'forge1', password: null }] })
+  check('★ null ⇒ **显式清除**（落成空串，不是删键 —— 与 token 那条一致）', cleared.servers[0].password === '',
+    JSON.stringify(cleared.servers[0].password))
+
+  // ── ④ 边界：新增的那台、原来没配的那台、没有 id 的元素 ─────────────────
+  const added = mergeConfigPatch(CUR, { servers: [{ id: 'forge1' }, { id: 'forge3', name: '新服' }] })
+  check('★ 新增的那台不会被凭空塞一个密码', !('password' in (added.servers.find((s) => s.id === 'forge3') ?? {})))
+  const noPw = mergeConfigPatch({ servers: [{ id: 'x', host: '1.2.3.4' }] }, { servers: [{ id: 'x' }] })
+  check('★ 原来就没配 ⇒ **不凭空造** `password: ""` 这个键', !('password' in noPw.servers[0]))
+  check('★ 没有 id 的元素不参与配对（不猜），也不抛', (() => {
+    const r = mergeConfigPatch(CUR, { servers: [{ name: '没id' }] })
+    return r.servers[0].name === '没id' && !('password' in r.servers[0])
+  })())
+  check('★ patch 里干脆没有 servers ⇒ 原样保留（这条最要紧：大部分保存都不碰服务器）', (() => {
+    const r = mergeConfigPatch(CUR, { dsh: { model: 'x' } })
+    return r.servers[0].password === 'RCON-SECRET'
+  })())
+
+  // ── ⑤ 判据本身：三种写法一张表 ─────────────────────────────────────────
+  check('判据：缺省 + 原来有 ⇒ 保留', resolveServerPassword(undefined, 'old') === 'old')
+  check('判据：空串 + 原来有 ⇒ 保留', resolveServerPassword('', 'old') === 'old')
+  check('判据：null + 原来有 ⇒ 清除（空串）', resolveServerPassword(null, 'old') === '')
+  check('判据：新值 ⇒ 覆盖', resolveServerPassword('new', 'old') === 'new')
+  check('判据：两边都没有 ⇒ null（调用方据此**不写这个键**）', resolveServerPassword(undefined, '') === null)
+  check('判据：非字符串（数字/对象）当"没带"处理，不当成密码',
+    resolveServerPassword(12345, 'old') === 'old' && resolveServerPassword({}, 'old') === 'old')
 }
 
 // ══════════════════════════════════════════════════════════════════════════

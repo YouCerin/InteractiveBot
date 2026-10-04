@@ -105,6 +105,38 @@ function delPath(obj, path) {
 }
 
 /**
+ * `servers[].password` 的**空值语义** —— 与 `SECRET_FIELDS` 那几条同一条规矩，
+ * 但它住在**数组元素**里，上不了那张"固定路径"的表，只能单独写一份。
+ *
+ * ★★★ 为什么必须有它（**真事故的回归**，2026-10-04）：
+ *   界面上的服务器表单**从不回显密码**（后端只给 `passwordSet` 布尔），
+ *   所以它保存时**根本不带 `password` 字段**（`ServerForm.tsx`：
+ *   `if (form.password) payload.password = form.password`，注释还写着"留空 = 不改"）。
+ *   而两条保存路径都会**把整条／整份配置替换掉**：
+ *     · `POST /api/servers/save` —— `list[idx] = norm`（**整条**替换）；
+ *     · `POST /api/config` —— `deepMerge` 里**数组是整体替换**的。
+ *   ⇒ 用户每点一次"保存"，RCON 密码就被抹成空串，而且**界面上没有任何异常**：
+ *   只是控制台突然开始说"没配 RCON 密码"，看起来像配置没保存，不像密码被删。
+ *   真机上就是这样丢的：`config.json.bak` 里那条是 5 个字符，14:02 一次表单保存
+ *   （同一次里打开了"游戏内对话"）之后变成空串 —— 那是**同一次写入**的两半。
+ *
+ * 三种写法的语义（与 `dsh.apiKey` 完全一致）：
+ *   · 缺省 / `''` → **保留原值**（"界面没动那个框"的常态）
+ *   · 非空字符串  → 覆盖
+ *   · `null`      → **显式清除**（"我要删掉它"必须能表达，而空串这条已被占用）
+ *
+ * @param {unknown} incoming 提交上来的值（`undefined` = 压根没带这个字段）
+ * @param {unknown} previous 原来那条里的值
+ * @returns {string|null} 该写入的密码；`null` = 两边都没有 ⇒ **不要凭空造这个键**
+ */
+export function resolveServerPassword(incoming, previous) {
+  if (incoming === null) return ''
+  if (typeof incoming === 'string' && incoming.length > 0) return incoming
+  if (typeof previous === 'string' && previous.length > 0) return previous
+  return null
+}
+
+/**
  * 把磁盘上的原始配置转成"可以安全返回给 UI"的形状。
  * **删除**密钥字段，并补上 `hasXxx` 布尔标记。
  */
@@ -115,6 +147,24 @@ export function redactConfig(raw) {
     const value = getPath(copy, path)
     delPath(copy, path)
     copy[flag] = typeof value === 'string' && value.length > 0
+  }
+  // ★★★ `servers[].password` 同样**不许读出去**（0.3.2 收尾补上的口子）。
+  //
+  // 它上不了 `SECRET_FIELDS`（那张表只认固定路径，这个是数组元素），
+  // 所以第一版**漏了它** —— `GET /api/config` 会把 RCON 密码明文发给浏览器，
+  // 而界面（`ServerForm.tsx` / `ServerTab.tsx`）明明写着"永不回显已有密码"。
+  // RCON 是 **op 级别**的通道，这个口的性质和 token 完全一样。
+  //
+  // ★ 为什么**不**顺手补一个 `passwordSet` 标记：那样会多出一个脏键 ——
+  //   界面把整份配置读进来再写回去（`Home.tsx` 的 `serialize`），任何
+  //   `hasXxx` 式的标记都会被当成配置**永久写进 config.json**
+  //   （`hasWsToken` 那几个就踩过这个坑，所以 `Home.tsx` 里有一串 delete）。
+  //   而"这台配没配密码"的标记在 `/api/servers` 那侧本来就有（每台一个
+  //   `passwordSet`）—— 界面读服务器只走那条路，这里不需要重复一份。
+  if (Array.isArray(copy.servers)) {
+    for (const s of copy.servers) {
+      if (s && typeof s === 'object') delete s.password
+    }
   }
   return copy
 }
@@ -175,6 +225,34 @@ export function mergeConfigPatch(current, patch) {
     if (getPath(patch, path) !== null) continue
     if (typeof getPath(current, path) === 'string') setPath(merged, path, '')
     else delPath(merged, path)
+  }
+
+  // ★★★ 最后：`servers[].password` **逐条**复原（上不了 `SECRET_FIELDS` 那张表）。
+  //
+  // ★ 为什么通用那一段救不了它：`deepMerge` 对**数组是整体替换**
+  //   （`target.servers = patch.servers`），而界面回传的 `servers` 来自
+  //   `GET /api/config` 的脱敏结果 ⇒ **每个元素都没有 `password`** ⇒
+  //   整体替换就等于把用户的 RCON 密码抹成空串。
+  //   （上面 `redactConfig` 那条口子一补，**这条就是必经之路** —— 先有脱敏、
+  //    就必然有"回传时缺字段"，两件事必须一起改，不然修了泄露反而开始丢密码。）
+  //
+  // ★ 匹配靠 `id`，**不靠下标**：下标会在"删了一台／换过顺序"之后错位，
+  //   而错位的结果是"把 A 的密码贴到 B 上"——比丢掉更难查。
+  // ★ 语义与 `SECRET_FIELDS` 一致（空/缺省 = 保留，`null` = 清除），
+  //   用的是同一个 `resolveServerPassword`。
+  if (Array.isArray(merged.servers)) {
+    const prevById = new Map()
+    for (const s of Array.isArray(current?.servers) ? current.servers : []) {
+      if (s && typeof s === 'object' && s.id !== undefined) prevById.set(String(s.id), s)
+    }
+    for (const s of merged.servers) {
+      if (!s || typeof s !== 'object' || s.id === undefined) continue
+      const prev = prevById.get(String(s.id))
+      if (!prev) continue // 新增的那台：它自己带什么就是什么
+      const pw = resolveServerPassword(s.password, prev.password)
+      if (pw === null) delete s.password
+      else s.password = pw
+    }
   }
 
   return merged
@@ -971,6 +1049,13 @@ export function createApiHandler(deps) {
         const list = Array.isArray(raw.servers) ? raw.servers.slice() : []
         const idx = list.findIndex((s) => s && String(s.id) === norm.id)
         const isNew = idx < 0
+        // ★★★ 密码**不许**被"整条替换"抹掉（真事故：见 `resolveServerPassword` 的说明）。
+        //   界面表单从不回显密码 ⇒ 它保存时不带 `password` ⇒ `normalizeServerEntry`
+        //   把它填成 `''` ⇒ 用户的 RCON 密码就这么没了，而且**不报任何错**。
+        //   ∴ 更新时必须把原来那条的密码按同一条语义接回来。
+        const prevEntry = isNew ? null : list[idx]
+        const pw = resolveServerPassword(incoming.password, prevEntry?.password)
+        norm.password = pw === null ? '' : pw
         if (isNew) list.push(norm)
         else list[idx] = norm
         raw.servers = list

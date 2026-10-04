@@ -2897,6 +2897,15 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
    **不会重启** —— 因为"TPS 低就重启"是赌博。
 2. **RCON 密码只进 `config.json`**，界面回显时**必须脱敏**（照 `/api/snowluma/accounts` 的字段白名单纪律：
    连 `token` 这种字样都不出现）。
+   ★★★ **而且保存时不许把它弄丢**（2026-10-04 真事故）：密码住在 `servers[]` 的**数组元素**里，
+   所以它上不了 `SECRET_FIELDS` 那张固定路径的表 —— 第一版两处都漏了：`GET /api/config`
+   **把密码明文发给了浏览器**，而保存的"整条／整份替换"又让用户**每点一次保存就丢一次密码**
+   （表单从不回显密码 ⇒ 保存时不带这个字段 ⇒ 后端补成 `''`），**全程不报任何错** ——
+   表现是控制台突然说「⚠️ 没配 RCON 密码」，看起来像配置没保存。
+   ∴ 界面这边三条纪律：① 编辑时**密码框留空 = 不改**（现在的后端真的这么做了，
+   `api.mjs` 的 `resolveServerPassword`）；② **看到那句"没配 RCON 密码"而用户说填过时，
+   先怀疑密码被抹了**，别急着说"你没填"；③ 界面**不要**自己补一个空的 `password` 字段
+   （那正好绕开"留空 = 不改"这条语义 —— 想清除只能送 `null`）。
 3. **RCON 只该监听本机或可信内网** —— 它等于服务端的控制台；界面要有一句提醒。
 4. **`servers` 为空 = 这一层完全不工作，而且一次网络请求都不发**（默认就是这样）。
 
@@ -2916,7 +2925,7 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 |---|---|---|
 | GET | `/api/servers` | 配置摘要 + **活证据** + 归属 + 重启状态。★ **字段白名单**：只回 `passwordSet` 布尔，**绝不回密码** |
 | POST | `/api/servers/action` | body `{serverId, action}`；**只有 `retry` / `abandon`**。★ `start`/`stop` 回 400（走 CLI，那条路上是人在做） |
-| POST | `/api/servers/save` | body `{server}`：新增/更新一台。归一化**复用 `normalizeServerEntry`**（与启动读配置同一份，避免"界面存进去的"与"启动时读到的"分叉）；`id` 空 ⇒ 400 |
+| POST | `/api/servers/save` | body `{server}`：新增/更新一台。归一化**复用 `normalizeServerEntry`**（与启动读配置同一份，避免"界面存进去的"与"启动时读到的"分叉）；`id` 空 ⇒ 400。★★★ **`password` 按"空/缺省 = 保留、非空 = 覆盖、`null` = 清除"处理**（`resolveServerPassword`）—— **不许整条替换就当没配过**，界面表单本来就不带这个字段 |
 | POST | `/api/servers/delete` | body `{serverId}`；缺 `serverId` ⇒ 400。★ **状态文件刻意保留**（那是"我起过它"的归属证据，删了就失去重启能力） |
 | POST | `/api/servers/command` | body `{serverId, command}`：手动跑一条控制台命令。缺 `serverId`／空命令／超长（>500 字）⇒ 400；★★★ **完整控制台（op 级别）**，**字段白名单**（密码绝不出去） |
 | POST | `/api/servers/probe` | body `{serverId}`：**主动检测**一次（真连 RCON + 只读命令）。缺 `serverId` ⇒ 400。★★ 它**不喂状态机、不累加「连续失败」** —— 点几次都不会把一台好好的服务器「点成 down」 |
@@ -2931,7 +2940,7 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 | 入口 | 谁能用 | 边界 |
 |---|---|---|
 | **本机网页**（本页的输入框 / `POST /api/servers/command`） | 能碰到这台机器的人 | API 只绑 127.0.0.1 ⇒ 不扩到局域网/公网 |
-| **QQ**（`/mc` 本地指令 + `mc_command` 工具） | **只有管理员**，且要显式打开 `servers[].commandFromQQ` | **默认关**；那台服务器的配置卡片上要显示这个开关的状态 |
+| **QQ**（`\mc` 本地指令 + `mc_command` 工具） | **只有管理员**，且要显式打开 `servers[].commandFromQQ` | **默认关**；那台服务器的配置卡片上要显示这个开关的状态 |
 
 > ★ **旧口径已作废**：这里曾经写着「绝不进 QQ 工具面」。
 > 用户后来明确要求"让 bot 执行指令（仅听从管理员）"，所以那条纪律被**替换**成

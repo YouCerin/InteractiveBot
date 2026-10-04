@@ -75,7 +75,7 @@ const logs = []
  * 配置的**可变桩**（④-d 的服务器条目增删改要真的读→改→写回）。
  * 起点放一台 `s1`，与 `serversList` / `serversCommand` 的桩对齐。
  */
-let rawConfigStub = { servers: [{ id: 's1', name: '主服' }] }
+let rawConfigStub = { servers: [{ id: 's1', name: '主服', password: 'THIS_SHOULD_NEVER_LEAK' }] }
 // 造两个记忆文件（④-b 的记忆检索要扫它们）
 {
   const memDir = join(WS, 'memory')
@@ -593,6 +593,34 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
     typeof saved.json?.data?.applied === 'object' && saved.json?.data?.applied !== null,
     JSON.stringify(saved.json?.data?.applied))
   check('★ 即时生效：applied.changed 为 true（不必重启桥接）', saved.json?.data?.applied?.changed === true)
+  check('★★★ 保存的响应里也没有密码（它只是回执，没有理由带上密钥）', !saved.text.includes('THIS_SHOULD_NEVER_LEAK'))
+
+  // ── ④-d-2 ★★★ 更新一台时**不许把已经配好的 RCON 密码抹掉**（真事故的回归）──
+  //
+  // 使用者 2026-10-04 报的现象：控制台说「⚠️ 没配 RCON 密码」，但他明明填过。
+  // 真机证据：`config.json.bak` 里是 5 个字符，14:02 那次写入（同一次里打开了
+  // "游戏内对话"）之后变成空串。链路是：界面表单**从不回显密码**（后端只给
+  // `passwordSet`）⇒ 保存时不带 `password` ⇒ 后端 `list[idx] = norm` **整条替换**
+  // ⇒ `normalizeServerEntry` 把它填成 `''`，**而且不报任何错**。
+  // 这里走**真实 HTTP 往返**（与 `dsh.apiKey` 那条清除 bug 同一个理由：
+  // 纯函数断言当时的全绿并没有抓到它）。
+  const s1pw = () => (rawConfigStub.servers.find((s) => s.id === 's1') ?? {}).password
+  check('（前提）桩里 s1 现在有密码', s1pw() === 'THIS_SHOULD_NEVER_LEAK', String(s1pw()))
+  const editedNoPw = await saveSrv({ server: { id: 's1', name: '主服改名' } })
+  check('★ 改名那次保存 → 200', editedNoPw.status === 200, editedNoPw.text.slice(0, 140))
+  check('★★★ 不带 password 地更新 ⇒ **密码原样保留**（这是使用者踩的那条）',
+    s1pw() === 'THIS_SHOULD_NEVER_LEAK', String(s1pw()))
+  check('★ 同一次里改的字段确实生效了（不是"整个保存被跳过"）',
+    rawConfigStub.servers.find((s) => s.id === 's1')?.name === '主服改名')
+  const editedEmpty = await saveSrv({ server: { id: 's1', password: '' } })
+  check('★★ 显式空串 ⇒ 也是"不改"（界面没动那个框的常态）',
+    editedEmpty.status === 200 && s1pw() === 'THIS_SHOULD_NEVER_LEAK', String(s1pw()))
+  const editedNew = await saveSrv({ server: { id: 's1', password: 'NEW-RCON-PW' } })
+  check('★ 填了新的 ⇒ 正常覆盖', editedNew.status === 200 && s1pw() === 'NEW-RCON-PW', String(s1pw()))
+  const editedClear = await saveSrv({ server: { id: 's1', password: null } })
+  check('★ `null` ⇒ **显式清除**（"我要删掉它"必须能表达）', editedClear.status === 200 && s1pw() === '', JSON.stringify(s1pw()))
+  // 收尾：把它放回一个非空值，后面的用例（如果有依赖）不会因为空密码而改变行为
+  await saveSrv({ server: { id: 's1', password: 'THIS_SHOULD_NEVER_LEAK' } })
 
   const delSrv = async (body) => {
     const res = await fetch(url('/api/servers/delete'), {
