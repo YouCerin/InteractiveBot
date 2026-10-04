@@ -229,7 +229,10 @@ console.log('\n=== ④ 绑定成立：两个方向都写、改绑两边都清、
   ok(audits.some((a) => a.action === 'rebound-away'), '★★ 被顶替的那条也有**独立一行**（"他什么时候被顶替的"要查得到）')
   const rawAudit = readFileSync(join(ws, BIND_AUDIT_REL), 'utf8')
   ok(!rawAudit.includes('654321'), '★★★ 审计里**没有**绑定码（哪怕它被用过）')
-  ok(shortUuid(UUID_A) === 'bbf13b2f', '★ shortUuid 取前 8 位', shortUuid(UUID_A))
+  // ★ 判据写成"由 UUID_A 推出来的前 8 位"，**不写死那个字面量** ——
+  //   否则脱敏把夹具里的真机 UUID 换成占位值之后，这条会假红（真的发生过：
+  //   换成一个全 0 的占位 UUID 之后 `'bbf13b2f'` 这个期望值就再也对不上了）。
+  ok(shortUuid(UUID_A) === UUID_A.slice(0, 8), '★ shortUuid 取前 8 位', shortUuid(UUID_A))
   ok(!rawAudit.includes(UUID_A), '★★ 审计里没有完整 UUID')
 
   const u = unbind({ workspace: ws, uuid: UUID_B, by: 'admin:1', now: t0 + 3000 })

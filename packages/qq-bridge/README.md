@@ -62,9 +62,9 @@ npm test                         # 全部离线套件（实测：所有套件退
 #
 # ⚠️⚠️ 括号里的数字**不是同一时刻量的**，而且不少已经漂了。0.3.0alpha 收尾时用
 #   「逐个套件实跑、读它自己的收尾行」的方式复核过一部分（写明了量到的值）：
-#     · 已核过并改准：verify-manifest 37、verify-release-hygiene **72**、
+#     · 已核过并改准：verify-manifest 38、verify-release-hygiene **79**、
 #       verify-imports 9、verify-persona 106、verify-personas 103、verify-chat-review 277、
-#       verify-doctor **48**、verify-ui-status 29、
+#       verify-doctor **48**、verify-ui-status 35、
 #       verify-token-sync **43**、verify-snowluma-console **29**、verify-dsh-locate **39**
 #       （0.3.1 打包前量的；后三个是实机报告那一轮新增的套件，它们**不打印自己的总数** ——
 #        上面的数是数 `✅` 行得到的。`verify-dsh-locate` 的 39 含 4 条"本机有真实 asar 才跑"的断言，
@@ -72,6 +72,10 @@ npm test                         # 全部离线套件（实测：所有套件退
 #       （0.3.0alpha 第二步：`verify-voice-style.mjs` **已删除** —— 说话方式从"代码常量 +
 #        每轮替换人设两节"改成"**就写在人设文件里**"，那个套件有一半在测已删的机制；
 #        里面仍然有意义的内容断言已归位到 `verify-persona.mjs`）
+#     · **0.3.2 实机修缺陷那一轮又量了一遍**（新增/改动的套件，读收尾行）：
+#       verify-bindings **139**、verify-game-wiring **146**、verify-api **127**、
+#       verify-api-h13 **103**、verify-schedule **196**、verify-extensions **193**
+#       （`verify-api` / `verify-extensions` 不打印总数，上面是数 `✅` 行得到的）
 #     · 实测**对不上、但本次没改**（超出版本范围，留着是**已知漂移**）：
 #       verify-persona 实测 60、verify-corpus 58、verify-extract 85、
 #       verify-memory-consolidate 77、verify-privacy 67、verify-oplog 49、
@@ -79,15 +83,15 @@ npm test                         # 全部离线套件（实测：所有套件退
 #       verify-mcp-tools 75、verify-delivery-ledger 34、verify-token-discovery 53、
 #       verify-delivery-gate 47、verify-memory-keyword 35、verify-transport 41、
 #       verify-session-state 48、verify-memory-supersede 50、verify-memory-stats 29、
-#       verify-memory-usage 54、verify-api-h13 29、verify-marker 46、verify-text-encoding 21
+#       verify-memory-usage 54、verify-marker 46、verify-text-encoding 21
 #     · 复核方式（可复现）：在 `packages/qq-bridge` 下逐个 `node mocks/verify-*.mjs`，
-#       读它的收尾行（「…全部通过（N 项）」）。链上共 **72 套**（0.3.1 打包前实测；
-#       `mocks/` 下共 73 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
+#       读它的收尾行（「…全部通过（N 项）」）。链上共 **82 套**（0.3.2 实测；
+#       `mocks/` 下共 83 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
 #   ∴ **不要**把这些数字当权威 —— 权威是 `node mocks/verify-*.mjs` 自己的输出。
-node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（37 项）
+node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（38 项）
 node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）
-node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、批处理括号、**包内路径引用**、接线断言（72 项）
-node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制（89 项）
+node mocks/verify-release-hygiene.mjs # ★★ 发布卫生：用户数据不许进包、大小写绕不过、批处理括号、**包内路径引用**、出厂模板里的说明文字、接线断言（79 项）
+node mocks/verify-api.mjs        # 配置接口：脱敏、空值语义、回环限制、**servers[].password 的三条语义**（127 项）
 node mocks/verify-api-h13.mjs    # ★★ H13 四个接口（真起 HTTP 服务）：漏 await、token 泄露、跨会话检索、**畸形返回不拖垮进程**（29 项）
 node mocks/verify-config.mjs     # 配置解析与校验（42 项）
 node mocks/verify-units.mjs      # 纯逻辑：文本/唤醒/会话/防自环/人味层/人设/记忆
@@ -140,14 +144,17 @@ node mocks/session-grep.mjs --list        # 只列有哪些会话、多大、什
 start.bat --doctor
 
 # 📄 更新汇总（给人看的：这次改了什么、怎么验、刻意不做什么、还差什么）
-#   docs/0.3.0alpha-release-notes.md   ← 最新（说话方式只剩一份：拆掉「闲聊/工作」双态）+ 升级须知
-#   docs/0.3.0beta-release-notes.md    ← 上一版的对应文档（双态 + 聊天记录评审台）
+#   docs/0.3.2-release-notes.md        ← 最新（服务器监测 / 启动接管 / 重启编排 / 完整控制台 /
+#                                        游戏内对话 + 四个真机缺陷修复）+ **升级须知** + 仍然存在的边界
+#   docs/0.3.0alpha-release-notes.md   ← 说话方式只剩一份：拆掉「闲聊/工作」双态
+#   docs/0.3.0beta-release-notes.md    ← 双态 + 聊天记录评审台
 #   docs/0.2.3-release-notes.md        ← 插件化：二选一 / 唤醒策略 / QQ 工具档位 / 投递 / 语料库
 #   docs/0.2.3-change-record.md        ← 逐条过程记录（含踩过的坑与两次"我错了"）
 #   docs/plugin-packaging-plan.md      ← 插件化怎么划分（哪些拆开、哪些合并、哪些二选一）
 #   docs/0.2.1-release-notes.md        ← 上一版的对应文档
 #   docs/0.2.1-hermes-borrow-plan.md   ← 逐阶段过程记录（含踩过的坑与被推翻的判断）
 #   docs/0.2.1-runtime-memory-verification.md ← 真机取证（哪些有硬证据、哪些还没有）
+#   （仓库根目录 README 的「版本历史」是这几份的索引；README 本身不再逐版复述。）
 
 # ⑤-b 记忆体检（只读；机器人正在跑的时候也能执行）
 #   ★「它说记住了」和「它真的记住了」是两件事 —— 这条命令回答后者。
@@ -254,11 +261,20 @@ node src/index.mjs --servers                  # 配置 + 监测状态（**不发
 node src/index.mjs --servers --probe          # 真连一次并跑只读命令 list
 node mocks/verify-servers.mjs                 # ★★ 协议与状态机（255 项，含真 TCP 假服务端）
 
-# ⑤-b6d 从 QQ 下服务器指令（0.3.2 收尾，**默认关**）
-#   ★★★ 打开方式：在那台服务器的条目里写 "commandFromQQ": true。
-#     打开之后**管理员**拥有这台服务器的**完整控制台（RCON = op 级别）**：
+# ⑤-b6d 允许管理员下服务器指令（0.3.2 收尾，**默认关**）
+#   ★★★ 打开方式：在那台服务器的条目里写 "commandFromQQ": true，或者在控制台
+#     「服务器」页签的条目表单里勾上（界面**必须**能改它 —— 见下面 ⑤-b6f 那条教训）。
+#     打开之后**管理员**拥有这台服务器的**完整控制台（RCON = op 级别）**。**一共三条入口**：
 #       · 管理员在群里发 `\mc [服务器id] <命令>` ⇒ 桥接**本地拦截执行**（不经模型）
 #       · 模型也可调 `mc_command` 工具（读本轮的 MC 域授权文件，**非管理员一律拒绝**）
+#       · ★★ **游戏内**：绑定到**管理员 QQ** 的玩家在服里叫它 —— 那一轮走的就是这个 QQ 的
+#         会话（`private:<QQ>`），所以**他也能让它去查 TPS / 人数 / 下指令**。
+#         （绑到普通 QQ 的玩家不行：桥接只给管理员写授权文件。）
+#   ★★ 它和「游戏内对话」（`gameChat`）的分工是**另一个维度**：
+#       `gameChat` 决定**听不听**游戏里的人说话（只有对白），这个决定**动不动**服务端（op）。
+#       ∴ 游戏内的管理员要查 TPS，**两个都得开**。
+#     ⚠️ 措辞这里错过一次：第一版写的是"与游戏内无关"，而那是**错的** —— 结果是管理员在游戏里
+#        查 TPS 被 bot 推回给使用者（真机日志：同一分钟、同一条会话键，QQ 私聊里问就真去查了）。
 #   ★★ 两条已知代价（拍板时已明确告知）：
 #      ① `op` 可提权 ⇒ 命令白名单**事实上失效**（能 op 一个玩家，白名单就没意义了）
 #      ② **管理员 QQ 被盗 = 服务器 op 被劫持**（本机网页那个控制台没这个问题）
@@ -310,7 +326,40 @@ node src/index.mjs --servers                  # 顺带列出绑定表、还没�
 node tools/probe-tellraw.mjs                  # ★ 真机取证：两台通道（tellraw/say）在你这台服上到底通不通
 node tools/probe-tellraw.mjs --send           # ★ 再加一格：给在线玩家真发一条（会出现在他游戏里）
 node mocks/verify-bindings.mjs                # ★★ 绑定/码/tellraw 注入（139 项，不连网）
-node mocks/verify-game-wiring.mjs             # ★★★ 走完整桥接的接线（128 项：命中即零模型调用）
+node mocks/verify-game-wiring.mjs             # ★★★ 走完整桥接的接线（146 项：命中即零模型调用、
+                                              #     "先应一声"不许跑进 QQ、系统提示按通道选路、
+                                              #     "能不能用控制台"按 tier 分三支）
+
+# ⑤-b6f 启动接管 / 重启编排（0.3.2 P2+P4）：**只在"确实是我起的"前提下动手**
+#   ★ 为什么这块必须存在：服务器挂了，人不在电脑前就只能干看着。但"自动重启"是这一层里
+#     唯一会**改变机器状态**的动作，所以它的每一条纪律都是为了**不把事情弄得更糟**。
+#   ★★★ 归属判据：`pid@进程启动时刻` 落在我们自己写的归属档里（`runtime/servers/<id>.running.json`），
+#     才算"是我起的"。**推荐用 `startExe` + `startArgs`**（不走 shell）——走 shell 时拿到的 pid 是
+#     `cmd.exe` 的，它起完 java 就退出 ⇒ 归属永远判不出来 ⇒ **重启能力形同虚设**（实测踩过）。
+#   ★ 流程：**优雅停服（RCON stop）→ 等端口释放 → 拉起 → 等端口开放**才算成功。
+#     两个 JVM 同写一个世界 = **存档损坏**，所以"端口活着"时**绝不重复拉起**。
+#   ★ 纪律：冷却（默认 10 分钟）+ **同一次故障最多尝试一次**（成功一次后计数归零）；
+#     等不到就**如实说没起来**并指路控制台输出 —— 绝不谎报成功。
+#   ★★ 启动接管 `servers[].manageOnStart`（默认关）：桥接启动时 ①端口活着+归属是我 ⇒ 接管（不上手）；
+#     ②端口活着但不是我 ⇒ **只报告**（绝不"先杀再起"去抢）；③端口不通 ⇒ 拉起来并等端口真的开放。
+#   ⚠️ 「正在启动」是一个**独立状态**：模组服冷启动 18~60 秒，而判 down 要连续失败 N 次 ——
+#     不做这一步，**还在加载时就会被判 down**，而 down 是唯一允许触发重启的那一类。
+node src/index.mjs --supervise status         # 看归属、pid、启动时刻、"能不能重启"
+node src/index.mjs --supervise start --id <id>   # 拉起并**等端口真的开放**（默认最多 180 秒）
+node src/index.mjs --supervise stop --id <id>    # 优雅停服（发 RCON stop，等它自己收尾）
+node src/index.mjs --supervise retry --id <id>   # 人工放行一次重启（清冷却/等指令态）
+node src/index.mjs --supervise abandon --id <id> # 放弃：别再自动动它（它会停在"等管理员"）
+#   ⚠️ 服务端要**在你的终端里**拉（`supervise-server.bat start --id <id>`）——
+#     在 agent/沙箱会话里拉起的进程会随那条命令一起被回收（实测：服务端起完就被杀，
+#     日志戛然而止、一行停机记录都没有）。判据是服务端日志尾部：优雅停服有完整收尾。
+#   控制台「服务器」页签：状态卡 + 归属证据 + 「主动检测」（**不喂状态机**，点几次都不会把
+#   一台好服务器"点成 down"）+ **实时后台**（按字节读那个控制台日志，真机是 GBK）+
+#   **条目增删改**（改完即时生效，不必重启桥接）+ 控制台输入框。
+#   ★★ 条目保存是**按字段合并**的：提交什么改什么，没提交的保持原样。
+#     这条纪律是**真事故换来的** —— 旧版是"整条替换"，于是界面上没渲染的字段每保存一次
+#     就被重置成默认值：RCON 密码被抹成空串、`commandFromQQ` 被静默关掉，
+#     而**界面上没有任何异常**（使用者：「我应该是打开的才对」）。
+#     同一类坑还有 `startArgs`（旧版无条件送 `[]`，打开表单点保存就把真实启动参数清空了）。
 
 # ⑤-b7 回到第 N 步
 #   ★ 三件如实说明（做不到的必须说清，否则就是个骗人的功能）：

@@ -366,12 +366,18 @@ section('仓库完整性：UI 源码不能有文件被 .gitignore 悄悄挡在�
 checkUiSourceTracked()
 
 // ══════════════════════════════════════════════════════════════════════════
-section('版本号只有一个来源（四处必须一致）')
+section('版本号只有一个来源（五处必须一致）')
 // ══════════════════════════════════════════════════════════════════════════
 //
-// ★ 为什么值得一条断言：版本号散在**四个**地方（package.json / PROJECT.json /
-//   MCP server info / RELEASE.md 里的包名），而升级版本时最容易"改了三个忘一个"。
-//   症状是自相矛盾：包名写着 0.2.0、里面报的却是 0.1.0 —— 用户看到之后才会发现。
+// ★ 为什么值得一条断言：版本号散在**五处**（package.json / PROJECT.json /
+//   **两个** MCP server 的 server info / RELEASE.md 里的包名），而升级版本时最容易
+//   "改了四个忘一个"。症状是自相矛盾：包名写着 0.3.2、里面报的却是 0.3.0alpha ——
+//   用户看到之后才会发现。
+//
+// ★★ 0.3.2 补上第二个 MCP server：`mcp-skills-server.mjs` 里那句注释原本写着
+//    "本文件靠自觉保持一致，不是被断言钉住的"，而写 0.3.2 发布文档时**它果然还是
+//    `0.3.0alpha`**（包名已经 0.3.2 了）。这就是"第二个副本迟早分叉"的活例子，
+//    所以现在改成**逐个文件循环断言** —— 以后新增 MCP server 只要加进这个数组。
 {
   const v = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
   check('package.json 有版本号', typeof v === 'string' && v.length > 0, String(v))
@@ -379,9 +385,15 @@ section('版本号只有一个来源（四处必须一致）')
   const projV = JSON.parse(readFileSync(join(PKG_ROOT, 'PROJECT.json'), 'utf8')).package?.version
   check('★ PROJECT.json 的 package.version 与 package.json 一致', projV === v, `${projV} vs ${v}`)
 
-  const mcpSrc = readFileSync(join(PKG_ROOT, 'mcp', 'mcp-qq-server.mjs'), 'utf8')
-  const mcpV = /SERVER_INFO\s*=\s*\{[^}]*version:\s*'([^']+)'/.exec(mcpSrc)?.[1]
-  check('★ MCP server info 的 version 与 package.json 一致', mcpV === v, `${mcpV} vs ${v}`)
+  for (const rel of ['mcp/mcp-qq-server.mjs', 'mcp/mcp-skills-server.mjs']) {
+    const src = readFileSync(join(PKG_ROOT, ...rel.split('/')), 'utf8')
+    const got = /SERVER_INFO\s*=\s*\{[^}]*version:\s*'([^']+)'/.exec(src)?.[1]
+    check(
+      `★ ${rel} 的 server info 版本与 package.json 一致`,
+      got === v,
+      got === undefined ? '（没找到 SERVER_INFO 的 version —— 文件名或形状变了？）' : `${got} vs ${v}`,
+    )
+  }
 
   const relMd = readFileSync(join(PKG_ROOT, 'RELEASE.md'), 'utf8')
   const names = [...new Set([...relMd.matchAll(/InteractiveBot-([0-9][^-\s]*)-win-x64/g)].map((m) => m[1]))]

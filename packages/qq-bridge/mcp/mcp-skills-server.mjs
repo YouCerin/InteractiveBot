@@ -53,9 +53,11 @@ import {
 
 const PROTOCOL_VERSION = '2024-11-05'
 // ⚠️ 版本号必须与 package.json 一致。★ 0.2.7 更正一句不准确的话：本文件原来写"verify-manifest
-//   会核对" —— 实际上那条断言只读 `mcp-qq-server.mjs` 的 SERVER_INFO（见 verify-manifest 的
-//   「版本号只有一个来源」那一节）。所以这里是**靠自觉**保持一致，不是被断言钉住的。
-const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.3.0alpha' }
+//   会核对" —— 实际上那条断言**当时**只读 `mcp-qq-server.mjs` 的 SERVER_INFO。
+// ★★ 0.3.2 起**两个 MCP server 都被断言钉住了**（`verify-manifest.mjs` 的「版本号只有一个
+//   来源」那一节会逐个文件读）：写这份发布文档时这里还是 `0.3.0alpha`，而包名已经是 0.3.2 ——
+//   正是"靠自觉就会分叉"的活例子（而它只在 MCP 握手时报出去，肉眼很难撞见）。
+const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.3.2' }
 
 /** 服务端配置：`{ skillsDir, configPath, workspace? }`。 */
 let config = null
