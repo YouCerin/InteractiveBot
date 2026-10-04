@@ -645,6 +645,13 @@
       "costs": "none"
     },
     {
+      "cmd": "node mocks/verify-link-dsh-workspace.mjs",
+      "purpose": "★ `tools/link-dsh-workspace.mjs` 的测试（29 项，0.3.2 收尾）。起因是使用者问「bot 调用的对话全部是未分类，能否把这些对话放到同一个工作区之下」——先说清机制：DSH Desktop 的会话侧栏**按工作区分组**，而桥接走 SDK 那条路（`dsh --profile sdk` 的 `agents.create()` 只传 `meta.cwd`）**不带工作区** ⇒ bot 的会话必然落进「未分组 / Ungrouped」（分组代码在 `@deepseek-ai/dsh-client-ui-workspace` 的 `groupByWorkspace()`：只认 `workspace.sessionIds`，**不做按路径的自动收编**）。能改的只有 DSH 的注册表 `<DSH_HOME>/storages/workspace.json`，那个工具就是去改它。★★ 为什么这个 **dev-only** 工具也要有测试：它**动的是别的应用的数据**，写坏了的后果是**使用者的 DSH 侧栏出问题**（不是我们这边报个错）—— 最不该靠「看着像对的」交付的一类改动。∴ 用一个**假的 DSH_HOME**（临时目录；会话文件是**真 zstd 帧**、header 与 DSH 实际写的形状逐字一致；注册表同构 `unit/global/tables`）把**真写那条路**跑一遍，断言：干跑**确实什么都没写**、工作区建对了（路径逐字相等 —— 那是 DSH 的挂载判据）、会话挂进去了、`global.workspaceIds` 里有它、**备份生成了**、**再跑一次幂等**（0 个待挂、不重复建）、**每个跳过的会话都带原因**、以及**安全闸**（DSH 在跑 ⇒ 拒绝写且**真的没动文件**；查不出在不在跑 ⇒ **也不写**，fail-closed）。★ 两条纪律：① 全程只碰临时目录（所有调用显式传 `dshHome`，工具里没有一处自己去摸 APPDATA）；② **不 spawn 子进程**（直接 import 工具导出的函数）—— 受限沙箱里 spawn 带管道是 EPERM，而这条测试要能在沙箱里跑，顺带也逼着工具把**逻辑与 CLI 外壳分开**（`pathToFileURL(process.argv[1])` 判 main）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 29
+    },
+    {
       "cmd": "npm test",
       "purpose": "跑全部离线测试（不含 verify-live）",
       "costs": "none"

@@ -85,8 +85,8 @@ npm test                         # 全部离线套件（实测：所有套件退
 #       verify-session-state 48、verify-memory-supersede 50、verify-memory-stats 29、
 #       verify-memory-usage 54、verify-marker 46、verify-text-encoding 21
 #     · 复核方式（可复现）：在 `packages/qq-bridge` 下逐个 `node mocks/verify-*.mjs`，
-#       读它的收尾行（「…全部通过（N 项）」）。链上共 **82 套**（0.3.2 实测；
-#       `mocks/` 下共 83 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
+#       读它的收尾行（「…全部通过（N 项）」）。链上共 **83 套**（0.3.2 实测；
+#       `mocks/` 下共 84 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
 #   ∴ **不要**把这些数字当权威 —— 权威是 `node mocks/verify-*.mjs` 自己的输出。
 node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（38 项）
 node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）
@@ -139,6 +139,19 @@ node mocks/probe-h13-endpoints.mjs   # H13 四个接口探针（含 preflight / 
 node mocks/probe-memory-injection.mjs # ★ 记忆**注入面**：哪些行会注入、哪些不会、为什么（加 private:<QQ号> 看某会话真实注入正文）
 node mocks/probe-memory-injection.mjs private:100000001   # 某个会话**真实**会收到的记忆正文
 node mocks/session-grep.mjs --list        # 只列有哪些会话、多大、什么时候写的
+
+# ⑤-a0 把 bot 的会话归到一个 DSH 工作区之下（**默认干跑**；动的是别的应用的数据）
+#   ★ 为什么会有这一条：DSH Desktop 的会话侧栏**按工作区分组**，而桥接走的是 SDK 那条路
+#     （`dsh --profile sdk` 的 `agents.create()` 只传 `meta.cwd`，**不带工作区**）⇒
+#     bot 的会话全部落进「未分组 / Ungrouped」。这不是我们的 bug，也**不是配置能改的**；
+#     能改的只有 DSH 那份注册表 `<DSH_HOME>/storages/workspace.json`。
+#   ★ 判据与 DSH 自己的 `attachSession()` 逐条对齐（header 必须有 cwd、必须等于工作区路径），
+#     所以挂进去的都是它认的；写之前**备份**，且**要求 DSH Desktop 关着**（它内存里也有一份）。
+#   ⚠️ **不是一劳永逸**：新会话仍会落进未分组，攒多了再跑一次即可。
+node tools/link-dsh-workspace.mjs            # 干跑：打印"将会建哪个工作区、挂几个会话"
+node tools/link-dsh-workspace.mjs --json     # 机器可读
+# node tools/link-dsh-workspace.mjs --apply  # 真写：**先把 DSH Desktop 完全退出**
+node mocks/verify-link-dsh-workspace.mjs     # ★★ 拿**假 DSH_HOME**把真写那条路跑一遍（29 项，不碰真机数据）
 
 # ⑤ 体检（真正检查连接是否可用，强烈建议先跑）
 start.bat --doctor
