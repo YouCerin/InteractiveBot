@@ -648,6 +648,16 @@ export interface ServerRow {
   /** 同上：那是使用者的机器信息（可能含路径与 JVM 参数） */
   startCommandSet: boolean
   /**
+   * ★★★ **启动窗口**：我们刚把它拉起来、它还在加载。
+   *
+   * 为什么必须有这个状态：模组服冷启动 **18~60 秒**（首次能到 1~2 分钟），
+   * 而判 down 的判据是"连续失败 N 次 + 采样间隔 30 秒" ⇒ **还在加载时就会被判成 down**。
+   * 界面把它显示成 🔴 down 会让人以为它挂了；更糟的是 `down` 是唯一允许触发重启的
+   * 那一类 ⇒ 可能"再拉一个"（两个 JVM 同写世界 = 存档损坏）。
+   * `null` = 没有启动窗口在跑。
+   */
+  starting: { starting: boolean; expired: boolean; waitedMs: number; leftMs: number; text: string } | null
+  /**
    * 推荐的启动形状：`startExe` + `startArgs`（**不走 shell**）。
    * 为什么它不是可有可无的：`shell: true` 时我们记录到的是 `cmd.exe` 的 pid，
    * 而它起完 java 就退出 ⇒ "归属是我"永远判不出来 ⇒ 重启能力形同虚设。

@@ -1074,6 +1074,17 @@ export function createApiHandler(deps) {
           id: s.id ?? '',
           name: s.name ?? '',
           enabled: s.enabled !== false,
+          // ★★★ 启动窗口：界面据此显示 🟡「正在启动」而不是 🔴 down。
+          //   字段白名单（同本路由的纪律）：只放行这几个键。
+          starting: s.starting
+            ? {
+                starting: s.starting.starting === true,
+                expired: s.starting.expired === true,
+                waitedMs: Number(s.starting.waitedMs) || 0,
+                leftMs: Number(s.starting.leftMs) || 0,
+                text: typeof s.starting.text === 'string' ? s.starting.text : '',
+              }
+            : null,
           host: s.host ?? '',
           port: s.port ?? null,
           rconPort: s.rconPort ?? null,

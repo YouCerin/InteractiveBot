@@ -240,6 +240,12 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                     {s.monitor.phase === 'down' ? '🔴 down' : '🟢 up'}
                   </span>
                 )}
+                {/* ★★★ 启动窗口：**优先显示 🟡**（它比 up/down 更准确 —— 正在加载不是故障） */}
+                {s.starting?.starting && (
+                  <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">
+                    🟡 正在启动{Math.round(s.starting.waitedMs / 1000) > 0 ? `（已等 ${Math.round(s.starting.waitedMs / 1000)} 秒）` : ''}
+                  </span>
+                )}
                 <span className="ml-auto flex items-center gap-1.5">
                   <Button variant="outline" size="sm" disabled={busyId === s.id} onClick={() => openForm(s)}>
                     编辑
@@ -271,7 +277,18 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                   ★ 上面那个是**后台采样的活证据**；「主动检测」是**现在真连一次**。
                   两者不同：检测**不参与 up/down 判定**（点几次都不会把服务器"点成 down"）。
                 </p>
-                {s.monitor ? (
+                {s.starting?.starting ? (
+                  <div className="mt-1 text-xs text-amber-600">
+                    {s.starting.text || `🟡 正在启动（已等 ${Math.round(s.starting.waitedMs / 1000)} 秒）`}
+                    <div className="text-muted-foreground mt-0.5">
+                      ★ 这期间**不是故障**，所以「主动检测」会回"正在启动"而不是"连不上"。
+                    </div>
+                  </div>
+                ) : s.starting?.expired ? (
+                  <div className="mt-1 text-xs text-amber-600">
+                    ⚠️ 启动**超时**（等了 {Math.round(s.starting.waitedMs / 1000)} 秒仍连不上）—— 之后按正常判据判 down。
+                  </div>
+                ) : s.monitor ? (
                   <div className="text-muted-foreground mt-1 space-y-0.5 text-xs">
                     <div>
                       上次采样：<span className="text-foreground">{agoText(s.monitor.lastAt)}</span> · 累计 {s.monitor.samples} 次 · 失败{' '}

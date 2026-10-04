@@ -134,6 +134,8 @@ function looksLikeMcCommand(text) {
 import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
 // ★ 控制台日志的解码（真机是 **GBK**，不是 UTF-8 —— 见 `log-source.mjs` 文件头）
 import { decodeConsoleBytes } from './servers/log-source.mjs'
+// ★ 启动窗口：把"正在启动"与"挂了"分开（判据只有一处，监测与界面共用）
+import { clearStarting, describeStarting, evaluateStarting, markStarting, readStarting } from './servers/starting.mjs'
 import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './memory-stats.mjs'
 import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
 import { appendTurnOps, appendOp } from './oplog.mjs'
@@ -1456,6 +1458,27 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * 这台服务器**现在是不是在启动窗口里**（纯读，给控制台/主动检测用）。
+   *
+   * ★ 为什么需要它：启动窗口内 RCON 连不上是**正常的**，而回一句"连不上那个 RCON 端口"
+   *   会把人往"服务端有问题"上引（实测就是这个症状）。所以这两条路都要先说清
+   *   "它正在启动，请稍等"，并给出「已等多久 / 最多再等多久」。
+   *
+   * @returns {null | {starting:boolean, expired:boolean, waitedMs:number, leftMs:number, text:string}}
+   */
+  #startupWindowOf(serverId) {
+    try {
+      const workspace = this.config?.dsh?.workspace
+      const st = readStarting({ workspace, serverId })
+      if (!st) return null
+      const ev = evaluateStarting({ state: st, portOpen: false, now: Date.now() })
+      return { ...ev, text: ev.starting ? describeStarting(ev) : '' }
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * **一次性检测一台服务器**（界面上的"主动检测"按钮）。
    *
    * ★★★ 它**不喂状态机、不产出事件、不改累计计数**（见 `loop.mjs` 的 `probeOnce`）。
@@ -1481,6 +1504,13 @@ export class Bridge extends EventTarget {
         })
       }
       const r = await this.#serverLoop.probeOnce(s)
+      const win = this.#startupWindowOf(id)
+      // ★★★ 启动窗口内"连不上"是**正常的** ⇒ 回"正在启动，请稍等"而不是"连不上"。
+      //   不这么做会把人往"服务端有问题"上引（实测症状就是这样）。
+      if (r?.ok !== true && win?.starting) {
+        this.log(`🔎 [servers] 主动检测 ${s.name ?? id}：正在启动（已等 ${Math.round(win.waitedMs / 1000)} 秒）`)
+        return { ...r, starting: true, startingText: win.text, waitedMs: win.waitedMs, leftMs: win.leftMs }
+      }
       this.log(`🔎 [servers] 主动检测 ${s.name ?? id}：${r?.ok ? '通' : '不通'}${r?.snapshot?.error ? `（${r.snapshot.error}）` : ''}`)
       return r
     } catch (error) {
@@ -1566,6 +1596,11 @@ export class Bridge extends EventTarget {
     if (server.enabled === false) return { ok: false, why: `「${server.name ?? id}」是停用的（先启用再发命令）` }
     const workspace = this.config?.dsh?.workspace
     if (!workspace) return { ok: false, why: '没有工作区 ⇒ 定位不到控制台日志' }
+    // ★★ 启动窗口内先别去连（连不上是正常的），如实说"正在启动，请稍等"
+    const win = this.#startupWindowOf(id)
+    if (win?.starting) {
+      return { ok: false, starting: true, waitedMs: win.waitedMs, leftMs: win.leftMs, why: `${win.text}（命令先别发，等它 Ready 再试）` }
+    }
     const r = await runConsoleCommand({ server, command, workspace })
     // 只记命令本身，**绝不记密码**（`runConsoleCommand` 也保证返回值里没有它）
     if (r.ok) {
@@ -1763,14 +1798,22 @@ export class Bridge extends EventTarget {
           this.log(`❌ [servers] ${s.name ?? s.id} 没起来：${r?.why ?? '未知原因'}`)
           continue
         }
-        this.log(`   ✅ 已拉起（pid ${r.pid}）· 输出 → ${r.logFile}`)
         const configured = Number(s.startWaitMs)
         const waitMs = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_START_WAIT_MS
+        // ★★★ **记下启动窗口**（在端口开放之前）——否则监测会把它判成 down，
+        //   而 `down` 是唯一允许触发重启的那一类 ⇒ 可能"再拉一个"（两个 JVM 同写世界）。
+        //   窗口长度用同一个 `waitMs`（与下面等端口的那段一致，免得两处口径不同）。
+        markStarting({ workspace: this.config?.dsh?.workspace, serverId: s.id, pid: r.pid, windowMs: waitMs })
+        this.log(`   ✅ 已拉起（pid ${r.pid}）· 输出 → ${r.logFile}`)
         const up = await this.waitPortListeningInternal(s, waitMs)
         if (up) {
+          // ★ 端口开了 ⇒ 启动窗口结束（"等 RCON 登录"是另一回事，不靠这个状态）
+          clearStarting({ workspace: this.config?.dsh?.workspace, serverId: s.id })
           this.log(`   ✅ ${s.name ?? s.id} 端口 ${s.port} 已开放，服务端真的起来了`)
         } else {
           const secs = Math.round(waitMs / 1000)
+          // ★ 窗口到期 ⇒ 清掉（之后按正常判据判 down，不再"一直算启动中"）
+          clearStarting({ workspace: this.config?.dsh?.workspace, serverId: s.id })
           this.log(`   ❌ ${s.name ?? s.id} 等了 ${secs} 秒，端口 ${s.port} 一直没开 ⇒ 它没起来。去看控制台输出：${r.logFile}`)
           this.log('      常见原因：JVM 参数/路径不对、EULA 没同意、端口被占、内存不够。')
         }
@@ -1877,6 +1920,23 @@ export class Bridge extends EventTarget {
       } catch {
         /* 增强路径：读不到就是 null（界面显示"还没采过样"） */
       }
+      // ★★★ **启动窗口**：把"正在启动"与"挂了"分开（界面据此显示 🟡 而不是 🔴）。
+      //   判据只有一处（`evaluateStarting`），监测循环与界面共用同一份，
+      //   避免"监测说在启动、界面说 down"那种两处措辞分叉。
+      let startingInfo = null
+      try {
+        const st = readStarting({ workspace, serverId: s.id })
+        if (st) {
+          const ev = evaluateStarting({ state: st, portOpen: ownership?.portOpen === true, now: Date.now() })
+          if (ev.starting) {
+            startingInfo = { starting: true, waitedMs: ev.waitedMs, leftMs: ev.leftMs, text: describeStarting(ev) }
+          } else if (ev.expired) {
+            startingInfo = { starting: false, expired: true, waitedMs: ev.waitedMs, leftMs: 0 }
+          }
+        }
+      } catch {
+        /* 增强路径：读不到就当没有启动窗口 */
+      }
       // 归属（**只报告不重启**那条纪律的依据）
       let ownership = null
       try {
@@ -1908,6 +1968,8 @@ export class Bridge extends EventTarget {
         host: s.host,
         port: s.port,
         rconPort: s.rconPort,
+        // ★★★ 启动窗口（界面据此显示 🟡 正在启动，而不是 🔴 down）
+        starting: startingInfo,
         passwordSet: Boolean(s.password),
         startCommandSet: Boolean(String(s.startCommand ?? '').trim()),
         // ★ 界面要按"能不能拉起它"来判断重启能力，而启动形状有**两条路**：

@@ -29,6 +29,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeF
 import { join } from 'node:path'
 
 import { createRconClient } from './rcon.mjs'
+import { clearStarting, evaluateStarting, readStarting } from './starting.mjs'
 import { EVENT, createMonitor, describeSnapshot } from './monitor.mjs'
 
 /** 事件台账（工作区相对）。★ 属于使用者数据。 */
@@ -305,6 +306,41 @@ export function createServerLoop({
       }
       entry.client = null
     }
+
+    // ── ★★★ 启动窗口：把"正在启动"与"挂了"分开（否则会误报 down，甚至重复拉起）──
+    //
+    // 为什么必须在这里拦（设计文档 §6.3.4 第 2 条，一直没实现）：
+    //   模组服冷启动 18~60 秒（首次能到 1~2 分钟），而判 down 的判据是**连续
+    //   `failThreshold` 次**、采样间隔默认 30 秒 ⇒ **服务端还在加载时就会被判成 down**。
+    //   后果最重的一条：`down` 是**唯一允许触发重启**的那一类 ⇒
+    //   "我刚把它拉起来，它自己又把那一个当成挂了、再拉一个" ⇒ **两个 JVM 同写世界**。
+    // ★ 做法：窗口内**不把这次采样喂给状态机**（既不累加 failStreak，也不产出 down），
+    //   而是如实标成 `starting`。
+    // ★ 前提是"我们真的刚拉起过它"（`markStarting` 才会写台账）——
+    //   手动起在别处的服务端不会被说成"我在启动它"。
+    const st = readStarting({ workspace: root, serverId: server.id })
+    if (st && snap?.reachable !== true) {
+      // 端口通不通要看采样：连不上就是"还没就绪"
+      const evalRes = evaluateStarting({ state: st, portOpen: false, now: now() })
+      if (evalRes.starting) {
+        return {
+          serverId: server.id,
+          snapshot: { ...evSafeSnapshot(snap), starting: true, waitedMs: evalRes.waitedMs, leftMs: evalRes.leftMs },
+          events: [],
+          phase: 'starting',
+        }
+      }
+      if (evalRes.expired) {
+        // ★ 窗口过了 ⇒ **不再算启动中**，并且清掉台账（免得每跳都重算一遍"过期"）
+        clearStarting({ workspace: root, serverId: server.id })
+        log(
+          `⚠️ [servers] ${server.name ?? server.id} 启动超时（等了 ${Math.round(evalRes.waitedMs / 1000)} 秒仍连不上）` +
+            '—— 之后按正常判据判 down。',
+        )
+      }
+    }
+    // 端口通了（采样成功）⇒ 已经就绪 ⇒ 清掉启动台账
+    if (st && snap?.reachable === true) clearStarting({ workspace: root, serverId: server.id })
 
     const fed = entry.monitor.feed(snap)
     const rows = []
