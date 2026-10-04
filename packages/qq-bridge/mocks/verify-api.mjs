@@ -14,8 +14,14 @@
  * 用法：node mocks/verify-api.mjs
  */
 
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { createApiHandler, redactConfig, mergeConfigPatch, resolveServerPassword, assertLoopbackOnly, serveApi } from '../src/api.mjs'
 import { normalizeConfig, validateConfig } from '../src/config.mjs'
+
+const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -242,6 +248,30 @@ section('安全 ③-b servers[].password：既不许读出去，也不许保存�
   check('判据：两边都没有 ⇒ null（调用方据此**不写这个键**）', resolveServerPassword(undefined, '') === null)
   check('判据：非字符串（数字/对象）当"没带"处理，不当成密码',
     resolveServerPassword(12345, 'old') === 'old' && resolveServerPassword({}, 'old') === 'old')
+
+  // ── ⑥ **界面侧契约**（静态审计 `ServerForm.tsx`）─────────────────────────
+  //
+  // ★★ 为什么这里要读界面源码：上面那 20 条只证明"后端守得住"，而这次的缺陷
+  //   是**两端对同一件事的约定**（空串到底算不算清除）。后端改对了、界面哪天
+  //   又写成"永远送 `password`（空串）"，密码会以**另一种方式**再丢一次，而后端
+  //   的断言全绿。这份契约只有一处实现，所以就在这里钉死。
+  // ★ 与 `verify-ui-status.mjs` §⑦ 同一个思路（那份也是对 `config-ui/src` 做静态审计 ——
+  //   浏览器包 import 不到 `src/`，判据只能靠"两份实现互相对账"）。
+  const formSrc = readFileSync(join(PKG_ROOT, 'config-ui', 'src', 'sections', 'ServerForm.tsx'), 'utf8')
+  check('★★★ 表单**不许**在密码框为空时也把 password 送上去（那会把密码抹成空串）',
+    !/password:\s*form\.password/.test(formSrc))
+  check('★★★ 三条分支都在：勾清除 ⇒ `null`；填了 ⇒ 覆盖；都没 ⇒ 不带这个字段', (() => {
+    const clear = /if \(form\.clearPassword\) payload\.password = null/.test(formSrc)
+    const overwrite = /else if \(form\.password\) payload\.password = form\.password/.test(formSrc)
+    return clear && overwrite
+  })())
+  check('★★ 界面上有一个**显式的清除入口**（否则想删密码只能手改 config.json）',
+    /清除已保存的密码/.test(formSrc) && /clearPassword/.test(formSrc))
+  check('★★ 清除是**破坏性动作**：默认不勾，且回执要说清代价（控制台/优雅停服都用不了）',
+    /clearPassword:\s*false/.test(formSrc) && /都用不了/.test(formSrc))
+  check('★★★ 界面**只读 `passwordSet`，绝不读 `password`**（"永不回显"这句话得是真的）',
+    !/server\?\.password(?!Set)/.test(formSrc))
+  check('★ 提示里仍然写着"留空 = 不改"（用户得知道空着保存是安全的）', /留空 = 不改/.test(formSrc))
 }
 
 // ══════════════════════════════════════════════════════════════════════════

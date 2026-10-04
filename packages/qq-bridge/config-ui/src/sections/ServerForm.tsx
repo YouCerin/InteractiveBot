@@ -19,8 +19,17 @@ import { api, type ServerRow } from '@/lib/api'
  *   · 如果只是**把地址换成另一台机器**而 `id` 不变，旧归属档还在 —— 那种情况下
  *     归属判定会拿旧 pid 去比新机器。∴ 表单里明说：**换机器请换个 id**。
  *
- * ★ 密码：留空 = **不改**（编辑时）；新建时留空 = 没配（那时发不了控制台命令）。
- *   界面**永不回显**已有密码（后端只给 `passwordSet` 布尔）。
+ * ★ 密码**三种意图**（缺一条都不行；2026-10-04 真事故的正中央）：
+ *   · **留空 = 不改**（编辑时；界面拿不到原密码，也**不该**拿）；
+ *   · **填了 = 覆盖**；
+ *   · **勾"清除" = 删掉它**（送 `null` —— 后端只认这个形状，见 `api.mjs` 的
+ *     `resolveServerPassword`）。
+ *
+ * ★★★ 为什么必须有一个**显式的清除入口**：后端把"空串"定义成**保留原值**
+ *   （因为界面回传时密码框本来就是空的，把空串当清除就等于**每保存一次丢一次密码**
+ *   —— 那就是真事故：用户的 RCON 密码被静默抹掉，控制台突然说"没配密码"）。
+ *   于是"清除"这条语义只能由 `null` 表达，而它在界面上**必须有地方可点** ——
+ *   否则想删密码的人只能去手改 `config.json`，而那正是这个表单存在的理由。
  */
 export function ServerForm({
   server,
@@ -33,6 +42,8 @@ export function ServerForm({
   onSaved: () => void
 }) {
   const editing = Boolean(server)
+  /** 这台已经有密码（后端只给布尔，不给值）—— "清除"那个勾只在有东西可清时才出现 */
+  const hasStoredPassword = editing && server?.passwordSet === true
   const [form, setForm] = useState({
     id: server?.id ?? '',
     name: server?.name ?? '',
@@ -41,6 +52,8 @@ export function ServerForm({
     rconPort: String(server?.rconPort ?? 25575),
     // ★ 编辑时留空 = 不改密码（界面拿不到原密码，也**不该**拿）
     password: '',
+    /** ★ 勾上 = **删掉**已保存的密码（送 `null`）。默认不勾 —— 破坏性动作不许是默认值 */
+    clearPassword: false,
     tpsCommand: server?.tpsCommand ?? '',
     startExe: server?.startExe ?? '',
     startArgs: '',
@@ -72,8 +85,14 @@ export function ServerForm({
         manageOnStart: form.manageOnStart,
         gameChat: form.gameChat,
       }
-      // ★ 密码：**只在填了的时候才送**（留空 = 不改），否则会把已有密码抹成空串
-      if (form.password) payload.password = form.password
+      // ★★★ 密码的三种意图 —— 三条分支缺一不可（2026-10-04 真事故的正中央）：
+      //   · 勾了"清除" ⇒ 送 `null`（后端把它当**显式清除**）
+      //   · 填了新的   ⇒ 送新值（覆盖）
+      //   · 两者都没有 ⇒ **不带这个字段**（后端按"保留原值"处理）
+      // 为什么"空串"不能代表清除：它已经被"不改"这条语义占用了 —— 界面拿不到原密码，
+      // 绝大多数保存时密码框本来就是空的，把空串当清除就是**每保存一次丢一次密码**。
+      if (form.clearPassword) payload.password = null
+      else if (form.password) payload.password = form.password
       if (form.startExe.trim()) {
         payload.startExe = form.startExe.trim()
         payload.startArgs = form.startArgs
@@ -87,6 +106,10 @@ export function ServerForm({
       if (r.applied?.ok === false) {
         // ★ 配置写进去了、但**没生效** —— 如实说（不假装成功）
         setNotice(`已保存，但**没生效**：${r.applied.why ?? '未知原因'}（可能要重启桥接）`)
+      } else if (form.clearPassword) {
+        // ★ 清除是**破坏性动作**，回执必须说清代价（否则用户下次会以为"桥接坏了"：
+        //   控制台发不了命令、优雅停服也没了）
+        setNotice('已保存，RCON 密码已清除。⚠️ 这台服的控制台命令与"优雅停服"都用不了了 —— 要用就去 server.properties 里拿一个填回来。')
       } else {
         setNotice(r.created ? '已新增，并已即时生效（不必重启桥接）' : '已保存，并已即时生效（不必重启桥接）')
       }
@@ -100,14 +123,14 @@ export function ServerForm({
     }
   }
 
-  const field = (label: string, key: keyof typeof form, hint?: string, type = 'text') => (
+  const field = (label: string, key: keyof typeof form, hint?: string, type = 'text', disabled = false) => (
     <label className="block text-xs">
       <span className="text-muted-foreground">{label}</span>
       <input
-        className="border-input bg-background mt-0.5 h-8 w-full rounded-md border px-2 font-mono text-xs"
+        className="border-input bg-background mt-0.5 h-8 w-full rounded-md border px-2 font-mono text-xs disabled:opacity-50"
         type={type}
         value={String(form[key])}
-        disabled={busy}
+        disabled={busy || disabled}
         onChange={(e) => set(key, e.target.value)}
       />
       {hint && <span className="text-muted-foreground mt-0.5 block text-[11px]">{hint}</span>}
@@ -121,7 +144,9 @@ export function ServerForm({
         ★ 保存后**即时生效**（后端会让监测循环按新列表重启），**不必重启桥接**。
         <br />★ **`id` 是状态文件的键**：换了服务端（地址不同）请**同时换个 id**，
         否则旧的归属档还挂在这个 id 上，归属判定会失真。
-        <br />★ 编辑时**密码留空 = 不改**（界面拿不到原密码，也不该拿）。
+        <br />★ 编辑时**密码留空 = 不改**（界面拿不到原密码，也不该拿）；
+        想**删掉**已保存的密码，勾密码框下面那个「清除已保存的密码」——
+        它和后端约定的是 `null`，而不是空串（空串的语义是"不改"）。
       </p>
 
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -130,7 +155,42 @@ export function ServerForm({
         {field('地址 host', 'host')}
         {field('游戏端口 port', 'port')}
         {field('RCON 端口 rconPort', 'rconPort')}
-        {field('RCON 密码（留空 = 不改）', 'password', editing && server?.passwordSet ? '这台已配密码（不回显）；填了才会覆盖' : '要与服务端 server.properties 里的 rcon.password 一致', 'password')}
+        {/* ★★★ 密码这一格**不走 `field()`** —— 它下面要挂一个"清除"的勾，
+            而 `<label>` 里再套一个 `<label>` 会让点击行为错乱（点勾选框会去聚焦输入框）。 */}
+        <div className="block text-xs">
+          <span className="text-muted-foreground">RCON 密码{editing ? '（留空 = 不改）' : ''}</span>
+          <input
+            className="border-input bg-background mt-0.5 h-8 w-full rounded-md border px-2 font-mono text-xs disabled:opacity-50"
+            type="password"
+            value={form.password}
+            disabled={busy || form.clearPassword}
+            onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value, clearPassword: false }))}
+          />
+          {hasStoredPassword && (
+            <label className="mt-1 flex items-start gap-2 text-[11px]">
+              <input
+                className="mt-0.5"
+                type="checkbox"
+                checked={form.clearPassword}
+                disabled={busy}
+                // ★ 勾上就把输入框里可能已经敲了一半的值清掉：两种意图不许同时成立
+                onChange={(e) => setForm((prev) => ({ ...prev, clearPassword: e.target.checked, password: '' }))}
+              />
+              <span>
+                清除已保存的密码
+                <span className="text-muted-foreground block">
+                  ★ 清掉之后这台服的**控制台命令**（含 `\mc` 那条通道）与**优雅停服**都用不了 ——
+                  只是"停用"请用上面的「启用这台」勾选框，别用这个。
+                </span>
+              </span>
+            </label>
+          )}
+          <span className="text-muted-foreground mt-0.5 block text-[11px]">
+            {hasStoredPassword
+              ? '这台已配密码（**不回显**）；留空 = 不改，填了 = 覆盖'
+              : '要与服务端 server.properties 里的 rcon.password 一致；留空 = 没配（那时发不了控制台命令）'}
+          </span>
+        </div>
         {field('TPS 命令（留空 = 不问）', 'tpsCommand', '例如 Forge：forge tps；Paper：tps。留空表示**我们不问**，不是"问了没拿到"')}
         {field('启动可执行文件 startExe（推荐）', 'startExe', '不走 shell ⇒ 归属可判定；相对路径按 cwd 解析')}
         {field('启动参数（一行一个）', 'startArgs', '配合 startExe，例如 @user_jvm_args.txt / nogui')}
