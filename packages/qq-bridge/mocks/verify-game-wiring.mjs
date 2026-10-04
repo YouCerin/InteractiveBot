@@ -70,9 +70,21 @@ const SERVER = { id: 'forge1', name: '主服（Forge 1.20.1）', host: '127.0.0.
 /**
  * 造一个最小可用的真桥接。
  * @param {{semantic?: boolean, groupAllow?: string[], wakeJudge?: object|null,
- *          readServers?: Function|null, servers?: object[]|null}} o
+ *          readServers?: Function|null, servers?: object[]|null,
+ *          humanize?: object, slowPromptMs?: number, turnTimeoutMs?: number}} o
  */
-function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null, readServers = null, servers = null } = {}) {
+function wiringBridge({
+  semantic = false,
+  groupAllow = [GROUP],
+  wakeJudge = null,
+  readServers = null,
+  servers = null,
+  // ★ 「先应一声」那一套要能**在测试里真的触发**：它的默认阈值是 8 秒，
+  //   而桩回合是瞬间结束的 ⇒ 不压低阈值就**永远测不到**（这正是它带着缺陷活了这么久的原因）。
+  humanize = { enabled: false, chunkChars: 300 },
+  slowPromptMs = 0,
+  turnTimeoutMs = 5000,
+} = {}) {
   const WS = join(ROOT, `ws-${Math.random().toString(36).slice(2)}`)
   mkdirSync(join(WS, 'runtime'), { recursive: true })
   const router = new SessionRouter({ log: () => {} })
@@ -84,8 +96,8 @@ function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null
     access: { adminUsers: [ADMIN], dmAllowlist: [], groupAllowlist: groupAllow },
     trigger: { private: true, mention: true, keyword: true, groupEnabled: true, keywords: ['小鲸鱼'] },
     send: { minGapMs: 0, maxGapMs: 0, maxPerMinute: 100, maxPerHour: 1000, dedupeWindowMs: 0, maxCharsPerMessage: 1500 },
-    turn: { timeoutMs: 5000 },
-    humanize: { enabled: false, chunkChars: 300 },
+    turn: { timeoutMs: turnTimeoutMs },
+    humanize,
     persona: { preset: 'none' },
     memory: { enabled: false, affect: { prewake: 'off' } },
     image: { enabled: false },
@@ -97,6 +109,8 @@ function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null
   rpc.prompts = []
   rpc.prompt = async (sessionId, contentBlocks) => {
     rpc.prompts.push({ sessionId, text: String(contentBlocks?.[0]?.text ?? '') })
+    // ★ 慢回合（可选）：让"先应一声"的定时器有机会真的烧到 —— 默认 0（立刻结束）。
+    if (slowPromptMs > 0) await new Promise((r) => setTimeout(r, slowPromptMs))
     router.handleEvent(sessionId, {
       type: 'assistant/message',
       data: { message: { content: [{ type: 'text', text: '我在。' }] } },
@@ -381,6 +395,16 @@ console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ �
   const prompt = rpc.prompts[1].text
   ok(/Minecraft/.test(prompt) && /公屏/.test(prompt), '★★★ 来源标注**如实说是公屏**（否则模型会以为在一对一私聊里）')
   ok(/全服所有人都看得见/.test(prompt), '★★★ 并且明确警告"全服都看得见"')
+  // ★★★ 使用者 2026-10-04 报的第二件事的直接回归锁：
+  //   他在游戏里让 bot 跑 `forge tps`，bot 回的是「那个「允许从 QQ 下指令」的开关没开」——
+  //   从这个站在游戏里的玩家听来那句话莫名其妙，于是他来问「这个开关跟在游戏内发布指令有何关系」。
+  //   答案是**没关系**（`commandFromQQ` 只管 QQ 那条路）。∴ 提示词里必须写明这条边界，
+  //   否则模型只能自己编，而它编出来的是**一句误导**：让人去开一个"开了也没用"的开关。
+  ok(/游戏内这条通道没有控制台权限/.test(prompt), '★★★ 来源标注写明"游戏内没有控制台权限"')
+  ok(
+    /commandFromQQ/.test(prompt) && /与游戏内无关/.test(prompt) && /不要\*\*让他去打开/.test(prompt),
+    '★★★ 并且**点名**别把 `commandFromQQ` 那个 QQ 侧开关当成游戏内的解法',
+  )
   eq(rpc.prompts[1].sessionId, qqSessionId, '★★★ 会话就是**那个 QQ 的会话**（游戏内的话与他的 QQ 记忆同一条）')
 
   const qqReplies = sent.filter((x) => x.kind === 'private')
@@ -662,6 +686,77 @@ console.log('\n=== ⑱ 窗口里的"搜历史"是真的能搜到（游戏内消�
     JSON.stringify((r.rows ?? []).slice(0, 1)),
   )
   await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑲ ★★★ 游戏内那一轮**不发「先应一声」**，而且任何"系统提示"都不许跑进 QQ 私聊 ===')
+//
+// ★★ 使用者 2026-10-04 报的：「在服务器中给小鱼发消息时会触发先应一声，并且会发给QQ私聊」。
+//   根因是一条**通道串味**：游戏内那一轮用的是 `kind:'private', peerId:<绑定的 QQ>`
+//   （会话与记忆要与他的 QQ 私聊共用），所以 `#runTurn` 里任何 `#safeSend(kind, peerId, …)`
+//   都会打到**他的 QQ 私聊**里 —— 而「先应一声」正是这么发的。
+//   ∴ 两条纪律：① 游戏通道**整条跳过**先应一声（它只剩公屏一条路，而垫场白上公屏是噪音）；
+//   ② 其余系统提示按"从哪进来就从哪回去"选路（`#speakerNotice`）。
+//
+// ★ 这一节必须**真的让定时器烧到**：默认阈值 8 秒，而桩回合是瞬间结束的 ⇒
+//   不压低 `interim.afterMs` 就永远测不到（这正是它带着缺陷活了这么久的原因）。
+{
+  const { bridge, sent, logs, gameCommands, WS } = wiringBridge({
+    humanize: { enabled: false, chunkChars: 300, interim: { enabled: true, afterMs: 20 } },
+    slowPromptMs: 150,
+  })
+  bridge.attach()
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
+
+  ok(
+    // ★ `what` 是历史名称 `'say'`（公屏发言那一条路），命令本体早就是 `tellraw @a`。
+    gameCommands.some((c) => c.what === 'say' && c.command.startsWith('tellraw @a ')),
+    '（前提）正文照常发到了公屏',
+    JSON.stringify(gameCommands.map((c) => `${c.what}: ${c.command.slice(0, 60)}`)),
+  )
+  // ★★★ 这一条就是使用者报的现象：曾经这里会有**一条 QQ 私聊**（"先应一声"）
+  eq(sent.length, 0, '★★★ 整轮下来 QQ 通道**一条消息都没有**（先应一声曾经发到这里）')
+  ok(
+    !logs.some((m) => /先发一条/.test(m)),
+    '★★★ 日志里也没有"先发一条"那条（说明是**整条跳过**，不是发失败）',
+    logs.filter((m) => /先发|interim|应一声/.test(m)).join(' | '),
+  )
+  await bridge.close({ timeoutMs: 300 })
+
+  // ── 对照：**QQ 私聊那一轮仍然会**发先应一声（证明抑制是"按通道"，不是"把功能关了"）──
+  const ctl = wiringBridge({
+    humanize: { enabled: false, chunkChars: 300, interim: { enabled: true, afterMs: 20 } },
+    slowPromptMs: 150,
+  })
+  ctl.bridge.attach()
+  await ctl.bridge.handleEvent(privateMsg(ADMIN, '小鲸鱼 在吗'))
+  ok(
+    ctl.logs.some((m) => /先发一条/.test(m)),
+    '★★ 对照：QQ 私聊那一轮**照旧**发先应一声（功能没被砍掉）',
+    ctl.logs.filter((m) => /先发一条/.test(m)).join(' | '),
+  )
+  ok(
+    ctl.sent.some((x) => x.text !== '我在。'),
+    '★★ 而且它确实走 QQ 通道发出去了（那一轮 QQ 才是对的地方）',
+    JSON.stringify(ctl.sent.map((x) => x.text)),
+  )
+  await ctl.bridge.close({ timeoutMs: 300 })
+}
+
+console.log('\n=== ⑳ ★★★ 游戏内回合**超时**：提示发到游戏里，不许跑进 QQ 私聊 ===')
+{
+  const { bridge, sent, gameCommands, WS } = wiringBridge({ turnTimeoutMs: 60, slowPromptMs: 400 })
+  bridge.attach()
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
+
+  ok(
+    gameCommands.some((c) => c.what === 'tellraw' && /超时/.test(c.command) && c.command.includes(PLAYER)),
+    '★★★ 超时那条提示发到了**游戏里、而且只给那个玩家**（tellraw <玩家>）',
+    JSON.stringify(gameCommands.map((c) => c.command).slice(-3)),
+  )
+  eq(sent.length, 0, '★★★ QQ 私聊里**一个字都没有**（旧代码在这里会发一条"这次处理超时了"）')
+  await bridge.close({ timeoutMs: 300 })
 }
 
 rmSync(ROOT, { recursive: true, force: true })

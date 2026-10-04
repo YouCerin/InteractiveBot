@@ -2220,11 +2220,26 @@ export class Bridge extends EventTarget {
       display: gWho,
       // ★ 来源标注整条替换：不这么做，模型会以为在一对一私聊里，
       //   而它说的每一句都会**当场印在全服公屏上**（见 channel-prompt.mjs）。
+      //
+      // ★★★ 最后那句"**游戏内没有控制台权限**"是 2026-10-04 使用者报的第二件事的直接修复。
+      //   他当时在游戏里让 bot 跑 `forge tps`，bot 回的是「那个「允许从 QQ 下指令」的开关
+      //   没开，得先去配置里打开」—— 从这个玩家听来，那句话**莫名其妙**（他在游戏里说话，
+      //   凭什么要去开一个 QQ 侧的开关？），于是他来问「这个开关跟在游戏内发布指令有何关系」。
+      //   答案是：**没关系**。`commandFromQQ` 只管 QQ 那条路；游戏内**根本发不出**指令
+      //   （那要服务端插件注册真命令，v1 刻意不写服务端代码）。
+      //   ∴ 必须把这条边界写进提示词，否则模型只能自己编，而它编出来的是一句**误导**：
+      //   让使用者去开一个"开了也没用"的开关。（它没错——门确实是关的；错的是
+      //   **把另一扇门的钥匙递给了站在这扇门前面的人**。）
       channelOrigin:
         `来自 Minecraft 服务器「${String(server?.name ?? sid)}」的**公屏**，` +
         `说话的是游戏里的玩家 ${name}（已绑定到 QQ ${qqId}）。` +
         '★ 你这一轮的回复会**直接发到那个公屏上 —— 全服所有人都看得见**，' +
-        '所以不要说出任何只该让一个人知道的内容（地址、号码、记忆原文、私下的约定等）',
+        '所以不要说出任何只该让一个人知道的内容（地址、号码、记忆原文、私下的约定等）。' +
+        '★★★ **游戏内这条通道没有控制台权限**：玩家在游戏里说什么都不能改变服务端状态' +
+        '（不能 op / ban / stop / 执行任何指令），`commandFromQQ`、「允许从 QQ 下指令」' +
+        '这类开关**只管 QQ 那条路，与游戏内无关**。被要求做这类事时，直接说' +
+        '「游戏里我下不了指令」并给一个他能自己做的最快办法（例如让他自己在服务端控制台敲），' +
+        '**不要**让他去打开某个 QQ 侧的开关 —— 那对他没有用。',
     })
   }
 
@@ -2254,6 +2269,32 @@ export class Bridge extends EventTarget {
       chatName: `游戏内对话 · ${String(server?.name ?? server?.id ?? '')}`,
     })
     return r
+  }
+
+  /**
+   * 给**这一轮的说话人**发一条**系统提示**（不是正文）—— 按通道选路。
+   *
+   * ★★★ 为什么必须有这个函数（2026-10-04 使用者实测报的缺陷）：
+   *   游戏内那一轮用的是 `kind:'private', peerId:<绑定的 QQ 号>`（会话与记忆要
+   *   与他的 QQ 私聊**共用**，见 `#onGameChat` ④）。于是 `#runTurn` 里任何
+   *   `#safeSend(kind, peerId, …)` 都会**打到那个人的 QQ 私聊里** ——
+   *   他在**游戏里**说的话，回执却出现在 QQ 里。使用者原话：
+   *   「在服务器中给小鱼发消息时会触发先应一声，并且会发给QQ私聊」。
+   *
+   * ∴ 规则一句话：**这一轮从哪进来，提示就从哪回去**。
+   *   游戏通道的提示走 `tellraw`（**只给那个玩家，不上公屏** —— 系统提示不是发言）。
+   *
+   * @param {string} kind      QQ 通道类型（`private` / `group`）
+   * @param {string} peerId    QQ 会话号
+   * @param {string} text      提示正文
+   * @param {{channel?: string, server?: object, playerName?: string}|null} deliverTo
+   */
+  async #speakerNotice(kind, peerId, text, deliverTo) {
+    if (deliverTo?.channel === 'game') {
+      await this.#gameTellraw(deliverTo.server, deliverTo.playerName, text)
+      return
+    }
+    await this.#safeSend(kind, peerId, text)
   }
 
   /**
@@ -2775,6 +2816,21 @@ export class Bridge extends EventTarget {
         // ★ 0.3.2 P3：游戏内对话（界面上的开关 + 说明）。
         //   ★ 它决定"读不读这台服的控制台、听不听里面的人说话"，所以界面必须能看见。
         gameChat: s.gameChat === true,
+        // ★★★ **允许从 QQ 下控制台指令**（0.3.2 收尾）—— 界面**必须能看见、也必须能改**。
+        //
+        // ★ 为什么这条注释值得写这么长（2026-10-04 使用者报的第二件事）：
+        //   他明明开过这个开关，bot 却一直回「那个开关没开」。查下来是
+        //   **界面上压根没有这个勾选框**，而保存又是"整条替换" ⇒ 他每点一次保存
+        //   就被重置成 `false`，而**界面上没有任何地方能看出来**。
+        //   （他当时只能照 bot 说的去手改 config.json —— 那就是"配置只有界面一条路"
+        //     这条设计被破的一个实例。）
+        // ★ 它与 `gameChat` 是**两条互不相干的路**，界面必须说清（否则就会像他那样问
+        //   「这个开关跟在游戏内发布指令有何关系」）：
+        //   · `commandFromQQ` ⇒ **QQ 条**下控制台指令（群里发 `\mc <命令>`、或模型调
+        //     `mc_command` 工具）。**游戏内一个字都不受影响**；
+        //   · `gameChat` ⇒ 读游戏内聊天、让绑定过的玩家说话（**只有对白，没有指令**）。
+        //   游戏内**发不出**控制台指令：那需要服务端插件注册真命令，而 v1 不写服务端代码。
+        commandFromQQ: s.commandFromQQ === true,
         failThreshold: s.failThreshold,
         rules: s.rules ?? {},
         monitor,
@@ -4525,7 +4581,16 @@ export class Bridge extends EventTarget {
       // 分成四类挑措辞：思考 / 搜索 / 调用工具 / 权限受阻（见 src/interim.mjs）。
       const interim = this.config.humanize?.interim ?? {}
       let interimTimer = null
-      if (interim.enabled !== false) {
+      // ── ★★★ 游戏内那一轮**不发**「先应一声」（使用者 2026-10-04 明确要求）──────
+      //
+      // 两条理由，第一条是使用者的要求，第二条是它本来就不该发生：
+      //   ① 他在游戏里说一句话，垫场白跑到**QQ 私聊**去了（因为这个 turn 的
+      //      `kind/peerId` 是那个绑定的 QQ）—— 那是**错的通道**，见 `#speakerNotice`；
+      //   ② 就算改对通道，它也只剩公屏这一条路 —— 而「先应一声」是一句
+      //      "我在想"的**垫场白**，把它印到**全服公屏**上是纯噪音（真正的回复
+      //      本来就会发出去），而且和"每条发言都像普通玩家"那条要求相冲。
+      // ∴ 游戏通道**整条跳过**：不挂定时器、也不留"改天补发"的口子。
+      if (interim.enabled !== false && deliverTo?.channel !== 'game') {
         interimTimer = setTimeout(() => {
           // ── ★★ 静默时段：**不发**「先应一声」（用户 2026-09-30 要求）──────────
           //
@@ -4707,7 +4772,7 @@ export class Bridge extends EventTarget {
             : '会话标识冲突：这不该发生（session.instance 留空时本应每次启动都唯一）。' +
               '请把这条日志连同时间反馈给维护者 —— 这是程序缺陷，不是配置问题。'
           : `没能把消息交给 DSH：${error.message}`
-        await this.#safeSend(kind, peerId, `⚠️ ${friendly}`)
+        await this.#speakerNotice(kind, peerId, `⚠️ ${friendly}`, deliverTo)
         return { handled: false, reason: 'prompt-failed', error: error.message }
       }
 
@@ -4787,7 +4852,7 @@ export class Bridge extends EventTarget {
           `[bridge] 回合未正常结束：${result.timedOut ? '超时' : result.abortReason}` +
             (settled.applied > 0 ? `；但已结算记忆 ${settled.applied} 条` : ''),
         )
-        await this.#safeSend(kind, peerId, '⚠️ 这次处理超时了，请再发一次。')
+        await this.#speakerNotice(kind, peerId, '⚠️ 这次处理超时了，请再发一次。', deliverTo)
         return { handled: false, reason: result.timedOut ? 'timeout' : 'aborted', result }
       }
 

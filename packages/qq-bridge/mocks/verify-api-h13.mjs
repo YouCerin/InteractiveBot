@@ -42,6 +42,9 @@ import {
   writeTask as writeScheduleTask,
 } from '../src/schedule.mjs'
 import { createRestarter } from '../src/servers/restart.mjs'
+// ★ 服务器条目的归一化**只用实现里那一份**（见下面 `normalizeServer` 那行注释：
+//   手写桩曾经把 `commandFromQQ` 等字段丢掉，让一条正确的断言假红）。
+import { normalizeServerEntry } from '../src/config.mjs'
 
 let passed = 0
 let failed = 0
@@ -250,12 +253,14 @@ const handler = createApiHandler({
       __password: 'THIS_SHOULD_NEVER_LEAK',
     }
   },
-  normalizeServer: (entry) => {
-    if (!entry || typeof entry !== 'object') return null
-    const id = String(entry.id ?? '').trim()
-    if (!id) return null
-    return { id, name: String(entry.name ?? id), host: '127.0.0.1', port: 25565, rconPort: 25575, password: '', enabled: true }
-  },
+  // ★★★ **用实现里那一份**归一化（`normalizeServerEntry`），不在测试里再写一遍。
+  //
+  // ★ 这里原来是一个手写的 7 字段桩（`{id,name,host,port,rconPort,password,enabled}`），
+  //   而它**恰好把 `commandFromQQ` / `failThreshold` / `logEncoding` / `startArgs` 全丢了** ——
+  //   于是"更新时按字段合并、不许重置没提交的字段"这条断言**永远是红的**，
+  //   看起来像产品代码的 bug，其实是桩在说谎（"二次实现迟早分叉"，这次分叉的是测试）。
+  //   真机上跑的是 `normalizeServerEntry`，测试就该用同一份 —— 它本来就是这个理由被导出的。
+  normalizeServer: normalizeServerEntry,
   onServersChanged: async () => ({ ok: true, changed: true, count: 2 }),
   // 主动检测（0.3.2 收尾）：桩里**故意**回带一个必泄串，让"字段白名单"那条断言能抓漏
   // （同 `serversList` 的套路）。
@@ -621,6 +626,48 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★ `null` ⇒ **显式清除**（"我要删掉它"必须能表达）', editedClear.status === 200 && s1pw() === '', JSON.stringify(s1pw()))
   // 收尾：把它放回一个非空值，后面的用例（如果有依赖）不会因为空密码而改变行为
   await saveSrv({ server: { id: 's1', password: 'THIS_SHOULD_NEVER_LEAK' } })
+
+  // ── ④-d-3 ★★★ 更新一台时**不许把表单没渲染的字段重置成默认值**（同一个使用者的第二件事）──
+  //
+  // 他原话：「bot反馈允许从QQ下指令的开关没开，但是我应该是打开的才对」。
+  // 查下来是**同一个病**：界面上压根没有 `commandFromQQ` 这个勾选框，而保存是
+  // `list[idx] = norm`（整条替换）⇒ 他每保存一次就被重置成 `false`，界面上还看不出来；
+  // 他只能照 bot 说的去手改 config.json —— 手改完再保存又被抹掉。
+  // ★ 同一次还会抹掉：`failThreshold` / `logEncoding` / `startWaitMs` / `rules` /
+  //   `shell` / `startArgs`（全都是"手改能配、界面一保存就没了"）。
+  // ★ 修法是"按字段合并"：**提交什么改什么，没提交的保持原样**。
+  //   这一节就是那条纪律的回归锁 —— 断言故意用**界面确实不渲染**的几个字段。
+  const s1 = () => rawConfigStub.servers.find((s) => s.id === 's1') ?? {}
+  // 造一份"手改出来的"配置（模拟他当时的状态）
+  Object.assign(rawConfigStub.servers.find((s) => s.id === 's1'), {
+    commandFromQQ: true,
+    failThreshold: 9,
+    logEncoding: 'gbk',
+    startWaitMs: 200000,
+    shell: true,
+    startArgs: ['@user_jvm_args.txt', 'nogui'],
+    rules: { minTps: 12.5, maxPlayers: 40 },
+  })
+  check('（前提）桩里现在是一份"手改过的"配置', s1().commandFromQQ === true && s1().failThreshold === 9)
+  const partial = await saveSrv({ server: { id: 's1', name: '只改名字' } })
+  check('★ 只提交一个字段的保存 → 200', partial.status === 200, partial.text.slice(0, 140))
+  check('★ 提交的那个字段确实改了', s1().name === '只改名字')
+  check('★★★ `commandFromQQ` **原样保留**（使用者报的正是这条：他开过，不该被静默关掉）',
+    s1().commandFromQQ === true, JSON.stringify({ cq: s1().commandFromQQ }))
+  check('★★ 表单没渲染的其它字段也都没被重置（阈值/编码/等待/壳/参数/规则）',
+    s1().failThreshold === 9 && s1().logEncoding === 'gbk' && s1().startWaitMs === 200000 &&
+      s1().shell === true && JSON.stringify(s1().startArgs) === '["@user_jvm_args.txt","nogui"]' &&
+      s1().rules?.minTps === 12.5,
+    JSON.stringify({ ft: s1().failThreshold, enc: s1().logEncoding, args: s1().startArgs }))
+  check('★★ 而**提交了**的字段照旧生效（合并不是"什么都不让改"）', (() => {
+    // 上面那次保存只提交了 name ⇒ 名字必须真的变（不是"为了保住其它字段而整个不写"）
+    return s1().name === '只改名字' && s1().host === '127.0.0.1'
+  })(), JSON.stringify({ name: s1().name, cq: s1().commandFromQQ }))
+  // ★ 反向：**显式**送 `false` 时必须真的关掉（那是用户在勾选框里真的取消了勾 —— 不能当成"没提交"）
+  await saveSrv({ server: { id: 's1', commandFromQQ: false } })
+  check('★★★ 显式送 `false` ⇒ **真的关掉**（合并只对"没提交"生效，不吞用户的显式意图）',
+    s1().commandFromQQ === false, String(s1().commandFromQQ))
+  await saveSrv({ server: { id: 's1', commandFromQQ: true } })
 
   const delSrv = async (body) => {
     const res = await fetch(url('/api/servers/delete'), {

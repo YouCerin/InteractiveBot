@@ -2922,7 +2922,10 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 - ❌ 不要把"配了服务器"显示成"正在监测"（两者差一步：**启用了 + 采样真的在跑**才算）；
 - ❌ 不要回显密码原文（见上表第 2 条）；
 - ❌ 不要在密码框为空时把 `password` 送上去（那会把已配好的密码抹掉 —— 真事故，见上表第 2 条）；
-- ❌ 不要把"清除密码"做成**默认勾选**或**点一下就生效**的按钮（保存前可反悔，且必须说清代价）。
+- ❌ 不要把"清除密码"做成**默认勾选**或**点一下就生效**的按钮（保存前可反悔，且必须说清代价）；
+- ❌ **不要漏掉任何一个会影响行为的开关**：后端支持而界面上没有的开关＝用户只能去手改
+  `config.json`（`commandFromQQ` 就是这样逼出过一次事故），而且**手改也保不住**（保存会重置它）；
+- ❌ 不要把"不回填"的输入框当成"清空"（`startArgs` 曾经无条件送 `[]`，打开表单点保存就清空了真实参数）。
 
 #### ★★★ 2.12.1 服务器**条目增删改**与**控制台**（0.3.2 收尾）
 
@@ -2934,7 +2937,7 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 |---|---|---|
 | GET | `/api/servers` | 配置摘要 + **活证据** + 归属 + 重启状态。★ **字段白名单**：只回 `passwordSet` 布尔，**绝不回密码** |
 | POST | `/api/servers/action` | body `{serverId, action}`；**只有 `retry` / `abandon`**。★ `start`/`stop` 回 400（走 CLI，那条路上是人在做） |
-| POST | `/api/servers/save` | body `{server}`：新增/更新一台。归一化**复用 `normalizeServerEntry`**（与启动读配置同一份，避免"界面存进去的"与"启动时读到的"分叉）；`id` 空 ⇒ 400。★★★ **`password` 按"空/缺省 = 保留、非空 = 覆盖、`null` = 清除"处理**（`resolveServerPassword`）—— **不许整条替换就当没配过**，界面表单本来就不带这个字段 |
+| POST | `/api/servers/save` | body `{server}`：新增/更新一台。归一化**复用 `normalizeServerEntry`**（与启动读配置同一份，避免"界面存进去的"与"启动时读到的"分叉）；`id` 空 ⇒ 400。★★★ **更新时按字段合并**（`{...原来那条, ...提交的}`）—— **提交什么改什么，没提交的保持原样**：整条替换会把"界面没渲染的字段"全部重置成默认值（`password` 被抹成空串、`commandFromQQ` 被关掉、`failThreshold`/`logEncoding`/`startArgs`/`rules` 全部回默认），而**界面上没有任何异常**。★★★ `password` 另按"空/缺省 = 保留、非空 = 覆盖、`null` = 清除"处理（`resolveServerPassword`）。★ **显式**送 `false`/空串仍然生效（那是用户真的取消了勾）—— 合并只对"压根没提交"生效 |
 | POST | `/api/servers/delete` | body `{serverId}`；缺 `serverId` ⇒ 400。★ **状态文件刻意保留**（那是"我起过它"的归属证据，删了就失去重启能力） |
 | POST | `/api/servers/command` | body `{serverId, command}`：手动跑一条控制台命令。缺 `serverId`／空命令／超长（>500 字）⇒ 400；★★★ **完整控制台（op 级别）**，**字段白名单**（密码绝不出去） |
 | POST | `/api/servers/probe` | body `{serverId}`：**主动检测**一次（真连 RCON + 只读命令）。缺 `serverId` ⇒ 400。★★ 它**不喂状态机、不累加「连续失败」** —— 点几次都不会把一台好好的服务器「点成 down」 |
@@ -3094,6 +3097,7 @@ agent 沙箱**）会把它一起收走 ⇒ 从那种环境里点一下"启动"�
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `servers[].gameChat` | boolean | `false` | 读这台服的控制台，让已绑定的玩家在游戏里说话。★ **默认关**（"无人开口就听"的能力默认关） |
+| `servers[].commandFromQQ` | boolean | `false` | ★★★ **允许从 QQ 下控制台指令**（管理员那一轮 = 完整 RCON，op 级别）。**与 `gameChat` 是两条独立的路**：这条只管 QQ（群里 `\mc [id] <命令>`、模型调 `mc_command`），**游戏内一个字都不受影响**（游戏内**发不出**指令）。★ 界面**必须**有这个勾选框 + 卡片上看得见状态 —— 它曾经"后端支持、界面没有"，于是使用者开过也被每次保存重置成 `false`，而界面上完全看不出来，只能去手改 `config.json`（他原话：「我应该是打开的才对」）。★ 两条已知代价（界面上要写）：`op` 可提权 ⇒ 白名单事实上失效；管理员 QQ 被盗 = op 被劫持 |
 | `servers[].logEncoding` | `'auto'\|'utf8'\|'gbk'` | `'auto'` | 控制台日志编码。★ 真机上是 **GBK**（Windows 中文版 JVM 的 `file.encoding`），`auto` 会自己回退。★ 开放它的理由：万一某台服显式设了别的编码，解成乱码**不会报错**，只会表现为"它读不懂玩家说什么" |
 | `gameChatPollMs` | number | 2000 | 读控制台的间隔（下限 1 秒）。★ 与 `serversPollMs` 是两个数（聊天要秒级） |
 ★ 若将来真要做"启动"按钮，前提是服务端由**桥接进程自己**持有（桥接活着它才活着），

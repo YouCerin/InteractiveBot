@@ -61,6 +61,16 @@ export function ServerForm({
     manageOnStart: server?.manageOnStart ?? false,
     // ★ 0.3.2 P3：游戏内对话（默认关 —— "无人开口就动手/就听"的能力默认关）
     gameChat: server?.gameChat ?? false,
+    /**
+     * ★★★ 允许从 QQ 下控制台指令（默认关）。
+     *
+     * ★ 为什么它必须在这里（2026-10-04 使用者报的）：「我应该是打开的才对」——
+     *   他确实开过，而这个表单**以前没有这一项**，后端又是"整条替换" ⇒
+     *   他每点一次保存就被重置成 `false`，界面上没有任何地方能看出来，
+     *   只能照 bot 说的去手改 `config.json`（改完再保存又被抹掉）。
+     * ★ 它与 `gameChat` 是**两条路**，说明写在界面上（见下面那个勾选框的注解）。
+     */
+    commandFromQQ: server?.commandFromQQ ?? false,
     enabled: server?.enabled !== false,
   })
   const [busy, setBusy] = useState(false)
@@ -84,6 +94,9 @@ export function ServerForm({
         enabled: form.enabled,
         manageOnStart: form.manageOnStart,
         gameChat: form.gameChat,
+        // ★★ 这个字段**必须一起送**：不送的话（旧版就是这样）后端按默认值 `false` 处理，
+        //   用户每保存一次就把这个开关关掉一次，而且界面上完全看不出来。
+        commandFromQQ: form.commandFromQQ,
       }
       // ★★★ 密码的三种意图 —— 三条分支缺一不可（2026-10-04 真事故的正中央）：
       //   · 勾了"清除" ⇒ 送 `null`（后端把它当**显式清除**）
@@ -95,10 +108,16 @@ export function ServerForm({
       else if (form.password) payload.password = form.password
       if (form.startExe.trim()) {
         payload.startExe = form.startExe.trim()
-        payload.startArgs = form.startArgs
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)
+        // ★★ 参数**只在填了的时候才送**（留空 = 不改）。旧版无条件送 `[]`，
+        //   而这个框**不回填**已有参数 ⇒ 用户打开表单直接点保存就**把真实参数清空了**
+        //   （`@user_jvm_args.txt` / `nogui` 这些）。那是与密码同一类静默数据丢失。
+        //   ⚠️ 代价如实说：因此**界面上清不掉**已有参数，要清得改 config.json。
+        if (form.startArgs.trim()) {
+          payload.startArgs = form.startArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        }
       }
       if (form.cwd.trim()) payload.cwd = form.cwd.trim()
 
@@ -147,6 +166,9 @@ export function ServerForm({
         <br />★ 编辑时**密码留空 = 不改**（界面拿不到原密码，也不该拿）；
         想**删掉**已保存的密码，勾密码框下面那个「清除已保存的密码」——
         它和后端约定的是 `null`，而不是空串（空串的语义是"不改"）。
+        <br />★ **没在这个表单里出现的字段一律保持原样**（`failThreshold`、`logEncoding`、
+        监测阈值…）—— 保存是**按字段改**，不是把整条覆盖掉。留空的框同理：
+        **留空 = 不改**，不是"清空"。
       </p>
 
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -193,7 +215,7 @@ export function ServerForm({
         </div>
         {field('TPS 命令（留空 = 不问）', 'tpsCommand', '例如 Forge：forge tps；Paper：tps。留空表示**我们不问**，不是"问了没拿到"')}
         {field('启动可执行文件 startExe（推荐）', 'startExe', '不走 shell ⇒ 归属可判定；相对路径按 cwd 解析')}
-        {field('启动参数（一行一个）', 'startArgs', '配合 startExe，例如 @user_jvm_args.txt / nogui')}
+        {field('启动参数（一行一个；**留空 = 不改**）', 'startArgs', '配合 startExe，例如 @user_jvm_args.txt / nogui。★ 这里**不回填**已有参数，所以留空表示"别动它"（要清空得改 config.json）')}
         {field('工作目录 cwd', 'cwd', '启动命令在哪个目录执行（通常是服务端根目录）')}
       </div>
 
@@ -227,6 +249,35 @@ export function ServerForm({
             <br />★ 只有**本程序拉起**的服务端才有那个控制台日志 —— 别人手动起的服读不到东西
             （日志里会有一行说明，**不是故障**）。
             <br />★ 权限**按绑定的那个 QQ** 判：那个 QQ 不在名单里，游戏里也说不上话。
+            <br />★★ **游戏内只能"说话"，发不了指令** —— 想从 QQ 下指令看下面那个开关
+            （那是**另一条路**，与这里无关）。
+          </span>
+        </span>
+      </label>
+      {/* ★★★ 允许从 QQ 下指令（0.3.2 收尾）。位置刻意放在 `gameChat` **下面并紧跟**，
+          因为使用者问过「这个开关跟在游戏内发布指令有何关系」—— 答案是**没关系**，
+          所以界面必须把两条路的边界摆在同一个视野里，别让他再猜一次。 */}
+      <label className="mt-1 flex items-start gap-2 text-xs">
+        <input
+          className="mt-0.5"
+          type="checkbox"
+          checked={form.commandFromQQ}
+          disabled={busy}
+          onChange={(e) => set('commandFromQQ', e.target.checked)}
+        />
+        <span>
+          允许从 <b>QQ</b> 下控制台指令（管理员这一轮拥有**完整控制台**，op 级别）
+          <span className="text-muted-foreground mt-0.5 block text-[11px]">
+            ★★★ **它和上面的「游戏内对话」没有关系**，是两条独立的路：
+            <br />· **这个开关** ⇒ 只管 **QQ** 那条：管理员在群里发 <code>\mc [id] &lt;命令&gt;</code>
+            （桥接本地拦截执行，不经模型），或模型调 <code>mc_command</code> 工具。
+            <br />· **「游戏内对话」** ⇒ 只管**游戏里**那条：读控制台日志、让绑定过的玩家
+            **说话**。**游戏内发不出指令**（那需要服务端插件注册真命令，本版刻意不写服务端代码）——
+            所以「开着这个开关，游戏里就能下指令」是**不成立**的。
+            <br />★ 默认**关**：它是唯一一条"外部消息能改服务端状态"的通道。
+            <br />★ 两条**已知并接受**的代价：① <code>op</code> 可提权 ⇒ 命令白名单**事实上失效**；
+            ② **管理员 QQ 被盗 = 服务器 op 被劫持**。想更保守就别开它，
+            只用本机网页那个控制台（服务器页签里）。
           </span>
         </span>
       </label>

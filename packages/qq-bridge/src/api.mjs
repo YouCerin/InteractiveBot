@@ -1049,15 +1049,30 @@ export function createApiHandler(deps) {
         const list = Array.isArray(raw.servers) ? raw.servers.slice() : []
         const idx = list.findIndex((s) => s && String(s.id) === norm.id)
         const isNew = idx < 0
-        // ★★★ 密码**不许**被"整条替换"抹掉（真事故：见 `resolveServerPassword` 的说明）。
-        //   界面表单从不回显密码 ⇒ 它保存时不带 `password` ⇒ `normalizeServerEntry`
-        //   把它填成 `''` ⇒ 用户的 RCON 密码就这么没了，而且**不报任何错**。
-        //   ∴ 更新时必须把原来那条的密码按同一条语义接回来。
         const prevEntry = isNew ? null : list[idx]
+        // ★★★ 更新时**按字段合并**，不是整条替换（2026-10-04 事故的根治）。
+        //
+        // 为什么（这不是洁癖，是**同一类缺陷反复发作**）：界面上的表单只渲染
+        // **一部分**字段（启用 / 启动接管 / 游戏内对话 / 那个新的"允许从 QQ 下指令"…），
+        // 而这里是 `list[idx] = norm` ⇒ **凡是表单没渲染的字段，每保存一次就被重置成默认值**：
+        //   · `password`   → 抹成 `''`（真事故，使用者报的「没配 RCON 密码」）；
+        //   · `commandFromQQ` → 抹成 `false`（**同一个使用者报的第二件事**：
+        //     他明明开过，bot 却一直说「那个开关没开」—— 而界面当时**根本没有这个勾选框**，
+        //     所以除了手改 config.json 没有第二条路，手改完又会被下一次保存抹掉）；
+        //   · 还有 `failThreshold` / `logEncoding` / `startWaitMs` / `rules` /
+        //     `shell` / `startArgs` —— 全都是"手改能配、界面一保存就没了"。
+        // ∴ 规则改成与 `mergeConfigPatch` 一致：**提交什么就改什么，没提交的保持原样**。
+        //   表单因此天然是"补丁编辑器"，而不是"整条覆盖器"。
+        //
+        // ⚠️ 与 `resolveServerPassword` 的分工：那一条处理的是"**显式送了但语义是保留**"
+        //   （空串 = 不改、`null` = 清除）；这里处理"**压根没送**"。两条都需要：
+        //   表单不带 `password`，也不带 `commandFromQQ`（勾选框没勾时会送 `false`，
+        //   那是**真值**，必须尊重）。
+        const mergedEntry = isNew ? norm : (normalizeServer({ ...prevEntry, ...incoming }) ?? norm)
         const pw = resolveServerPassword(incoming.password, prevEntry?.password)
-        norm.password = pw === null ? '' : pw
-        if (isNew) list.push(norm)
-        else list[idx] = norm
+        mergedEntry.password = pw === null ? '' : pw
+        if (isNew) list.push(mergedEntry)
+        else list[idx] = mergedEntry
         raw.servers = list
         try {
           await writeRawConfig(raw)
@@ -1074,7 +1089,7 @@ export function createApiHandler(deps) {
         return ok({
           saved: true,
           created: isNew,
-          id: norm.id,
+          id: mergedEntry.id,
           // ★ 如实说明"配置写进去了，但生效没有"是两件事
           applied: applied?.ok === false ? { ok: false, why: applied.why } : { ok: true, changed: Boolean(applied?.changed), count: applied?.count ?? list.length },
         })
@@ -1184,6 +1199,11 @@ export function createApiHandler(deps) {
           manageOnStart: s.manageOnStart === true,
           // ★ 0.3.2 P3：游戏内对话（界面上的开关）。字段白名单照旧逐个放行。
           gameChat: s.gameChat === true,
+          // ★★★ 允许从 QQ 下控制台指令（0.3.2 收尾）。★ **必须放行**：界面要能显示
+          //   它的状态、也要能改它 —— 在那之前界面上没有这个字段，而保存又是"整条替换"
+          //   ⇒ 使用者每次保存都把它重置成 `false`，且**界面上完全看不出来**
+          //   （他报的「我应该是打开的才对」正是这件事）。
+          commandFromQQ: s.commandFromQQ === true,
           failThreshold: s.failThreshold ?? null,
           rules: {
             minTps: s.rules?.minTps ?? null,

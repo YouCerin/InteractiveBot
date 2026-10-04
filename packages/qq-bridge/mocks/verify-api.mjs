@@ -272,6 +272,22 @@ section('安全 ③-b servers[].password：既不许读出去，也不许保存�
   check('★★★ 界面**只读 `passwordSet`，绝不读 `password`**（"永不回显"这句话得是真的）',
     !/server\?\.password(?!Set)/.test(formSrc))
   check('★ 提示里仍然写着"留空 = 不改"（用户得知道空着保存是安全的）', /留空 = 不改/.test(formSrc))
+
+  // ── ⑦ **两条路的边界必须在界面上写清**（2026-10-04 使用者问的那件事）──────────
+  //
+  // 他原话：「bot反馈允许从QQ下指令的开关没开，但是我应该是打开的才对，
+  //          并且这个开关跟在游戏内发布指令有何关系」。
+  // 前半句的根因是**表单里压根没有这个勾选框**（后端又是整条替换 ⇒ 每保存一次就关掉一次）；
+  // 后半句的答案在语义上：`commandFromQQ` 只管 **QQ** 那条路，**与游戏内无关**
+  // （游戏内根本没有控制台通道）。两件事都必须在界面上可查、可改。
+  check('★★★ 表单里有 `commandFromQQ` 这个勾选框，而且**状态会跟着保存提交**',
+    /commandFromQQ:\s*server\?\.commandFromQQ/.test(formSrc) && /commandFromQQ:\s*form\.commandFromQQ/.test(formSrc))
+  check('★★★ 并且明说它与「游戏内对话」是**两条独立的路**、游戏内发不了指令',
+    /没有关系/.test(formSrc) && /游戏内发不出指令|游戏内\*\*发不出\*\*指令/.test(formSrc))
+  check('★★ 服务器卡片上也看得见它的状态（否则用户只能靠 bot 的报错才知道）',
+    /commandFromQQ/.test(readFileSync(join(PKG_ROOT, 'config-ui', 'src', 'sections', 'ServerTab.tsx'), 'utf8')))
+  check('★★ 启动参数**留空 = 不改**（旧版无条件送 `[]`，打开表单点保存就把真实参数清空了）',
+    !/payload\.startArgs = form\.startArgs/.test(formSrc) || /if \(form\.startArgs\.trim\(\)\)/.test(formSrc), '')
 }
 
 // ══════════════════════════════════════════════════════════════════════════
