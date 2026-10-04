@@ -311,6 +311,28 @@ export function createRoster({ config, log = () => {} } = {}) {
   }
 
   /**
+   * 「这个 QQ 号是什么级别」—— **只看管理员表**，其余一律只读用户（`USER`）。
+   *
+   * ★★ 它与 `tierOfGroup` 是**同一条规则**，只是用在两个不同的入口上：
+   *   · **群聊**：群白名单决定"这个群能不能用"，发言人权限看这里；
+   *   · **游戏内对话**（0.3.2 P3）：**绑定**决定"能不能说话"，权限同样看这里。
+   *
+   * ★★★ 为什么游戏内那条路**不查私聊白名单**（使用者 2026-10-04 定的取舍）：
+   *   他要的行为是「**已绑定的玩家**在游戏里叫它就回」。上一版把 QQ 的私聊白名单
+   *   也当成一道门 ⇒ 玩家好不容易绑上了，却因为那个 QQ 不在 `dmAllowlist` 里
+   *   而**在游戏里说不上话**（还要管理员再去加一次名单）—— 那不是他要的。
+   *   ∴ 现在的门是**绑定**（而绑定本身已经要求"人在服里 + 在某个已允许的群里"）。
+   *
+   * ⚠️ 但**权限一分不让**：绑定只证明"这个游戏身份 = 这个 QQ"，它**不**该顺便
+   *   把人提权成管理员。绑上了的普通玩家拿到的仍然是 `USER`（能聊天、**不能**
+   *   触发任何有实际修改行为的动作 —— 见 `MODIFY_TOOLS` / `MODIFY_QQ_TOOLS`）。
+   *   管理员（在 `adminUsers` 里的）照旧是 `ADMIN`。
+   */
+  function tierOfSpeaker(userId) {
+    return tierOfGroup(userId)
+  }
+
+  /**
    * 综合判定：这条消息该不该回、以什么权限回。
    *
    * @returns {{respond: boolean, tier: string, reason: string}}
@@ -469,6 +491,7 @@ export function createRoster({ config, log = () => {} } = {}) {
   return {
     tierOfPrivate,
     tierOfGroup,
+    tierOfSpeaker,
     isGroupAllowed,
     decide,
     fetchLists,

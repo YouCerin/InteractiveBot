@@ -213,7 +213,7 @@ import {
   unbindByName,
 } from './servers/bindings.mjs'
 import { buildSay, buildTellraw, chunkForSay, PLAYER_NAME_RE } from './servers/tellraw.mjs'
-import { createGameChatLoop, decideGameChat } from './servers/game-chat.mjs'
+import { createGameChatLoop, decideGameChat, unboundReminder } from './servers/game-chat.mjs'
 import { createSupervisor, defaultPortOpen as defaultPortProbe } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
 //   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
@@ -1962,7 +1962,15 @@ export class Bridge extends EventTarget {
       this.#gameReminded.delete(key)
       const known = lookupByName(workspace, name)
       if (known?.uuid) this.#gameUuids.set(key, known.uuid)
-      return
+      // ★★★ 使用者 2026-10-04 的明确要求：**未绑定的玩家进服就提醒**，
+      //   不是等他先说话（他不上来搭话就永远不知道要绑定）。
+      try {
+        return await this.#remindUnboundOnJoin(server, name)
+      } catch (error) {
+        // 提醒发不出去**不该**影响别的（它只是一句话），但要留痕
+        this.log(`⚠️ [bind] 进服提醒发不出去（已吞掉）：${error?.message ?? error}`)
+        return
+      }
     }
     if (event.kind === 'leave') {
       this.#gameReminded.delete(key)
@@ -1979,6 +1987,33 @@ export class Bridge extends EventTarget {
       this.log(`❌ [game-chat] 处理「${name}」的发言时抛异常（已吞掉，其它人照常）：${error?.stack ?? error}`)
       return { handled: false, reason: 'error', error: String(error?.message ?? error) }
     }
+  }
+
+  /**
+   * **进服那一刻**给未绑定的玩家一条提醒（使用者 2026-10-04 明确要求）。
+   *
+   * ★ 为什么必须在进服时发（而不是等他先说话）：他不上来搭话就永远不知道要绑定，
+   *   而"不绑定就不能说话"这条规矩会让新玩家**完全不知道该干什么**。
+   * ★ 三条边界：
+   *   ① **已绑定的人一个字都不发**（误报"你还没绑定"比不提醒更糟）——
+   *      判据是绑定表（按 UUID，退化到按名字），不是"有没有见过他"；
+   *   ② 同一趟进服**只提醒一次**（`#gameReminded`），退服再进会重置；
+   *   ③ 认不出身份（既没有 UUID 事件、名字也不在表里）时**仍然提醒** ——
+   *      那种情况他几乎一定是新玩家，而"老玩家被误提醒一次"的代价远小于
+   *      "新玩家永远不知道要绑定"。★ 有实测背书：真机日志里 `UUID of player X is …`
+   *      在 `X joined the game` **之前**（`mocks/verify-log-source.mjs` 有夹具）。
+   */
+  async #remindUnboundOnJoin(server, name) {
+    const sid = String(server?.id ?? '')
+    const key = this.#gameKey(sid, name)
+    const workspace = this.config?.dsh?.workspace ?? ''
+    const uuid = this.#gameUuids.get(key) ?? lookupByName(workspace, name)?.uuid ?? null
+    const bound = uuid ? lookupByUuid(workspace, uuid) : null
+    if (bound) return { handled: false, reason: 'already-bound' }
+    await this.#gameTellraw(server, name, unboundReminder(name), 'yellow')
+    this.#gameReminded.add(key)
+    this.log(`🔗 [bind] 「${name}」进服且未绑定 ⇒ 已给他本人一条提醒（每次进服最多一次）`)
+    return { handled: true, reason: 'remind-on-join' }
   }
 
   /**
@@ -2063,26 +2098,17 @@ export class Bridge extends EventTarget {
       return
     }
 
-    // ④ 权限：**按绑定的那个 QQ** 判（与 QQ 侧 fail-closed 完全一致）
+    // ④ 权限：**按绑定的那个 QQ** 判 —— 但**只看管理员表**（`tierOfSpeaker`）。
+    //
+    // ★★★ 这里**不查私聊白名单**（使用者 2026-10-04 定的取舍）：他要的是
+    //   「**已绑定的玩家**在游戏里叫它就回」。上一版把 QQ 的私聊白名单也当成一道门
+    //   ⇒ 玩家好不容易绑上了，却因为那个 QQ 不在 `dmAllowlist` 里而**说不上话**
+    //   （还要管理员再去加一次名单）—— 那不是他要的。
+    //   ∴ 门是**绑定**（而绑定本身要求"人在服里 + 在某个已允许的群里"）。
+    // ⚠️ 权限一分不让：绑上了的普通玩家拿到的是 `USER`（只读），
+    //   要动东西仍然只有管理员。见 `roster.mjs` 的 `tierOfSpeaker`。
     const qqId = String(bound.qqId ?? '')
-    const verdict = this.roster?.decide?.({ kind: 'private', peerId: qqId, senderId: qqId }) ?? {
-      respond: false,
-      reason: 'no-roster',
-      tier: '',
-    }
-    if (!verdict.respond) {
-      if (!this.#gameReminded.has(key)) {
-        this.#gameReminded.add(key)
-        await this.#gameTellraw(
-          server,
-          name,
-          '你的绑定没问题，但那个 QQ 不在机器人的可用名单里 —— 现在还不能在这里跟我说话。让管理员把那个 QQ 加进名单就行。',
-          'yellow',
-        )
-      }
-      this.log(`🔗 [bind] 「${name}」（QQ ${qqId}）不在名单里 ⇒ 游戏内不参与（${verdict.reason ?? '?'}）`)
-      return
-    }
+    const tier = this.roster?.tierOfSpeaker?.(qqId) ?? 'user'
 
     // 唤醒判定：与 QQ 侧**共用关键词表**（设计文档 §5.3）。
     // ★ 这里把 `groupEnabled` 显式置真：游戏内对话由 `servers[].gameChat` 这个
@@ -2115,7 +2141,8 @@ export class Bridge extends EventTarget {
       kind: 'private',
       peerId: qqId,
       senderId: qqId,
-      tier: verdict.tier,
+      // ★ 绑定即能说话；权限只由管理员表决定（`tierOfSpeaker`，见上面 ④ 的长注释）
+      tier,
       rendered: { text, mentioned: false, replyTo: null, imageRefs: [], videoRefs: [] },
       reason: wake.reason,
       deliverTo: { channel: 'game', server, playerName: name },

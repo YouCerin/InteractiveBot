@@ -268,33 +268,62 @@ console.log('\n=== ④-b 老的单斜杠形状仍然收（**零代价的兜底**
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑤ 未绑定玩家：提示**每次进服最多一次**；而提示过之后 `mc bind` 仍然管用 ===')
+console.log('\n=== ⑤ ★★★ 未绑定玩家**进服那一刻**就收到提醒；每次进服最多一次；而已绑定的人一个字都不发 ===')
 {
   const { bridge, rpc, gameCommands } = wiringBridge()
   bridge.attach()
-  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+  // ★ 真机顺序：`UUID of player X is …` 在 `X joined the game` **之前**
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+
+  const tells0 = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells0.length, 1, '★★★ **进服那一刻**就发了提醒（不是等他先说话 —— 使用者明确要求）')
+  ok(tells0[0].command.startsWith(`tellraw ${PLAYER} `), '★★ 只给他本人')
+  ok(/\\mc bind/.test(tells0[0].command), '★ 提醒里给出了 `\\mc bind`')
+  ok(/反斜杠/.test(tells0[0].command), '★★★ 并说清是**反斜杠**（玩家一定会按习惯打斜杠）')
+  eq(rpc.prompts.length, 0, '★ 提醒不产生任何模型调用')
 
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 你好' })
   eq(rpc.prompts.length, 0, '★★★ 未绑定的玩家说话 ⇒ **一次模型调用都没有**（零成本）')
-  const tells1 = gameCommands.filter((c) => c.what === 'tellraw')
-  eq(tells1.length, 1, '★ 只有一条 tellraw（提醒他绑定）')
-  ok(/\\mc bind/.test(tells1[0].command), '★ 提醒里给出了**新流程**（\\mc bind）')
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 说话时**不再重复**提醒（这一趟已经提醒过了）')
 
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 再问一次' })
-  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 第二次说话**不再提示**（每次进服最多一次）')
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 第二次说话也不再提示（每次进服最多一次）')
 
-  // ★★★ 但"已经提示过"**不能**把 `mc bind` 也挡住 —— 那是玩家主动来绑定的
+  // ★★★ 但"已经提示过"**不能**把 `\mc bind` 也挡住 —— 那是玩家主动来绑定的
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const tells2 = gameCommands.filter((c) => c.what === 'tellraw')
-  eq(tells2.length, 2, '★★★ 提示过之后 `mc bind` **照样**给码（这两件事是独立的）')
+  eq(tells2.length, 2, '★★★ 提示过之后 `\\mc bind` **照样**给码（这两件事是独立的）')
   ok(/\d{6}/.test(tells2.at(-1).command), '★ 新码给了')
 
   // 退服再进 ⇒ 允许再提示一次
   await bridge.onGameEventForTest(SERVER, { kind: 'leave', name: PLAYER })
   await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 我回来了' })
-  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 3, '★ 重新进服 ⇒ 可以再提示一次（"每次进服"不是"一辈子一次"）')
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 3, '★ 重新进服 ⇒ 又提醒一次（"每次进服"不是"一辈子一次"）')
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑤-b ★★★ 已绑定的玩家进服：**一个字都不发**（误报"你还没绑定"比不提醒更糟）===')
+{
+  const { bridge, WS, gameCommands } = wiringBridge()
+  bridge.attach()
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  // ① 先看到 uuid 事件（真机顺序），再进服
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 0, '★★★ 已绑定 ⇒ 进服**不发**任何提醒')
+
+  // ② 万一没看到 uuid 事件，也要靠**绑定表里的名字**认出他（不能误报）
+  const b2 = wiringBridge()
+  b2.bridge.attach()
+  bindUuid({ workspace: b2.WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  await b2.bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+  eq(
+    b2.gameCommands.filter((c) => c.what === 'tellraw').length,
+    0,
+    '★★★ 没有 uuid 事件时靠**名字**也认得出他已绑定 ⇒ 依然不误报',
+  )
+  await b2.bridge.close({ timeoutMs: 100 })
   await bridge.close({ timeoutMs: 200 })
 }
 
@@ -327,17 +356,35 @@ console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ �
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑦ 已绑定但那个 QQ 不在名单里 ⇒ 不参与（与 QQ 侧 fail-closed 一致）===')
+console.log('\n=== ⑦ ★★★ 绑定了就能说话（**门是绑定，不是私聊白名单**）；但权限仍然只是只读 ===')
 {
+  // 使用者 2026-10-04 定的取舍：「**已绑定的玩家**在游戏里叫它就回」。
+  // 上一版把 QQ 的私聊白名单也当成一道门 ⇒ 玩家好不容易绑上了却**说不上话**。
   const { bridge, rpc, WS, gameCommands } = wiringBridge()
   bridge.attach()
-  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: MEMBER, by: 'test' })
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: MEMBER, by: 'test' }) // MEMBER **不在**任何名单里
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
-  eq(rpc.prompts.length, 0, '★★ 名单外 ⇒ **一次模型调用都没有**')
-  const tells = gameCommands.filter((c) => c.what === 'tellraw')
-  eq(tells.length, 1, '★ 如实告诉他"名单里没有"（只给他本人）')
-  ok(/名单/.test(tells[0]?.command ?? ''), '★ 说清了是名单问题，不是"我不理你"')
+  eq(rpc.prompts.length, 1, '★★★ 绑定了 ⇒ **真的跑了一轮**（不再因为 QQ 不在白名单里而拒答）')
+  ok(
+    /【你的权限：普通用户（只读）】/.test(rpc.prompts[0].text),
+    '★★★ 但权限**只是只读**（提示词里明写「普通用户（只读）」）—— 绑定不该顺便把人提权',
+  )
+  eq(
+    gameCommands.filter((c) => c.what === 'tellraw').length,
+    0,
+    '★ 而且**不再**发"你不在名单里"那种话（那句话已经不成立了）',
+  )
+
+  // ★ 管理员绑的还是管理员（权限只由 adminUsers 决定）
+  const b2 = wiringBridge()
+  b2.bridge.attach()
+  bindUuid({ workspace: b2.WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  await b2.bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await b2.bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
+  eq(b2.rpc.prompts.length, 1, '（准备）管理员那条也跑了一轮')
+  ok(/【你的权限：管理员】/.test(b2.rpc.prompts[0].text), '★★★ 绑的是管理员 QQ ⇒ 提示词里仍然是「管理员」（没有降级）')
+  await b2.bridge.close({ timeoutMs: 100 })
   await bridge.close({ timeoutMs: 200 })
 }
 

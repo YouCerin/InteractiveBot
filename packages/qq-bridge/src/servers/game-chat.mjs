@@ -53,13 +53,25 @@ export const MAX_INFLIGHT_EVENTS = 4
 export function decideGameChat({ name = '', uuid = null, bound = null, reminded = false } = {}) {
   if (uuid && bound && bound.qqId) return { action: 'turn' }
   if (reminded) return { action: 'ignore' }
-  return {
-    action: 'remind',
-    text:
-      `你好，${String(name ?? '')}。我还不知道你是群里的谁 —— 要在这里跟我说话，先绑定一下：\n` +
-      '在聊天里输入 \\mc bind（**反斜杠**），我给你一个 6 位码；' +
-      '把码发到群里（@我 并写 \\mc bind 你的码）就绑好了。',
-  }
+  return { action: 'remind', text: unboundReminder(name) }
+}
+
+/**
+ * 「你还没绑定」那条提醒的**唯一文案**（进服提醒与说话兜底共用同一份）。
+ *
+ * ★ 为什么抽出来：它会出现在**两个地方**（进服那一刻、以及他说话时兜底），
+ *   两处各写一遍必然会漂 —— 而漂了以后使用者看到的是两套说法，没法照着做。
+ * ★ 文案的三条硬要求（都有断言）：
+ *   ① 给的是 `\mc bind`，而且明说**反斜杠**（玩家一定会按习惯打斜杠，而斜杠进不来）；
+ *   ② 说清"下一步在群里"（否则他不知道码要发到哪）；
+ *   ③ 不写任何内部术语（"UUID""绑定表"这些对他没用）。
+ */
+export function unboundReminder(name = '') {
+  return (
+    `你好，${String(name ?? '')}。我还不知道你是群里的谁 —— 要在这里跟我说话，先绑定一下：\n` +
+    '在聊天里输入 \\mc bind（**反斜杠**），我给你一个 6 位码；' +
+    '把码发到群里（@我 并写 \\mc bind 你的码）就绑好了。'
+  )
 }
 
 /**
