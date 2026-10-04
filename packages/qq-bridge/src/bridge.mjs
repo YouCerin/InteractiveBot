@@ -97,7 +97,7 @@ const RECENT_CTX_CHARS = 150
  */
 const DEFAULT_START_WAIT_MS = 180_000
 /**
- * **本地指令通道**（0.3.2 收尾）：管理员在群里发 `/mc <命令>`，桥接**自己执行**。
+ * **本地指令通道**（0.3.2 收尾）：管理员在群里发 `\mc <命令>`，桥接**自己执行**。
  *
  * ★★★ 这条路与"模型调工具"那条路的根本区别：**模型一次都没被叫醒**。
  *   所以它没有"伪造授权文件"那个上限（见 `src/servers/command-gate.mjs` 的边界说明），
@@ -108,7 +108,7 @@ const DEFAULT_START_WAIT_MS = 180_000
  *      `semantic` 模式下"来下指令"可能被判成"该沉默"，命令白下；
  *   ② **只有管理员**能用（`tier === 'admin'`）。非管理员发这个形状的文本时
  *      **不是**"拒绝并解释"，而是**当作普通聊天**（否则等于告诉所有人"这里有后门"）。
- *   ③ 参数消歧**不能靠正则**：`/mc list` 里的 `list` 是命令不是 id（实测踩到）。
+ *   ③ 参数消歧**不能靠正则**：`\mc list` 里的 `list` 是命令不是 id（实测踩到）。
  *      判据是"第一个词是不是配置里真实存在的 id"。
  *   ④ 形状判据必须**纯同步**（`looksLikeMcCommand`），普通消息不产生额外 `await` ——
  *      见那个函数的注释（无条件 `await` 会扰动原有时序，代价很大）。
@@ -128,7 +128,7 @@ const MC_COMMAND_SHAPE = /^[\\/]{1,2}mc(?:\s|$)/i
  *   使 `verify-schedule` 报 `unsettled top-level await`（退出码 13）——
  *   那种失败看起来与本地指令毫无关系，极难定位。
  * ★ 形状判据**只看开头**：必须以 `/mc`（或 `//mc`）作为一个词开头，
- *   所以群里聊到"那个 /mc 命令"**不会**命中。
+ *   所以群里聊到"那个 \mc 命令"**不会**命中。
  */
 function looksLikeMcCommand(text) {
   return MC_COMMAND_SHAPE.test(String(text ?? '').trim())
@@ -1686,11 +1686,17 @@ export class Bridge extends EventTarget {
   }
 
   /**
-   * **本地指令通道**：`/mc [服务器id] <命令>`（0.3.2 收尾）。
+   * **本地指令通道**：`\mc [服务器id] <命令>`（0.3.2 收尾）。
+   *
+   * ★★★ **反斜杠是唯一的对外格式**（使用者 2026-10-04 定的）：游戏里以 `/` 开头会被
+   *   服务端当命令（那条路看不到），群里那两个字符本来无所谓，但**两处用同一个格式**
+   *   对使用者更省事 —— 所以**文档、提示、示例一律写 `\mc`**。
+   *   代码里 `/mc` 与 `//mc` **仍然认**（零代价的兜底，见 `MC_COMMAND_SHAPE`），
+   *   但如果发现自己又在某处写了 `/mc`，那多半是漏改。
    *
    * ★★★ 判据顺序（每一步都要有理由）：
-   *   ① 文本必须是这个**完整指令形状**（`/mc ` 前缀）—— 只有前缀不算命中
-   *      （群里聊到"那个 /mc 命令"不该触发）。形状不对 ⇒ 返回 `notMatched`，
+   *   ① 文本必须是这个**完整指令形状**（`\mc ` 前缀）—— 只有前缀不算命中
+   *      （群里聊到"那个 \mc 命令"不该触发）。形状不对 ⇒ 返回 `notMatched`，
    *      调用方**照常走普通聊天**。
    *   ② **只有管理员**（`tier === 'admin'`）—— 非管理员发这个形状时返回 `notMatched`
    *      **而不是拒绝**：拒绝等于告诉所有人"这里有后门"，而照常聊天什么都不暴露。
@@ -1708,17 +1714,17 @@ export class Bridge extends EventTarget {
     // ★ 反斜杠是**对外格式**（游戏内以 `/` 开头会被当命令，见 `parseGameBindRequest`）；
     //   斜杠那几个形状仍然收（零代价，装了服务端插件之后就能用）。
     if (!/^[\\/]{1,2}mc(?:\s|$)/i.test(raw)) return { matched: false }
-    // ★★ 参数消歧（实测踩到的真 bug）：`/mc list` 里的 `list` 是**命令**，
+    // ★★ 参数消歧（实测踩到的真 bug）：`\mc list` 里的 `list` 是**命令**，
     //   不是服务器 id。靠正则分不出来 ⇒ **按配置里真实存在的 id 来消歧**：
     //   第一个词命中某个 id 才算 id，否则整串都是命令（id 留空，交给"只有一台就自动选"）。
     const rest = raw.replace(/^[\\/]{1,2}mc\s*/i, '').trim()
     if (!rest) {
-      await this.#safeSend(kind, peerId, '用法：`/mc [服务器id] <命令>` —— 例如 `/mc list`、`/mc forge tps`')
+      await this.#safeSend(kind, peerId, '用法：`\\mc [服务器id] <命令>` —— 例如 `\\mc list`、`\\mc forge tps`')
       return { matched: true, ok: false, text: '没给命令' }
     }
     // ★ 只有管理员：非管理员 ⇒ **当作普通聊天**（不解释、不拒绝）
     if (String(tier ?? '') !== 'admin') {
-      this.log(`🎛️ [servers] 有人发了 /mc 形状的文本但不是管理员（${kind}:${peerId}）⇒ 按普通聊天处理，不执行也不解释`)
+      this.log(`🎛️ [servers] 有人发了 \\mc 形状的文本但不是管理员（${kind}:${peerId}）⇒ 按普通聊天处理，不执行也不解释`)
       return { matched: false }
     }
     const list = (Array.isArray(this.config?.servers) ? this.config.servers : []).filter((s) => s && s.enabled !== false)
@@ -1731,7 +1737,7 @@ export class Bridge extends EventTarget {
       command = rest.slice(first.length).trim()
     }
     if (!command) {
-      await this.#safeSend(kind, peerId, `用法：\`/mc ${serverId} <命令>\` —— 只给了服务器 id，没给命令`)
+      await this.#safeSend(kind, peerId, `用法：\`\\mc ${serverId} <命令>\` —— 只给了服务器 id，没给命令`)
       return { matched: true, ok: false, text: '没给命令' }
     }
     if (!serverId) {
@@ -1739,7 +1745,7 @@ export class Bridge extends EventTarget {
       else {
         // ★ 多台且没给 id ⇒ **报错不猜**（"随便挑一台"是这里最坏的一种猜错）
         const ids = list.map((s) => s.id).filter(Boolean)
-        const msg = `配了 ${list.length} 台服务器，必须指明是哪一台：\`/mc <id> <命令>\`（有：${ids.join('、') || '无'}）`
+        const msg = `配了 ${list.length} 台服务器，必须指明是哪一台：\`\\mc <id> <命令>\`（有：${ids.join('、') || '无'}）`
         await this.#safeSend(kind, peerId, msg)
         return { matched: true, ok: false, text: msg }
       }
@@ -1829,7 +1835,8 @@ export class Bridge extends EventTarget {
         if (v.respond) {
           const msg =
             '绑定要在**群里**做：先让玩家在游戏里输 `\\mc bind` 拿一个 6 位码，' +
-            '然后在机器人所在的群里发 `\\mc bind <码>`。私聊这条路是关着的（也不打算开）。'
+            '然后在机器人所在的群里**直接发** `\\mc bind <码>`（**不用 @ 我**）。' +
+            '私聊这条路是关着的（也不打算开）。'
           this.log(`🔗 [bind] ${peerKey} 在私聊里发绑定指令 ⇒ 给了一句确定性指路（不调模型）`)
           await this.#safeSend(kind, peerId, msg)
           return { matched: true, ok: false, text: msg }
@@ -1850,7 +1857,8 @@ export class Bridge extends EventTarget {
       const msg =
         '绑定码要**在游戏里拿**：让玩家进服后**在聊天里输入** `\\mc bind`（**反斜杠，不是斜杠** —— ' +
         '以 `/` 开头的会被服务端当成命令，我们看不到那句），' +
-        '我会单独把 6 位码发给**他本人**；他把码发到这里：`\\mc bind <码>`。'
+        '我会单独把 6 位码发给**他本人**；他把码发到这里：`\\mc bind <码>`' +
+        '（**直接发，不用 @ 我** —— 这句我一定能看到）。'
       await this.#safeSend(kind, peerId, msg)
       return { matched: true, ok: false, text: msg }
     }
@@ -1926,13 +1934,15 @@ export class Bridge extends EventTarget {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 0.3.2 P3：游戏内对话（读控制台 → 绑定 → 模型 → `say` / `tellraw`）
+  // 0.3.2 P3：游戏内对话（读控制台 → 绑定 → 模型 → `tellraw`）
   // ══════════════════════════════════════════════════════════════════════════
   //
   // 三条设计纪律（设计文档 §5.3 / §5.4 / §5.5），改这里之前先读：
   //   ① **未绑定 = 不能对话**，而且它的话**不进模型**（零成本）：只给本人一条
   //      `tellraw` 说明怎么绑，且**每次进服最多一次**（刷屏的提示等于没有提示）；
-  //   ② **未绑定提醒与绑定回执走 `tellraw`（只给本人）**，普通回复走公屏 `say`；
+  //   ② **未绑定提醒与绑定回执走 `tellraw`（只给本人）**，普通回复走公屏
+  //      （`tellraw @a` + `<小鲸鱼> ` 前缀、不上色 —— 使用者要求「每条发言都带上
+  //      `<小鲸鱼>`、不要高亮、模仿正常玩家」；`say` 会渲染成 `[Server] …` 带配色，故弃用）；
   //   ③ **任何进入游戏的内容都必须过隐私闸** —— 那一条不用在这里做：它在上游
   //      （`#runTurn` 里、`#deliver` 之前），游戏通道与 QQ 通道**共用同一道门**。
 
@@ -2109,9 +2119,9 @@ export class Bridge extends EventTarget {
         server,
         name,
         `你的绑定码是 ${issued.code}（${mins} 分钟内有效、只能用一次）。\n` +
-          '把它发到我们那个群里，格式是：@小鲸鱼 \\mc bind ' +
-          issued.code,
-        'yellow',
+          '把它**直接发到我们那个群里**：`\\mc bind ' +
+          issued.code +
+          '`（**不用 @ 我**）。',
       )
       this.log(`🔗 [bind] 给「${name}」（UUID ${shortUuid(uuid)}…）出了一张绑定码（码**不进日志**，${mins} 分钟有效）`)
       return
@@ -2860,7 +2870,7 @@ export class Bridge extends EventTarget {
   }
 
   /**
-   * **本地指令通道**的测试入口（0.3.2 收尾：`/mc [id] <命令>`）。
+   * **本地指令通道**的测试入口（0.3.2 收尾：`\mc [id] <命令>`）。
    *
    * ★ 为什么必须留这个入口：那条通道的**位置**才是关键 —— 它必须在
    *   **语义唤醒闸门之前**且**命中即 return**。放错地方会**静默失效**
@@ -3590,7 +3600,7 @@ export class Bridge extends EventTarget {
       this.log(`⚠️ [people-stats] 统计没记上（聊天不受影响）：${error?.message ?? error}`)
     }
 
-    // ── ③-b 本地指令通道：`/mc [id] <命令>`（0.3.2 收尾）──────────────────
+    // ── ③-b 本地指令通道：`\mc [id] <命令>`（0.3.2 收尾）──────────────────
     //
     // ★★★ 位置是**刻意的**（设计文档 §11「本地指令通道」那一条）：
     //   · 在**语义唤醒闸门之前** ⇒ 否则 `semantic` 模式下"来下指令"可能被判成

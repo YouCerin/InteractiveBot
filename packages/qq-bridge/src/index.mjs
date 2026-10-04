@@ -1753,7 +1753,7 @@ async function main() {
         console.log('')
         console.log(`UUID ↔ QQ 绑定（${binds.length} 条；表在 runtime/bindings.json —— 属使用者数据，永不进包）：`)
         if (binds.length === 0) {
-          console.log('   （还没有 —— 玩家要在游戏里输 `mc bind` 拿码，再到群里发 `/mc bind <码>`）')
+          console.log('   （还没有 —— 玩家要在游戏里输 `\\mc bind` 拿码，再到群里**直接发** `\\mc bind <码>`（不用 @））')
         }
         for (const b of binds) {
           const when = b.at ? new Date(Number(b.at)).toLocaleString() : ''

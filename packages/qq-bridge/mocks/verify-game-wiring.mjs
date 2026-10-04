@@ -15,7 +15,7 @@
  * 玩家进服（未绑定）          → 只给他本人一条 tellraw：怎么拿码
  * 玩家在**游戏里**说 \mc bind  → 生成一张 6 位码（与那个 UUID 挂在一起）
  *                                → 只给他本人 tellraw：码 + 下一步
- * 玩家在**群里**发 @我 \mc bind <码>
+ * 玩家在**群里直接**发 \mc bind <码>（**不用 @ 我** —— 这条通道在唤醒判定**之前**）
  *                            → 桥接本地拦截（一次模型调用都没有）→ **当场绑定**
  *                            → 群里回一句 + **在游戏里给那个玩家一条成功通知**
  * ```
@@ -243,6 +243,11 @@ console.log('\n=== ④ 形状不对的提交：**必须在这里拦下**，不�
   eq(sent.length, before + 1, '★ `\\mc bind`（没码）⇒ 指路')
   ok(/游戏里/.test(sent.at(-1)?.text ?? ''), '★★ 指路说清"码要在游戏里拿"（**不在这里发码**）')
   ok(/反斜杠/.test(sent.at(-1)?.text ?? ''), '★★★ 而且说清是**反斜杠**（斜杠在游戏里进不来，实测过）')
+  // ★★★ 使用者 2026-10-04 的第二处修正：群里**不用 @ 它**。第一版教程写的是
+  //   「@小鲸鱼 \mc bind 码」，而这条通道跑在 `decideTrigger` **之前** ⇒ @ 一直是多余的。
+  //   措辞错了会让人以为不 @ 就没反应（白等），∴ 两条都钉死。
+  ok(!/@小鲸鱼/.test(sent.at(-1)?.text ?? ''), '★★★ 群里那句指路**不教人 @ 小鲸鱼**')
+  ok(/不用 ?@ ?我/.test(sent.at(-1)?.text ?? ''), '★★★ 并**明说不必 @**')
   eq(rpc.prompts.length, 0, '★ 零模型调用')
 
   // ★★ 别的 `mc <子命令>`**不许**被绑定通道吞掉（它们要走管理员控制台那条路）
@@ -281,6 +286,9 @@ console.log('\n=== ⑤ ★★★ 未绑定玩家**进服那一刻**就收到提�
   ok(tells0[0].command.startsWith(`tellraw ${PLAYER} `), '★★ 只给他本人')
   ok(/\\mc bind/.test(tells0[0].command), '★ 提醒里给出了 `\\mc bind`')
   ok(/反斜杠/.test(tells0[0].command), '★★★ 并说清是**反斜杠**（玩家一定会按习惯打斜杠）')
+  ok(!/@小鲸鱼/.test(tells0[0].command), '★★★ 提醒里**不教人 @ 小鲸鱼**（群里直接发就行，@ 是多余的）')
+  ok(/不用 ?@ ?我/.test(tells0[0].command), '★★★ 并且**明说"不用 @ 我"**（不说清就会有人 @ 了再等）')
+  ok(!/\/mc/.test(tells0[0].command), '★★ 提醒里不出现 `/mc`（正斜杠是错的形状）')
   eq(rpc.prompts.length, 0, '★ 提醒不产生任何模型调用')
 
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 你好' })
@@ -356,7 +364,7 @@ console.log('\n=== ⑤-c 未绑定的人**说话**：默认不回；只有**明�
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ 真的跑了一轮，回复走**公屏 say** ===')
+console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ 真的跑了一轮，回复走**公屏 tellraw @a** ===')
 {
   const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
   bridge.attach()
