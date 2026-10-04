@@ -282,8 +282,16 @@ section('安全 ③-b servers[].password：既不许读出去，也不许保存�
   // （游戏内根本没有控制台通道）。两件事都必须在界面上可查、可改。
   check('★★★ 表单里有 `commandFromQQ` 这个勾选框，而且**状态会跟着保存提交**',
     /commandFromQQ:\s*server\?\.commandFromQQ/.test(formSrc) && /commandFromQQ:\s*form\.commandFromQQ/.test(formSrc))
-  check('★★★ 并且明说它与「游戏内对话」是**两条独立的路**、游戏内发不了指令',
-    /没有关系/.test(formSrc) && /游戏内发不出指令|游戏内\*\*发不出\*\*指令/.test(formSrc))
+  // ★★★ 措辞这条**错过一次**，所以判据也要跟着改（别把错话钉成契约）：
+  //   第一版界面写的是「与游戏内无关 / 游戏内发不出指令」——**那是错的**：
+  //   游戏内那一轮若是**绑定到管理员 QQ** 的玩家在说话，用的就是这个 QQ 的会话，
+  //   所以这个开关**也管他**。真机表现：管理员在游戏里查 TPS 被 bot 推回给使用者。
+  check('★★★ 明说这个开关**管三条入口**（群里 `\\mc` / 模型工具 / **游戏内管理员**）',
+    /群里/.test(formSrc) && /mc_command/.test(formSrc) && /游戏内/.test(formSrc) && /管理员 QQ/.test(formSrc))
+  check('★★ 并且说清它与「游戏内对话」的分工是**听不听 vs 动不动**（另一个维度）',
+    /听不听/.test(formSrc) && /动不动/.test(formSrc))
+  check('★★★ **不许**再写回「与游戏内无关 / 游戏内发不出指令」那句错话',
+    !/与游戏内无关/.test(formSrc) && !/游戏内发不出/.test(formSrc))
   check('★★ 服务器卡片上也看得见它的状态（否则用户只能靠 bot 的报错才知道）',
     /commandFromQQ/.test(readFileSync(join(PKG_ROOT, 'config-ui', 'src', 'sections', 'ServerTab.tsx'), 'utf8')))
   check('★★ 启动参数**留空 = 不改**（旧版无条件送 `[]`，打开表单点保存就把真实参数清空了）',

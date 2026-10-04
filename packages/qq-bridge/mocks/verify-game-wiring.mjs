@@ -395,15 +395,23 @@ console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ �
   const prompt = rpc.prompts[1].text
   ok(/Minecraft/.test(prompt) && /公屏/.test(prompt), '★★★ 来源标注**如实说是公屏**（否则模型会以为在一对一私聊里）')
   ok(/全服所有人都看得见/.test(prompt), '★★★ 并且明确警告"全服都看得见"')
-  // ★★★ 使用者 2026-10-04 报的第二件事的直接回归锁：
-  //   他在游戏里让 bot 跑 `forge tps`，bot 回的是「那个「允许从 QQ 下指令」的开关没开」——
-  //   从这个站在游戏里的玩家听来那句话莫名其妙，于是他来问「这个开关跟在游戏内发布指令有何关系」。
-  //   答案是**没关系**（`commandFromQQ` 只管 QQ 那条路）。∴ 提示词里必须写明这条边界，
-  //   否则模型只能自己编，而它编出来的是**一句误导**：让人去开一个"开了也没用"的开关。
-  ok(/游戏内这条通道没有控制台权限/.test(prompt), '★★★ 来源标注写明"游戏内没有控制台权限"')
+  // ★★★ 使用者 2026-10-04 报的第二件事的直接回归锁（**两个方向都错过一次，所以这里钉三面**）：
+  //   ① 最早什么都不说 ⇒ 模型自己编出「那个「允许从 QQ 下指令」的开关没开」，
+  //      对站在游戏里的玩家毫无用处；
+  //   ② 我接着改成一句无条件的「游戏内这条通道没有控制台权限」——**那是假的**：
+  //      这一轮绑定到了管理员 QQ，桥接**已经给这一轮写了控制台授权**，于是它把自己的活
+  //      推回给使用者（「你自己在服务端控制台敲 forge tps」），而同一条会话在 QQ 私聊里问
+  //      就老老实实去查了 —— 使用者因此来问「为什么游戏内无法执行，在游戏外却可以」。
+  //   ∴ 判据必须**按 tier 分**。这一节是「管理员 + 那台服开关没开」这一支。
   ok(
-    /commandFromQQ/.test(prompt) && /与游戏内无关/.test(prompt) && /不要\*\*让他去打开/.test(prompt),
-    '★★★ 并且**点名**别把 `commandFromQQ` 那个 QQ 侧开关当成游戏内的解法',
+    /说话人是\*\*管理员\*\*/.test(prompt) && /没有打开/.test(prompt),
+    '★★★ 管理员这一轮 + 测试那台服 `commandFromQQ=false` ⇒ 标注如实说"开关没开"',
+    prompt.slice(-180),
+  )
+  ok(/服务器页签/.test(prompt), '★★ 并且告诉他去哪儿打开它（他是管理员，那开关就是给他用的）')
+  ok(
+    !/没有控制台权限/.test(prompt),
+    '★★★ **不许**再出现"游戏内没有控制台权限"那句绝对话（授权本来就是给管理员写的 —— 那是我错过一次的措辞）',
   )
   eq(rpc.prompts[1].sessionId, qqSessionId, '★★★ 会话就是**那个 QQ 的会话**（游戏内的话与他的 QQ 记忆同一条）')
 
@@ -757,6 +765,46 @@ console.log('\n=== ⑳ ★★★ 游戏内回合**超时**：提示发到游戏�
   )
   eq(sent.length, 0, '★★★ QQ 私聊里**一个字都没有**（旧代码在这里会发一条"这次处理超时了"）')
   await bridge.close({ timeoutMs: 300 })
+}
+
+console.log('\n=== ㉑ ★★★ 「能不能用控制台」必须**按说话人的 tier** 分，三支都要对 ===')
+//
+// ★★ 使用者 2026-10-04 的最后一问：「为什么我在游戏内要求bot检测TPS无法执行，在游戏外却可以」。
+//   真机日志把原因指得很清楚：
+//     · 07:31:07 游戏内那一轮 —— `🎛️ [servers] 已给这一轮写控制台授权（private:100000001·admin）`
+//       （**授权是写了的**），可它回的是「公屏这条通道我没有控制台权限，你自己在服务端控制台敲
+//       一句 forge tps」；
+//     · 07:32:01 QQ 私聊那一轮 —— **同一条会话键**，同一个授权文件，它就真的调了
+//       `mc_command {"command":"forge tps","kind":"private","peerId":"100000001"}`。
+//   ⇒ 差别不在权限（两边一样），而在**提示词**：我当时写了一句无条件的
+//     「游戏内这条通道没有控制台权限」，它照着念了。这一节把三支都钉住。
+{
+  // ── 支 ①：管理员 + 那台服开了 `commandFromQQ` ⇒ **能用，而且要给全参数指引** ──
+  const on = wiringBridge({ servers: [{ ...SERVER, commandFromQQ: true }] })
+  on.bridge.attach()
+  bindUuid({ workspace: on.WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  const r1 = await on.bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 看下tps' })
+  const p1 = on.rpc.prompts.at(-1)?.text ?? ''
+  ok(Boolean(r1), '（前提）跑了一轮')
+  ok(/控制台你确实能用/.test(p1), '★★★ 管理员 + 开关开着 ⇒ 明确告诉它"你能用"', p1.slice(-200))
+  ok(
+    /mc_command/.test(p1) && /`kind` 用 `private`/.test(p1) && /`peerId` 用 `100000001`|peerId.*100000001/.test(p1),
+    '★★★ 并且把 `kind`/`peerId` **给全**（这正是它调工具时最容易猜错的两个参数）',
+  )
+  ok(/别让他自己去控制台敲/.test(p1), '★★ 明确说"别把你能做的事推回去"（那正是上一次的实际表现）')
+  ok(/公屏/.test(p1) && /别念出来/.test(p1), '★ 同时提醒结果会进公屏 ⇒ 挑着说')
+  await on.bridge.close({ timeoutMs: 300 })
+
+  // ── 支 ②：非管理员（绑的是普通群友的 QQ）⇒ 拿不到授权，且**不许**让他去开开关 ──
+  const no = wiringBridge({ servers: [{ ...SERVER, commandFromQQ: true }] })
+  no.bridge.attach()
+  bindUuid({ workspace: no.WS, uuid: UUID, name: PLAYER, qqId: MEMBER, by: 'test' })
+  await no.bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 看下tps' })
+  const p2 = no.rpc.prompts.at(-1)?.text ?? ''
+  ok(/拿不到控制台权限/.test(p2), '★★★ 非管理员 ⇒ 如实说拿不到（桥接不会给 `USER` 写授权）', p2.slice(-200))
+  ok(/不要\*\*让他去打开某个开关/.test(p2), '★★★ 并且**不许**让普通玩家去开那个开关（开了也没他的份）')
+  ok(!/控制台你确实能用/.test(p2), '★★ 反向对照：**不许**对普通玩家说"你能用"')
+  await no.bridge.close({ timeoutMs: 300 })
 }
 
 rmSync(ROOT, { recursive: true, force: true })

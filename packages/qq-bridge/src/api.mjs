@@ -1199,10 +1199,12 @@ export function createApiHandler(deps) {
           manageOnStart: s.manageOnStart === true,
           // ★ 0.3.2 P3：游戏内对话（界面上的开关）。字段白名单照旧逐个放行。
           gameChat: s.gameChat === true,
-          // ★★★ 允许从 QQ 下控制台指令（0.3.2 收尾）。★ **必须放行**：界面要能显示
+          // ★★★ 允许管理员下控制台指令（0.3.2 收尾）。★ **必须放行**：界面要能显示
           //   它的状态、也要能改它 —— 在那之前界面上没有这个字段，而保存又是"整条替换"
           //   ⇒ 使用者每次保存都把它重置成 `false`，且**界面上完全看不出来**
           //   （他报的「我应该是打开的才对」正是这件事）。
+          // ★ 它管**三条入口**（群里 `\mc`、模型工具、以及**游戏内绑定了管理员 QQ 的玩家**）——
+          //   详见 `config.mjs` 的 `commandFromQQ` 注释与 `bridge.mjs` 里那段按 tier 分的来源标注。
           commandFromQQ: s.commandFromQQ === true,
           failThreshold: s.failThreshold ?? null,
           rules: {
