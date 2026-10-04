@@ -613,6 +613,30 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
       // notImplemented 会被报成"文档谎称已实现"（**这是这条检查第六次抓漏注入了**）。
       serversProbe: async () => ({ ok: true, serverId: 'probe', snapshot: { reachable: true, probed: true } }),
       serversConsole: () => ({ ok: true, lines: [], total: 0, encoding: 'utf8', why: '' }),
+      // 服务端 `server.properties` 的读/写（0.3.2 收尾）—— **第七次**同一处漏注入，
+      // 而且这次它在接进测试链的**第一跑**就报了出来（"文档声称已实现、代码里其实是占位"）。
+      // 这正是那条行为探测的价值：它验的是**行为**，所以只要依赖名写错/漏传就会红。
+      serversProperties: async ({ serverId } = {}) => ({
+        ok: true,
+        serverId,
+        path: 'C:\\probe\\server.properties',
+        from: '归属档',
+        settings: { enableRcon: false, rconPort: 25575, passwordSet: false },
+        describe: 'probe',
+        configRconPort: 25575,
+        configPasswordSet: false,
+      }),
+      serversPropertiesApply: async ({ serverId } = {}) => ({
+        ok: true,
+        serverId,
+        path: 'C:\\probe\\server.properties',
+        from: '归属档',
+        backup: 'C:\\probe\\server.properties.bak-probe',
+        changed: ['enable-rcon'],
+        settings: { enableRcon: true, rconPort: 25575, passwordSet: true },
+        describe: 'probe',
+        note: 'probe',
+      }),
       requestRestart: () => {},
       requestStop: () => {},
       powerUpdateDelayMs: 0,

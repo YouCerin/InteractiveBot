@@ -402,6 +402,12 @@ export function createApiHandler(deps) {
     serversProbe,
     // `readServerConsole({serverId, limit})` —— 控制台**实时输出**（已按真机编码解码）。
     serversConsole,
+    // `serverPropertiesForApi({serverId})` / `applyServerProperties({serverId, …})` ——
+    //   读**服务端自己的** `server.properties` 里 RCON 那三项 / 一键把 RCON 配好（0.3.2 收尾）。
+    //   ★ 实现在 `bridge.mjs`（业务在那一层），纯函数在 `src/servers/properties.mjs`。
+    //   ★ 响应里**永不回密码本身**（只给 `passwordSet`），与 `servers[].password` 同一条纪律。
+    serversProperties,
+    serversPropertiesApply,
     // `normalizeServer(entry)` —— **与启动读配置同一份**归一化（不另写一份，见路由注释）。
     normalizeServer,
     // `onServersChanged()` —— 让盘上的服务器列表**即时生效**（重建监测循环）。
@@ -1092,6 +1098,121 @@ export function createApiHandler(deps) {
           id: mergedEntry.id,
           // ★ 如实说明"配置写进去了，但生效没有"是两件事
           applied: applied?.ok === false ? { ok: false, why: applied.why } : { ok: true, changed: Boolean(applied?.changed), count: applied?.count ?? list.length },
+        })
+      }
+
+      // ── ⓪ 服务端的 `server.properties`（0.3.2 收尾）：读状态 / 一键把 RCON 配好 ──
+      //
+      // 起因（使用者 2026-10-04）：「开服时显示 enable-rcon=false，能否在桥接的编辑栏直接修改」。
+      // 在那之前我们只能**指路**（"去 server.properties 里开 enable-rcon=true"）。
+      //
+      // ★ 两条边界写在这里，免得后来的人以为是疏漏：
+      //   ① **改完必须重启服务端才生效** —— 那三项是它**启动时**读进内存的。
+      //      （实测 2026-10-04：停机**没有**重写 `server.properties`，所以跑着改**不会**被覆盖 ——
+      //       "跑着改会被它改回去"是句流传的话，至少在真机上不成立。）
+      //   ② **它只动 RCON 那三行**，其余逐字保留；写前备份；写前重读一次做乐观并发检查。
+      // ★ 与 `password` 的老纪律一致：响应里**永远不回密码本身**（`settings.passwordSet` 只说配没配，
+      //   连长度都不回）。
+      if (method === 'GET' && path === '/api/servers/properties') {
+        if (typeof serversProperties !== 'function') return notImplemented('服务端 server.properties')
+        const serverId = queryParam(req, 'serverId')
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        const r = await serversProperties({ serverId })
+        // ★★ 字段白名单（与 `/api/servers` 同一条纪律）：不把那一层的返回值直接转出去
+        if (r?.ok !== true) return fail(400, String(r?.why ?? '读不出来'))
+        const s = r.settings ?? {}
+        // ⚠️ `Number(null) === 0` 且 `Number.isFinite(0) === true` —— 直接写
+        //    `Number.isFinite(Number(x))` 会把"没这一项"变成 `0`。这里显式挡掉 null/undefined。
+        const filePort = s.rconPort === null || s.rconPort === undefined ? null : Number(s.rconPort)
+        const cfgPort = r.configRconPort === null || r.configRconPort === undefined ? null : Number(r.configRconPort)
+        return ok({
+          ok: true,
+          serverId: String(r.serverId ?? serverId),
+          path: String(r.path ?? ''),
+          from: String(r.from ?? ''),
+          settings: {
+            enableRcon: s.enableRcon === true ? true : s.enableRcon === false ? false : null,
+            rconPort: Number.isFinite(filePort) ? filePort : null,
+            passwordSet: s.passwordSet === true,
+          },
+          describe: String(r.describe ?? ''),
+          configRconPort: Number.isFinite(cfgPort) ? cfgPort : null,
+          configPasswordSet: r.configPasswordSet === true,
+          // ★ 忠实转达"这两边一致吗"（不一致时 RCON 一样连不上）。
+          //   ★ 一边"不知道"时**不算不一致** —— 不能凭空宣称一个我们没核实过的差异。
+          mismatch: {
+            port: filePort !== null && cfgPort !== null && filePort !== cfgPort,
+            password: (s.passwordSet === true) !== (r.configPasswordSet === true),
+          },
+          restartNeeded: true,
+        })
+      }
+
+      if (method === 'POST' && path === '/api/servers/properties') {
+        if (typeof serversPropertiesApply !== 'function') return notImplemented('服务端 server.properties')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        const serverId = String(body.serverId ?? '').trim()
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        const wantsRcon = body.enableRcon !== undefined
+        const wantsPort = body.rconPort !== undefined && body.rconPort !== null && String(body.rconPort).trim() !== ''
+        const wantsPassword = typeof body.password === 'string' && body.password.length > 0
+        if (!wantsRcon && !wantsPort && !wantsPassword) {
+          return fail(400, '至少要给一项：enableRcon / rconPort / password')
+        }
+        const r = await serversPropertiesApply({
+          serverId,
+          ...(wantsRcon ? { enableRcon: body.enableRcon === true } : {}),
+          ...(wantsPort ? { rconPort: Number(body.rconPort) } : {}),
+          ...(wantsPassword ? { password: String(body.password) } : {}),
+        })
+        if (r?.ok !== true) return fail(400, String(r?.why ?? '写入失败'))
+
+        // ── 顺手把两边对齐：只写我们自己的 config（服务端那三行刚写过了）──────────
+        // ★ 同步是**默认行为**且必须做：两边不一致时 RCON 照样连不上（这正是使用者报的那类
+        //   "配置都填了却还是用不了"）。字段级合并 —— 只动 `rconPort` / `password`。
+        let synced = null
+        if (body.syncToConfig !== false && (wantsPort || wantsPassword)) {
+          try {
+            const raw = await readRawConfig()
+            const list = Array.isArray(raw.servers) ? raw.servers : []
+            const i = list.findIndex((s) => s && String(s.id) === serverId)
+            if (i >= 0) {
+              if (wantsPort) list[i].rconPort = Number(body.rconPort)
+              if (wantsPassword) list[i].password = String(body.password)
+              raw.servers = list
+              await writeRawConfig(raw)
+              if (typeof onServersChanged === 'function') {
+                const applied = await onServersChanged()
+                synced = { ok: applied?.ok !== false, why: applied?.ok === false ? applied.why : '' }
+              } else {
+                synced = { ok: false, why: '没有 onServersChanged —— 配置写了但监测循环没重建' }
+              }
+            } else {
+              synced = { ok: false, why: `配置里没有 id 为「${serverId}」的服务器（只改了 server.properties）` }
+            }
+          } catch (e) {
+            synced = { ok: false, why: `同步进 config.json 失败：${e?.message ?? e}` }
+          }
+        }
+        const s = r.settings ?? {}
+        return ok({
+          ok: true,
+          serverId,
+          path: String(r.path ?? ''),
+          from: String(r.from ?? ''),
+          backup: r.backup ? String(r.backup) : '',
+          changed: Array.isArray(r.changed) ? r.changed.map(String) : [],
+          settings: {
+            enableRcon: s.enableRcon === true ? true : s.enableRcon === false ? false : null,
+            // ⚠️ 同上：`Number(null) === 0` ⇒ 必须显式挡掉，否则"没这一项"会变成端口 0
+            rconPort: s.rconPort === null || s.rconPort === undefined ? null : (Number.isFinite(Number(s.rconPort)) ? Number(s.rconPort) : null),
+            passwordSet: s.passwordSet === true,
+          },
+          describe: String(r.describe ?? ''),
+          // ★ 这一句是从那一层带上来的（含"要重启才生效"），界面照抄，别自己编
+          note: String(r.note ?? ''),
+          synced,
+          restartNeeded: true,
         })
       }
 

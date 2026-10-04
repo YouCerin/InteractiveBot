@@ -287,6 +287,52 @@ const handler = createApiHandler({
       __password: 'THIS_SHOULD_NEVER_LEAK',
     }
   },
+  // ── 服务端 `server.properties`（0.3.2 收尾）：读状态 / 一键配好 ──────────────
+  // ★ 桩里**故意回带密码字段**（`__password` 与 settings 里的原始 `password`），
+  //   用来断言路由那层的字段白名单真的把它们挡住了（与上面几处同一个套路）。
+  serversProperties: async ({ serverId } = {}) => {
+    if (serverId === 's2') {
+      // ★ "文件里没写那两项"那一档：路由必须回 `null` 而不是 `0`/`false`
+      //   （`Number(null)===0` 是这条路上最容易踩的坑，见 ④-d-5 的断言）
+      return {
+        ok: true,
+        serverId: 's2',
+        path: 'C:\\fake\\store\\mc-two\\server.properties',
+        from: 'config.json 的 servers[].cwd',
+        settings: { enableRcon: null, rconPort: null, passwordSet: false },
+        describe: 'enable-rcon=**没有这一项/值看不懂** · rcon.port=没写（默认 25575） · rcon.password=**空**',
+        configRconPort: null,
+        configPasswordSet: false,
+      }
+    }
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    return {
+      ok: true,
+      serverId: 's1',
+      path: 'C:\\fake\\store\\mc-main\\server.properties',
+      from: '归属档（我们拉起它时用的工作目录）',
+      settings: { enableRcon: false, rconPort: 25575, passwordSet: true, password: 'THIS_SHOULD_NEVER_LEAK' },
+      describe: 'enable-rcon=**关**（这就是连不上的原因） · rcon.port=25575 · rcon.password=已设置',
+      configRconPort: 25576,
+      configPasswordSet: false,
+      __password: 'THIS_SHOULD_NEVER_LEAK',
+    }
+  },
+  serversPropertiesApply: async ({ serverId, enableRcon, rconPort, password } = {}) => {
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    return {
+      ok: true,
+      serverId: 's1',
+      path: 'C:\\fake\\store\\mc-main\\server.properties',
+      from: '归属档',
+      backup: 'C:\\fake\\store\\mc-main\\server.properties.bak-2026-10-04T12-00-00-000Z',
+      changed: [enableRcon === true ? 'enable-rcon' : null, rconPort ? 'rcon.port' : null, password ? 'rcon.password' : null].filter(Boolean),
+      settings: { enableRcon: enableRcon === true, rconPort: rconPort ?? 25575, passwordSet: Boolean(password) },
+      describe: `enable-rcon=${enableRcon === true ? '开' : '关'} · rcon.port=${rconPort ?? 25575} · rcon.password=${password ? '已设置' : '空'}`,
+      note: '已写入 server.properties。**要重启服务端才生效** —— 那三项是它启动时读进内存的。',
+      __password: 'THIS_SHOULD_NEVER_LEAK',
+    }
+  },
 })
 
 const server = await serveApi({ port: 0, handler, log: (m) => logs.push(String(m)) })
@@ -691,6 +737,87 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★★★ 明确回带"状态文件刻意保留"（那是"我起过它"的归属证据，删了就失去重启能力）',
     delOk.json?.data?.keptStateFiles === true && /归属证据/.test(String(delOk.json?.data?.note ?? '')),
     String(delOk.json?.data?.note ?? ''))
+
+  // ── ④-d-5 服务端 `server.properties`（0.3.2 收尾）──────────────────────────
+  //
+  // 使用者问：「开服时显示 enable-rcon=false，能否在桥接的编辑栏直接修改」。
+  // 这一节盯**接线**（纯函数那一套在 `verify-properties.mjs`）：
+  //   · 字段白名单（桩里故意回带密码 ⇒ 响应里一个字符都不能有）；
+  //   · **顺手把两边对齐**：写入之后 `config.json` 的 `rconPort`/`password` 必须跟着变
+  //     —— 只改一半等于没修（这正是使用者报的那类"配置都填了却还是用不了"）；
+  //   · 缺 serverId / 什么都不要求改 ⇒ 400（fail-closed）。
+  const propsGet = async (serverId) => {
+    const res = await fetch(url(`/api/servers/properties?serverId=${encodeURIComponent(serverId)}`), {
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  const propsPost = async (body) => {
+    const res = await fetch(url('/api/servers/properties'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+
+  const noId = await propsGet('')
+  check('★★ 读状态缺 serverId ⇒ 400（不猜是哪一台）', noId.status === 400, noId.text.slice(0, 120))
+  const st = await propsGet('s1')
+  check('★ 读状态 → 200', st.status === 200, st.text.slice(0, 140))
+  check('★★★ 响应里**一个字符都没有密码**（桩里故意回带了 `__password`）',
+    !st.text.includes('THIS_SHOULD_NEVER_LEAK'), st.text.slice(0, 140))
+  check('★ 只给"配没配"（`passwordSet`），不给密码本身', st.json?.data?.settings?.passwordSet === true)
+  check('★★ 如实回带"两边对不上"的两项（端口 / 密码）',
+    st.json?.data?.mismatch?.port === true && st.json?.data?.mismatch?.password === true,
+    JSON.stringify(st.json?.data?.mismatch))
+  check('★★ 回带那个**文件路径**与它的来源（"改错文件"是最坏的失败形状）',
+    /server\.properties$/.test(String(st.json?.data?.path ?? '')) && String(st.json?.data?.from ?? '').length > 0,
+    `${st.json?.data?.path} ← ${st.json?.data?.from}`)
+  check('★ 端口如实回带（桩里是 25575）', st.json?.data?.settings?.rconPort === 25575, String(st.json?.data?.settings?.rconPort))
+  // ★★ 这一条是**我自己写错又抓回来的**：`Number(null) === 0` 且 `Number.isFinite(0)` 为真 ⇒
+  //    "文件里没写 rcon.port"会被回成 `0`（一个服务端会拒绝的端口），而界面上看不出区别。
+  //    桩里 `s2` 就是"没写端口 + 没写 enable-rcon"那一档。
+  const st2 = await propsGet('s2')
+  check('★★★ 文件里没写端口 ⇒ 回 `null`，**不是 0**（`Number(null)===0` 那个坑）',
+    st2.json?.data?.settings?.rconPort === null, JSON.stringify(st2.json?.data?.settings))
+  check('★★ 文件里没写 `enable-rcon` ⇒ 回 `null`（**不猜成 false**）',
+    st2.json?.data?.settings?.enableRcon === null, JSON.stringify(st2.json?.data?.settings))
+  check('★★ 一边"不知道"时**不算不一致**（不能凭空宣称没核实过的差异）',
+    st2.json?.data?.mismatch?.port === false, JSON.stringify(st2.json?.data?.mismatch))
+
+  check('★★ 写入缺 serverId ⇒ 400', (await propsPost({ enableRcon: true })).status === 400)
+  check('★★ 写入什么都不要求改 ⇒ 400', (await propsPost({ serverId: 's1' })).status === 400)
+  check('★ 不认识的 serverId ⇒ 400（如实报错，不静默成功）', (await propsPost({ serverId: 'nope', enableRcon: true })).status === 400)
+
+  const applied = await propsPost({ serverId: 's1', enableRcon: true, rconPort: 25599, password: 'BRAND-NEW-PW' })
+  check('★★ 一键配好 → 200', applied.status === 200, applied.text.slice(0, 160))
+  check('★★★ 写入的响应里**也没有密码**（连回执都不带）', !applied.text.includes('BRAND-NEW-PW'), applied.text.slice(0, 160))
+  check('★★ 如实回带"**要重启服务端才生效**"（界面照抄这句，别自己编）',
+    /重启服务端才生效/.test(String(applied.json?.data?.note ?? '')), String(applied.json?.data?.note ?? ''))
+  check('★ 回带备份路径（写坏了能回退）', /\.bak-/.test(String(applied.json?.data?.backup ?? '')), String(applied.json?.data?.backup ?? ''))
+  check('★★★ **顺手把 config.json 也对齐了**（只改 server.properties 等于没修）', (() => {
+    const row = rawConfigStub.servers.find((s) => s.id === 's1') ?? {}
+    return row.rconPort === 25599 && row.password === 'BRAND-NEW-PW'
+  })(), JSON.stringify({ port: s1().rconPort, pwLen: String(s1().password ?? '').length }))
+  check('★ 同步结果也如实回带', applied.json?.data?.synced?.ok === true, JSON.stringify(applied.json?.data?.synced))
+  check('★★ 字段白名单：返回里没有依赖塞进来的 `__password`',
+    st.json?.data?.__password === undefined && applied.json?.data?.__password === undefined)
 
   // ── ④-e 主动检测（`POST /api/servers/probe`）与实时后台（`GET /api/servers/console`）──
   const probe = async (body) => {

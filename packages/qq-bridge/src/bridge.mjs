@@ -161,7 +161,7 @@ function looksLikeBindCommand(text) {
 
 // ★ P3/收尾用到的几个：读服务器控制台（`readServerConsole`）。
 //   为什么在这里 import 而不是动态：它们只是 `node:fs` 的普通函数，没有加载成本。
-import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, openSync, readSync, statSync, writeFileSync } from 'node:fs'
 // ★ 控制台日志的解码（真机是 **GBK**，不是 UTF-8 —— 见 `log-source.mjs` 文件头）
 import { decodeConsoleBytes } from './servers/log-source.mjs'
 // ★ 启动窗口：把"正在启动"与"挂了"分开（判据只有一处，监测与界面共用）
@@ -170,6 +170,18 @@ import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './m
 import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
 import { appendTurnOps, appendOp } from './oplog.mjs'
 import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } from './tasks.mjs'
+// ★ 服务端的 `server.properties`（0.3.2 收尾）：界面上的「RCON 一键配好」走这两个模块。
+//   ★★ 必须是**模块级 import**（不是块内局部别名）—— 路由对象会引用它们，
+//   而"块级局部别名被路由对象引用"正是 `listScheduleTasks is not defined` 那次事故的形状
+//   （见 `mocks/verify-route-scope.mjs`）。
+import {
+  PROPERTIES_FILE,
+  describeRconSettings,
+  patchRconSettings,
+  readPropertiesFile,
+  readRconSettings,
+  resolvePropertiesPath,
+} from './servers/properties.mjs'
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
 import { extractRecipe, runDirect, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './extract.mjs'
 import { createWakeJudge, judgeTransport, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
@@ -2884,6 +2896,105 @@ export class Bridge extends EventTarget {
       servers: rows,
       recentEvents: [],
       workspace: Boolean(workspace),
+    }
+  }
+
+  /**
+   * **读**这台服务端的 `server.properties` 里 RCON 那三项的当前状态（界面用；只读）。
+   *
+   * ★ 由 `api.mjs` 的路由调用（那边只做接口，业务在这一层 —— 与 `serversSnapshotForApi` 同一分工）。
+   * ★ **永不回密码本身**：只说"配了没有"。密码长度也不回（长度也是信息）。
+   */
+  async serverPropertiesForApi({ serverId = '' } = {}) {
+    const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+    const server = list.find((s) => s && String(s.id) === String(serverId)) ?? null
+    if (!server) return { ok: false, why: `配置里没有 id 为「${serverId}」的服务器` }
+    const workspace = this.config?.dsh?.workspace ?? ''
+    const at = resolvePropertiesPath({ workspace, server })
+    if (!at.ok) return { ok: false, why: at.why, serverId: server.id }
+    const file = readPropertiesFile(at.path)
+    if (!file.ok) return { ok: false, why: file.why, serverId: server.id, path: at.path }
+    const settings = readRconSettings(file.text)
+    return {
+      ok: true,
+      serverId: server.id,
+      path: at.path,
+      from: at.from,
+      settings,
+      describe: describeRconSettings(settings),
+      // ★ 与配置对不上的提醒：两边不一致时 RCON 一样连不上（这是我们踩过的那类"两处各说各话"）
+      configRconPort: Number.isFinite(Number(server.rconPort)) ? Number(server.rconPort) : null,
+      configPasswordSet: Boolean(server.password),
+    }
+  }
+
+  /**
+   * **写**这台的 `server.properties`（只动 RCON 那三行），并顺手备份。
+   *
+   * ★ 三条纪律（详见 `servers/properties.mjs` 文件头）：只碰那三行、写前备份、
+   *   **写前重新读一次并要求内容与刚才一致**（乐观并发：否则会静默盖掉使用者在别处的改动）。
+   * ★ 它**不写我们的 config** —— 那件事由路由用 `readRawConfig/writeRawConfig` 做
+   *   （与"保存服务器条目"走同一条路，才不会两处口径分叉）。
+   */
+  async applyServerProperties({ serverId = '', enableRcon, rconPort, password } = {}) {
+    const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+    const server = list.find((s) => s && String(s.id) === String(serverId)) ?? null
+    if (!server) return { ok: false, why: `配置里没有 id 为「${serverId}」的服务器` }
+    const workspace = this.config?.dsh?.workspace ?? ''
+    const at = resolvePropertiesPath({ workspace, server })
+    if (!at.ok) return { ok: false, why: at.why, serverId: server.id }
+    const before = readPropertiesFile(at.path)
+    if (!before.ok) return { ok: false, why: before.why, serverId: server.id, path: at.path }
+
+    const patched = patchRconSettings(before.text, { enableRcon, rconPort, password })
+    if (!patched.ok) return { ok: false, why: patched.why, serverId: server.id, path: at.path }
+    if (patched.changed.length === 0) {
+      return {
+        ok: true,
+        serverId: server.id,
+        path: at.path,
+        backup: null,
+        changed: [],
+        settings: readRconSettings(before.text),
+        describe: describeRconSettings(readRconSettings(before.text)),
+        note: '这三项本来就是你要的值 —— 没有改任何东西',
+      }
+    }
+
+    // 乐观并发：写之前再读一次，内容和刚读到的不一样就别写（有人同时在改）
+    const again = readPropertiesFile(at.path)
+    if (!again.ok || again.text !== before.text) {
+      return {
+        ok: false,
+        serverId: server.id,
+        path: at.path,
+        why: '这个文件刚刚被别的程序/人改过（内容和几毫秒前读到的不一样）—— 没有覆盖它，请刷新后重试',
+      }
+    }
+
+    const backup = `${at.path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
+    try {
+      copyFileSync(at.path, backup)
+      writeFileSync(at.path, patched.text, 'utf8')
+    } catch (error) {
+      return { ok: false, why: `写失败：${error?.message ?? error}（备份：${backup}）`, serverId: server.id, path: at.path, backup }
+    }
+    const settings = readRconSettings(patched.text)
+    this.log(
+      `🎛️ [servers] 改了「${server.name ?? server.id}」的 ${PROPERTIES_FILE}：${patched.changed.join('、')}` +
+        `（已备份）—— **要重启服务端才生效**`,
+    )
+    return {
+      ok: true,
+      serverId: server.id,
+      path: at.path,
+      from: at.from,
+      backup,
+      changed: patched.changed,
+      settings,
+      describe: describeRconSettings(settings),
+      // ★ 这句必须在返回值里（界面照抄）：改完不重启 = 白改
+      note: `已写入 ${PROPERTIES_FILE}。**要重启服务端才生效** —— 那三项是它启动时读进内存的。`,
     }
   }
 

@@ -631,6 +631,64 @@ export const api = {
    */
   serversConsole: (serverId: string, limit = 200) =>
     request<ServersConsoleResult>('GET', `/api/servers/console?serverId=${encodeURIComponent(serverId)}&limit=${limit}`),
+  /**
+   * 读**服务端自己的** `server.properties` 里 RCON 那三项的当前状态（0.3.2 收尾）。
+   * ★ 起因（使用者 2026-10-04）：「开服时显示 enable-rcon=false，能否在桥接的编辑栏直接修改」。
+   * ★ 响应里**没有密码本身**（只有 `passwordSet`），与 `servers[].password` 同一条纪律。
+   */
+  serversProperties: (serverId: string) =>
+    request<ServersPropertiesResult>('GET', `/api/servers/properties?serverId=${encodeURIComponent(serverId)}`),
+  /**
+   * 一键把 RCON 配好（**只改那三行**，其余逐字保留）+ 顺手同步进我们自己的 config。
+   * ★★ 默认 `syncToConfig: true`：两边不一致时 RCON 照样连不上（只改一半等于没修）。
+   * ★ 返回里的 `note` 含「**要重启服务端才生效**」，界面照抄，别自己编。
+   */
+  serversPropertiesApply: (body: {
+    serverId: string
+    enableRcon?: boolean
+    rconPort?: number
+    password?: string
+    syncToConfig?: boolean
+  }) => request<ServersPropertiesApplyResult>('POST', '/api/servers/properties', body),
+}
+
+/** `GET /api/servers/properties` 的结果。 */
+export interface ServersPropertiesResult {
+  ok: boolean
+  serverId: string
+  /** `server.properties` 的绝对路径（界面要显示 —— 使用者得知道改的是哪个文件） */
+  path: string
+  /** 这个路径从哪推出来的（归属档 / config.json 的 cwd）——"改错文件"是最坏的失败形状 */
+  from: string
+  settings: {
+    /** `null` = 文件里没这一项或值看不懂（**不猜成 false**） */
+    enableRcon: boolean | null
+    rconPort: number | null
+    passwordSet: boolean
+  }
+  /** 一句人话（界面直接显示，别自己拼） */
+  describe: string
+  configRconPort: number | null
+  configPasswordSet: boolean
+  /** ★ 两边对不上的两项（对不上时 RCON 一样连不上） */
+  mismatch: { port: boolean; password: boolean }
+  restartNeeded: boolean
+}
+
+/** `POST /api/servers/properties` 的结果。 */
+export interface ServersPropertiesApplyResult {
+  ok: boolean
+  serverId: string
+  path: string
+  from: string
+  backup: string
+  changed: string[]
+  settings: ServersPropertiesResult['settings']
+  describe: string
+  /** ★ 含「要重启服务端才生效」 */
+  note: string
+  synced: { ok: boolean; why: string } | null
+  restartNeeded: boolean
 }
 
 // ── 0.3.2 服务器监测（CONFIG-UI.md §2.12）─────────────────────────────────

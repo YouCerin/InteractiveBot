@@ -2942,6 +2942,8 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 | POST | `/api/servers/command` | body `{serverId, command}`：手动跑一条控制台命令。缺 `serverId`／空命令／超长（>500 字）⇒ 400；★★★ **完整控制台（op 级别）**，**字段白名单**（密码绝不出去） |
 | POST | `/api/servers/probe` | body `{serverId}`：**主动检测**一次（真连 RCON + 只读命令）。缺 `serverId` ⇒ 400。★★ 它**不喂状态机、不累加「连续失败」** —— 点几次都不会把一台好好的服务器「点成 down」 |
 | GET | `/api/servers/console?serverId=…&limit=N` | 服务器**控制台最新输出**（「实时后台」折叠栏的数据源）。**只读**；回带 `encoding`（真机是 `gbk` —— 那个文件不是 UTF-8） |
+| GET | `/api/servers/properties?serverId=…` | ★ 读**服务端自己的** `server.properties` 里 RCON 那三项的当前状态。**只读**；回 `path`/`from`（那个文件的路径，以及它是从哪儿推出来的：归属档的 `cwd` 还是 `servers[].cwd`）、`settings{enableRcon,rconPort,passwordSet}`、`mismatch{port,password}`（它和本桥接这份配置**对不上**的两项 —— 对不上时 RCON 照样连不上）。★★ **永不回密码本身**，连长度都不回 |
+| POST | `/api/servers/properties` | ★ 一键把 RCON 配好（0.3.2 收尾）。body `{serverId, enableRcon?, rconPort?, password?, syncToConfig?}` —— 三项至少给一个，否则 400。★★★ **只改那三行**（`enable-rcon`/`rcon.port`/`rcon.password`），其余行**逐字保留**；写前**备份**；写前**重读一次**，内容变了就**拒绝写**（乐观并发：不盖掉别处的改动）。★★ 默认**顺手把两份配置对齐**（`syncToConfig !== false` 时同时写 `config.json` 的 `servers[].rconPort/password`）—— 只改一半等于没修。★ 回带 `note`（含「**要重启服务端才生效**」，界面照抄别自己编）、`backup`、`changed[]`、`synced`。⚠️ **响应里没有密码** |
 
 **★ 保存/删除后即时生效**：后端会现读盘上的列表并**重建监测循环**
 （`bridge.reloadServers()`）—— 不必重启桥接、不断 QQ、不打断在跑的回合。

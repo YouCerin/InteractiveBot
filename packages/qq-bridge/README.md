@@ -85,8 +85,8 @@ npm test                         # 全部离线套件（实测：所有套件退
 #       verify-session-state 48、verify-memory-supersede 50、verify-memory-stats 29、
 #       verify-memory-usage 54、verify-marker 46、verify-text-encoding 21
 #     · 复核方式（可复现）：在 `packages/qq-bridge` 下逐个 `node mocks/verify-*.mjs`，
-#       读它的收尾行（「…全部通过（N 项）」）。链上共 **83 套**（0.3.2 实测；
-#       `mocks/` 下共 84 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
+#       读它的收尾行（「…全部通过（N 项）」）。链上共 **84 套**（0.3.2 实测；
+#       `mocks/` 下共 85 个 `verify-*.mjs`，不在链上的是花钱的 `verify-live.mjs`）。
 #   ∴ **不要**把这些数字当权威 —— 权威是 `node mocks/verify-*.mjs` 自己的输出。
 node mocks/verify-manifest.mjs   # 包契约自检：文档与代码是否一致（38 项）
 node mocks/verify-imports.mjs    # ★★ 导入与登记漂移审计：坏了才炸的导入、孤儿模块、漏登记的套件（9 项）

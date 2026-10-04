@@ -3566,6 +3566,12 @@ async function main() {
       serversProbe: async ({ serverId } = {}) => bridge.probeServerForApi({ serverId }),
       // ★ 控制台实时输出（只读；已按真机编码解码 —— 那个文件是 GBK）
       serversConsole: ({ serverId, limit } = {}) => bridge.readServerConsole({ serverId, limit }),
+      // ★ 服务端自己的 `server.properties`：读 RCON 状态 / 一键把 RCON 配好。
+      //   ★★ 这两个名字必须**在路由对象所在作用域里真的存在** —— 它们是这里的属性名，
+      //   所以在 `createApiHandler({…})` 的对象字面量里是合法引用（`verify-route-scope.mjs`
+      //   会核对这一点；那次 `listScheduleTasks is not defined` 就是栽在这类地方）。
+      serversProperties: async ({ serverId } = {}) => bridge.serverPropertiesForApi({ serverId }),
+      serversPropertiesApply: async (opts = {}) => bridge.applyServerProperties(opts),
       // ★ 归一化**复用 config.mjs 那一份**（与启动读配置同一实现）——
       //   另写一份必然分叉，而分叉的表现是"界面存进去的"与"启动时读到的"不是一回事。
       normalizeServer: (entry) => normalizeServerEntry(entry),

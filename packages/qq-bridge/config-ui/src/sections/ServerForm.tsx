@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 
 import { api, type ServerRow } from '@/lib/api'
@@ -76,6 +76,67 @@ export function ServerForm({
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  /**
+   * 服务端 `server.properties` 的 RCON 状态（0.3.2 收尾）。
+   * ★ `patch.enableRcon` 初值取**读到的状态**（读不到就默认勾上 —— 使用者的意图几乎总是"我要用"）。
+   * ★ `patch.password` 永远从空开始：**不回显已有密码**（与 `servers[].password` 同一条纪律）。
+   */
+  const [rcon, setRcon] = useState({
+    loading: false,
+    busy: false,
+    err: null as string | null,
+    note: '',
+    info: null as Awaited<ReturnType<typeof api.serversProperties>> | null,
+    patch: { enableRcon: true, rconPort: String(server?.rconPort ?? 25575), password: '' },
+  })
+
+  const loadRcon = async () => {
+    if (!server?.id) return
+    setRcon((p) => ({ ...p, loading: true, err: null }))
+    try {
+      const info = await api.serversProperties(server.id)
+      setRcon((p) => ({
+        ...p,
+        loading: false,
+        info,
+        patch: {
+          // 读得到就照实回填；`enableRcon === null`（文件里没这一项）⇒ 默认勾上
+          enableRcon: info.settings.enableRcon !== false,
+          // ★ 端口**以本桥接这份配置为准**（那是使用者对"这台服该用哪个端口"的声明），
+          //   文件里那个值显示在"当前"那一行里。理由是真机上真发生过：两台服的文件都写着
+          //   25575，而本桥接给第二台配的是 25576 —— 若按文件回填，一键修好会让两台抢同一个端口。
+          rconPort: String(server?.rconPort ?? info.settings.rconPort ?? 25575),
+          password: '', // 永不回显
+        },
+      }))
+    } catch (e) {
+      setRcon((p) => ({ ...p, loading: false, err: e instanceof Error ? e.message : String(e), info: null }))
+    }
+  }
+
+  useEffect(() => {
+    void loadRcon()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server?.id])
+
+  const applyRcon = async () => {
+    if (!server?.id) return
+    setRcon((p) => ({ ...p, busy: true, note: '' }))
+    try {
+      const r = await api.serversPropertiesApply({
+        serverId: server.id,
+        enableRcon: rcon.patch.enableRcon,
+        rconPort: Number(rcon.patch.rconPort) || undefined,
+        ...(rcon.patch.password ? { password: rcon.patch.password } : {}),
+        syncToConfig: true,
+      })
+      const syncTxt = r.synced ? (r.synced.ok ? '已同步进本桥接的配置。' : `⚠️ 同步进配置失败：${r.synced.why}`) : ''
+      setRcon((p) => ({ ...p, busy: false, note: `${r.note} 改了：${r.changed.join('、') || '（无变化）'}。${syncTxt}`, patch: { ...p.patch, password: '' } }))
+      await loadRcon()
+    } catch (e) {
+      setRcon((p) => ({ ...p, busy: false, err: e instanceof Error ? e.message : String(e) }))
+    }
+  }
 
   const set = (k: keyof typeof form, v: string | boolean) => setForm((prev) => ({ ...prev, [k]: v }))
 
@@ -285,6 +346,117 @@ export function ServerForm({
 
       {err && <p className="text-destructive mt-2 text-xs">保存失败：{err}</p>}
       {notice && <p className="mt-2 text-xs text-emerald-600">{notice}</p>}
+
+      {/* ── 服务端自己的 server.properties（0.3.2 收尾）──────────────────────────
+          起因（使用者 2026-10-04）：「开服时显示 enable-rcon=false，能否在桥接的编辑栏
+          直接修改」—— 在那之前我们只能指路（"去 server.properties 里开 enable-rcon=true"）。
+          ★ 三条在这一屏里必须说清（否则使用者会以为"点了就生效"）：
+            ① 改的是**哪个文件**（路径显示出来，还说明是从哪推出来的）；
+            ② **只改那三行**，其余逐字保留（写前备份、写前重读做乐观并发检查）；
+            ③ **要重启服务端才生效**（那三项是它**启动时**读进内存的）。
+          ★ 只在"编辑一台已有服务器"时出现：新增时还没有可解析的目录（归属档/`cwd`）。 */}
+      {editing && (
+        <div className="mt-3 rounded-md border p-3">
+          <div className="text-xs font-medium">
+            服务端的 RCON（直接改它的 <code>server.properties</code>）
+          </div>
+          {rcon.loading && <p className="text-muted-foreground mt-1 text-[11px]">正在读…</p>}
+          {rcon.err && (
+            <p className="text-destructive mt-1 text-[11px] leading-relaxed">
+              读不出来：{rcon.err}
+              <br />
+              <span className="text-muted-foreground">
+                → 先在下面那个「**工作目录 cwd**」里填上这台服的**服务端根目录**
+                （`server.properties` 就在那儿），保存后再回来看这一块。
+              </span>
+            </p>
+          )}
+          {rcon.info && (
+            <>
+              <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
+                当前：<b>{rcon.info.describe}</b>
+                <br />
+                文件：<code className="break-all">{rcon.info.path}</code>
+                <br />
+                （路径来自{rcon.info.from}）
+                {(rcon.info.mismatch.port || rcon.info.mismatch.password) && (
+                  <>
+                    <br />
+                    <span className="text-amber-600">
+                      ⚠️ 它和本桥接这份配置**对不上**
+                      {rcon.info.mismatch.port
+                        ? `（端口：文件里 ${rcon.info.settings.rconPort ?? '—'} vs 这里 ${rcon.info.configRconPort ?? '—'}）`
+                        : ''}
+                      {rcon.info.mismatch.password
+                        ? `（密码：文件里${rcon.info.settings.passwordSet ? '已设置' : '是空的'} vs 这里${rcon.info.configPasswordSet ? '已配置' : '没配'}）`
+                        : ''}
+                      —— 两边不一致时 RCON 照样连不上。
+                    </span>
+                  </>
+                )}
+              </p>
+              <div className="mt-2 flex flex-wrap items-end gap-2">
+                <label className="flex items-center gap-1.5 text-[11px]">
+                  <input
+                    type="checkbox"
+                    checked={rcon.patch.enableRcon}
+                    disabled={rcon.busy}
+                    onChange={(e) => setRcon((p) => ({ ...p, patch: { ...p.patch, enableRcon: e.target.checked } }))}
+                  />
+                  打开 <code>enable-rcon</code>
+                </label>
+                <label className="text-[11px]">
+                  <span className="text-muted-foreground mr-1">rcon.port</span>
+                  <input
+                    className="border-input bg-background h-7 w-24 rounded-md border px-2 font-mono text-[11px]"
+                    value={rcon.patch.rconPort}
+                    disabled={rcon.busy}
+                    onChange={(e) => setRcon((p) => ({ ...p, patch: { ...p.patch, rconPort: e.target.value } }))}
+                  />
+                </label>
+                <label className="text-[11px]">
+                  <span className="text-muted-foreground mr-1">rcon.password</span>
+                  <input
+                    className="border-input bg-background h-7 w-40 rounded-md border px-2 font-mono text-[11px]"
+                    type="text"
+                    placeholder={rcon.info.settings.passwordSet ? '（已设置；留空 = 不改）' : '设一个（不能留空）'}
+                    value={rcon.patch.password}
+                    disabled={rcon.busy}
+                    onChange={(e) => setRcon((p) => ({ ...p, patch: { ...p.patch, password: e.target.value } }))}
+                  />
+                </label>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={rcon.busy}
+                  onClick={() => {
+                    // 随机密码**在浏览器里生成**（不新增接口；`enable-rcon` 要密码非空）
+                    const bytes = new Uint8Array(12)
+                    crypto.getRandomValues(bytes)
+                    const rand = Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 16)
+                    setRcon((p) => ({ ...p, patch: { ...p.patch, password: p.patch.password || rand } }))
+                  }}
+                >
+                  随机密码
+                </Button>
+                <Button size="sm" disabled={rcon.busy || !rcon.patch.password} onClick={() => void applyRcon()}>
+                  {rcon.busy ? '写入中…' : '写入并同步到本桥接'}
+                </Button>
+              </div>
+              <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
+                ★ **只改那三行**，其余逐字保留（写前备份；写前会重读一次，发现文件刚被别处改过就**不动它**）。
+                <br />⚠️ **改完要重启服务端才生效** —— 那三项是它**启动时**读进内存的。
+                {rcon.note && (
+                  <>
+                    <br />
+                    <span className="text-emerald-600">{rcon.note}</span>
+                  </>
+                )}
+              </p>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="mt-3 flex items-center gap-2">
         <Button size="sm" disabled={busy || !form.id.trim()} onClick={() => void submit()}>
