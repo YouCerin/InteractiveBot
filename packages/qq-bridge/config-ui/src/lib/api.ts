@@ -645,9 +645,13 @@ export const api = {
    */
   serversPropertiesApply: (body: {
     serverId: string
+    /** ★ 游戏端口（`server-port`）—— 与 `servers[].port` 必须一致，否则监测说它挂了 */
+    serverPort?: number
     enableRcon?: boolean
     rconPort?: number
     password?: string
+    /** ★ 同意 EULA（写隔壁的 `eula.txt`）。这是一条**同意条款**的动作，界面必须显式问过 */
+    agreeEula?: boolean
     syncToConfig?: boolean
   }) => request<ServersPropertiesApplyResult>('POST', '/api/servers/properties', body),
   /**
@@ -686,6 +690,8 @@ export interface ServersPropertiesResult {
   /** 这个路径从哪推出来的（归属档 / config.json 的 cwd）——"改错文件"是最坏的失败形状 */
   from: string
   settings: {
+    /** ★ 游戏端口（`server-port`）；`null` = 文件里没这一项 */
+    serverPort: number | null
     /** `null` = 文件里没这一项或值看不懂（**不猜成 false**） */
     enableRcon: boolean | null
     rconPort: number | null
@@ -693,10 +699,14 @@ export interface ServersPropertiesResult {
   }
   /** 一句人话（界面直接显示，别自己拼） */
   describe: string
+  /** ★ EULA 的状态（在**隔壁那个文件** `eula.txt` 里；`agreed:false` ⇒ 服务端会拒绝启动） */
+  eula: { path: string; exists: boolean; agreed: boolean | null }
+  /** 本桥接这份 config 里配的游戏端口（用来显示"两边对不上"） */
+  configPort: number | null
   configRconPort: number | null
   configPasswordSet: boolean
-  /** ★ 两边对不上的两项（对不上时 RCON 一样连不上） */
-  mismatch: { port: boolean; password: boolean }
+  /** ★ 两边对不上的三项（对不上时就是"改了没用"） */
+  mismatch: { port: boolean; rconPort: boolean; password: boolean }
   restartNeeded: boolean
 }
 
@@ -710,6 +720,8 @@ export interface ServersPropertiesApplyResult {
   changed: string[]
   settings: ServersPropertiesResult['settings']
   describe: string
+  /** ★ EULA 那一条的结果（只在要求改它时才有） */
+  eula: { path: string; backup: string; changed: string[]; agreed: boolean } | null
   /** ★ 含「要重启服务端才生效」 */
   note: string
   synced: { ok: boolean; why: string } | null

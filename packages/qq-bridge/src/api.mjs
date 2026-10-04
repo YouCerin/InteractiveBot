@@ -1126,25 +1126,38 @@ export function createApiHandler(deps) {
         const s = r.settings ?? {}
         // ⚠️ `Number(null) === 0` 且 `Number.isFinite(0) === true` —— 直接写
         //    `Number.isFinite(Number(x))` 会把"没这一项"变成 `0`。这里显式挡掉 null/undefined。
-        const filePort = s.rconPort === null || s.rconPort === undefined ? null : Number(s.rconPort)
-        const cfgPort = r.configRconPort === null || r.configRconPort === undefined ? null : Number(r.configRconPort)
+        const numOrNull = (v) => (v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null)
+        const filePort = numOrNull(s.serverPort)
+        const fileRconPort = numOrNull(s.rconPort)
+        const cfgPort = numOrNull(r.configPort)
+        const cfgRconPort = numOrNull(r.configRconPort)
+        const eula = r.eula && typeof r.eula === 'object' ? r.eula : null
         return ok({
           ok: true,
           serverId: String(r.serverId ?? serverId),
           path: String(r.path ?? ''),
           from: String(r.from ?? ''),
           settings: {
+            serverPort: filePort,
             enableRcon: s.enableRcon === true ? true : s.enableRcon === false ? false : null,
-            rconPort: Number.isFinite(filePort) ? filePort : null,
+            rconPort: fileRconPort,
             passwordSet: s.passwordSet === true,
           },
           describe: String(r.describe ?? ''),
-          configRconPort: Number.isFinite(cfgPort) ? cfgPort : null,
+          // ★ EULA 在隔壁那个文件里（`eula.txt`）：不存在也算一种状态（服务端还没跑过）
+          eula: {
+            path: String(eula?.path ?? ''),
+            exists: eula?.exists === true,
+            agreed: eula?.agreed === true ? true : eula?.agreed === false ? false : null,
+          },
+          configPort: cfgPort,
+          configRconPort: cfgRconPort,
           configPasswordSet: r.configPasswordSet === true,
-          // ★ 忠实转达"这两边一致吗"（不一致时 RCON 一样连不上）。
+          // ★ 忠实转达"这几对一不一致"（不一致时就是"改了没用"）。
           //   ★ 一边"不知道"时**不算不一致** —— 不能凭空宣称一个我们没核实过的差异。
           mismatch: {
             port: filePort !== null && cfgPort !== null && filePort !== cfgPort,
+            rconPort: fileRconPort !== null && cfgRconPort !== null && fileRconPort !== cfgRconPort,
             password: (s.passwordSet === true) !== (r.configPasswordSet === true),
           },
           restartNeeded: true,
@@ -1210,27 +1223,35 @@ export function createApiHandler(deps) {
         const wantsRcon = body.enableRcon !== undefined
         const wantsPort = body.rconPort !== undefined && body.rconPort !== null && String(body.rconPort).trim() !== ''
         const wantsPassword = typeof body.password === 'string' && body.password.length > 0
-        if (!wantsRcon && !wantsPort && !wantsPassword) {
-          return fail(400, '至少要给一项：enableRcon / rconPort / password')
+        // ★ 游戏端口（`server-port`）也是**两边必须一致**的一项：以前编辑栏只改我们的
+        //   `servers[].port`，服务端还监听老端口 ⇒ 监测说它挂了（使用者报的"改了不生效"）。
+        const wantsGamePort = body.serverPort !== undefined && body.serverPort !== null && String(body.serverPort).trim() !== ''
+        const wantsEula = body.agreeEula !== undefined
+        if (!wantsRcon && !wantsPort && !wantsPassword && !wantsGamePort && !wantsEula) {
+          return fail(400, '至少要给一项：serverPort / enableRcon / rconPort / password / agreeEula')
         }
         const r = await serversPropertiesApply({
           serverId,
+          ...(wantsGamePort ? { serverPort: Number(body.serverPort) } : {}),
           ...(wantsRcon ? { enableRcon: body.enableRcon === true } : {}),
           ...(wantsPort ? { rconPort: Number(body.rconPort) } : {}),
           ...(wantsPassword ? { password: String(body.password) } : {}),
+          // ★ EULA 是**同意条款**：只认显式布尔，且界面必须把官方链接摆在点按钮的人眼前
+          ...(wantsEula ? { agreeEula: body.agreeEula === true } : {}),
         })
         if (r?.ok !== true) return fail(400, String(r?.why ?? '写入失败'))
 
-        // ── 顺手把两边对齐：只写我们自己的 config（服务端那三行刚写过了）──────────
-        // ★ 同步是**默认行为**且必须做：两边不一致时 RCON 照样连不上（这正是使用者报的那类
-        //   "配置都填了却还是用不了"）。字段级合并 —— 只动 `rconPort` / `password`。
+        // ── 顺手把两边对齐：只写我们自己的 config（服务端那些行刚写过了）──────────
+        // ★ 同步是**默认行为**且必须做：两边不一致时就是"改了没用"（端口对不上 ⇒ 监测说它挂了；
+        //   密码对不上 ⇒ RCON 认证被拒）。字段级合并 —— 只动 `port` / `rconPort` / `password`。
         let synced = null
-        if (body.syncToConfig !== false && (wantsPort || wantsPassword)) {
+        if (body.syncToConfig !== false && (wantsGamePort || wantsPort || wantsPassword)) {
           try {
             const raw = await readRawConfig()
             const list = Array.isArray(raw.servers) ? raw.servers : []
             const i = list.findIndex((s) => s && String(s.id) === serverId)
             if (i >= 0) {
+              if (wantsGamePort) list[i].port = Number(body.serverPort)
               if (wantsPort) list[i].rconPort = Number(body.rconPort)
               if (wantsPassword) list[i].password = String(body.password)
               raw.servers = list
@@ -1242,7 +1263,7 @@ export function createApiHandler(deps) {
                 synced = { ok: false, why: '没有 onServersChanged —— 配置写了但监测循环没重建' }
               }
             } else {
-              synced = { ok: false, why: `配置里没有 id 为「${serverId}」的服务器（只改了 server.properties）` }
+              synced = { ok: false, why: `配置里没有 id 为「${serverId}」的服务器（只改了服务端的文件）` }
             }
           } catch (e) {
             synced = { ok: false, why: `同步进 config.json 失败：${e?.message ?? e}` }
@@ -1257,12 +1278,23 @@ export function createApiHandler(deps) {
           backup: r.backup ? String(r.backup) : '',
           changed: Array.isArray(r.changed) ? r.changed.map(String) : [],
           settings: {
+            serverPort:
+              s.serverPort === null || s.serverPort === undefined ? null : Number.isFinite(Number(s.serverPort)) ? Number(s.serverPort) : null,
             enableRcon: s.enableRcon === true ? true : s.enableRcon === false ? false : null,
             // ⚠️ 同上：`Number(null) === 0` ⇒ 必须显式挡掉，否则"没这一项"会变成端口 0
             rconPort: s.rconPort === null || s.rconPort === undefined ? null : (Number.isFinite(Number(s.rconPort)) ? Number(s.rconPort) : null),
             passwordSet: s.passwordSet === true,
           },
           describe: String(r.describe ?? ''),
+          // ★ EULA 那一条的结果（写没写、备份在哪）——**不掺密码**
+          eula: r.eula
+            ? {
+                path: String(r.eula.path ?? ''),
+                backup: r.eula.backup ? String(r.eula.backup) : '',
+                changed: Array.isArray(r.eula.changed) ? r.eula.changed.map(String) : [],
+                agreed: r.eula.agreed === true,
+              }
+            : null,
           // ★ 这一句是从那一层带上来的（含"要重启才生效"），界面照抄，别自己编
           note: String(r.note ?? ''),
           synced,

@@ -4,6 +4,12 @@ import { Button } from '@/components/ui/button'
 import { api, type ServerRow } from '@/lib/api'
 
 /**
+ * Minecraft 官方 EULA 的地址（与 `src/servers/properties.mjs` 里写进 `eula.txt` 的那一行同一个）。
+ * ★ 界面把它**显示成链接**：「同意」得是使用者看过之后自己点的，不是我们替他点的。
+ */
+const EULA_URL = 'https://aka.ms/MinecraftEULA'
+
+/**
  * 服务器条目的**新增 / 编辑**表单（0.3.2 收尾）。
  *
  * ══════════════════════════════════════════════════════════════════════════
@@ -86,13 +92,23 @@ export function ServerForm({
     busy: false,
     err: null as string | null,
     note: '',
+    /** ★ 与 `err` 分开：`err` 是"这个文件读不出来"（那时整块内容都不显示），
+     *  `applyErr` 是"这一次写入被拒了"（内容还在，只是这次没写成功）。 */
+    applyErr: null as string | null,
     info: null as Awaited<ReturnType<typeof api.serversProperties>> | null,
-    patch: { enableRcon: true, rconPort: String(server?.rconPort ?? 25575), password: '' },
+    patch: {
+      // ★ 游戏端口（`server-port`）也归这一块管：使用者报的「在编辑页面改了游戏端口也不能实际生效」
+      //   就是它 —— 以前只改了本桥接这份配置，服务端还在老端口上。
+      serverPort: String(server?.port ?? 25565),
+      enableRcon: true,
+      rconPort: String(server?.rconPort ?? 25575),
+      password: '',
+    },
   })
 
   const loadRcon = async () => {
     if (!server?.id) return
-    setRcon((p) => ({ ...p, loading: true, err: null }))
+    setRcon((p) => ({ ...p, loading: true, err: null, applyErr: null }))
     try {
       const info = await api.serversProperties(server.id)
       setRcon((p) => ({
@@ -100,6 +116,9 @@ export function ServerForm({
         loading: false,
         info,
         patch: {
+          // ★ 游戏端口同 rcon.port 的道理：**以本桥接这份配置为准**（那是使用者对"这台服该用哪个
+          //   端口"的声明），文件里那个值显示在"当前"那一行。若文件里没有这一项，就回填配置里的值。
+          serverPort: String(server?.port ?? info.settings.serverPort ?? 25565),
           // 读得到就照实回填；`enableRcon === null`（文件里没这一项）⇒ 默认勾上
           enableRcon: info.settings.enableRcon !== false,
           // ★ 端口**以本桥接这份配置为准**（那是使用者对"这台服该用哪个端口"的声明），
@@ -125,7 +144,7 @@ export function ServerForm({
    */
   const adoptRcon = async () => {
     if (!server?.id) return
-    setRcon((p) => ({ ...p, busy: true, note: '', err: null }))
+    setRcon((p) => ({ ...p, busy: true, note: '', applyErr: null }))
     try {
       const r = await api.serversRconAdopt(server.id)
       setRcon((p) => ({
@@ -135,25 +154,65 @@ export function ServerForm({
       }))
       await loadRcon()
     } catch (e) {
-      setRcon((p) => ({ ...p, busy: false, err: e instanceof Error ? e.message : String(e) }))
+      setRcon((p) => ({ ...p, busy: false, applyErr: e instanceof Error ? e.message : String(e) }))
     }
   }
 
-  const applyRcon = async () => {    if (!server?.id) return
-    setRcon((p) => ({ ...p, busy: true, note: '' }))
+  /** 端口必须是 1–65535 的整数；空字符串 / 乱写都返回 `null`（**不静默当 0**）。 */
+  const parsePort = (v: string): number | null => {
+    const n = Number(v.trim())
+    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
+  }
+
+  /**
+   * 把这一屏的改动写进服务端那两个文件（`server.properties` + `eula.txt`）。
+   * ★ `agreeEula` **只能由使用者显式点那个按钮**传进来 —— 同意条款是使用者的动作，
+   *   不能因为保存了别的字段就顺手替他同意。
+   * ★ 写的是**服务端那份文件**，不是本桥接这份配置；写前备份、写前重读（乐观并发）。
+   *   所以这个动作**要重启服务端才生效**，而且会踢掉在线的人。
+   */
+  const applyRcon = async (extra: { agreeEula?: boolean; onlyEula?: boolean } = {}) => {
+    if (!server?.id) return
+    const sp = parsePort(rcon.patch.serverPort)
+    const rp = parsePort(rcon.patch.rconPort)
+    if (!extra.onlyEula && rcon.patch.serverPort.trim() !== '' && sp === null) {
+      setRcon((p) => ({ ...p, note: '', applyErr: '`server-port` 要填 1–65535 的整数。' }))
+      return
+    }
+    if (!extra.onlyEula && rcon.patch.rconPort.trim() !== '' && rp === null) {
+      setRcon((p) => ({ ...p, note: '', applyErr: '`rcon.port` 要填 1–65535 的整数。' }))
+      return
+    }
+    setRcon((p) => ({ ...p, busy: true, note: '', applyErr: null }))
     try {
       const r = await api.serversPropertiesApply({
         serverId: server.id,
-        enableRcon: rcon.patch.enableRcon,
-        rconPort: Number(rcon.patch.rconPort) || undefined,
-        ...(rcon.patch.password ? { password: rcon.patch.password } : {}),
+        // 只写 EULA 时不碰端口那些项（否则会把「当前值」当成"要改成这个值"再写一遍）
+        ...(extra.onlyEula
+          ? {}
+          : {
+              serverPort: sp ?? undefined,
+              enableRcon: rcon.patch.enableRcon,
+              rconPort: rp ?? undefined,
+            }),
+        ...(rcon.patch.password && !extra.onlyEula ? { password: rcon.patch.password } : {}),
+        ...(extra.agreeEula ? { agreeEula: true } : {}),
         syncToConfig: true,
       })
       const syncTxt = r.synced ? (r.synced.ok ? '已同步进本桥接的配置。' : `⚠️ 同步进配置失败：${r.synced.why}`) : ''
-      setRcon((p) => ({ ...p, busy: false, note: `${r.note} 改了：${r.changed.join('、') || '（无变化）'}。${syncTxt}`, patch: { ...p.patch, password: '' } }))
+      const eulaTxt = r.eula
+        ? `EULA（${r.eula.path}）已写成 ${r.eula.agreed ? 'eula=true' : '未同意'}。`
+        : ''
+      setRcon((p) => ({
+        ...p,
+        busy: false,
+        applyErr: null,
+        note: `${r.note} 改了：${r.changed.join('、') || '（无变化）'}。${eulaTxt}${syncTxt}`,
+        patch: { ...p.patch, password: '' },
+      }))
       await loadRcon()
     } catch (e) {
-      setRcon((p) => ({ ...p, busy: false, err: e instanceof Error ? e.message : String(e) }))
+      setRcon((p) => ({ ...p, busy: false, applyErr: e instanceof Error ? e.message : String(e) }))
     }
   }
 
@@ -202,17 +261,43 @@ export function ServerForm({
       if (form.cwd.trim()) payload.cwd = form.cwd.trim()
 
       const r = await api.serversSave(payload)
+
+      // ★★★ 「在编辑页面改了游戏端口也不能实际生效」的正面回答。
+      //   保存这一下只改**本桥接这份配置**（它决定我们往哪儿连、往哪儿发 RCON），
+      //   而**服务端监听哪个端口**是它自己 `server.properties` 里的 `server-port`，
+      //   且那一项**只在启动时**被读进内存 ⇒ 两边可以各说各话。
+      //   ∴ 端口真的变了就主动回读一次：还对不上就**明说**，并且**不自动关窗**
+      //   （上面那块里改一下 server-port 就能一键写过去）。
+      //   ★ 读不到文件时**什么都不说** —— 不凭空宣称一个我们没核实过的差异。
+      let portWarning = ''
+      const portChanged = editing && server != null && Number(form.port) !== Number(server.port)
+      if (portChanged && r.applied?.ok !== false) {
+        try {
+          const info = await api.serversProperties(String(payload.id))
+          if (info.mismatch.port) {
+            portWarning = `⚠️ 但服务端的 server.properties 里还写着 server-port=${info.settings.serverPort ?? '（没有这一项）'} —— 它只在**启动时**读这一项。上面那一块里「server-port」已经替你填成 ${form.port} 了，点「写入并同步到本桥接」，再重启服务端。`
+            // 顺手把上面那块的那个框填成使用者刚输的端口 —— 他接下来只该点一下「写入」
+            setRcon((p) => ({ ...p, patch: { ...p.patch, serverPort: String(form.port) } }))
+          }
+        } catch {
+          /* 读不出来就别断言不一致 */
+        }
+      }
+
       if (r.applied?.ok === false) {
         // ★ 配置写进去了、但**没生效** —— 如实说（不假装成功）
-        setNotice(`已保存，但**没生效**：${r.applied.why ?? '未知原因'}（可能要重启桥接）`)
+        setNotice(`已保存，但**没生效**：${r.applied.why ?? '未知原因'}（可能要重启桥接）${portWarning ? ` ${portWarning}` : ''}`)
       } else if (form.clearPassword) {
         // ★ 清除是**破坏性动作**，回执必须说清代价（否则用户下次会以为"桥接坏了"：
         //   控制台发不了命令、优雅停服也没了）
         setNotice('已保存，RCON 密码已清除。⚠️ 这台服的控制台命令与"优雅停服"都用不了了 —— 要用就去 server.properties 里拿一个填回来。')
       } else {
-        setNotice(r.created ? '已新增，并已即时生效（不必重启桥接）' : '已保存，并已即时生效（不必重启桥接）')
+        setNotice(
+          `${r.created ? '已新增，并已即时生效（不必重启桥接）' : '已保存，并已即时生效（不必重启桥接）'}${portWarning ? ` ${portWarning}` : ''}`,
+        )
       }
       onSaved()
+      if (portWarning) return // 还有一步要使用者做 ⇒ 别关窗
       // 留 1.2 秒让使用者看到那句"已生效"，然后关掉
       setTimeout(onClose, 1200)
     } catch (e) {
@@ -255,8 +340,12 @@ export function ServerForm({
         {field('id（**换了服务端就换个 id**）', 'id', '文件安全字符：[a-zA-Z0-9_.-]，会成为 runtime/servers/<id>.* 的文件名')}
         {field('名字（界面上显示）', 'name')}
         {field('地址 host', 'host')}
-        {field('游戏端口 port', 'port')}
-        {field('RCON 端口 rconPort', 'rconPort')}
+        {field(
+          '游戏端口 port',
+          'port',
+          '★ 这是**本桥接**往哪儿连（探活 / 状态）。**服务端自己监听哪个端口**是它 server.properties 里的 server-port —— 保存后若两边对不上，下面会明说并给你一键写过去。',
+        )}
+        {field('RCON 端口 rconPort', 'rconPort', '同理：要和 server.properties 里的 rcon.port 一致，否则控制台连不上。')}
         {/* ★★★ 密码这一格**不走 `field()`** —— 它下面要挂一个"清除"的勾，
             而 `<label>` 里再套一个 `<label>` 会让点击行为错乱（点勾选框会去聚焦输入框）。 */}
         <div className="block text-xs">
@@ -366,18 +455,21 @@ export function ServerForm({
       {err && <p className="text-destructive mt-2 text-xs">保存失败：{err}</p>}
       {notice && <p className="mt-2 text-xs text-emerald-600">{notice}</p>}
 
-      {/* ── 服务端自己的 server.properties（0.3.2 收尾）──────────────────────────
-          起因（使用者 2026-10-04）：「开服时显示 enable-rcon=false，能否在桥接的编辑栏
+      {/* ── 服务端自己那两个文件（0.3.2 收尾）────────────────────────────────────
+          起因①（使用者 2026-10-04）：「开服时显示 enable-rcon=false，能否在桥接的编辑栏
           直接修改」—— 在那之前我们只能指路（"去 server.properties 里开 enable-rcon=true"）。
-          ★ 三条在这一屏里必须说清（否则使用者会以为"点了就生效"）：
+          起因②（使用者 2026-10-05）：「在编辑页面改了游戏端口也不能实际生效，并且不能自动
+          同样 Eula」—— 于是这一块扩成"游戏端口 + RCON 三项 + EULA"。
+          ★ 四条在这一屏里必须说清（否则使用者会以为"点了就生效"）：
             ① 改的是**哪个文件**（路径显示出来，还说明是从哪推出来的）；
-            ② **只改那三行**，其余逐字保留（写前备份、写前重读做乐观并发检查）；
-            ③ **要重启服务端才生效**（那三项是它**启动时**读进内存的）。
+            ② 只改**被管的那些行**，其余逐字保留（写前备份、写前重读做乐观并发检查）；
+            ③ **要重启服务端才生效**（那几项是它**启动时**读进内存的）；
+            ④ 这里改的是**服务端那份**，同时同步进本桥接这份配置（两边对不上 = "改了没用"）。
           ★ 只在"编辑一台已有服务器"时出现：新增时还没有可解析的目录（归属档/`cwd`）。 */}
       {editing && (
         <div className="mt-3 rounded-md border p-3">
           <div className="text-xs font-medium">
-            服务端的 RCON（直接改它的 <code>server.properties</code>）
+            服务端那两份文件（<code>server.properties</code> + <code>eula.txt</code>）
           </div>
           {rcon.loading && <p className="text-muted-foreground mt-1 text-[11px]">正在读…</p>}
           {rcon.err && (
@@ -398,13 +490,16 @@ export function ServerForm({
                 文件：<code className="break-all">{rcon.info.path}</code>
                 <br />
                 （路径来自{rcon.info.from}）
-                {(rcon.info.mismatch.port || rcon.info.mismatch.password) && (
+                {(rcon.info.mismatch.port || rcon.info.mismatch.rconPort || rcon.info.mismatch.password) && (
                   <>
                     <br />
                     <span className="text-amber-600">
                       ⚠️ 它和本桥接这份配置**对不上**
                       {rcon.info.mismatch.port
-                        ? `（端口：文件里 ${rcon.info.settings.rconPort ?? '—'} vs 这里 ${rcon.info.configRconPort ?? '—'}）`
+                        ? `（游戏端口：文件里 ${rcon.info.settings.serverPort ?? '—'} vs 这里 ${rcon.info.configPort ?? '—'} —— 这就是"改了游戏端口不生效"）`
+                        : ''}
+                      {rcon.info.mismatch.rconPort
+                        ? `（rcon 端口：文件里 ${rcon.info.settings.rconPort ?? '—'} vs 这里 ${rcon.info.configRconPort ?? '—'}）`
                         : ''}
                       {rcon.info.mismatch.password
                         ? `（密码：文件里${rcon.info.settings.passwordSet ? '已设置' : '是空的'} vs 这里${rcon.info.configPasswordSet ? '已配置' : '没配'}）`
@@ -413,8 +508,54 @@ export function ServerForm({
                     </span>
                   </>
                 )}
+                {/* ★ EULA 在**隔壁那个文件**里（`eula.txt`），而且 `false` 会让服务端**拒绝启动**。
+                    真机上真发生过：控制台只留一句 "You need to agree to the EULA in order to run
+                    the server. Go to eula.txt for more info."，使用者不知道该点哪里。
+                    ★ 这是一条**同意条款**的动作 ⇒ 必须由使用者**自己点**这个按钮，
+                      不放在"保存"里顺手做掉，也不预勾。 */}
+                <br />
+                <span className={rcon.info.eula.agreed === true ? 'text-emerald-600' : 'text-amber-600'}>
+                  {rcon.info.eula.agreed === true
+                    ? '✅ EULA 已同意（eula=true）'
+                    : rcon.info.eula.exists
+                      ? '⚠️ EULA **没同意** —— 服务端会拒绝启动（"You need to agree to the EULA…"）'
+                      : '⚠️ 还没有 eula.txt —— 服务端第一次启动时就卡在这一步'}
+                </span>
+                {rcon.info.eula.agreed !== true && (
+                  <>
+                    {' '}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[11px]"
+                      disabled={rcon.busy}
+                      onClick={() => void applyRcon({ agreeEula: true, onlyEula: true })}
+                    >
+                      同意 EULA（写 eula=true）
+                    </Button>
+                    <a
+                      className="text-muted-foreground ml-1 text-[11px] underline"
+                      href={EULA_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      先看一眼条款
+                    </a>
+                  </>
+                )}
               </p>
               <div className="mt-2 flex flex-wrap items-end gap-2">
+                {/* ★ 游戏端口（`server-port`）—— 使用者报的「改了游戏端口不生效」就是这一项：
+                    以前编辑栏只改我们的 `servers[].port`，服务端还监听老端口。 */}
+                <label className="text-[11px]">
+                  <span className="text-muted-foreground mr-1">server-port</span>
+                  <input
+                    className="border-input bg-background h-7 w-24 rounded-md border px-2 font-mono text-[11px]"
+                    value={rcon.patch.serverPort}
+                    disabled={rcon.busy}
+                    onChange={(e) => setRcon((p) => ({ ...p, patch: { ...p.patch, serverPort: e.target.value } }))}
+                  />
+                </label>
                 <label className="flex items-center gap-1.5 text-[11px]">
                   <input
                     type="checkbox"
@@ -476,8 +617,18 @@ export function ServerForm({
                 </Button>
               </div>
               <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
-                ★ **只改那三行**，其余逐字保留（写前备份；写前会重读一次，发现文件刚被别处改过就**不动它**）。
-                <br />⚠️ **改完要重启服务端才生效** —— 那三项是它**启动时**读进内存的。
+                ★ 只改上面列出的那几行（<code>server-port</code> / <code>enable-rcon</code> /{' '}
+                <code>rcon.port</code> / <code>rcon.password</code>），其余**逐字保留**（写前备份；写前会重读一次，
+                发现文件刚被别处改过就**不动它**）。
+                <br />⚠️ **改完要重启服务端才生效** —— 那几项是它**启动时**读进内存的（`eula.txt` 同理）。
+                <br />★ 这里改的是**服务端那份文件**，同时会把端口同步进本桥接这份配置 ——
+                「改了游戏端口不生效」就是以前只改了后者。
+                {rcon.applyErr && (
+                  <>
+                    <br />
+                    <span className="text-destructive">写不进去：{rcon.applyErr}</span>
+                  </>
+                )}
                 {rcon.note && (
                   <>
                     <br />

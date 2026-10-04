@@ -175,11 +175,14 @@ import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } 
 //   而"块级局部别名被路由对象引用"正是 `listScheduleTasks is not defined` 那次事故的形状
 //   （见 `mocks/verify-route-scope.mjs`）。
 import {
+  EULA_FILE,
   PROPERTIES_FILE,
-  describeRconSettings,
-  patchRconSettings,
-  readPropertiesFile,
-  readRconSettings,
+  describeServerSettings,
+  patchServerSettings,
+  readEula,
+  readServerSettings,
+  readTextFile,
+  resolveEulaPath,
   resolvePropertiesPath,
 } from './servers/properties.mjs'
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
@@ -2912,57 +2915,55 @@ export class Bridge extends EventTarget {
     const workspace = this.config?.dsh?.workspace ?? ''
     const at = resolvePropertiesPath({ workspace, server })
     if (!at.ok) return { ok: false, why: at.why, serverId: server.id }
-    const file = readPropertiesFile(at.path)
+    const file = readTextFile(at.path)
     if (!file.ok) return { ok: false, why: file.why, serverId: server.id, path: at.path }
-    const settings = readRconSettings(file.text)
+    const settings = readServerSettings(file.text)
+    // ★ EULA 在**隔壁那个文件**里：`eula.txt`（服务端首次启动时才生成 ⇒ 不存在也算一种状态）
+    const eulaAt = resolveEulaPath({ workspace, server })
+    let eula = { path: eulaAt.path ?? '', exists: eulaAt.exists === true, agreed: null }
+    if (eulaAt.ok && eulaAt.exists) {
+      const ef = readTextFile(eulaAt.path)
+      if (ef.ok) eula = { path: eulaAt.path, exists: true, agreed: readEula(ef.text).agreed }
+    } else if (eulaAt.ok) {
+      eula = { path: eulaAt.path, exists: false, agreed: null }
+    }
     return {
       ok: true,
       serverId: server.id,
       path: at.path,
       from: at.from,
       settings,
-      describe: describeRconSettings(settings),
-      // ★ 与配置对不上的提醒：两边不一致时 RCON 一样连不上（这是我们踩过的那类"两处各说各话"）
+      describe: describeServerSettings(settings),
+      eula,
+      // ★★ 与配置对不上的项：**每一对都会让"改了没用"**（端口对不上 ⇒ 监测说它挂了；
+      //    密码对不上 ⇒ RCON 认证被拒）。以前只报 RCON 那一对，现在连游戏端口一起报。
+      configPort: Number.isFinite(Number(server.port)) ? Number(server.port) : null,
       configRconPort: Number.isFinite(Number(server.rconPort)) ? Number(server.rconPort) : null,
       configPasswordSet: Boolean(server.password),
     }
   }
 
   /**
-   * **写**这台的 `server.properties`（只动 RCON 那三行），并顺手备份。
+   * **写**这台的 `server.properties`（只动托管的那几行）与/或 `eula.txt`，并顺手备份。
    *
-   * ★ 三条纪律（详见 `servers/properties.mjs` 文件头）：只碰那三行、写前备份、
-   *   **写前重新读一次并要求内容与刚才一致**（乐观并发：否则会静默盖掉使用者在别处的改动）。
+   * ★ 四条纪律（详见 `servers/properties.mjs` 文件头）：只碰托管的行、写前备份、
+   *   **写前重新读一次并要求内容与刚才一致**（乐观并发：不盖掉使用者在别处的改动）、
+   *   改了要**重启服务端**才生效。
    * ★ 它**不写我们的 config** —— 那件事由路由用 `readRawConfig/writeRawConfig` 做
    *   （与"保存服务器条目"走同一条路，才不会两处口径分叉）。
    */
-  async applyServerProperties({ serverId = '', enableRcon, rconPort, password } = {}) {
+  async applyServerProperties({ serverId = '', serverPort, enableRcon, rconPort, password, agreeEula } = {}) {
     const list = Array.isArray(this.config?.servers) ? this.config.servers : []
     const server = list.find((s) => s && String(s.id) === String(serverId)) ?? null
     if (!server) return { ok: false, why: `配置里没有 id 为「${serverId}」的服务器` }
     const workspace = this.config?.dsh?.workspace ?? ''
     const at = resolvePropertiesPath({ workspace, server })
     if (!at.ok) return { ok: false, why: at.why, serverId: server.id }
-    const before = readPropertiesFile(at.path)
+    const before = readTextFile(at.path)
     if (!before.ok) return { ok: false, why: before.why, serverId: server.id, path: at.path }
 
-    const patched = patchRconSettings(before.text, { enableRcon, rconPort, password })
-    if (!patched.ok) return { ok: false, why: patched.why, serverId: server.id, path: at.path }
-    if (patched.changed.length === 0) {
-      return {
-        ok: true,
-        serverId: server.id,
-        path: at.path,
-        backup: null,
-        changed: [],
-        settings: readRconSettings(before.text),
-        describe: describeRconSettings(readRconSettings(before.text)),
-        note: '这三项本来就是你要的值 —— 没有改任何东西',
-      }
-    }
-
-    // 乐观并发：写之前再读一次，内容和刚读到的不一样就别写（有人同时在改）
-    const again = readPropertiesFile(at.path)
+    // ── ① 乐观并发：写之前再读一次，内容和刚读到的不一样就别写（有人同时在改）──
+    const again = readTextFile(at.path)
     if (!again.ok || again.text !== before.text) {
       return {
         ok: false,
@@ -2972,29 +2973,88 @@ export class Bridge extends EventTarget {
       }
     }
 
-    const backup = `${at.path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
-    try {
-      copyFileSync(at.path, backup)
-      writeFileSync(at.path, patched.text, 'utf8')
-    } catch (error) {
-      return { ok: false, why: `写失败：${error?.message ?? error}（备份：${backup}）`, serverId: server.id, path: at.path, backup }
+    const wantsProps = serverPort !== undefined || enableRcon !== undefined || rconPort !== undefined || password !== undefined
+    const patched = wantsProps ? patchServerSettings(before.text, { serverPort, enableRcon, rconPort, password }) : null
+    if (wantsProps && !patched.ok) return { ok: false, why: patched.why, serverId: server.id, path: at.path }
+
+    // ── ② EULA（另一个文件；`agreeEula` 缺省 = 不动它）──────────────────────
+    let eulaResult = null
+    if (agreeEula !== undefined) {
+      const eulaAt = resolveEulaPath({ workspace, server })
+      if (!eulaAt.ok) return { ok: false, why: eulaAt.why, serverId: server.id, path: at.path }
+      const cur = eulaAt.exists ? readTextFile(eulaAt.path) : { ok: true, text: '' }
+      if (!cur.ok) return { ok: false, why: cur.why, serverId: server.id, path: eulaAt.path }
+      // 同一个乐观并发规则：存在就要求内容没变过
+      if (eulaAt.exists) {
+        const re = readTextFile(eulaAt.path)
+        if (!re.ok || re.text !== cur.text) {
+          return { ok: false, serverId: server.id, path: eulaAt.path, why: `${EULA_FILE} 刚刚被别处改过 —— 没有覆盖它，请刷新后重试` }
+        }
+      }
+      const pe = patchEula(cur.text, agreeEula === true)
+      if (!pe.ok) return { ok: false, why: pe.why, serverId: server.id, path: eulaAt.path }
+      if (pe.changed.length > 0) {
+        const bak = eulaAt.exists ? `${eulaAt.path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}` : null
+        try {
+          if (bak) copyFileSync(eulaAt.path, bak)
+          writeFileSync(eulaAt.path, pe.text, 'utf8')
+        } catch (error) {
+          return { ok: false, why: `写 ${EULA_FILE} 失败：${error?.message ?? error}`, serverId: server.id, path: eulaAt.path, backup: bak }
+        }
+        eulaResult = { path: eulaAt.path, backup: bak, changed: pe.changed, agreed: agreeEula === true }
+        this.log(
+          `📜 [servers] 「${server.name ?? server.id}」的 ${EULA_FILE}：${pe.changed.join('、')}（已备份）` +
+            ` —— **下次启动服务端才生效**`,
+        )
+      } else {
+        eulaResult = { path: eulaAt.path, backup: null, changed: [], agreed: agreeEula === true, note: '本来就是这个值 —— 没有改任何东西' }
+      }
     }
-    const settings = readRconSettings(patched.text)
-    this.log(
-      `🎛️ [servers] 改了「${server.name ?? server.id}」的 ${PROPERTIES_FILE}：${patched.changed.join('、')}` +
-        `（已备份）—— **要重启服务端才生效**`,
-    )
+
+    const propsChanged = patched?.changed ?? []
+    if (propsChanged.length > 0) {
+      const backup = `${at.path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
+      try {
+        copyFileSync(at.path, backup)
+        writeFileSync(at.path, patched.text, 'utf8')
+      } catch (error) {
+        return { ok: false, why: `写失败：${error?.message ?? error}（备份：${backup}）`, serverId: server.id, path: at.path, backup }
+      }
+      this.log(
+        `🎛️ [servers] 改了「${server.name ?? server.id}」的 ${PROPERTIES_FILE}：${propsChanged.join('、')}` +
+          `（已备份）—— **要重启服务端才生效**`,
+      )
+      const settings = readServerSettings(patched.text)
+      return {
+        ok: true,
+        serverId: server.id,
+        path: at.path,
+        from: at.from,
+        backup,
+        changed: propsChanged,
+        settings,
+        describe: describeServerSettings(settings),
+        eula: eulaResult,
+        note: `已写入 ${PROPERTIES_FILE}。**要重启服务端才生效** —— 那几项是它启动时读进内存的。`,
+      }
+    }
+
+    // 只动了 eula（或什么都没动）
+    const settings = readServerSettings(before.text)
     return {
       ok: true,
       serverId: server.id,
       path: at.path,
       from: at.from,
-      backup,
-      changed: patched.changed,
+      backup: null,
+      changed: [],
       settings,
-      describe: describeRconSettings(settings),
-      // ★ 这句必须在返回值里（界面照抄）：改完不重启 = 白改
-      note: `已写入 ${PROPERTIES_FILE}。**要重启服务端才生效** —— 那三项是它启动时读进内存的。`,
+      describe: describeServerSettings(settings),
+      eula: eulaResult,
+      note:
+        eulaResult?.changed?.length > 0
+          ? `已写入 ${EULA_FILE}（同意 EULA）。**下次启动服务端才生效**。`
+          : '这几项本来就是你要的值 —— 没有改任何东西',
     }
   }
 
@@ -3018,9 +3078,9 @@ export class Bridge extends EventTarget {
     const workspace = this.config?.dsh?.workspace ?? ''
     const at = resolvePropertiesPath({ workspace, server })
     if (!at.ok) return { ok: false, why: at.why, serverId: server.id }
-    const file = readPropertiesFile(at.path)
+    const file = readTextFile(at.path)
     if (!file.ok) return { ok: false, why: file.why, serverId: server.id, path: at.path }
-    const s = readRconSettings(file.text)
+    const s = readServerSettings(file.text)
     // ★ 空密码**没有可抄的**：如实说，并指向"设一个新的"那条路（别静默地把空串写进 config ——
     //   那会让这台服从此"看起来配了密码、其实连不上"）。
     if (s.passwordSet !== true) {

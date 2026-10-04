@@ -2916,6 +2916,35 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 3. **RCON 只该监听本机或可信内网** —— 它等于服务端的控制台；界面要有一句提醒。
 4. **`servers` 为空 = 这一层完全不工作，而且一次网络请求都不发**（默认就是这样）。
 
+#### ★★★ 「服务端那两份文件」那一块（`ServerForm.tsx`，只在编辑已有服务器时出现）
+
+它是**两对配置各说各话**这个失败形状的正面回答 —— 使用者原话两条：
+「开服时显示 `enable-rcon=false`，能否在桥接的编辑栏直接修改」、
+「在编辑页面改了游戏端口也不能实际生效，并且不能自动同意 Eula」。
+
+| 被管的行 | 住在哪 | 与谁配对（对不上就是"改了没用"） |
+|---|---|---|
+| `server-port` | `server.properties` | 本桥接配置的 `servers[].port` |
+| `enable-rcon` / `rcon.port` / `rcon.password` | `server.properties` | `servers[].rconPort` / `servers[].password` |
+| `eula=true` | **隔壁的 `eula.txt`** | 没有配对项 —— 它只决定**服务端肯不肯启动** |
+
+四条在这块里必须说清（否则使用者会以为"点了就生效"）：
+
+1. 改的是**哪个文件**（显示绝对路径 + 它是从哪推出来的：归属档的 `cwd` 还是 `servers[].cwd`）；
+2. **只改被管的那几行**，其余**逐字保留**（写前备份；写前重读一次，发现文件刚被别处改过就**不动它**）；
+3. **要重启服务端才生效** —— 那几项是它**启动时**读进内存的（`eula.txt` 同理）；**而且会踢掉在线的人**；
+4. 这里改的是**服务端那份**，同时把端口/密码同步进本桥接这份配置（**只改一半等于没修**）。
+
+★★ 「对不上」要**看得见**：读出来的 `mismatch{port,rconPort,password}` 三个布尔直接显示成一行
+（游戏端口那一项还要点破「**这就是"改了游戏端口不生效"**」），否则使用者会以为桥接坏了。
+★★★ **保存主表单时若游戏端口变了，要主动回读一次并明说**：本桥接这份配置只决定"我们往哪儿连"，
+**服务端监听哪个端口是它自己那份文件的事** ⇒ 保存后两边可能仍然不一致。发现不一致时
+① 如实说、② 把那一块的 `server-port` 框**替他填成刚输入的值**（他接下来只该点一下「写入」）、
+③ **不自动关窗**（还有一步要人做）。★ 读不到文件时**什么都不说** —— 不凭空宣称一个没核实过的差异。
+★★ `eula.txt` 是**同意条款**的动作 ⇒ 只有「同意 EULA（写 eula=true）」那个按钮会送 `agreeEula`，
+**不放进"保存"里顺手做掉、不预勾**，旁边给出条款原文的链接（`https://aka.ms/MinecraftEULA`）；
+状态分三种显示：已同意 / **没同意（服务端会拒绝启动）** / **还没有 `eula.txt`**（第一次启动就卡在这儿）。
+
 #### 界面**不可以**做的事
 
 - ❌ 不要在界面上"顺便"加一个"立刻重启服务端"的按钮 —— 那属于 P4，且必须带"只尝试一次 + 冷却"的编排；
@@ -2942,8 +2971,8 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 | POST | `/api/servers/command` | body `{serverId, command}`：手动跑一条控制台命令。缺 `serverId`／空命令／超长（>500 字）⇒ 400；★★★ **完整控制台（op 级别）**，**字段白名单**（密码绝不出去） |
 | POST | `/api/servers/probe` | body `{serverId}`：**主动检测**一次（真连 RCON + 只读命令）。缺 `serverId` ⇒ 400。★★ 它**不喂状态机、不累加「连续失败」** —— 点几次都不会把一台好好的服务器「点成 down」 |
 | GET | `/api/servers/console?serverId=…&limit=N` | 服务器**控制台最新输出**（「实时后台」折叠栏的数据源）。**只读**；回带 `encoding`（真机是 `gbk` —— 那个文件不是 UTF-8） |
-| GET | `/api/servers/properties?serverId=…` | ★ 读**服务端自己的** `server.properties` 里 RCON 那三项的当前状态。**只读**；回 `path`/`from`（那个文件的路径，以及它是从哪儿推出来的：归属档的 `cwd` 还是 `servers[].cwd`）、`settings{enableRcon,rconPort,passwordSet}`、`mismatch{port,password}`（它和本桥接这份配置**对不上**的两项 —— 对不上时 RCON 照样连不上）。★★ **永不回密码本身**，连长度都不回 |
-| POST | `/api/servers/properties` | ★ 一键把 RCON 配好（0.3.2 收尾）。body `{serverId, enableRcon?, rconPort?, password?, syncToConfig?}` —— 三项至少给一个，否则 400。★★★ **只改那三行**（`enable-rcon`/`rcon.port`/`rcon.password`），其余行**逐字保留**；写前**备份**；写前**重读一次**，内容变了就**拒绝写**（乐观并发：不盖掉别处的改动）。★★ 默认**顺手把两份配置对齐**（`syncToConfig !== false` 时同时写 `config.json` 的 `servers[].rconPort/password`）—— 只改一半等于没修。★ 回带 `note`（含「**要重启服务端才生效**」，界面照抄别自己编）、`backup`、`changed[]`、`synced`。⚠️ **响应里没有密码** |
+| GET | `/api/servers/properties?serverId=…` | ★ 读**服务端自己的** `server.properties`（+ 隔壁的 `eula.txt`）里那几项的当前状态。**只读**；回 `path`/`from`（那个文件的路径，以及它是从哪儿推出来的：归属档的 `cwd` 还是 `servers[].cwd`）、`settings{serverPort,enableRcon,rconPort,passwordSet}`、`eula{path,exists,agreed}`（`agreed:false` ⇒ 服务端**拒绝启动**）、`configPort`/`configRconPort`/`configPasswordSet`（本桥接这份配的是什么）、`mismatch{port,rconPort,password}`（**对不上就是"改了没用"**；一边"不知道"时**不算不一致**）。★★ **永不回密码本身**，连长度都不回 |
+| POST | `/api/servers/properties` | ★ 一键把服务端那两份文件配好（0.3.2 收尾）。body `{serverId, serverPort?, enableRcon?, rconPort?, password?, agreeEula?, syncToConfig?}` —— 至少给一项，否则 400。★★★ **只改被管的那几行**（`server-port`/`enable-rcon`/`rcon.port`/`rcon.password`），其余行**逐字保留**；写前**备份**；写前**重读一次**，内容变了就**拒绝写**（乐观并发：不盖掉别处的改动）。★★ 默认**顺手把两份配置对齐**（`syncToConfig !== false` 时同时写 `config.json` 的 `servers[].port/rconPort/password`）—— 只改一半等于没修，而**「在编辑页面改了游戏端口不能实际生效」正是只改了 `config.json` 那一半**。★ `agreeEula:true` 会写隔壁的 `eula.txt`（`eula=true`）—— 那是**同意条款**的动作，必须由使用者显式点、**不能顺手代办**。★ 回带 `note`（含「**要重启服务端才生效**」，界面照抄别自己编）、`backup`、`changed[]`、`eula{path,backup,changed,agreed}`、`synced`。⚠️ **响应里没有密码** |
 | POST | `/api/servers/properties`（`{serverId, adoptFromFile:true}`） | ★★ **「密码忘了 ⇒ 把服务端那份抄过来」**（使用者问「rcon 密码被忘记了怎么办」）：密码明文存在两边，而**服务端那份是权威**（它拿它校验每个 RCON 连接）⇒ 只要它还在，抄过来就行，**一次重启都不用**（改服务端那份才要重启、还会踢在线玩家）。它把 `server.properties` 里的 `rcon.password`（有端口就一起）写进 `config.json`，★ **密码只在桥接进程内存里走一趟，响应里只有 `adopted{password,rconPort}` 这个"抄了什么类别"，既没有值也没有长度**。★ 服务端那份是空的 ⇒ 400 并指向"写入"那条路。★ 回带 `restartNeeded:false` + 「不必重启服务端」 |
 
 **★ 保存/删除后即时生效**：后端会现读盘上的列表并**重建监测循环**

@@ -301,6 +301,7 @@ const handler = createApiHandler({
         from: 'config.json 的 servers[].cwd',
         settings: { enableRcon: null, rconPort: null, passwordSet: false },
         describe: 'enable-rcon=**没有这一项/值看不懂** · rcon.port=没写（默认 25575） · rcon.password=**空**',
+        eula: { path: 'C:\\fake\\store\\mc-two\\eula.txt', exists: false, agreed: null },
         configRconPort: null,
         configPasswordSet: false,
       }
@@ -311,25 +312,46 @@ const handler = createApiHandler({
       serverId: 's1',
       path: 'C:\\fake\\store\\mc-main\\server.properties',
       from: '归属档（我们拉起它时用的工作目录）',
-      settings: { enableRcon: false, rconPort: 25575, passwordSet: true, password: 'THIS_SHOULD_NEVER_LEAK' },
+      settings: { serverPort: 25565, enableRcon: false, rconPort: 25575, passwordSet: true, password: 'THIS_SHOULD_NEVER_LEAK' },
       describe: 'enable-rcon=**关**（这就是连不上的原因） · rcon.port=25575 · rcon.password=已设置',
+      eula: { path: 'C:\\fake\\store\\mc-main\\eula.txt', exists: true, agreed: false },
+      configPort: 25566, // ★ 与本桥接的 `servers[].port` **不一致** ⇒ mismatch.port 应为 true
       configRconPort: 25576,
       configPasswordSet: false,
       __password: 'THIS_SHOULD_NEVER_LEAK',
     }
   },
-  serversPropertiesApply: async ({ serverId, enableRcon, rconPort, password } = {}) => {
+  serversPropertiesApply: async ({ serverId, serverPort, enableRcon, rconPort, password, agreeEula } = {}) => {
     if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    const changed = [
+      serverPort ? 'server-port' : null,
+      enableRcon === true ? 'enable-rcon' : null,
+      rconPort ? 'rcon.port' : null,
+      password ? 'rcon.password' : null,
+    ].filter(Boolean)
     return {
       ok: true,
       serverId: 's1',
       path: 'C:\\fake\\store\\mc-main\\server.properties',
       from: '归属档',
       backup: 'C:\\fake\\store\\mc-main\\server.properties.bak-2026-10-04T12-00-00-000Z',
-      changed: [enableRcon === true ? 'enable-rcon' : null, rconPort ? 'rcon.port' : null, password ? 'rcon.password' : null].filter(Boolean),
-      settings: { enableRcon: enableRcon === true, rconPort: rconPort ?? 25575, passwordSet: Boolean(password) },
-      describe: `enable-rcon=${enableRcon === true ? '开' : '关'} · rcon.port=${rconPort ?? 25575} · rcon.password=${password ? '已设置' : '空'}`,
-      note: '已写入 server.properties。**要重启服务端才生效** —— 那三项是它启动时读进内存的。',
+      changed,
+      settings: { serverPort: serverPort ?? 25565, enableRcon: enableRcon === true, rconPort: rconPort ?? 25575, passwordSet: Boolean(password) },
+      describe: `server-port=${serverPort ?? 25565} · enable-rcon=${enableRcon === true ? '开' : '关'} · rcon.port=${rconPort ?? 25575} · rcon.password=${password ? '已设置' : '空'}`,
+      // ★ EULA 只有在被要求时才回（它是**另一个文件**）
+      eula:
+        agreeEula === undefined
+          ? null
+          : {
+              path: 'C:\\fake\\store\\mc-main\\eula.txt',
+              backup: 'C:\\fake\\store\\mc-main\\eula.txt.bak-2026-10-04T12-00-00-000Z',
+              changed: ['eula'],
+              agreed: agreeEula === true,
+            },
+      note:
+        agreeEula !== undefined && changed.length === 0
+          ? '已写入 eula.txt（同意 EULA）。**下次启动服务端才生效**。'
+          : '已写入 server.properties。**要重启服务端才生效** —— 那几项是它启动时读进内存的。',
       __password: 'THIS_SHOULD_NEVER_LEAK',
     }
   },
@@ -797,9 +819,16 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★★★ 响应里**一个字符都没有密码**（桩里故意回带了 `__password`）',
     !st.text.includes('THIS_SHOULD_NEVER_LEAK'), st.text.slice(0, 140))
   check('★ 只给"配没配"（`passwordSet`），不给密码本身', st.json?.data?.settings?.passwordSet === true)
-  check('★★ 如实回带"两边对不上"的两项（端口 / 密码）',
-    st.json?.data?.mismatch?.port === true && st.json?.data?.mismatch?.password === true,
+  check('★★ 如实回带"两边对不上"的三项（游戏端口 / RCON 端口 / 密码）',
+    st.json?.data?.mismatch?.port === true && st.json?.data?.mismatch?.rconPort === true && st.json?.data?.mismatch?.password === true,
     JSON.stringify(st.json?.data?.mismatch))
+  // ★★ 这一条是使用者报的「改了游戏端口也不生效」在**接线层**的回归锁：
+  //    游戏端口（`server-port`）与 RCON 端口是**两件独立的事**，各自都要能看出不一致。
+  check('★★★ 游戏端口与 RCON 端口**分开报**（不许混成一个"端口"）',
+    st.json?.data?.settings?.serverPort === 25565 && st.json?.data?.settings?.rconPort === 25575,
+    JSON.stringify(st.json?.data?.settings))
+  check('★★ EULA 的状态也在同一屏里（它在**隔壁那个文件**；`agreed:false` = 服务端会拒绝启动）',
+    st.json?.data?.eula?.exists === true && st.json?.data?.eula?.agreed === false, JSON.stringify(st.json?.data?.eula))
   check('★★ 回带那个**文件路径**与它的来源（"改错文件"是最坏的失败形状）',
     /server\.properties$/.test(String(st.json?.data?.path ?? '')) && String(st.json?.data?.from ?? '').length > 0,
     `${st.json?.data?.path} ← ${st.json?.data?.from}`)
@@ -819,19 +848,32 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★★ 写入什么都不要求改 ⇒ 400', (await propsPost({ serverId: 's1' })).status === 400)
   check('★ 不认识的 serverId ⇒ 400（如实报错，不静默成功）', (await propsPost({ serverId: 'nope', enableRcon: true })).status === 400)
 
-  const applied = await propsPost({ serverId: 's1', enableRcon: true, rconPort: 25599, password: 'BRAND-NEW-PW' })
+  const applied = await propsPost({ serverId: 's1', serverPort: 25599, enableRcon: true, rconPort: 25599, password: 'BRAND-NEW-PW' })
   check('★★ 一键配好 → 200', applied.status === 200, applied.text.slice(0, 160))
   check('★★★ 写入的响应里**也没有密码**（连回执都不带）', !applied.text.includes('BRAND-NEW-PW'), applied.text.slice(0, 160))
   check('★★ 如实回带"**要重启服务端才生效**"（界面照抄这句，别自己编）',
     /重启服务端才生效/.test(String(applied.json?.data?.note ?? '')), String(applied.json?.data?.note ?? ''))
   check('★ 回带备份路径（写坏了能回退）', /\.bak-/.test(String(applied.json?.data?.backup ?? '')), String(applied.json?.data?.backup ?? ''))
-  check('★★★ **顺手把 config.json 也对齐了**（只改 server.properties 等于没修）', (() => {
+  check('★★★ **顺手把 config.json 也对齐了**（只改服务端那份等于没修）', (() => {
     const row = rawConfigStub.servers.find((s) => s.id === 's1') ?? {}
-    return row.rconPort === 25599 && row.password === 'BRAND-NEW-PW'
-  })(), JSON.stringify({ port: s1().rconPort, pwLen: String(s1().password ?? '').length }))
+    return row.port === 25599 && row.rconPort === 25599 && row.password === 'BRAND-NEW-PW'
+  })(), JSON.stringify({ port: s1().port, rconPort: s1().rconPort, pwLen: String(s1().password ?? '').length }))
   check('★ 同步结果也如实回带', applied.json?.data?.synced?.ok === true, JSON.stringify(applied.json?.data?.synced))
   check('★★ 字段白名单：返回里没有依赖塞进来的 `__password`',
     st.json?.data?.__password === undefined && applied.json?.data?.__password === undefined)
+  check('★★ 只要求改游戏端口也行（不必每次都连 RCON 那几项一起送）', (await propsPost({ serverId: 's1', serverPort: 25600 })).status === 200)
+
+  // ── EULA：同意条款那一条（`{serverId, agreeEula:true}` ⇒ 写隔壁的 eula.txt）──────────
+  const eula = await propsPost({ serverId: 's1', agreeEula: true })
+  check('★★ 同意 EULA → 200', eula.status === 200, eula.text.slice(0, 140))
+  check('★★★ 回带**写的是哪个文件**、备份、以及"已同意"（这是一条**同意条款**的动作，要说清）',
+    /eula\.txt$/.test(String(eula.json?.data?.eula?.path ?? '')) && eula.json?.data?.eula?.agreed === true,
+    JSON.stringify(eula.json?.data?.eula))
+  check('★★ 回带的那句是"**下次启动服务端才生效**"（不是"已经生效"）',
+    /才生效/.test(String(eula.json?.data?.note ?? '')), String(eula.json?.data?.note ?? ''))
+  check('★★ EULA 那条**不碰** RCON 密码（各自独立；不许因为顺路就把密码写一遍）',
+    s1().password === 'BRAND-NEW-PW', `len=${String(s1().password ?? '').length}`)
+  check('★ 与 EULA 无关的项也没被顺手改掉（`port` 还是上一步写的 25600）', s1().port === 25600, String(s1().port))
 
   // ── ④-d-6 「把服务端那份抄过来」（零重启对齐两边；使用者问「rcon 密码被忘记了怎么办」）──
   //
