@@ -6,24 +6,29 @@
  * ══════════════════════════════════════════════════════════════════════════
  * 本项目的原话是"最贵的缺陷是接线"（先例：任务段那次"从未注入过"的静默事故，
  * 124 项纯函数断言一条都没抓到）。这一套盯的正是那几处**只有走完整桥接才看得见**
- * 的东西：
+ * 的东西。
  *
- *   ① **绑定码走完整桥接时，一次 `rpc.prompt` 都没有发** ——
- *      设计文档 §10.1 的接线级验收第⑤条，逐字要求；
- *   ② 它必须在**语义唤醒闸门之前**生效 —— 用桩判定器断言"码这一轮**根本没问过**
- *      判定器"（放在闸门之后会**静默失效**：`semantic` 下玩家来绑定可能被判"沉默"）；
- *   ③ 未绑定的玩家说话 ⇒ **一次 `rpc.prompt` 都没有**（零成本）+ 只给他本人一条 `tellraw`；
- *   ④ 已绑定的玩家说话 + 命中唤醒词 ⇒ 真的产生了 `session/prompt`，
- *      而且回复**走公屏 `say`**（不是 QQ、不是私聊）；
- *   ⑤ 提示词里的来源标注**如实说是公屏**（不这么做模型会以为在一对一私聊里，
- *      而它说的每一句都会当场印在全服公屏上）。
+ * ══════════════════════════════════════════════════════════════════════════
+ * 流程（2026-10-04 使用者重新定的口径）
+ * ══════════════════════════════════════════════════════════════════════════
+ * ```
+ * 玩家进服（未绑定）        → 只给他本人一条 tellraw：怎么拿码（**不要加斜杠**）
+ * 玩家在**游戏里**说 mc bind → 生成一张 6 位码（与那个 UUID 挂在一起）
+ *                              → 只给他本人 tellraw：码 + 下一步
+ * 玩家在**群里**发 @我 /mc bind <码>
+ *                          → 桥接本地拦截（一次模型调用都没有）→ **当场绑定**
+ *                          → 群里回一句 + **在游戏里给那个玩家一条成功通知**
+ * ```
+ * ∴ 关键断言：① 取码与提交**都不产生模型调用**；② 提交那一刻**就**绑上了
+ *   （不再有"下次说话才落实"）；③ **每个玩家只收到给他本人的** tellraw；
+ *   ④ 绑定成功通知**立刻**回到游戏里（抢绑藏不住）。
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindUuid, issueCode, lookupByUuid, pendingQualifications, redeemCode } from '../src/servers/bindings.mjs'
+import { lookupByUuid, lookupByQq, listBindings, bindUuid, readStore, writeStore } from '../src/servers/bindings.mjs'
 
 let pass = 0
 let fail = 0
@@ -49,15 +54,17 @@ const { SendQueue } = await import('../src/onebot.mjs')
 
 const ROOT = mkdtempSync(join(tmpdir(), 'qqb-gamewire-'))
 const ADMIN = '100000001'
+const MEMBER = '100000077'
 const GROUP = '700000001'
 const OTHER_GROUP = '700000999'
 const PLAYER = 'YoCerin'
 const UUID = '00000000-0000-4000-8000-000000000001'
-const SERVER = { id: 'forge1', name: '主服（Forge 1.20.1）', host: '127.0.0.1', rconPort: 25575, rconPort2: 0, password: 'x', gameChat: true, enabled: true, commandFromQQ: false }
+const SERVER = { id: 'forge1', name: '主服（Forge 1.20.1）', host: '127.0.0.1', rconPort: 25575, password: 'x', gameChat: true, enabled: true, commandFromQQ: false }
 
 /**
  * 造一个最小可用的真桥接。
- * @param {{semantic?: boolean, players?: object[]}} o
+ * @param {{semantic?: boolean, groupAllow?: string[], wakeJudge?: object|null,
+ *          readServers?: Function|null, servers?: object[]|null}} o
  */
 function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null, readServers = null, servers = null } = {}) {
   const WS = join(ROOT, `ws-${Math.random().toString(36).slice(2)}`)
@@ -103,7 +110,7 @@ function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null
 
   const sendQueue = new SendQueue({ ...config.send, log })
   const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, log, wakeJudge, readServers })
-  // ★ 游戏内那条通道的执行器换成桩：**只换执行器**，命令的构造一个都不放宽 ——
+  // ★ 游戏内那条通道的执行器换成桩：**只换执行器**，命令的构造一个字都不放宽 ——
   //   这里收到的 `command` 正是真机上会发给 RCON 的那一串。
   const gameCommands = []
   bridge.setGameConsoleForTest(async ({ server, command, what }) => {
@@ -124,38 +131,71 @@ const groupMsg = (groupId, userId, text) => ({
   sender: { user_id: userId, nickname: `用户${userId}` },
 })
 
-/** 从桥接日志里捞出刚发出的绑定码（**只有测试这么做**；生产代码绝不记录码）。 */
-function codeFrom(text) {
-  const m = /绑定码：`([0-9]{6})`/.exec(String(text ?? ''))
+const privateMsg = (userId, text) => ({
+  post_type: 'message',
+  message_type: 'private',
+  sub_type: 'friend',
+  user_id: userId,
+  self_id: '200000001',
+  message: [{ type: 'text', data: { text } }],
+  sender: { user_id: userId, nickname: '主人' },
+})
+
+/** 从 tellraw 命令里把码抠出来（**只有测试这么做**；生产代码绝不把码写进日志）。 */
+function codeFromTellraw(command) {
+  const m = /(\d{6})/.exec(String(command ?? ''))
   return m ? m[1] : ''
 }
 
-console.log('\n=== ① ★★★ 群里发 `/绑定`：**一次 rpc.prompt 都没有**，而且回了一张码 ===')
+console.log('\n=== ① ★★★ 玩家在游戏里说 `mc bind` ⇒ 一张只发给**他本人**的码，零模型调用 ===')
 {
-  const { bridge, rpc, sent } = wiringBridge()
+  const { bridge, rpc, sent, gameCommands } = wiringBridge()
   bridge.attach()
-  // ★★ 关键：这条消息**没有 @ 机器人、也没有命中关键词** —— 正是真实用法
-  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/绑定'))
-  eq(rpc.prompts.length, 0, '★★★ 走完整桥接，**一次 session/prompt 都没发**（设计文档 §10.1 逐字要求）')
-  eq(r.reason, 'bind-command', '★ 这一轮以「绑定指令」结束（不是普通聊天）')
-  eq(sent.length, 1, '★ 只回了一条')
-  ok(/绑定码：`[0-9]{6}`/.test(sent[0].text), '★ 回复里有 6 位绑定码')
-  eq(sent[0].peerId, GROUP, '★ 回在**那个群里**（不是私聊 —— 私聊是 fail-closed 的门）')
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  eq(rpc.prompts.length, 0, '★★★ 取码**一次模型调用都没有**')
+  eq(sent.length, 0, '★★ 也没往 QQ 发任何东西（码是游戏内的私密消息）')
+  const tells = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells.length, 1, '★ 恰好一条 tellraw')
+  ok(tells[0].command.startsWith(`tellraw ${PLAYER} `), '★★★ 收件人是**他本人**（不是 @a）')
+  ok(/\d{6}/.test(tells[0].command), '★ 里面给了 6 位码')
+  ok(/\/mc bind/.test(tells[0].command), '★★ 而且告诉了他下一步：群里发 `/mc bind <码>`')
+  ok(Boolean(codeFromTellraw(tells[0].command)), '★ 码能从那串命令里读出来（形状是我们要的）')
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ② ★★ 不在白名单的群：`/绑定` **一个回话都没有**（fail-closed，不新造名单）===')
+console.log('\n=== ② ★★★ 群里 `/mc bind <码>` ⇒ **当场绑定** + 回游戏通知本人，零模型调用 ===')
 {
-  const { bridge, rpc, sent } = wiringBridge()
+  const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
   bridge.attach()
-  const r = await bridge.handleEvent(groupMsg(OTHER_GROUP, ADMIN, '/绑定'))
-  eq(sent.length, 0, '★★ 群白名单外 ⇒ **不回话**（与普通消息同一条纪律：群里不解释）')
-  eq(rpc.prompts.length, 0, '★ 也没有模型调用')
-  ok(r.reason === 'bind-command' || r.reason === 'no-trigger' || r.reason === 'group-disabled' || r.reason === 'not-allowed', '★ 如实给出原因', String(r.reason))
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const code = codeFromTellraw(gameCommands.at(-1)?.command)
+  const tellsBefore = gameCommands.filter((c) => c.what === 'tellraw').length
+
+  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  eq(rpc.prompts.length, 0, '★★★ 提交码也**零模型调用**')
+  eq(r.reason, 'bind-command', '★ 这一轮以「绑定指令」结束')
+
+  // ★★★ 提交那一刻就绑上了（不再有"下次说话才落实"）
+  eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★★★ **当场**写死了映射')
+  eq(lookupByQq(WS, ADMIN)?.uuid, UUID, '★ 两个方向都在')
+  eq(Object.keys(readStore(WS).store.codes).length, 0, '★ 码被消费掉了（一次性）')
+
+  ok(sent.some((x) => /绑好了/.test(x.text)), '★ 群里回了一句"绑好了"')
+
+  // ★★★ 而且**在游戏里**给那个玩家发了成功通知（使用者明确要求的那一步）
+  const tells = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells.length, tellsBefore + 1, '★★★ 多了一条 tellraw —— 绑定成功通知回到了游戏里')
+  const last = tells.at(-1).command
+  ok(last.startsWith(`tellraw ${PLAYER} `), '★★ 那条通知是给**那个玩家本人**的')
+  ok(/绑定成功/.test(last), '★★★ 内容就是"绑定成功"')
+  ok(!last.includes(ADMIN), '★★★ 通知里**没有 QQ 号**（设计文档 §5.5：服务端只拿到"绑定了没有"）')
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ③ ★★★ 语义唤醒闸门开着时：码这一轮**根本没问过判定器**（放在闸门后会静默失效）===')
+console.log('\n=== ③ ★★★ 语义唤醒闸门开着时：取码/提交两轮**根本没问过判定器** ===')
 {
   let judgeCalls = 0
   const judge = {
@@ -165,60 +205,83 @@ console.log('\n=== ③ ★★★ 语义唤醒闸门开着时：码这一轮**根
       return { verdict: 'silent', why: '桩：一律判沉默' }
     },
   }
-  const { bridge, rpc, sent } = wiringBridge({ semantic: true, wakeJudge: judge })
+  const { bridge, rpc, sent, gameCommands } = wiringBridge({ semantic: true, wakeJudge: judge })
   bridge.attach()
-  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/绑定'))
-  eq(judgeCalls, 0, '★★★ 判定器**一次都没被问过** —— 说明绑定通道确实排在闸门之前')
-  eq(sent.length, 1, '★★ 即使判定器"会判沉默"，绑定码照样发得出去（码没白拿）')
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const code = codeFromTellraw(gameCommands.at(-1)?.command)
+
+  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  eq(judgeCalls, 0, '★★★ 判定器**一次都没被问过** —— 绑定通道确实排在闸门之前')
+  ok(sent.some((x) => /绑好了/.test(x.text)), '★★ 即使判定器"会判沉默"，绑定照样成立（这一步没白做）')
   eq(rpc.prompts.length, 0, '★ 依然零模型调用')
   eq(r.reason, 'bind-command', '★ 以绑定指令结束')
 
   // 对照组：同样开着闸门，一条**普通**群消息**会**经过判定器（证明桩真的接上了）
   await bridge.handleEvent(groupMsg(GROUP, ADMIN, '小鲸鱼 在吗'))
-  ok(judgeCalls > 0, '★★ 对照组：普通消息**确实**会问判定器（说明上面那条 0 不是"桩没接上"）', `问了 ${judgeCalls} 次`)
+  ok(judgeCalls > 0, '★★ 对照组：普通消息**确实**会问判定器（说明上面那个 0 不是"桩没接上"）', `问了 ${judgeCalls} 次`)
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ④ 提交码：资格生效，但仍然**零模型调用**；且绑的是**发送者** ===')
+console.log('\n=== ④ 形状不对的提交：**必须在这里拦下**，不许掉进管理员控制台那条路 ===')
 {
   const { bridge, rpc, sent, WS } = wiringBridge()
   bridge.attach()
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/绑定'))
-  const code = codeFrom(sent.at(-1)?.text)
-  ok(Boolean(code), '（准备）拿到了一张码')
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/mc bind abc'))
+  ok(sent.some((x) => /6 位数字/.test(x.text)), '★★ `/mc bind abc` ⇒ 一句"码是 6 位数字"')
+  eq(rpc.prompts.length, 0, '★ 零模型调用')
+  eq(listBindings(WS).length, 0, '★ 什么都没绑上')
 
-  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/绑定 ${code}`))
-  eq(rpc.prompts.length, 0, '★★ 提交码也是**零模型调用**')
-  eq(r.reason, 'bind-command', '★ 以绑定指令结束')
-  const pend = pendingQualifications(WS)
-  eq(pend.length, 1, '★ 资格生效了')
-  eq(pend[0].qqId, ADMIN, '★★★ 资格属于**发送者本人**（绝不绑给消息里写的任何人）')
-
-  // 错的码：一句极短的话，且不产生模型调用
   const before = sent.length
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/绑定 000000'))
-  eq(sent.length, before + 1, '★ 码不对 ⇒ 回一句（不吵）')
-  ok(/不能用/.test(sent.at(-1)?.text ?? ''), '★ 失败话术极短且不猜')
-  eq(rpc.prompts.length, 0, '★ 失败路径也不调模型')
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/mc bind'))
+  eq(sent.length, before + 1, '★ `/mc bind`（没码）⇒ 指路')
+  ok(/游戏里/.test(sent.at(-1)?.text ?? ''), '★★ 指路说清"码要在游戏里拿"（**不在这里发码**）')
+  eq(rpc.prompts.length, 0, '★ 零模型调用')
+
+  // ★★ 别的 `/mc` 子命令**不许**被绑定通道吞掉（它们要走管理员控制台那条路）
+  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/mc list'))
+  ok(r.reason !== 'bind-command', '★★★ `/mc list` **不走**绑定通道（那是控制台指令）', String(r.reason))
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑤ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ 真的跑了一轮，回复走**公屏 say** ===')
+console.log('\n=== ⑤ 未绑定玩家：提示**每次进服最多一次**；而提示过之后 `mc bind` 仍然管用 ===')
+{
+  const { bridge, rpc, gameCommands } = wiringBridge()
+  bridge.attach()
+  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 你好' })
+  eq(rpc.prompts.length, 0, '★★★ 未绑定的玩家说话 ⇒ **一次模型调用都没有**（零成本）')
+  const tells1 = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells1.length, 1, '★ 只有一条 tellraw（提醒他绑定）')
+  ok(/mc bind/.test(tells1[0].command), '★ 提醒里给出了**新流程**')
+
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 再问一次' })
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 第二次说话**不再提示**（每次进服最多一次）')
+
+  // ★★★ 但"已经提示过"**不能**把 `mc bind` 也挡住 —— 那是玩家主动来绑定的
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const tells2 = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells2.length, 2, '★★★ 提示过之后 `mc bind` **照样**给码（这两件事是独立的）')
+  ok(/\d{6}/.test(tells2.at(-1).command), '★ 新码给了')
+
+  // 退服再进 ⇒ 允许再提示一次
+  await bridge.onGameEventForTest(SERVER, { kind: 'leave', name: PLAYER })
+  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 我回来了' })
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 3, '★ 重新进服 ⇒ 可以再提示一次（"每次进服"不是"一辈子一次"）')
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ 真的跑了一轮，回复走**公屏 say** ===')
 {
   const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
   bridge.attach()
   bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
 
   // 先让他在 QQ 私聊里说一句 —— 拿到"那个 QQ 的会话 id"
-  await bridge.handleEvent({
-    post_type: 'message',
-    message_type: 'private',
-    sub_type: 'friend',
-    user_id: ADMIN,
-    self_id: '200000001',
-    message: [{ type: 'text', data: { text: '小鲸鱼 在吗' } }],
-    sender: { user_id: ADMIN, nickname: '主人' },
-  })
+  await bridge.handleEvent(privateMsg(ADMIN, '小鲸鱼 在吗'))
   eq(rpc.prompts.length, 1, '（准备）QQ 私聊那条跑了一轮')
   const qqSessionId = rpc.prompts[0].sessionId
 
@@ -230,7 +293,6 @@ console.log('\n=== ⑤ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ �
   ok(/全服所有人都看得见/.test(prompt), '★★★ 并且明确警告"全服都看得见"')
   eq(rpc.prompts[1].sessionId, qqSessionId, '★★★ 会话就是**那个 QQ 的会话**（游戏内的话与他的 QQ 记忆同一条）')
 
-  // ★ 回复必须走游戏，**不能**走 QQ
   const qqReplies = sent.filter((x) => x.kind === 'private')
   eq(qqReplies.length, 1, '★★★ 游戏那一轮的回复**没有**发到 QQ 私聊（只有上面那条 QQ 消息的回复）')
   eq(sent.length, 1, '★ QQ 通道上只有那一条（游戏那条完全没走 QQ）')
@@ -241,88 +303,11 @@ console.log('\n=== ⑤ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ �
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑥ 未绑定玩家说话：**零模型调用** + 只给他本人一条 tellraw；每次进服最多一次 ===')
-{
-  const { bridge, rpc, sent, gameCommands } = wiringBridge()
-  bridge.attach()
-  // `join` 事件（真实序列里它在聊天之前）
-  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
-  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-
-  const r1 = await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 你好' })
-  eq(r1, undefined, '★ 未绑定 ⇒ 这一轮到此为止（不进模型）')
-  eq(rpc.prompts.length, 0, '★★★ 未绑定的玩家说话 ⇒ **一次模型调用都没有**（零成本）')
-  eq(sent.length, 0, '★★ 也没有往 QQ 发任何东西')
-  const tells = gameCommands.filter((c) => c.what === 'tellraw')
-  eq(tells.length, 1, '★ 只有一条 tellraw')
-  eq(tells[0].command.startsWith(`tellraw ${PLAYER} `), true, '★★ 收件人是**他本人**（不是 @a）')
-  ok(/\/绑定/.test(tells[0].command), '★ 提醒里给出了**怎么绑**')
-
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 再问一次' })
-  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 第二次说话**不再提示**（每次进服最多一次，刷屏的提示等于没有提示）')
-  eq(rpc.prompts.length, 0, '★ 仍然零模型调用')
-
-  // 退服再进 ⇒ 允许再提示一次
-  await bridge.onGameEventForTest(SERVER, { kind: 'leave', name: PLAYER })
-  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 我回来了' })
-  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 2, '★ 重新进服 ⇒ 可以再提示一次（"每次进服"不是"一辈子一次"）')
-  await bridge.close({ timeoutMs: 200 })
-}
-
-console.log('\n=== ⑦ ★★★ 有资格时：游戏内一说话就把绑定**写死**，并给本人 tellraw 确认 ===')
-{
-  const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
-  bridge.attach()
-  issueCode({ workspace: WS, qqId: ADMIN, chatKey: `group:${GROUP}` })
-  // 直接从盘上读码（生产代码只有群里那条回复里有；测试为了不解析文案就这么拿）
-  const { readStore } = await import('../src/servers/bindings.mjs')
-  const code = readStore(WS).store.codes[ADMIN].code
-  redeemCode({ workspace: WS, qqId: ADMIN, code, chatKey: `group:${GROUP}` })
-  eq(pendingQualifications(WS).length, 1, '（准备）有一份待绑定资格')
-
-  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 早上好' })
-  const bound = lookupByUuid(WS, UUID)
-  eq(bound?.qqId, ADMIN, '★★★ 绑定**当场写死**（UUID → QQ）')
-  eq(pendingQualifications(WS).length, 0, '★ 那份资格被消费掉了（一次性）')
-  const tells = gameCommands.filter((c) => c.what === 'tellraw')
-  ok(tells.length >= 1, '★★ 给了本人一条确认')
-  ok(/绑定成立/.test(tells[0]?.command ?? ''), '★★ 确认里明说"绑定成立"（抢绑藏不住）')
-  // ★ 设计文档 §5.5：服务端**拿不到 QQ 号** ⇒ 确认里不许出现 QQ 号
-  ok(!tells.some((t) => t.command.includes(ADMIN)), '★★★ 确认里**没有 QQ 号**（§5.5：服务端只拿到"绑定了没有"）')
-  // 绑定之后这一轮**同时**继续跑（玩家叫了它，就该答）
-  eq(rpc.prompts.length, 1, '★ 绑定之后这一轮照常继续（他确实叫了小鲸鱼）')
-  eq(sent.length, 0, '★ 回复走公屏，不走 QQ')
-  ok(gameCommands.some((c) => c.what === 'say'), '★ 回复真的发到公屏了')
-  await bridge.close({ timeoutMs: 200 })
-}
-
-console.log('\n=== ⑧ 多份资格 ⇒ **绝不猜**：不写绑定，给本人一条"我分不清" ===')
-{
-  const { bridge, WS, gameCommands } = wiringBridge()
-  bridge.attach()
-  issueCode({ workspace: WS, qqId: ADMIN, chatKey: 'g', code: '111111' })
-  issueCode({ workspace: WS, qqId: '100000002', chatKey: 'g', code: '222222' })
-  redeemCode({ workspace: WS, qqId: ADMIN, code: '111111', chatKey: 'g' })
-  redeemCode({ workspace: WS, qqId: '100000002', code: '222222', chatKey: 'g' })
-  eq(pendingQualifications(WS).length, 2, '（准备）两份资格')
-
-  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
-  eq(lookupByUuid(WS, UUID), null, '★★★ **没有**写任何绑定（猜错 = 把别人的身份算到你头上）')
-  const tells = gameCommands.filter((c) => c.what === 'tellraw')
-  eq(tells.length, 1, '★ 给本人一条说明')
-  ok(/2 个/.test(tells[0]?.command ?? ''), '★ 如实说清有几份（不装作没事）')
-  await bridge.close({ timeoutMs: 200 })
-}
-
-console.log('\n=== ⑨ 已绑定但那个 QQ 不在名单里 ⇒ 不参与（与 QQ 侧 fail-closed 一致）===')
+console.log('\n=== ⑦ 已绑定但那个 QQ 不在名单里 ⇒ 不参与（与 QQ 侧 fail-closed 一致）===')
 {
   const { bridge, rpc, WS, gameCommands } = wiringBridge()
   bridge.attach()
-  const STRANGER = '999999999'
-  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: STRANGER, by: 'test' })
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: MEMBER, by: 'test' })
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
   eq(rpc.prompts.length, 0, '★★ 名单外 ⇒ **一次模型调用都没有**')
@@ -332,7 +317,7 @@ console.log('\n=== ⑨ 已绑定但那个 QQ 不在名单里 ⇒ 不参与（与
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑩ 已绑定但**没叫它** ⇒ 不回答（唤醒判定与 QQ 侧共用同一份判据）===')
+console.log('\n=== ⑧ 已绑定但**没叫它** ⇒ 不回答（唤醒判定与 QQ 侧共用同一份判据）===')
 {
   const { bridge, rpc, WS, gameCommands } = wiringBridge()
   bridge.attach()
@@ -344,23 +329,59 @@ console.log('\n=== ⑩ 已绑定但**没叫它** ⇒ 不回答（唤醒判定与
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑪ 管理员 `/解绑`：能解掉，且**零模型调用**；非管理员发同一形状 ⇒ 按普通聊天 ===')
+console.log('\n=== ⑨ 管理员 `/mc unbind`：能解掉、零模型调用；非管理员发同一形状 ⇒ 按普通聊天 ===')
 {
   const { bridge, rpc, sent, WS } = wiringBridge()
   bridge.attach()
   bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/解绑 ${PLAYER}`))
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc unbind ${PLAYER}`))
   eq(lookupByUuid(WS, UUID), null, '★ 管理员解绑成功')
   eq(rpc.prompts.length, 0, '★ 解绑也是零模型调用')
   ok(/解绑了/.test(sent.at(-1)?.text ?? ''), '★ 如实回报')
 
-  // 非管理员发同一形状：**不命中** ⇒ 回到普通聊天（不解释、不拒绝 —— 拒绝等于告诉所有人这里有后门）
   bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
   const before = sent.length
-  const r = await bridge.handleEvent(groupMsg(GROUP, '100000077', `/解绑 ${PLAYER}`))
-  ok(r.reason !== 'bind-command', '★★ 非管理员发 `/解绑` ⇒ **不命中**这条通道', String(r.reason))
+  const r = await bridge.handleEvent(groupMsg(GROUP, MEMBER, `/mc unbind ${PLAYER}`))
+  ok(r.reason !== 'bind-command', '★★ 非管理员发 `/mc unbind` ⇒ **不命中**这条通道', String(r.reason))
   eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★★★ 绑定**没有被解掉**（非管理员解不动）')
   ok(sent.length === before, '★ 也没有任何"你没有权限"的回应（那等于告诉所有人这里有后门）')
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑩ 不在白名单的群：`/mc bind <码>` 一个回话都没有（fail-closed）===')
+{
+  const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
+  bridge.attach()
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const code = codeFromTellraw(gameCommands.at(-1)?.command)
+
+  const r = await bridge.handleEvent(groupMsg(OTHER_GROUP, ADMIN, `/mc bind ${code}`))
+  eq(sent.length, 0, '★★ 群白名单外 ⇒ **不回话**（与普通消息同一条纪律：群里不解释）')
+  eq(rpc.prompts.length, 0, '★ 也没有模型调用')
+  eq(lookupByUuid(WS, UUID), null, '★★★ 而且**没有绑上**（白名单是硬门）')
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑪ 私聊里发 `/mc bind`：一句**确定性**指路，零模型调用 ===')
+{
+  const { bridge, rpc, sent } = wiringBridge()
+  bridge.attach()
+  const before = sent.length
+  const r = await bridge.handleEvent(privateMsg(ADMIN, '/mc bind'))
+  eq(rpc.prompts.length, 0, '★★★ 一次模型调用都没有（否则模型会编出一套流程）')
+  eq(r.reason, 'bind-command', '★ 以绑定指令结束')
+  eq(sent.length, before + 1, '★ 回了一句')
+  ok(/群里/.test(sent.at(-1)?.text ?? ''), '★★ 指路说清了"要在群里做"')
+
+  // 名单外的人：**什么都不回**（fail-closed）
+  const before2 = sent.length
+  const r2 = await bridge.handleEvent(privateMsg('999999999', '/mc bind'))
+  ok(r2.reason !== 'bind-command', '★★ 名单外的人**不走**绑定通道（交回普通准入判定）', String(r2.reason))
+  eq(rpc.prompts.length, 0, '★ 名单外也没有模型调用')
+  const strangerMsgs = sent.slice(before2).filter((x) => x.peerId === '999999999')
+  eq(strangerMsgs.length, 1, '★ 只收到那句统一的"只对名单内的人开放"')
+  ok(/名单/.test(strangerMsgs[0]?.text ?? ''), '★★ 而且**不是**绑定流程的指路（不泄露这里有这条路）')
   await bridge.close({ timeoutMs: 200 })
 }
 
@@ -375,45 +396,7 @@ console.log('\n=== ⑫ 提示词里的来源标注：空串时**逐字不变**�
   await bridge.close({ timeoutMs: 200 })
 }
 
-console.log('\n=== ⑬ 私聊里发 `/绑定`：一句**确定性**指路，**零模型调用**（不让模型去编一套流程）===')
-{
-  const { bridge, rpc, sent } = wiringBridge()
-  bridge.attach()
-  const before = sent.length
-  const r = await bridge.handleEvent({
-    post_type: 'message',
-    message_type: 'private',
-    sub_type: 'friend',
-    user_id: ADMIN,
-    self_id: '200000001',
-    message: [{ type: 'text', data: { text: '/绑定' } }],
-    sender: { user_id: ADMIN, nickname: '主人' },
-  })
-  eq(rpc.prompts.length, 0, '★★★ 一次模型调用都没有（否则模型会编出一套绑定流程）')
-  eq(r.reason, 'bind-command', '★ 以绑定指令结束')
-  eq(sent.length, before + 1, '★ 回了一句')
-  ok(/群里/.test(sent.at(-1)?.text ?? ''), '★★ 指路说清了"要在群里做"')
-
-  // 名单外的人：**什么都不回**（fail-closed，与"群里不回"一致）
-  const before2 = sent.length
-  const r2 = await bridge.handleEvent({
-    post_type: 'message',
-    message_type: 'private',
-    sub_type: 'friend',
-    user_id: '999999999',
-    self_id: '200000001',
-    message: [{ type: 'text', data: { text: '/绑定' } }],
-    sender: { user_id: '999999999', nickname: '陌生人' },
-  })
-  ok(r2.reason !== 'bind-command', '★★ 名单外的人**不走**绑定通道（交回普通准入判定）', String(r2.reason))
-  eq(rpc.prompts.length, 0, '★ 名单外也没有模型调用')
-  const strangerMsgs = sent.slice(before2).filter((x) => x.peerId === '999999999')
-  eq(strangerMsgs.length, 1, '★ 只收到那句统一的"只对名单内的人开放"')
-  ok(/名单/.test(strangerMsgs[0]?.text ?? ''), '★★ 而且**不是**绑定流程的指路（不泄露这里有这条路）')
-  await bridge.close({ timeoutMs: 200 })
-}
-
-console.log('\n=== ⑭ 在界面上打开 `gameChat` ⇒ 读控制台的循环**真的起来**（那个复选框不许撒谎）===')
+console.log('\n=== ⑬ 在界面上打开 `gameChat` ⇒ 读控制台的循环**真的起来**（那个复选框不许撒谎）===')
 {
   const off = [{ ...SERVER, gameChat: false }]
   let served = off
@@ -427,8 +410,7 @@ console.log('\n=== ⑭ 在界面上打开 `gameChat` ⇒ 读控制台的循环**
   eq(
     bridge.gameChatStats().running,
     true,
-    '★★★ 打开 gameChat 之后循环**真的起来了** —— 否则界面提示"已即时生效、不必重启桥接"就是**撒谎**，' +
-      '而症状是"我明明打开了，游戏里说话它不理我"且不报任何错',
+    '★★★ 打开 gameChat 之后循环**真的起来了** —— 否则界面提示"已即时生效、不必重启桥接"就是**撒谎**',
   )
 
   served = [{ ...SERVER, gameChat: false }]
@@ -436,6 +418,60 @@ console.log('\n=== ⑭ 在界面上打开 `gameChat` ⇒ 读控制台的循环**
   eq(bridge.gameChatStats().running, false, '★ 再关掉 ⇒ 循环停掉（不会偷偷继续读日志）')
   await bridge.close({ timeoutMs: 200 })
   eq(bridge.gameChatStats().running, false, '★ 收尾时也停掉（不留一个还在读日志的定时器）')
+}
+
+console.log('\n=== ⑭ 同一张码不能用第二次：归属不会被第二个人抢走 ===')
+{
+  const { bridge, WS, gameCommands } = wiringBridge()
+  bridge.attach()
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const code = codeFromTellraw(gameCommands.at(-1)?.command)
+
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  eq(listBindings(WS).length, 1, '（准备）绑上了一条')
+  await bridge.handleEvent(groupMsg(GROUP, MEMBER, `/mc bind ${code}`))
+  eq(listBindings(WS).length, 1, '★★★ 还是只有一条（同一张码不能用第二次）')
+  eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★★★ 归属**没有被第二个人抢走**')
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑮ 认不出 UUID ⇒ 绝不发一张没处挂的码 ===')
+{
+  const { bridge, rpc, gameCommands } = wiringBridge()
+  bridge.attach()
+  // ★ 没收到过 uuid 事件 ⇒ 认不出他是谁 ⇒ **不发码**
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const tells = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells.length, 1, '★ 回了一条 tellraw')
+  ok(/重进/.test(tells[0].command), '★★ 让他重进一次（而不是发一张挂不到人身上的码）')
+  ok(!/\d{6}/.test(tells[0].command), '★★★ 而且**没有**给码')
+  eq(rpc.prompts.length, 0, '★ 零模型调用')
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑯ 取码时记的那台服不见了 ⇒ 改成在别的服上通知，并**留下痕迹** ===')
+{
+  const other = { ...SERVER, id: 'forge2', name: '副服' }
+  const { bridge, WS, gameCommands, logs } = wiringBridge({ servers: [{ ...SERVER }, other] })
+  bridge.attach()
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  const code = codeFromTellraw(gameCommands.at(-1)?.command)
+  // 把码搬到一台"已经不存在的服务器"上（模拟码里那台被删/改名）
+  const { store } = readStore(WS)
+  store.codes[code].serverId = 'gone'
+  writeStore(WS, store)
+
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★ 绑定照样成立（找不到那台服不该让绑定失败）')
+  ok(
+    logs.some((l) => /现在找不到/.test(l)),
+    '★★★ 而且**留了一行日志**说明"码里那台服找不到、改成在所有开了 gameChat 的服上通知"',
+  )
+  const tells = gameCommands.filter((c) => c.what === 'tellraw')
+  ok(tells.some((c) => c.serverId === 'forge2'), '★ 副服上确实发了通知')
+  await bridge.close({ timeoutMs: 200 })
 }
 
 rmSync(ROOT, { recursive: true, force: true })

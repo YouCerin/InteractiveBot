@@ -33,37 +33,32 @@ export const MAX_INFLIGHT_EVENTS = 4
 /**
  * 这条游戏内发言该怎么处理（**纯函数**，一条事件一次判定）。
  *
- * 五种结果，**每一种都有明确的理由**（不猜）：
- *   `bind`  —— 未绑定，且 QQ 侧**正好有一份**待绑定资格 ⇒ 现在写死映射
- *   `ask`   —— 未绑定，但有 **≥2 份**资格 ⇒ **绝不猜**（猜错 = 把别人的身份算到你头上）
- *   `remind`—— 未绑定且这一趟还没提示过 ⇒ 只给他本人一条"怎么绑"
- *   `ignore`—— 未绑定且已经提示过 ⇒ 什么都不做（刷屏的提示等于没有提示）
+ * 三种结果，**每一种都有明确的理由**（不猜）：
  *   `turn`  —— 已绑定 ⇒ 交给唤醒判定与模型
+ *   `remind`—— 未绑定且这一趟还没提示过 ⇒ 只给他本人一条"怎么绑定"
+ *   `ignore`—— 未绑定且已经提示过 ⇒ 什么都不做（刷屏的提示等于没有提示）
+ *
+ * ★★ **"取绑定码"那一步不在这里**（2026-10-04 流程改动之后）：它由
+ *   `parseGameBindRequest()` 单独判，而且**优先于本函数** —— 因为一个已经绑定的
+ *   玩家重新说一次 `mc bind`（换绑/自检）也应该能拿到新码，而不该被
+ *   "已绑定 ⇒ 交给模型"这条先吃掉。
  *
  * @param {object} o
  * @param {string} o.name            游戏内显示名（`<名> 正文` 里的那个）
  * @param {string|null} o.uuid        解析到的 UUID（拿不到就是 null）
  * @param {object|null} o.bound       `lookupByUuid()` 的结果
- * @param {Array} o.pending           `pendingQualifications()` 的结果
  * @param {boolean} o.reminded        这一趟进服是否已经提示过
- * @returns {{action:'bind'|'ask'|'remind'|'ignore'|'turn', qqId?:string, text?:string}}
+ * @returns {{action:'turn'|'remind'|'ignore', text?:string}}
  */
-export function decideGameChat({ name = '', uuid = null, bound = null, pending = [], reminded = false } = {}) {
-  if (uuid && bound && bound.qqId) return { action: 'turn', qqId: String(bound.qqId) }
-  const list = Array.isArray(pending) ? pending : []
-  if (list.length === 1) return { action: 'bind', qqId: String(list[0]?.qqId ?? '') }
-  if (list.length > 1) {
-    return {
-      action: 'ask',
-      text:
-        `现在有 ${list.length} 个待确认的绑定，我没法确定你是哪一个 —— ` +
-        '请在群里重新发一条 `/绑定`，拿到新码后马上用 `/绑定 <码>` 提交。',
-    }
-  }
+export function decideGameChat({ name = '', uuid = null, bound = null, reminded = false } = {}) {
+  if (uuid && bound && bound.qqId) return { action: 'turn' }
   if (reminded) return { action: 'ignore' }
   return {
     action: 'remind',
-    text: `你好，${String(name ?? '')}。我还不知道你是群里的谁 —— 请在群里发 \`/绑定\` 拿一个 6 位码，再用 \`/绑定 <码>\` 交回来，之后就能在这里跟我说话了。`,
+    text:
+      `你好，${String(name ?? '')}。我还不知道你是群里的谁 —— 要在这里跟我说话，先绑定一下：\n` +
+      '在聊天里输入 mc bind（**不要加斜杠**），我给你一个 6 位码；' +
+      '把码发到群里（@我 并写 /mc bind 你的码）就绑好了。',
   }
 }
 

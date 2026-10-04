@@ -1747,18 +1747,21 @@ async function main() {
       //   设计文档 §12.2 的原话：这不是装饰，是**替代品**。
       // ★ 不显示完整 UUID（只给前 8 位）：够核对，又不构成一份可直接用的对照表。
       if (workspace) {
-        const { listBindings, pendingQualifications } = await import('./servers/bindings.mjs')
+        const { listBindings, countCodes } = await import('./servers/bindings.mjs')
         const binds = listBindings(workspace)
-        const pend = pendingQualifications(workspace)
+        const codes = countCodes(workspace)
         console.log('')
         console.log(`UUID ↔ QQ 绑定（${binds.length} 条；表在 runtime/bindings.json —— 属使用者数据，永不进包）：`)
-        if (binds.length === 0) console.log('   （还没有 —— 玩家在群里发 `/绑定` 走完流程之后才会有）')
+        if (binds.length === 0) {
+          console.log('   （还没有 —— 玩家要在游戏里输 `mc bind` 拿码，再到群里发 `/mc bind <码>`）')
+        }
         for (const b of binds) {
           const when = b.at ? new Date(Number(b.at)).toLocaleString() : ''
           console.log(`   ${b.name || '（没记名字）'}  UUID ${b.uuid8}…  →  QQ ${b.qqId}${when ? `   ${when}` : ''}`)
         }
-        if (pend.length > 0) {
-          console.log(`   待确认的资格：${pend.length} 份 —— 那个人在游戏里说一句话就会落实`)
+        if (codes > 0) {
+          // ★ 只报**张数**，不报码本身（码是资格，写出来就等于公开它）
+          console.log(`   还没被提交的绑定码：${codes} 张（5 分钟内有效、一次性；码本身不显示、也不进日志）`)
         }
         // ★ 游戏内对话的开关与它**必然依赖**的那个文件是不是存在 —— 一起说清
         const chatty = list.filter((s) => s && s.gameChat === true && s.enabled !== false)

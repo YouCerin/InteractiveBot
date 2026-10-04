@@ -4,15 +4,19 @@
  * ══════════════════════════════════════════════════════════════════════════
  * 这一套守的是什么（全都是"错了不会报错"的那种）
  * ══════════════════════════════════════════════════════════════════════════
- *   ① **归属只能绑给发送者本人** —— 绑给"消息里写的那个人"就等于谁看见码谁就能冒名；
- *   ② **码是一次性 + 5 分钟 TTL** —— 它是发在**群里**的（设计文档 §5.6 承认的代价），
- *      所以"能重复用"或"能用一小时"都会把那个代价放大一个数量级；
- *   ③ **码绝不进审计**（审计不含秘密，同 `memory-audit.mjs`）—— UUID 也只留前 8 位；
- *   ④ **改绑必须两边都清 + 留痕** —— 同一 QQ 只能绑一个 UUID、同一 UUID 只能绑一个 QQ，
- *      而"他什么时候被顶替的"事后必须查得到；
- *   ⑤ **`tellraw` 的名字必须严格校验** —— 它是**选择器**：名字里塞进 `@` 会让
- *      "只给本人"变成"全服广播"（`@a` / `@e[tag=x]` 都是合法选择器）；
- *   ⑥ **多份待绑定资格同时存在时绝不猜** —— 猜错 = 把别人的身份算到你头上。
+ *   ① **流程的形状**（2026-10-04 使用者重新定的口径，与第一版**不同**）：
+ *      码在**游戏里**生成并与那个 UUID 挂在一起 → 群里提交 → **当场绑定**。
+ *      ∴ 断言必须钉住"游戏内那条请求认得出来"、"码与 UUID 绑着"、
+ *      "提交即绑定（不再有'资格'那一步、也不再有'下次发言才落实'）"；
+ *   ② **一次性 + 5 分钟 TTL** —— 码要经过群聊（§5.6 承认的代价）；
+ *   ③ **码绝不进审计**（审计不含秘密，同 `memory-audit.mjs`），UUID 只留前 8 位；
+ *   ④ **改绑两边都清 + 各自留痕**（同一 QQ 只能绑一个 UUID、同一 UUID 只能绑一个 QQ）；
+ *   ⑤ **消费码与写映射必须是同一次写盘** —— 分两次写会在中间崩掉时留下一张
+ *      还能再用的码（⇒ 可能被第二个人提交并改绑）；
+ *   ⑥ **`tellraw` 的名字必须严格校验** —— 它是**选择器**：名字里塞进 `@` 会让
+ *      "只给本人"变成 `@a` 全服广播；
+ *   ⑦ **`/mc bind` 是保留字**：形状不对（`/mc bind abc`）也必须命中，
+ *      否则会掉进管理员控制台那条路，把 `bind abc` 当服务端命令发出去。
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -23,20 +27,21 @@ import {
   BIND_AUDIT_REL,
   BINDINGS_REL,
   CODE_TTL_MS,
-  QUALIFY_TTL_MS,
   appendAudit,
+  bindByCode,
   bindUuid,
-  issueCode,
+  codeInfoForUuid,
+  countCodes,
+  issueCodeFor,
   listBindings,
   lookupByName,
   lookupByQq,
   lookupByUuid,
   newCode,
-  parseBindCommand,
-  pendingQualifications,
+  parseGameBindRequest,
+  parseMcBindCommand,
   readAudit,
   readStore,
-  redeemCode,
   resetForTest,
   shortUuid,
   unbind,
@@ -74,49 +79,62 @@ const UUID_B = '11111111-2222-3333-4444-555555555555'
 const QQ_A = '100000001'
 const QQ_B = '100000002'
 
-console.log('\n=== ① 本地指令的形状：带前缀才命中，带别的字**不命中** ===')
+console.log('\n=== ① 游戏内那句请求（`mc bind`）与群里那两条指令的形状 ===')
 {
-  eq(parseBindCommand('/绑定'), { hit: true, kind: 'issue' }, '★ `/绑定` ⇒ 取码')
-  eq(parseBindCommand('/bind'), { hit: true, kind: 'issue' }, '★ `/bind` 是别名')
-  eq(parseBindCommand('/BIND'), { hit: true, kind: 'issue' }, '★ 别名大小写不敏感')
-  eq(parseBindCommand('  /绑定  '), { hit: true, kind: 'issue' }, '★ 前后空白不影响')
-  eq(parseBindCommand('/绑定 123456'), { hit: true, kind: 'redeem', code: '123456' }, '★ `/绑定 <6位>` ⇒ 提交码')
-  eq(parseBindCommand('/bind 000000'), { hit: true, kind: 'redeem', code: '000000' }, '★ 别名也能提交（前导零不丢）')
+  // ── 游戏内：**没有斜杠**（原因写在 bindings.mjs 的 `parseGameBindRequest` 上）──
+  eq(parseGameBindRequest('mc bind'), { hit: true }, '★★ `mc bind` ⇒ 认得（真实形状）')
+  eq(parseGameBindRequest('  MC   Bind  '), { hit: true }, '★ 大小写与多余空白都能容忍')
+  eq(parseGameBindRequest('/mc bind'), { hit: true }, '★ 带斜杠也认（将来装了插件、把它反馈进控制台就能用）')
+  eq(parseGameBindRequest('mc bind 123456'), { hit: false }, '★★ 多带了码 ⇒ 不认（那是另一回事）')
+  eq(parseGameBindRequest('bind'), { hit: false }, '★★ 光一个 bind 不认（英文聊天里会误伤）')
+  eq(parseGameBindRequest('我要 mc bind 一下'), { hit: false }, '★★ 句中提到 ⇒ 不认')
+  eq(parseGameBindRequest(''), { hit: false }, '空 ⇒ 不认')
+  eq(parseGameBindRequest(null), { hit: false }, 'null ⇒ 不认（永不抛）')
 
-  // ★★★ 「带别的字不命中」：命中即"这一轮一次模型调用都不产生"，
-  //    判宽了会把普通闲聊吞掉（表现成"机器人不理我"），判窄只是回到普通聊天。
-  eq(parseBindCommand('/绑定 你好'), { hit: false }, '★★ `/绑定 你好` 不命中')
-  eq(parseBindCommand('/绑定 12345'), { hit: false }, '★★ 5 位不算码（不命中 ⇒ 回到普通聊天）')
-  eq(parseBindCommand('/绑定 1234567'), { hit: false }, '★★ 7 位不算码')
-  eq(parseBindCommand('/绑定 123456 额外'), { hit: false }, '★★ 后面还带字 ⇒ 不命中')
-  eq(parseBindCommand('/绑定abc'), { hit: false }, '★★ 前缀后**紧跟字母** ⇒ 不命中（那是别的东西）')
-  eq(parseBindCommand('绑定'), { hit: false }, '★★ 没有前缀 ⇒ 不命中')
-  eq(parseBindCommand('我要绑定'), { hit: false }, '★★ 句子里含有"绑定" ⇒ 不命中')
-  eq(parseBindCommand(''), { hit: false }, '空文本 ⇒ 不命中')
-  eq(parseBindCommand(null), { hit: false }, 'null ⇒ 不命中（永不抛）')
-
-  eq(parseBindCommand('/解绑 小明'), { hit: true, kind: 'unbind', target: '小明' }, '★ `/解绑 <目标>` ⇒ 解绑')
-  eq(parseBindCommand('/解绑 100000001'), { hit: true, kind: 'unbind', target: '100000001' }, '★ 解绑也认 QQ 号')
-  eq(parseBindCommand('/解绑'), { hit: false }, '★ `/解绑` 后面没东西 ⇒ 不命中（不猜解谁的）')
+  // ── 群里：`/mc bind ...` / `/mc unbind ...` ──
+  eq(parseMcBindCommand('/mc bind 123456'), { hit: true, kind: 'redeem', code: '123456' }, '★★ 提交码 ⇒ redeem')
+  eq(parseMcBindCommand('/MC BIND 000000'), { hit: true, kind: 'redeem', code: '000000' }, '★ 大小写不敏感（前导零不丢）')
+  eq(parseMcBindCommand('/mc bind'), { hit: true, kind: 'bind-help' }, '★ 没带码 ⇒ 指路（**不在这里发码**）')
+  // ★★★ 坏码也必须命中：否则 `/mc bind abc` 会掉进管理员控制台那条路
+  eq(parseMcBindCommand('/mc bind abc'), { hit: true, kind: 'bad-code' }, '★★★ 坏码 ⇒ 命中（不许掉进控制台那条路）')
+  eq(parseMcBindCommand('/mc bind 12345'), { hit: true, kind: 'bad-code' }, '★★ 5 位 ⇒ bad-code')
+  eq(parseMcBindCommand('/mc unbind YoCerin'), { hit: true, kind: 'unbind', target: 'YoCerin' }, '★ 解绑（管理员）')
+  eq(parseMcBindCommand('/mc unbind'), { hit: true, kind: 'unbind-help' }, '★ 解绑没给目标 ⇒ 用法')
+  eq(parseMcBindCommand('/mc unbind 100000001'), { hit: true, kind: 'unbind', target: '100000001' }, '★ 解绑也认 QQ 号')
+  // ★ 别的 `/mc` 子命令**不属于这条通道**（它们要走管理员控制台那条路）
+  eq(parseMcBindCommand('/mc list'), { hit: false }, '★★ `/mc list` 不归绑定通道（那是控制台指令）')
+  eq(parseMcBindCommand('/mc'), { hit: false }, '★ 裸 `/mc` 不归这里')
+  eq(parseMcBindCommand('我要绑定'), { hit: false }, '★★ 句子里含"绑定" ⇒ 不命中')
+  eq(parseMcBindCommand(''), { hit: false }, '空 ⇒ 不命中')
 }
 
-console.log('\n=== ② 取码：6 位数字、一次性、TTL 5 分钟、同一个 QQ 只留一张 ===')
+console.log('\n=== ② 取码：**在游戏里生成**、与那个 UUID 挂在一起、同一个 UUID 只有一张 ===')
 {
   const ws = mkWs()
   const t0 = 1_700_000_000_000
-  const r1 = issueCode({ workspace: ws, qqId: QQ_A, chatKey: `group:700000001`, now: t0, code: '111111' })
+  const r1 = issueCodeFor({ workspace: ws, uuid: UUID_A, name: 'YoCerin', serverId: 'forge1', now: t0, code: '111111' })
   ok(r1.ok, '取码成功')
   eq(r1.code, '111111', '码就是给的那个（测试注入）')
   eq(r1.until - t0, CODE_TTL_MS, '★★ TTL = 5 分钟（设计文档 §13.1 拍板）')
-  ok(CODE_TTL_MS <= 5 * 60 * 1000, '★★ 且不长于 5 分钟（码是发在群里的）', `${CODE_TTL_MS}ms`)
+  ok(CODE_TTL_MS <= 5 * 60 * 1000, '★★ 且不长于 5 分钟（码要经过群聊）', `${CODE_TTL_MS}ms`)
 
-  const r2 = issueCode({ workspace: ws, qqId: QQ_A, chatKey: `group:700000001`, now: t0 + 1000, code: '222222' })
-  eq(r2.code, '222222', '同一个 QQ 再取一次 ⇒ 覆盖')
+  // ★★ 关键：码**记着那个 UUID**（这是这一版流程的核心）
   const { store } = readStore(ws)
-  eq(Object.keys(store.codes).length, 1, '★★ 同一个 QQ 只留**一张**有效码（否则"哪张是我的"只能靠猜）')
-  eq(store.codes[QQ_A].code, '222222', '留下的是新的那张')
+  eq(store.codes['111111'].uuid, UUID_A, '★★★ 码上挂的是那个 UUID（提交时才能确定映射）')
+  eq(store.codes['111111'].name, 'YoCerin', '★ 也记了名字（通知与留痕要用）')
+  eq(store.codes['111111'].serverId, 'forge1', '★ 也记了是哪台服（绑定成功要回到那台服通知他）')
 
-  // 码的形状（不注入时随机生成）
+  const r2 = issueCodeFor({ workspace: ws, uuid: UUID_A, name: 'YoCerin', serverId: 'forge1', now: t0 + 1000, code: '222222' })
+  eq(r2.code, '222222', '同一个玩家再要一次 ⇒ 换新的')
+  eq(countCodes(ws, t0 + 2000), 1, '★★ 同一个 UUID **只保留一张**有效码（否则"哪张是我的"只能靠猜）')
+  eq(codeInfoForUuid(ws, UUID_A, t0 + 2000)?.code, '222222', '★ 查"他手上那张"拿得到（**只在内部用**）')
+
+  // 不同玩家各自的码互不影响
+  issueCodeFor({ workspace: ws, uuid: UUID_B, name: 'Steve', serverId: 'forge1', now: t0 + 3000, code: '333333' })
+  eq(countCodes(ws, t0 + 4000), 2, '★ 两个人各自的码都在')
+
+  eq(issueCodeFor({ workspace: ws, uuid: '', name: 'x' }).ok, false, '★ 没有 UUID ⇒ 拒绝取码（发出去也没处挂）')
+
   const gen = newCode()
   ok(/^[0-9]{6}$/.test(gen), '★ 随机生成的码是 6 位数字', gen)
   const set = new Set()
@@ -125,42 +143,42 @@ console.log('\n=== ② 取码：6 位数字、一次性、TTL 5 分钟、同一�
   rmSync(ws, { recursive: true, force: true })
 }
 
-console.log('\n=== ③ 提交码：成立的是「资格」，不是「映射」；一次性；过期即废 ===')
+console.log('\n=== ③ 提交码：**当场绑定**、一次性、消费与写映射是同一次写盘 ===')
 {
   const ws = mkWs()
   const t0 = 1_700_000_000_000
-  issueCode({ workspace: ws, qqId: QQ_A, chatKey: 'group:1', now: t0, code: '654321' })
+  issueCodeFor({ workspace: ws, uuid: UUID_A, name: 'YoCerin', serverId: 'forge1', now: t0, code: '654321' })
 
-  const bad = redeemCode({ workspace: ws, qqId: QQ_A, code: '000000', now: t0 + 1000 })
+  const bad = bindByCode({ workspace: ws, qqId: QQ_A, code: '000000', now: t0 + 1000 })
   eq(bad.ok, false, '★ 码不对 ⇒ 失败')
   eq(bad.why, 'unknown', '★★ 失败理由**只有一种**（不泄露"这个码存在过"）')
+  eq(lookupByUuid(ws, UUID_A), null, '★ 失败时**什么都没写**')
 
-  const good = redeemCode({ workspace: ws, qqId: QQ_A, code: '654321', now: t0 + 1000 })
-  ok(good.ok, '★ 码对 ⇒ 资格生效')
-  const pend = pendingQualifications(ws, t0 + 2000)
-  eq(pend.length, 1, '★ 有了一份待绑定资格')
-  eq(pend[0].qqId, QQ_A, '★ 资格属于**提交的人**')
-  ok(pend[0].until - (t0 + 1000) === QUALIFY_TTL_MS, '资格有效期 = 默认值')
+  const good = bindByCode({ workspace: ws, qqId: QQ_A, code: '654321', chatKey: 'group:1', now: t0 + 1000 })
+  ok(good.ok, '★★ 码对 ⇒ 当场绑定（不再有"资格"那一步）')
+  eq(good.uuid, UUID_A, '★ 回带 UUID（通知与留痕要用）')
+  eq(good.name, 'YoCerin', '★ 回带游戏名')
+  eq(good.serverId, 'forge1', '★★ 回带"哪台服"（绑定成功要回到那台服给他 tellraw）')
+  eq(lookupByUuid(ws, UUID_A)?.qqId, QQ_A, '★★★ 映射**当场**就写死了')
+  eq(countCodes(ws, t0 + 2000), 0, '★★ 码被**消费掉**了（同一次写盘 —— 分两次会留下一个危险的窗口）')
 
-  const again = redeemCode({ workspace: ws, qqId: QQ_B, code: '654321', now: t0 + 2000 })
+  const again = bindByCode({ workspace: ws, qqId: QQ_B, code: '654321', now: t0 + 2000 })
   eq(again.ok, false, '★★★ **一次性**：同一张码不能再被用（哪怕是另一个人）')
+  eq(lookupByQq(ws, QQ_B), null, '★ 第二个人什么都没拿到')
 
   // 过期
   const ws2 = mkWs()
-  issueCode({ workspace: ws2, qqId: QQ_A, chatKey: 'group:1', now: t0, code: '999999' })
-  const late = redeemCode({ workspace: ws2, qqId: QQ_A, code: '999999', now: t0 + CODE_TTL_MS + 1 })
+  issueCodeFor({ workspace: ws2, uuid: UUID_A, name: 'YoCerin', serverId: 'forge1', now: t0, code: '999999' })
+  const late = bindByCode({ workspace: ws2, qqId: QQ_A, code: '999999', now: t0 + CODE_TTL_MS + 1 })
   eq(late.ok, false, '★★ 过期 ⇒ 不能用')
   const { store: s2 } = readStore(ws2)
   eq(Object.keys(s2.codes).length, 0, '★ 过期的那张**顺手清掉**（不留死记录）')
+  eq(countCodes(ws2, t0 + CODE_TTL_MS + 1), 0, '★ 计数也如实（不留"还有一张"的假象）')
 
-  // 资格过期后不该出现在待绑定里
-  const ws3 = mkWs()
-  issueCode({ workspace: ws3, qqId: QQ_A, chatKey: 'group:1', now: t0, code: '121212' })
-  redeemCode({ workspace: ws3, qqId: QQ_A, code: '121212', now: t0 })
-  eq(pendingQualifications(ws3, t0 + QUALIFY_TTL_MS + 1).length, 0, '★★ 资格也会过期（不会永远等着）')
+  eq(bindByCode({ workspace: ws, qqId: '', code: '654321' }).ok, false, '★ 没有发送者 ⇒ 拒绝')
+  eq(bindByCode({ workspace: ws, qqId: QQ_A, code: 'abc' }).ok, false, '★ 码形状不对 ⇒ 拒绝')
   rmSync(ws, { recursive: true, force: true })
   rmSync(ws2, { recursive: true, force: true })
-  rmSync(ws3, { recursive: true, force: true })
 }
 
 console.log('\n=== ④ 绑定成立：两个方向都写、改绑两边都清、并且**留痕不含码** ===')
@@ -174,21 +192,18 @@ console.log('\n=== ④ 绑定成立：两个方向都写、改绑两边都清、
   eq(lookupByName(ws, 'YoCerin')?.uuid, UUID_A, '★ 按游戏名也找得到（跨重启认得出老玩家）')
   eq(listBindings(ws).length, 1, '列表里有一条')
 
-  // 改绑：同一个 UUID 换一个 QQ
   const r2 = bindUuid({ workspace: ws, uuid: UUID_A, name: 'YoCerin', qqId: QQ_B, chatKey: 'group:1', now: t0 + 1000 })
-  ok(r2.ok, '改绑成功')
+  ok(r2.ok, '改绑成功（同一个 UUID 换一个 QQ）')
   eq(r2.replaced?.qqId, QQ_A, '★★ 如实回报"覆盖了原来那个 QQ"')
   eq(lookupByQq(ws, QQ_A), null, '★★★ 旧 QQ 那条**被清掉**（同一 UUID 只能绑一个 QQ）')
   eq(lookupByQq(ws, QQ_B)?.uuid, UUID_A, '新 QQ 那条在')
 
-  // 改绑：同一个 QQ 换一个 UUID
   const r3 = bindUuid({ workspace: ws, uuid: UUID_B, name: 'Steve', qqId: QQ_B, chatKey: 'group:1', now: t0 + 2000 })
-  ok(r3.ok, '再改绑成功')
+  ok(r3.ok, '再改绑成功（同一个 QQ 换一个 UUID）')
   eq(r3.stolenFrom?.uuid, UUID_A, '★★ 如实回报"这个 QQ 原来绑的是哪个 UUID"')
   eq(lookupByUuid(ws, UUID_A), null, '★★★ 旧 UUID 那条**被清掉**（同一 QQ 只能绑一个 UUID）')
   eq(listBindings(ws).length, 1, '★ 表里仍然只有一条（没有留下幽灵）')
 
-  // 留痕
   const audits = readAudit(ws, 0)
   ok(audits.length >= 3, '★ 每次绑定/改绑都留了一行', `${audits.length} 行`)
   ok(
@@ -197,20 +212,16 @@ console.log('\n=== ④ 绑定成立：两个方向都写、改绑两边都清、
   )
   ok(audits.some((a) => a.action === 'rebound-away'), '★★ 被顶替的那条也有**独立一行**（"他什么时候被顶替的"要查得到）')
   const rawAudit = readFileSync(join(ws, BIND_AUDIT_REL), 'utf8')
-  // ★★★ 码绝不进审计（同 memory-audit 的纪律：审计不含秘密）
-  const codeUsed = '654321'
-  ok(!rawAudit.includes(codeUsed), '★★★ 审计里**没有**绑定码（哪怕它被用过）')
+  ok(!rawAudit.includes('654321'), '★★★ 审计里**没有**绑定码（哪怕它被用过）')
   ok(shortUuid(UUID_A) === 'bbf13b2f', '★ shortUuid 取前 8 位', shortUuid(UUID_A))
-  ok(!rawAudit.includes(UUID_A) || rawAudit.includes('bbf13b2f'), '★★ 审计里没有完整 UUID')
+  ok(!rawAudit.includes(UUID_A), '★★ 审计里没有完整 UUID')
 
-  // 解绑
   const u = unbind({ workspace: ws, uuid: UUID_B, by: 'admin:1', now: t0 + 3000 })
   ok(u.ok, '解绑成功')
   eq(lookupByUuid(ws, UUID_B), null, '★ UUID 方向清掉')
   eq(lookupByQq(ws, QQ_B), null, '★ QQ 方向也清掉')
   eq(unbind({ workspace: ws, uuid: UUID_B }).ok, false, '★ 再解绑一次 ⇒ 如实说"没有这条"')
-  const u2 = unbindByName({ workspace: ws, name: 'nobody' })
-  eq(u2.ok, false, '★ 按不存在的名字解绑 ⇒ 失败但永不抛')
+  eq(unbindByName({ workspace: ws, name: 'nobody' }).ok, false, '★ 按不存在的名字解绑 ⇒ 失败但永不抛')
   rmSync(ws, { recursive: true, force: true })
 }
 
@@ -221,11 +232,9 @@ console.log('\n=== ⑤ 坏表 / 缺参数 ⇒ 不猜、永不抛（半截表比�
   const r = readStore(ws)
   eq(r.broken, true, '★ 坏表能被**看出来**（不是静默当空）')
   eq(lookupByUuid(ws, UUID_A), null, '★ 读坏表 ⇒ null（不抛）')
-  eq(pendingQualifications(ws).length, 0, '★ 坏表 ⇒ 没有资格（不猜）')
+  eq(countCodes(ws), 0, '★ 坏表 ⇒ 没有码（不猜）')
   eq(bindUuid({ workspace: ws, uuid: '', qqId: QQ_A }).ok, false, '★ 没 UUID ⇒ 拒绝')
   eq(bindUuid({ workspace: ws, uuid: UUID_A, qqId: '' }).ok, false, '★ 没 QQ ⇒ 拒绝')
-  eq(issueCode({ workspace: ws, qqId: '' }).ok, false, '★ 没发起人 ⇒ 拒绝取码')
-  eq(redeemCode({ workspace: ws, qqId: QQ_A, code: 'abc' }).ok, false, '★ 码形状不对 ⇒ 拒绝')
   eq(writeStore('', {}).ok, false, '★ 没有 workspace ⇒ 写失败但不抛')
   eq(lookupByUuid('', UUID_A), null, '★ 没有 workspace ⇒ null')
   // 部分坏：某一节不是对象时，其它节仍要能用（"一处坏 = 全部失联"是最坏的形状）
@@ -253,7 +262,6 @@ console.log('\n=== ⑥ `tellraw` 的选择器注入：名字不合法**拒绝发
   const good = buildTellraw({ player: 'YoCerin', text: '绑好了' })
   eq(good.ok, true, '★ 合法名 ⇒ 构造成功')
   eq(good.command, 'tellraw YoCerin {"text":"绑好了"}', '★ 命令形状正确')
-  // ★ JSON 由 JSON.stringify 生成：引号与反斜杠必须被转义（自己拼引号就会破防）
   const tricky = buildTellraw({ player: 'YoCerin', text: '他说"你好"\\ 走了' })
   ok(tricky.ok, '★ 含引号/反斜杠的正文也能构造')
   const payload = tricky.command.slice('tellraw YoCerin '.length)
@@ -283,37 +291,22 @@ console.log('\n=== ⑥ `tellraw` 的选择器注入：名字不合法**拒绝发
 
 console.log('\n=== ⑦ 游戏内发言该做什么：纯判定（不猜）===')
 {
+  eq(decideGameChat({ name: 'A', uuid: UUID_A, bound: { qqId: QQ_A } }).action, 'turn', '★ 已绑定 ⇒ 交给唤醒判定与模型')
+  const remind = decideGameChat({ name: 'A', uuid: null, bound: null })
+  eq(remind.action, 'remind', '★ 未绑定 ⇒ 提示一次')
+  ok(/mc bind/.test(remind.text), '★★ 提示里给的是**新流程**（游戏里输入 mc bind）', remind.text.slice(0, 40))
+  ok(/不要加斜杠/.test(remind.text), '★★★ 而且明说"不要加斜杠"（否则玩家一定会加，而加了我们就看不到）')
   eq(
-    decideGameChat({ name: 'A', uuid: UUID_A, bound: { qqId: QQ_A } }).action,
-    'turn',
-    '★ 已绑定 ⇒ 交给唤醒判定与模型',
-  )
-  eq(
-    decideGameChat({ name: 'A', uuid: UUID_A, bound: null, pending: [{ qqId: QQ_A }] }).action,
-    'bind',
-    '★ 未绑定 + **正好一份**资格 ⇒ 当场写死映射',
-  )
-  eq(
-    decideGameChat({ name: 'A', uuid: UUID_A, bound: null, pending: [{ qqId: QQ_A }] }).qqId,
-    QQ_A,
-    '★ 绑的是那份资格对应的 QQ',
-  )
-  const ask = decideGameChat({ name: 'A', uuid: UUID_A, bound: null, pending: [{ qqId: QQ_A }, { qqId: QQ_B }] })
-  eq(ask.action, 'ask', '★★★ 有 **≥2 份**资格 ⇒ **绝不猜**（猜错 = 把别人的身份算到你头上）')
-  ok(/2 个/.test(ask.text), '★ 如实说清有几份')
-  eq(decideGameChat({ name: 'A', uuid: null, bound: null, pending: [] }).action, 'remind', '★ 未绑定没资格 ⇒ 提示一次')
-  eq(
-    decideGameChat({ name: 'A', uuid: null, bound: null, pending: [], reminded: true }).action,
+    decideGameChat({ name: 'A', uuid: null, bound: null, reminded: true }).action,
     'ignore',
     '★★ 已经提示过 ⇒ 什么都不做（刷屏的提示等于没有提示）',
   )
   // ★ UUID 还没解析出来时**不能**当"已绑定"（哪怕表里有一条）
   eq(
-    decideGameChat({ name: 'A', uuid: null, bound: { qqId: QQ_A }, pending: [] }).action,
+    decideGameChat({ name: 'A', uuid: null, bound: { qqId: QQ_A } }).action,
     'remind',
     '★★ 拿不到 UUID ⇒ 不算已绑定（宁可提示一次，也不冒名）',
   )
-  ok(/\/绑定/.test(decideGameChat({ name: 'A' }).text), '★ 提示里给出了**怎么绑**（不是干巴巴一句"未绑定"）')
 }
 
 console.log('\n=== ⑧ appendAudit 自身：缺 workspace 不抛；非数字时间不写成 NaN ===')

@@ -15,26 +15,34 @@
  *     （`check-release-package.mjs` 的 FORBIDDEN 覆盖它，另有一条**指名**断言）。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * ★★★ 「码 = 资格」而不是「码 = 归属」（这是本设计里最容易理解错的一件事）
+ * ★★★ 绑定流程（2026-10-04 使用者重新定的口径 —— 与第一版**不同**）
  * ══════════════════════════════════════════════════════════════════════════
- * 群里发 `/绑定 <码>` 成立时，我们**并不知道这个人游戏里是哪个 UUID** ——
- * 我们只知道"这个 QQ 想绑定"。真正把两边连起来的是**下一次游戏内发言**：
- * 一个**未绑定的 UUID** 说话，而 QQ 侧正好有**一份刚绑定过的资格** ⇒ 此时才写死。
+ * ```
+ * 玩家进服（未绑定）        → 只给他本人一条 tellraw：怎么拿码
+ * 玩家在**游戏里**说 mc bind → 生成一张 6 位码，**与那个 UUID 挂在一起**
+ *                              → 只给他本人 tellraw：码 + 下一步
+ * 玩家在**群里**发 @小鲸鱼 /mc bind <码>
+ *                          → 桥接本地拦截（一次模型调用都没有）→ **当场绑定**
+ *                          → 群里回一句 + **在游戏里给那个玩家一条成功通知**
+ * ```
  *
- * ∴ **抢到码 ≠ 抢到身份**：抢码的人还必须"那个 UUID 在游戏里说话"才会生效，
- *   而那一步是**对方自己**触发的，受害者在游戏里会**立刻**收到只给他本人的
- *   `tellraw` 确认（`bridge.mjs` 的 `#gameBind`）。**抢绑藏不住**，这是兜底。
+ * ★★ 与第一版的关键差别（为什么这一版更好，记下来免得改回去）：
+ *   第一版是"群里 `/绑定` 取码 → 群里提交 → **下一次游戏内发言**才写死映射"
+ *   （设计文档 §5.2 的"码 = 资格"）。那一版的问题是**归属只能靠猜**：
+ *   码头在 QQ 侧，谁能提交谁就拿到资格，而"那个 UUID 是谁"要等到下一次发言才知道，
+ *   于是**同时有两份资格时根本无法判断**（第一版只能 fail-closed 地拒绝）。
+ *   这一版让**码在游戏里生成、且与那个 UUID 挂在一起** ⇒ 提交上去就是确定的映射，
+ *   没有"资格"这一步、没有歧义、也没有"哪一份资格是我的"这种问题。
  *
- * ⚠️ 仍**不是**密码学意义上的证明：如果攻击者既看见码、又能操作那个 UUID
- * （例如共用账号），这条机制挡不住。**如实记在这里**，不假装它是强认证。
+ * ⚠️ **仍然存在的风险（如实写，不粉饰）**：码是要经过群聊的（玩家自己粘进去），
+ *   所以**同群的人有机会抢先提交** —— 提交成功就绑到了抢码者自己的 QQ 上。
+ *   缓解是三样，都在这一版里：**一次性** + **5 分钟 TTL** +
+ *   **绑定成立时立刻给那个 UUID 本人一条 `tellraw`** ⇒ **抢绑藏不住**
+ *   （受害者会在游戏里当场看到"绑定成功"，而那不是他做的）。
+ *   想真正堵死要加第二因子（需要服务端插件），按裁决留作可选硬化项，**不进 v1**。
  *
- * ⚠️ 资格是**全局**的（不区分是哪台服务器）：同一个人在两台服上绑同一个 QQ 是
- * 正常需求，而"资格"描述的是"这个 QQ 刚刚证明过自己"这件事。
- *
- * ── 多份资格同时存在时怎么办（计划里没写，这里定死）────────────────────────
- * 若此刻有 **N ≥ 2** 份待绑定资格，我们就**无法知道**说话的那个 UUID 属于谁
- * ⇒ **绝不猜**：不写盘，改为给那个玩家一条 `tellraw`（"现在有多个待确认的绑定"）。
- * 这比"随便挑一个"安全得多（挑错的后果是**把别人的身份算到你头上**）。
+ * ⚠️ 也**不是**密码学意义的证明：如果攻击者既看见码、又能操作那个 UUID
+ *   （例如共用账号），这条机制挡不住。不假装它是强认证。
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -46,17 +54,18 @@ export const BINDINGS_REL = 'runtime/bindings.json'
 /** 绑定变更留痕（工作区相对）。**只记 UUID 前 8 位与 QQ 号，绝不记码**。 */
 export const BIND_AUDIT_REL = 'runtime/bindings-audit.jsonl'
 
-/** 绑定码有效期（设计文档 §13.1 拍板：5 分钟）。★ 码是发在群里的，TTL 越短越好。 */
+/** 绑定码有效期（设计文档 §13.1 拍板：5 分钟）。★ 码要经过群聊，TTL 越短越好。 */
 export const CODE_TTL_MS = 5 * 60 * 1000
-/** 「资格」有效期：扫码之后到"在游戏里说上话"之间的窗口。 */
-export const QUALIFY_TTL_MS = 10 * 60 * 1000
 
-/** 码的形状：6 位数字、大小写无所谓（`/^\d{6}$/`）。 */
+/** 码的形状：6 位数字（`/^\d{6}$/`）。 */
 export const CODE_RE = /^[0-9]{6}$/
-/** 本地指令前缀（**必须带前缀**才命中 —— 误伤概率天然极低）。 */
-export const BIND_COMMAND = '/绑定'
-export const BIND_ALIAS = '/bind'
-export const UNBIND_COMMAND = '/解绑'
+
+/** 群里的两条指令（**必须带 `/mc` 前缀**才命中 —— 误伤概率天然极低）。 */
+export const MC_BIND_COMMAND = '/mc bind'
+export const MC_UNBIND_COMMAND = '/mc unbind'
+
+/** 游戏内那句请求（**没有斜杠** —— 见文件头与 `parseGameBindRequest` 的注释）。 */
+export const GAME_BIND_WORDS = 'mc bind'
 
 /** 审计里只留 UUID 的前几位（够核对，又不构成一份可直接用的对照表）。 */
 export function shortUuid(uuid) {
@@ -80,7 +89,7 @@ function auditPath(workspace) {
 }
 
 function emptyStore() {
-  return { version: 1, byUuid: {}, byQq: {}, codes: {}, pending: {} }
+  return { version: 1, byUuid: {}, byQq: {}, codes: {} }
 }
 
 /** 读盘（**永不抛**：读不出来就当空的，并且让调用方能从 `broken` 看出来）。 */
@@ -100,7 +109,6 @@ export function readStore(workspace) {
         byUuid: v.byUuid && typeof v.byUuid === 'object' ? v.byUuid : {},
         byQq: v.byQq && typeof v.byQq === 'object' ? v.byQq : {},
         codes: v.codes && typeof v.codes === 'object' ? v.codes : {},
-        pending: v.pending && typeof v.pending === 'object' ? v.pending : {},
       },
       broken: false,
       why: '',
@@ -182,51 +190,70 @@ export function readAudit(workspace, limit = 20) {
   }
 }
 
-// ── 本地指令的形状（纯函数，零模型调用）────────────────────────────────────
+// ── 两条指令的形状（纯函数，零模型调用）────────────────────────────────────
 
 /**
- * 识别本地绑定指令。
+ * 识别**群里**那两条 `/mc` 指令。
  *
- * 认的形状（**带前缀 + 只认下面这几种**，其余一律 `hit:false` ⇒ 照常走普通聊天）：
- *   `/绑定`            → 取码
- *   `/bind`            → 取码（别名）
- *   `/绑定 123456`     → 提交码
- *   `/解绑 <玩家名或QQ号>` → 管理员解绑
+ * 认的形状：
+ *   `/mc bind`                → `help`（还没码 ⇒ 告诉他先去游戏里拿）
+ *   `/mc bind 123456`         → `redeem`（提交码）
+ *   `/mc bind abc` / `12345`  → `bad-code`（**必须命中**：否则会掉进管理员控制台那条路，
+ *                                把 `bind abc` 当成一条服务端命令发出去）
+ *   `/mc unbind <玩家名或QQ号>` → `unbind`（**只有管理员**，权限在桥接那边判）
  *
- * ★★★ 为什么"带别的字就不命中"是**刻意的**：命中即 `return`，这一轮**一次模型
- *   调用都不产生**。判得太宽会让普通闲聊被吞掉（变成"机器人不理我"），
- *   而判得太窄只是回到普通聊天 —— 失败方向不对称，所以往窄了判。
+ * ★★★ 为什么"带别的东西也要命中、不能落回普通聊天"：`/mc` 前缀下面还有一条
+ *   **管理员控制台**通道。`/mc bind xyz` 若不在这里被拦下，管理员发它就会真的
+ *   往服务端发一条 `bind xyz` 命令 —— 那不是我们想表达的语义。所以
+ *   `bind` / `unbind` 这两个词在 `/mc` 下是**保留字**。
  *
- * @returns {{hit:false} | {hit:true, kind:'issue'} | {hit:true, kind:'redeem', code:string}
- *           | {hit:true, kind:'unbind', target:string}}
+ * @returns {{hit:false} | {hit:true, kind:'help'|'bad-code'|'bind-help'|'unbind-help'}
+ *           | {hit:true, kind:'redeem', code:string} | {hit:true, kind:'unbind', target:string}}
  */
-export function parseBindCommand(text) {
+export function parseMcBindCommand(text) {
   const raw = String(text ?? '').trim()
   if (!raw.startsWith('/')) return { hit: false }
-  // 前缀只认这两种（`/bind` 大小写不敏感；中文没有大小写问题）
-  let rest = null
-  for (const p of [BIND_COMMAND, BIND_ALIAS]) {
-    if (raw.length >= p.length && raw.slice(0, p.length).toLowerCase() === p.toLowerCase()) {
-      rest = raw.slice(p.length)
-      break
-    }
+  // 只认 `/mc` 开头（大小写不敏感）
+  const m = /^\/mc\b\s*(.*)$/i.exec(raw)
+  if (!m) return { hit: false }
+  const rest = String(m[1] ?? '').trim()
+  if (!rest) return { hit: false } // 裸 `/mc` 是"用法提示"那条路，不归这里
+  const words = rest.split(/\s+/)
+  const sub = String(words[0] ?? '').toLowerCase()
+  if (sub === 'unbind' || sub === '解绑') {
+    const target = words.slice(1).join(' ').trim()
+    return target ? { hit: true, kind: 'unbind', target } : { hit: true, kind: 'unbind-help' }
   }
-  if (rest === null) {
-    // `/解绑 <目标>`
-    const u = UNBIND_COMMAND
-    if (raw.length > u.length && raw.slice(0, u.length) === u) {
-      const target = raw.slice(u.length).trim()
-      return target ? { hit: true, kind: 'unbind', target } : { hit: false }
-    }
-    return { hit: false }
-  }
-  // 前缀后面必须紧跟"空白或结束" —— `/绑定abc` 不命中（那是别的东西）
-  if (rest !== '' && !/^\s/.test(rest)) return { hit: false }
-  const arg = rest.trim()
-  if (!arg) return { hit: true, kind: 'issue' }
+  if (sub !== 'bind' && sub !== '绑定') return { hit: false }
+  const arg = words.slice(1).join(' ').trim()
+  if (!arg) return { hit: true, kind: 'bind-help' }
   if (CODE_RE.test(arg)) return { hit: true, kind: 'redeem', code: arg }
-  // 带了别的字（`/绑定 你好`、`/绑定 12345`、`/绑定 123456 额外`）⇒ 不命中
-  return { hit: false }
+  return { hit: true, kind: 'bad-code' }
+}
+
+/**
+ * 识别**游戏内**那句请求。
+ *
+ * ★★★ 为什么是 `mc bind`（**没有斜杠**）而不是 `/mc bind`（使用者原话）：
+ *   Minecraft 里**以 `/` 开头的输入是"命令"**，会被客户端交给服务端去当命令执行；
+ *   而我们的服务端上**没有**注册过叫 `mc` 的命令 ⇒ 服务端只会回玩家一句
+ *   "Unknown command"，**而且这一句不会写进控制台日志**。我们的游戏内事件源
+ *   读的正是控制台日志（`runtime/servers/<id>.console.log`）⇒ **看不到**。
+ *   ∴ 在**不写服务端插件/模组**的前提下，玩家必须把 `mc bind` 当**聊天**发出来。
+ *   界面上那句提醒因此要写清"不要加斜杠"，并且说明原因（否则玩家一定会加）。
+ * ★ 仍然接受带斜杠的形状：将来若真装了插件、把 `/mc bind` 反馈进控制台，
+ *   这一条不用改就能用。
+ *
+ * @returns {{hit:boolean}}
+ */
+export function parseGameBindRequest(text) {
+  const s = String(text ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+  if (!s) return { hit: false }
+  const bare = s.startsWith('/') ? s.slice(1).trim() : s
+  return { hit: /^mc\s+bind$/.test(bare) }
 }
 
 // ── 取码 / 提交码 ─────────────────────────────────────────────────────────
@@ -237,79 +264,119 @@ export function newCode() {
 }
 
 /**
- * 取码（群里发 `/绑定`）。
+ * 在**游戏内**为某个玩家生成一张绑定码（码与那个 UUID 挂在一起）。
  *
- * ★ **同一个 QQ 只保留一个有效码**：重复取码就是覆盖旧的（否则码越攒越多，
- *   而"哪一个才是我的"只能靠猜）。
- * ★ 返回的 `code` **只用于回给发起人**，调用方**绝不能把它写进日志**。
+ * ★ **同一个 UUID 只保留一张有效码**：重复请求就是覆盖旧的（否则"哪一张是我的"
+ *   只能靠猜，而猜错的后果是把身份算到别人头上）。
+ * ★ 返回的 `code` **只用于回给那个玩家本人**，调用方**绝不能把它写进日志**。
  */
-export function issueCode({ workspace, qqId = '', chatKey = '', now = Date.now(), ttlMs = CODE_TTL_MS, code = null } = {}) {
-  const id = key(qqId)
-  if (!id) return { ok: false, why: '没有发起人（senderId）' }
+export function issueCodeFor({
+  workspace,
+  uuid = '',
+  name = '',
+  serverId = '',
+  now = Date.now(),
+  ttlMs = CODE_TTL_MS,
+  code = null,
+} = {}) {
+  const u = key(uuid).toLowerCase()
+  if (!u) return { ok: false, why: '没有 UUID（还不知道这个玩家是谁）' }
   const { store } = readStore(workspace)
-  const value = code && CODE_RE.test(String(code)) ? String(code) : newCode()
-  store.codes[id] = { code: value, at: now, until: now + Math.max(1, Number(ttlMs) || CODE_TTL_MS), chatKey: String(chatKey ?? '') }
+  pruneExpired(store, now)
+  // 同一个 UUID 的旧码先撤掉（"一个玩家一张码"）
+  for (const [c, row] of Object.entries(store.codes ?? {})) {
+    if (row && String(row.uuid ?? '').toLowerCase() === u) delete store.codes[c]
+  }
+  let value = code && CODE_RE.test(String(code)) ? String(code) : newCode()
+  // 撞码就重摇（6 位空间很小，但同一时刻的有效码只有个位数 —— 重摇几次足够）
+  for (let i = 0; i < 20 && store.codes[value]; i += 1) value = newCode()
+  if (store.codes[value]) return { ok: false, why: '取不到空闲的码（有效码太多，等一下再试）' }
+  const until = now + Math.max(1, Number(ttlMs) || CODE_TTL_MS)
+  store.codes[value] = { uuid: u, name: String(name ?? ''), serverId: String(serverId ?? ''), at: now, until }
   const w = writeStore(workspace, store)
   if (!w.ok) return { ok: false, why: w.why }
-  return { ok: true, code: value, until: store.codes[id].until }
+  return { ok: true, code: value, until, uuid: u, name: String(name ?? '') }
+}
+
+/** 清掉过期的码（就地改 `store`）。 */
+export function pruneExpired(store, now = Date.now()) {
+  if (!store) return store
+  for (const [k, v] of Object.entries(store.codes ?? {})) {
+    if (!v || !Number.isFinite(Number(v.until)) || Number(v.until) <= now) delete store.codes[k]
+  }
+  return store
+}
+
+/** 只读：某个 UUID 手上有没有还没用的码（不返回码本身）。 */
+export function codeInfoForUuid(workspace, uuid, now = Date.now()) {
+  const u = key(uuid).toLowerCase()
+  if (!u) return null
+  const { store } = readStore(workspace)
+  pruneExpired(store, now)
+  for (const [c, row] of Object.entries(store.codes ?? {})) {
+    if (row && String(row.uuid ?? '').toLowerCase() === u) {
+      return { code: c, until: Number(row.until) || 0, name: String(row.name ?? '') }
+    }
+  }
+  return null
+}
+
+/** 只读：当前有几张有效码（给巡检用；**不返回码本身**）。 */
+export function countCodes(workspace, now = Date.now()) {
+  const { store } = readStore(workspace)
+  pruneExpired(store, now)
+  return Object.keys(store.codes ?? {}).length
 }
 
 /**
- * 提交码（群里发 `/绑定 <码>`）。
+ * 提交一张码（群里发 `/mc bind <码>`）—— **当场绑定**。
  *
- * ★ 成立时写入的是**一份资格**（`pending[qqId]`），**不是**一条 UUID 映射 ——
- *   原因见文件头「码 = 资格」。
- * ★ 一次性：用掉就删（成功与失败都删？**不** —— 只有成功才删；失败若是"码不对"
- *   就什么都不动，若是"码过期"则顺手清掉那条死记录）。
+ * ★ 实现上是**一次读写**：查码 → 删码 → 写映射 → 留痕，全在同一份 store 上完成。
+ *   分两次写（先绑、再删码）会在中间崩掉时留下一张还能再用的码 ⇒ 可能被第二个人
+ *   提交并**改绑**。所以这里把"消费码"作为 `bindUuid` 的一部分。
+ *
+ * @returns {{ok:boolean, why?:string, uuid?:string, name?:string, serverId?:string,
+ *           replaced?:object|null, stolenFrom?:object|null}}
  */
-export function redeemCode({ workspace, qqId = '', code = '', chatKey = '', now = Date.now(), qualifyMs = QUALIFY_TTL_MS } = {}) {
+export function bindByCode({ workspace, qqId = '', code = '', chatKey = '', now = Date.now(), by = 'group-command' } = {}) {
   const id = key(qqId)
   const c = String(code ?? '').trim()
   if (!id) return { ok: false, why: 'no-sender' }
   if (!CODE_RE.test(c)) return { ok: false, why: 'bad-shape' }
   const { store } = readStore(workspace)
   // 先清过期（否则"过期"与"存在但过期"会分叉成两种行为）
-  const before = (Object.keys(store.codes ?? {}).length << 16) + Object.keys(store.pending ?? {}).length
+  const before = Object.keys(store.codes ?? {}).length
   pruneExpired(store, now)
-  const after = (Object.keys(store.codes ?? {}).length << 16) + Object.keys(store.pending ?? {}).length
   // ★ 清掉了东西就**写回**：不写回的话过期记录会永远躺在盘上（读的时候虽然不认它，
-  //   但"文件里有一堆早就没用的码"本身是另一种脏 —— 而它们正是"能用吗"的误判来源）。
-  if (after !== before) writeStore(workspace, store)
-  // ★ 失败理由**只有一种**（`unknown`）：码不存在 / 已过期 / 已被用过，对使用者
-  //   是**同一件事**（"这个码现在不能用"）。分成三种话术只会泄露"这个码存在过"
-  //   —— 而那是给抢码的人送情报。
-  const hit = Object.entries(store.codes).find(([, v]) => v && String(v.code) === c)
-  if (!hit) return { ok: false, why: 'unknown' }
-  const [ownerId] = hit
-  // ★ 一次性：无论谁提交，这条码立刻作废（防止两个人先后用同一个码）
-  delete store.codes[ownerId]
-  store.pending[id] = { at: now, until: now + Math.max(1, Number(qualifyMs) || QUALIFY_TTL_MS), chatKey: String(chatKey ?? ''), codeOwner: ownerId }
-  const w = writeStore(workspace, store)
-  if (!w.ok) return { ok: false, why: `write-failed:${w.why}` }
-  appendAudit(workspace, { at: now, action: 'qualify', qqId: id, chatKey, by: 'group-command' })
-  return { ok: true, until: store.pending[id].until }
+  //   但"文件里有一堆早就没用的码"本身就是另一种脏 —— 而它们正是"还能用吗"的误判来源）。
+  if (Object.keys(store.codes ?? {}).length !== before) writeStore(workspace, store)
+  // ★ 失败理由**只有一种**（`unknown`）：不存在 / 已过期 / 已被用过，对使用者是
+  //   **同一件事**。分成三种话术只会泄露"这个码存在过" —— 那是给抢码的人送情报。
+  const row = store.codes[c]
+  if (!row) return { ok: false, why: 'unknown' }
+  const r = bindUuid({
+    workspace,
+    uuid: String(row.uuid ?? ''),
+    name: String(row.name ?? ''),
+    qqId: id,
+    chatKey,
+    by,
+    now,
+    // ★ 同一次写盘里把这个码消费掉（见上面那段：分两次写会留下一个危险的窗口）
+    consumeCode: c,
+  })
+  if (!r.ok) return { ok: false, why: r.why }
+  return {
+    ok: true,
+    uuid: String(row.uuid ?? ''),
+    name: String(row.name ?? ''),
+    serverId: String(row.serverId ?? ''),
+    replaced: r.replaced,
+    stolenFrom: r.stolenFrom,
+  }
 }
 
-/** 清掉过期的码与资格（就地改 `store`）。 */
-export function pruneExpired(store, now = Date.now()) {
-  if (!store) return store
-  for (const [k, v] of Object.entries(store.codes ?? {})) {
-    if (!v || !Number.isFinite(Number(v.until)) || Number(v.until) <= now) delete store.codes[k]
-  }
-  for (const [k, v] of Object.entries(store.pending ?? {})) {
-    if (!v || !Number.isFinite(Number(v.until)) || Number(v.until) <= now) delete store.pending[k]
-  }
-  return store
-}
-
-/** 只读：当前有效的待绑定资格（已清过期）。 */
-export function pendingQualifications(workspace, now = Date.now()) {
-  const { store } = readStore(workspace)
-  pruneExpired(store, now)
-  return Object.entries(store.pending ?? {})
-    .map(([qqId, v]) => ({ qqId, at: Number(v?.at) || 0, until: Number(v?.until) || 0, chatKey: String(v?.chatKey ?? '') }))
-    .sort((a, b) => a.at - b.at)
-}
+// ── 读 ────────────────────────────────────────────────────────────────────
 
 /** 只读：某个 UUID 绑到了谁。 */
 export function lookupByUuid(workspace, uuid) {
@@ -354,7 +421,7 @@ export function listBindings(workspace) {
   }))
 }
 
-// ── 写死映射（把 UUID 与 QQ 真的连起来的那一步）────────────────────────────
+// ── 写死映射 ──────────────────────────────────────────────────────────────
 
 /**
  * 建立 UUID ↔ QQ 的映射（改绑即覆盖，**旧关系留痕**）。
@@ -366,6 +433,7 @@ export function listBindings(workspace) {
  *   ② 写盘用**原子写**（半截表比没有表危险）；
  *   ③ 留痕**不含码**、UUID 只留前 8 位。
  *
+ * @param {string} [o.consumeCode] 同一次写盘里顺手消费掉的那张码（见 `bindByCode`）
  * @returns {{ok:boolean, why?:string, replaced?:object|null, stolenFrom?:object|null}}
  */
 export function bindUuid({
@@ -374,9 +442,9 @@ export function bindUuid({
   name = '',
   qqId = '',
   chatKey = '',
-  by = 'game-speech',
+  by = 'game',
   now = Date.now(),
-  consumeQualification = true,
+  consumeCode = '',
 } = {}) {
   const u = key(uuid).toLowerCase()
   const id = key(qqId)
@@ -384,7 +452,7 @@ export function bindUuid({
   if (!id) return { ok: false, why: 'no-qq' }
   const { store } = readStore(workspace)
   pruneExpired(store, now)
-  if (consumeQualification) delete store.pending[id]
+  if (consumeCode) delete store.codes[String(consumeCode)]
 
   // 旧的"这个 UUID 属于谁"
   const prevForUuid = store.byUuid[u] ? { ...store.byUuid[u] } : null
@@ -442,7 +510,7 @@ export function unbind({ workspace, uuid = '', qqId = '', by = '', now = Date.no
   return { ok: true, uuid: u, qqId: id, name: String(row.name ?? '') }
 }
 
-/** 管理员解绑（按游戏名）。 */
+/** 管理员解绑（按游戏名或 QQ 号）。 */
 export function unbindByName({ workspace, name = '', by = '', now = Date.now() } = {}) {
   const n = key(name)
   if (!n) return { ok: false, why: 'no-target' }

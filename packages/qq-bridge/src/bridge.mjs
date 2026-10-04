@@ -130,14 +130,18 @@ function looksLikeMcCommand(text) {
 }
 
 /**
- * **绑定指令通道**（0.3.2 P3）：群里发 `/绑定` / `/绑定 <码>`，桥接自己处理。
+ * **绑定指令通道**（0.3.2 P3）：群里发 `/mc bind <码>`（+ `/mc unbind <目标>`），桥接自己处理。
  *
- * ★★★ 它与 `/mc` 那条通道**同一个形状，但插入点更靠前** —— 这是设计文档 §5.2
- *   明确要求的，理由是硬的：
- *     · 必须在**唤醒判定（`decideTrigger`）之前**：群里发 `/绑定` 是**不会 @ 机器人**的
- *       （玩家在群里粘贴一串码，没人会去 @ 它），而唤醒判定对"没 @ 也没命中关键词"的
- *       群消息直接 return ⇒ 放在它后面等于**这条通道根本不存在**；
- *     · 必须在**语义唤醒闸门之前**：闸门可能判"沉默"，于是"玩家来绑定却被判沉默，码白发了"；
+ * ⚠️ 2026-10-04 流程改动后，这条通道**寄居在 `/mc` 前缀下**（原来是 `/绑定`）：
+ *   使用者的口径是「群里发 `@小鲸鱼 /mc bind <绑定码>`」。`bind` / `unbind`
+ *   因此在 `/mc` 下成了**保留字**（见 `parseMcBindCommand` 的注释）。
+ *
+ * ★★★ 插入点是**刻意的**（与 `/mc` 那条**不一样** —— 那条在唤醒判定之后）：
+ *     · 必须在**唤醒判定（`decideTrigger`）之前**：群里发 `/mc bind 123456`
+ *       是**不会 @ 机器人**的（谁会为了一串码去 @ 它），而唤醒判定对"没 @ 也没命中
+ *       关键词"的群消息直接 return ⇒ 放在它后面等于**这条通道根本不存在**；
+ *     · 必须在**语义唤醒闸门之前**：闸门可能判"沉默"，于是"玩家来绑定却被判沉默，
+ *       这一步白做了"；
  *     · 必须在**群白名单之后**：否则等于给所有群开后门（下面复用 `roster.isGroupAllowed`）。
  * ★ 命中即 `return`：这一轮**一次模型调用都不产生**（省钱，也不给模型"看到这条码"的机会）。
  * ★ 判据是**纯同步**的（同 `looksLikeMcCommand` 那条纪律：普通消息不产生额外 `await`，
@@ -145,8 +149,7 @@ function looksLikeMcCommand(text) {
  *   `unsettled top-level await` 的形式变红，而看起来与这里毫无关系）。
  */
 function looksLikeBindCommand(text) {
-  const s = String(text ?? '').trim()
-  return s.startsWith('/绑定') || s.toLowerCase().startsWith('/bind') || s.startsWith('/解绑')
+  return /^\/mc\b/i.test(String(text ?? '').trim())
 }
 
 // ★ P3/收尾用到的几个：读服务器控制台（`readServerConsole`）。
@@ -191,16 +194,15 @@ import { runConsoleCommand } from './servers/console.mjs'
 import { runMcCommand } from './servers/command-gate.mjs'
 // ★ 0.3.2 P3：游戏内对话（绑定表 / 回应通道 / 读控制台的循环）
 import {
-  bindUuid,
-  issueCode,
+  bindByCode,
+  countCodes,
+  issueCodeFor,
   listBindings,
   lookupByName,
   lookupByUuid,
-  parseBindCommand,
-  pendingQualifications,
-  redeemCode,
+  parseGameBindRequest,
+  parseMcBindCommand,
   shortUuid,
-  unbind,
   unbindByName,
 } from './servers/bindings.mjs'
 import { buildSay, buildTellraw, chunkForSay, PLAYER_NAME_RE } from './servers/tellraw.mjs'
@@ -1774,22 +1776,27 @@ export class Bridge extends EventTarget {
    */
   async #handleBindLocalCommand({ text, kind, peerId, senderId }) {
     if (!looksLikeBindCommand(text)) return { matched: false }
-    const parsed = parseBindCommand(text)
-    // ★ 形状像 `/绑定xxx` 这种（带了别的字）**不命中** ⇒ 照常走普通聊天。
-    //   往窄了判是刻意的：误吞一条闲聊 = "机器人不理我"，而漏判只是回到普通聊天。
+    const parsed = parseMcBindCommand(text)
+    // ★ `bind` / `unbind` 在 `/mc` 前缀下是**保留字**：形状不对也要在这里拦下
+    //   （否则会掉进管理员控制台那条路，把 `bind xyz` 当成服务端命令发出去）。
     if (!parsed.hit) return { matched: false }
 
     const workspace = this.config?.dsh?.workspace
     const peerKey = `${kind}:${peerId}`
 
     // ── ① 权限与范围（**先判，再碰任何盘上状态**）──────────────────────────
-    if (parsed.kind === 'unbind') {
+    if (parsed.kind === 'unbind' || parsed.kind === 'unbind-help') {
       // 解绑：管理员专用（控制台 / 管理员私聊 / 群里 @）。
       // ★ 用 `roster.decide` 的结论，**不看群内角色**（那条安全边界见 roster.mjs）。
       const verdict = this.roster?.decide?.({ kind, peerId, senderId }) ?? { respond: false, tier: '' }
       if (String(verdict.tier ?? '') !== 'admin') {
-        this.log(`🔗 [bind] 有人发了 /解绑 但不是管理员（${peerKey}）⇒ 按普通聊天处理，不执行也不解释`)
+        this.log(`🔗 [bind] 有人发了 /mc unbind 但不是管理员（${peerKey}）⇒ 按普通聊天处理，不执行也不解释`)
         return { matched: false }
+      }
+      if (parsed.kind === 'unbind-help') {
+        const msg = '用法：`/mc unbind <游戏名或QQ号>`'
+        await this.#safeSend(kind, peerId, msg)
+        return { matched: true, ok: false, text: msg }
       }
       const r = unbindByName({ workspace, name: parsed.target, by: `admin:${senderId}` })
       const msg = r.ok
@@ -1812,72 +1819,100 @@ export class Bridge extends EventTarget {
         const v = this.roster?.decide?.({ kind, peerId, senderId }) ?? { respond: false }
         if (v.respond) {
           const msg =
-            '绑定要在**群里**做：在机器人所在的群里发 `/绑定` 拿一个 6 位码，再发 `/绑定 <码>`。' +
-            '私聊这条路是关着的（也不打算开）。'
+            '绑定要在**群里**做：先让玩家在游戏里输 `mc bind` 拿一个 6 位码，' +
+            '然后在机器人所在的群里发 `/mc bind <码>`。私聊这条路是关着的（也不打算开）。'
           this.log(`🔗 [bind] ${peerKey} 在私聊里发绑定指令 ⇒ 给了一句确定性指路（不调模型）`)
           await this.#safeSend(kind, peerId, msg)
           return { matched: true, ok: false, text: msg }
         }
       }
-      this.log(`🔗 [bind] ${peerKey} 发了 /绑定 但这里不是"已允许的群" ⇒ 当作普通聊天`)
+      this.log(`🔗 [bind] ${peerKey} 发了 /mc bind 但这里不是"已允许的群" ⇒ 当作普通聊天`)
       return { matched: false }
     }
     if (!senderId) return { matched: false }
 
-    // 一台都没开游戏内对话时，如实说清（否则使用者会以为绑上就能用）
-    const chatty = (Array.isArray(this.config?.servers) ? this.config.servers : []).filter(
-      (s) => s && s.gameChat === true && s.enabled !== false,
-    )
-    if (chatty.length === 0 && parsed.kind === 'issue') {
-      const msg = '绑定先不急：现在**没有任何一台服务器**打开「游戏内对话」（`servers[].gameChat`）。打开之后再用这条指令。'
+    // ── ② `/mc bind` 没带码 / 带了坏码 ⇒ 指路（**不在这里发码**）───────────
+    //
+    // ★★ 为什么**不能**在这里发码（第一版就是这么做的，已被使用者否掉）：
+    //   码必须**在游戏里生成**并与那个玩家的 UUID 挂在一起 —— 否则提交码的时候
+    //   我们只知道"某个 QQ 想绑定"，**不知道是哪个游戏身份**，只能等下一次发言去猜
+    //   （第一版的"资格"那一套，而且同时有两份资格时根本无法判断）。
+    if (parsed.kind === 'bind-help') {
+      const msg =
+        '绑定码要**在游戏里拿**：让玩家进服后在聊天里输入 `mc bind`（**不要加斜杠**），' +
+        '我会单独把 6 位码发给**他本人**；他把码发到这里：`/mc bind <码>`。'
+      await this.#safeSend(kind, peerId, msg)
+      return { matched: true, ok: false, text: msg }
+    }
+    if (parsed.kind === 'bad-code') {
+      const msg = '码是 **6 位数字**（例如 `/mc bind 123456`）。让玩家在游戏里输 `mc bind` 重新拿一个。'
       await this.#safeSend(kind, peerId, msg)
       return { matched: true, ok: false, text: msg }
     }
 
-    // ── ② 取码 ────────────────────────────────────────────────────────────
-    if (parsed.kind === 'issue') {
-      const r = issueCode({ workspace, qqId: senderId, chatKey: peerKey })
-      if (!r.ok) {
-        const msg = `取码失败（${r.why}）—— 请稍后再试。`
-        await this.#safeSend(kind, peerId, msg)
-        return { matched: true, ok: false, text: msg }
-      }
-      // ★ 回应发在**群里**（`peerKey` 就是那个群）—— 设计文档 §5.4 的原文是
-      //   「QQ 侧那条是**群内只回发起人**」：意思是**只针对他回一条**，
-      //   不是"向全群播报"，也不是"改成私聊"（私聊是 fail-closed 的门，玩家进不来）。
-      // ★★ 由此带来一条**必须写在明处的代价**（§5.6 全节都在讲它）：
-      //   **码在群里是所有人可见的** ⇒ 同群的人有机会抢先提交。
-      //   缓解办法有三样，都在实现里：**一次性** + **5 分钟 TTL** +
-      //   **绑定真的成立时给那个 UUID 本人 `tellraw` 确认**（抢绑藏不住）。
-      //   想把这条路堵死不是"在这里假装它私密"，而是加第二因子（需要服务端插件，
-      //   已按用户裁决留作可选硬化项，不进 v1）。
-      const mins = Math.max(1, Math.round((r.until - Date.now()) / 60000))
-      const msg =
-        `绑定码：\`${r.code}\`（${mins} 分钟内有效、只能用一次）。\n` +
-        `把它发回本群：\`/绑定 ${r.code}\` —— 然后去游戏里说一句话，绑定才算真的成立。`
-      this.log(`🔗 [bind] 给 ${peerKey} 出了一张绑定码（码**不进日志**，${mins} 分钟内有效）`)
-      await this.#safeSend(kind, peerId, msg)
-      return { matched: true, ok: true, text: msg }
-    }
-
-    // ── ③ 提交码 ──────────────────────────────────────────────────────────
+    // ── ③ 提交码 ⇒ **当场绑定** ───────────────────────────────────────────
     if (parsed.kind === 'redeem') {
-      const r = redeemCode({ workspace, qqId: senderId, code: parsed.code, chatKey: peerKey })
+      const r = bindByCode({ workspace, qqId: senderId, code: parsed.code, chatKey: peerKey })
       if (!r.ok) {
-        const msg = '这个码现在不能用（不存在、已过期、或者已经被用过了）。发 `/绑定` 重新拿一个。'
+        const msg = '这个码现在不能用（不存在、已过期、或者已经被用过了）。让玩家在游戏里输 `mc bind` 重新拿一个。'
         this.log(`🔗 [bind] ${peerKey} 提交的码不可用（${r.why}）—— 码本身不记`)
         await this.#safeSend(kind, peerId, msg)
         return { matched: true, ok: false, text: msg }
       }
-      const msg =
-        '收到，资格已经生效。**最后一步在游戏里**：进服后随便说一句带唤醒词的话，' +
-        '我会在那个 UUID 上把绑定落实，并单独告诉你一声。'
-      this.log(`🔗 [bind] ${peerKey} 的绑定资格已生效（等游戏内发言落实）`)
+      const extra = r.replaced || r.stolenFrom ? '（覆盖了原来的一条绑定，已留痕）' : ''
+      const msg = `绑好了：游戏里的 **${r.name || shortUuid(r.uuid)}** ↔ 你${extra}。\n已经在他本人的游戏里通知过了。`
+      this.log(
+        `🔗 [bind] 绑定成立（${peerKey} → QQ ${senderId}）：游戏名「${r.name}」UUID ${shortUuid(r.uuid)}…` +
+          `${r.replaced ? `｜覆盖了原来的 QQ ${r.replaced.qqId}` : ''}` +
+          `${r.stolenFrom ? `｜该 QQ 原来绑的是 UUID ${shortUuid(r.stolenFrom.uuid)}…` : ''}`,
+      )
       await this.#safeSend(kind, peerId, msg)
+
+      // ★★★ **抢绑藏不住**（设计文档 §5.6 档 A 的兜底）：绑定一成立就**立刻**给
+      //   那个 UUID 本人一条只给他看的 `tellraw`。这一步必须在**提交这一刻**做
+      //   （而不是等他下次说话）—— 受害者要**当场**看见有人拿他的身份绑了。
+      //   ⚠️ 特意**不写 QQ 号**：设计文档 §5.5 的边界是"服务端只拿到'绑定了没有'，
+      //   拿不到 QQ 号"。要查是谁绑的，管理员看留痕/绑定表。
+      await this.#gameTellrawToPlayer(
+        r.serverId,
+        r.name,
+        '绑定成功 —— 现在你可以在这里跟我说话了（说「小鲸鱼」叫我）。' +
+          '如果这次绑定不是你做的，请立刻找管理员，每次绑定变更都有记录。',
+        'yellow',
+      )
       return { matched: true, ok: true, text: msg }
     }
 
     return { matched: false }
+  }
+
+  /**
+   * 按 `serverId` 找到那台服务器，再给那个玩家发一条 `tellraw`。
+   *
+   * ★ 为什么需要这一层：绑定成立发生在**群里**，而通知要发到**游戏里** ——
+   *   中间隔着"哪一台服务器"。码里记了 `serverId`（取码时写进去的），
+   *   但**那一台可能已经被删/停用/关了 gameChat** ⇒ 退化成"在所有开了 gameChat
+   *   的服上都发一遍"，并把这件事如实记一行日志（**绝不静默**）。
+   */
+  async #gameTellrawToPlayer(serverId, playerName, text, color = '') {
+    const list = (Array.isArray(this.config?.servers) ? this.config.servers : []).filter(
+      (s) => s && s.enabled !== false && s.gameChat === true,
+    )
+    const byId = list.find((s) => String(s.id) === String(serverId ?? ''))
+    if (!byId) {
+      if (list.length === 0) {
+        this.log('⚠️ [bind] 绑定成功了，但**没有一台开了 gameChat 的服务器**可以发那条通知（玩家不会收到确认）')
+        return { ok: false, why: 'no-game-server' }
+      }
+      this.log(`⚠️ [bind] 码里记的服务器「${serverId}」现在找不到 ⇒ 改成在所有开了 gameChat 的服上通知`)
+    }
+    const targets = byId ? [byId] : list
+    let okAny = false
+    for (const s of targets) {
+      const r = await this.#gameTellraw(s, playerName, text, color)
+      if (r.ok) okAny = true
+    }
+    return { ok: okAny }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1963,58 +1998,57 @@ export class Bridge extends EventTarget {
       }
     }
 
-    // ② + ③ 绑定状态
+    // ② ★★★ 游戏内那句"我要绑定"（`mc bind`）—— **优先于**下面的绑定状态判定
+    //
+    // 为什么必须排在前面：一个**已经绑定**的玩家也可能重新说一次（换绑/自检），
+    // 要是被"已绑定 ⇒ 交给模型"先吃掉，那句话就变成了普通聊天（模型会瞎答一句）。
+    // ★ 码**在游戏里生成、与这个 UUID 挂在一起**（2026-10-04 流程改动的核心）：
+    //   这样群里提交码的时候就是**确定的映射**，不需要"资格"那一步、也没有歧义。
+    if (parseGameBindRequest(text).hit) {
+      if (!uuid) {
+        // 认不出他是谁 ⇒ **绝不发码**（发出去也没法挂到任何人身上）
+        await this.#gameTellraw(
+          server,
+          name,
+          '我还没拿到你的身份（UUID）—— 退出去重进一次服务器，然后再试 `mc bind`。',
+          'yellow',
+        )
+        this.log(`⚠️ [bind] 「${name}」要绑定码，但还没解析到他的 UUID（不发码）`)
+        return
+      }
+      const issued = issueCodeFor({ workspace, uuid, name, serverId: sid })
+      if (!issued.ok) {
+        await this.#gameTellraw(server, name, `取码失败（${issued.why}）—— 过一会儿再试。`, 'yellow')
+        this.log(`❌ [bind] 「${name}」取码失败：${issued.why}`)
+        return
+      }
+      const mins = Math.max(1, Math.round((issued.until - Date.now()) / 60000))
+      // ★ 码**只发给本人**（tellraw），**绝不进日志**、也就不进群。
+      await this.#gameTellraw(
+        server,
+        name,
+        `你的绑定码是 ${issued.code}（${mins} 分钟内有效、只能用一次）。\n` +
+          '把它发到我们那个群里，格式是：@小鲸鱼 /mc bind ' +
+          issued.code,
+        'yellow',
+      )
+      this.log(`🔗 [bind] 给「${name}」（UUID ${shortUuid(uuid)}…）出了一张绑定码（码**不进日志**，${mins} 分钟有效）`)
+      return
+    }
+
+    // ③ 绑定状态
     let bound = uuid ? lookupByUuid(workspace, uuid) : null
-    const pending = pendingQualifications(workspace)
     const decision = decideGameChat({
       name,
       uuid,
       bound,
-      pending,
       reminded: this.#gameReminded.has(key),
     })
 
-    if (decision.action === 'bind' && decision.qqId) {
-      const r = bindUuid({
-        workspace,
-        uuid,
-        name,
-        qqId: decision.qqId,
-        // 审计里记"资格是从哪个群来的"（`pendingQualifications` 带回来的是群会话键）
-        chatKey: String(pending[0]?.chatKey ?? ''),
-        by: 'game-speech',
-      })
-      if (!r.ok) {
-        this.log(`🔗 [bind] 「${name}」的绑定没写进去（${r.why}）—— 下一次发言会再试一次`)
-      } else {
-        // ★★★ **抢绑藏不住**（设计文档 §5.6 档 A 的兜底）：绑定真的成立时，
-        //   立刻给**那个 UUID 本人**一条只给他看的确认。
-        //   ⚠️ 特意**不写 QQ 号**：设计文档 §5.5 的边界是"服务端只拿到'绑定了没有'，
-        //   拿不到 QQ 号"。要查是谁绑的，管理员看留痕/绑定表。
-        const extra = r.replaced || r.stolenFrom ? '（这条覆盖了原来的一条绑定，已留痕）' : ''
-        await this.#gameTellraw(
-          server,
-          name,
-          `绑定成立：这个游戏身份已经和一个 QQ 号绑在一起了${extra}。` +
-            '如果这不是你做的，请立刻找管理员 —— 每次绑定变更都会留下记录。',
-          'yellow',
-        )
-        this.log(
-          `🔗 [bind] 「${name}」（UUID ${shortUuid(uuid)}…）已绑到 QQ ${decision.qqId}` +
-            `${r.replaced ? `｜覆盖了原来的 QQ ${r.replaced.qqId}` : ''}` +
-            `${r.stolenFrom ? `｜该 QQ 原来绑的是 UUID ${shortUuid(r.stolenFrom.uuid)}…` : ''}`,
-        )
-        bound = lookupByUuid(workspace, uuid)
-      }
-    }
-
     if (!bound) {
-      if (decision.action === 'remind' || decision.action === 'ask') {
+      if (decision.action === 'remind') {
         if (decision.text) await this.#gameTellraw(server, name, decision.text, 'yellow')
         this.#gameReminded.add(key)
-        if (decision.action === 'ask') {
-          this.log(`🔗 [bind] 「${name}」说话时有 ${pending.length} 份待绑定资格 ⇒ **不猜**，已提示他重新取码`)
-        }
       }
       return
     }
@@ -2665,7 +2699,9 @@ export class Bridge extends EventTarget {
       ok: true,
       count: rows.length,
       bindings: rows.map((r) => ({ uuid8: r.uuid8, qqId: r.qqId, name: r.name, at: r.at })),
-      pending: pendingQualifications(workspace).map((p) => ({ qqId: p.qqId, at: p.at, until: p.until })),
+      // ★★★ 只回**张数**，**绝不回码本身**（码是"资格"：它一旦进了接口响应/日志，
+      //   就等于把资格公开了）。要核对的只是"有没有人正卡在取码那一步"。
+      codeCount: countCodes(workspace),
     }
   }
 
