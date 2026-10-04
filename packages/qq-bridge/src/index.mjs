@@ -3572,6 +3572,8 @@ async function main() {
       //   会核对这一点；那次 `listScheduleTasks is not defined` 就是栽在这类地方）。
       serversProperties: async ({ serverId } = {}) => bridge.serverPropertiesForApi({ serverId }),
       serversPropertiesApply: async (opts = {}) => bridge.applyServerProperties(opts),
+      // ★ 「把服务端那份抄过来」：零重启对齐两边（密码只在我们进程内存里走一趟，不回响应）
+      serversRconCredentials: async ({ serverId } = {}) => bridge.readServerRconCredentials({ serverId }),
       // ★ 归一化**复用 config.mjs 那一份**（与启动读配置同一实现）——
       //   另写一份必然分叉，而分叉的表现是"界面存进去的"与"启动时读到的"不是一回事。
       normalizeServer: (entry) => normalizeServerEntry(entry),

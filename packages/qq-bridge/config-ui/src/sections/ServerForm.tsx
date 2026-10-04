@@ -119,8 +119,27 @@ export function ServerForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [server?.id])
 
-  const applyRcon = async () => {
+  /**
+   * 「密码忘了 ⇒ 把服务端那份抄过来」（零重启对齐两边）。
+   * ★ 界面上**看不到那个密码**，也不需要看到 —— 这是这条路存在的全部意义。
+   */
+  const adoptRcon = async () => {
     if (!server?.id) return
+    setRcon((p) => ({ ...p, busy: true, note: '', err: null }))
+    try {
+      const r = await api.serversRconAdopt(server.id)
+      setRcon((p) => ({
+        ...p,
+        busy: false,
+        note: `${r.note}（抄到：密码${r.adopted.password ? '✓' : '—'}${r.adopted.rconPort ? ` · 端口 ${r.adopted.rconPort}` : ''}；本桥接配置${r.applied?.ok ? '已生效' : `**没生效**：${r.applied?.why ?? '未知'}`}）`,
+      }))
+      await loadRcon()
+    } catch (e) {
+      setRcon((p) => ({ ...p, busy: false, err: e instanceof Error ? e.message : String(e) }))
+    }
+  }
+
+  const applyRcon = async () => {    if (!server?.id) return
     setRcon((p) => ({ ...p, busy: true, note: '' }))
     try {
       const r = await api.serversPropertiesApply({
@@ -441,6 +460,19 @@ export function ServerForm({
                 </Button>
                 <Button size="sm" disabled={rcon.busy || !rcon.patch.password} onClick={() => void applyRcon()}>
                   {rcon.busy ? '写入中…' : '写入并同步到本桥接'}
+                </Button>
+                {/* ★ 「抄过来」那条路（使用者问「rcon 密码被忘记了怎么办」）：
+                    密码是明文存在两边的，而**服务端那份是权威** ⇒ 只要它还在就能抄过来，
+                    **一次重启都不用**（改服务端那份才要重启、还会踢在线玩家）。
+                    ★ 它的意义正是"**不用看到密码也能对齐**" —— 响应里只有类别，没有值。 */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={rcon.busy}
+                  title="把服务端那份里的 rcon.password 抄进本桥接的配置（不必重启服务端；也不需要你看到那个密码）"
+                  onClick={() => void adoptRcon()}
+                >
+                  密码忘了？把服务端那份抄过来
                 </Button>
               </div>
               <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">

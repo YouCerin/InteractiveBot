@@ -408,6 +408,9 @@ export function createApiHandler(deps) {
     //   ★ 响应里**永不回密码本身**（只给 `passwordSet`），与 `servers[].password` 同一条纪律。
     serversProperties,
     serversPropertiesApply,
+    // `readServerRconCredentials({serverId})` —— 把服务端那份 RCON 凭据读出来（给"抄过来"那条路用）。
+    //   ★ 它的返回值里**有密码本身**，只许用来写 config，**绝不许进任何响应**。
+    serversRconCredentials,
     // `normalizeServer(entry)` —— **与启动读配置同一份**归一化（不另写一份，见路由注释）。
     normalizeServer,
     // `onServersChanged()` —— 让盘上的服务器列表**即时生效**（重建监测循环）。
@@ -1153,6 +1156,57 @@ export function createApiHandler(deps) {
         const body = req.body && typeof req.body === 'object' ? req.body : {}
         const serverId = String(body.serverId ?? '').trim()
         if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+
+        // ── ⓪「把服务端那份抄过来」：**不重启、不看到密码**地把两边对齐 ──────────────
+        //
+        // 起因（使用者：「rcon 密码被忘记了怎么办」）：密码是明文存在两边的，
+        // 而服务端那份是**权威**（它拿它校验每个 RCON 连接）⇒ 只要它还在，
+        // 抄过来就行，**一次重启都不用**（改服务端那份才需要重启，还会踢人）。
+        // ★ 密码只在服务端内存里走一趟（读文件 → 写 config），**任何响应都不带它出门**。
+        if (body.adoptFromFile === true) {
+          if (typeof serversRconCredentials !== 'function') return notImplemented('服务端 server.properties')
+          const cred = await serversRconCredentials({ serverId })
+          if (cred?.ok !== true) return fail(400, String(cred?.why ?? '读不到服务端那份凭据'))
+          let raw
+          try {
+            raw = await readRawConfig()
+          } catch (e) {
+            return fail(500, `读配置失败：${e?.message ?? e}`)
+          }
+          const list = Array.isArray(raw.servers) ? raw.servers : []
+          const i = list.findIndex((s) => s && String(s.id) === serverId)
+          if (i < 0) return fail(404, `配置里没有 id 为「${serverId}」的服务器`)
+          // ★ 只动这两项（字段级合并 —— 与"保存服务器条目"同一条纪律）
+          list[i].password = String(cred.password)
+          const portWritten = Number.isFinite(Number(cred.rconPort)) && Number(cred.rconPort) > 0
+          if (portWritten) list[i].rconPort = Number(cred.rconPort)
+          raw.servers = list
+          try {
+            await writeRawConfig(raw)
+          } catch (e) {
+            return fail(500, `写配置失败：${e?.message ?? e}`)
+          }
+          let applied = null
+          if (typeof onServersChanged === 'function') {
+            try {
+              applied = await onServersChanged()
+            } catch (e) {
+              applied = { ok: false, why: String(e?.message ?? e) }
+            }
+          }
+          return ok({
+            ok: true,
+            serverId,
+            path: String(cred.path ?? ''),
+            from: String(cred.from ?? ''),
+            // ★ 只说"抄了什么类别"，**不说值、也不说长度**
+            adopted: { password: true, rconPort: portWritten ? Number(cred.rconPort) : null },
+            applied: applied?.ok === false ? { ok: false, why: applied.why } : { ok: true },
+            note: '已把服务端那份里的 RCON 密码抄进本桥接的配置 —— **不必重启服务端**（它本来就是拿这份校验的）。',
+            restartNeeded: false,
+          })
+        }
+
         const wantsRcon = body.enableRcon !== undefined
         const wantsPort = body.rconPort !== undefined && body.rconPort !== null && String(body.rconPort).trim() !== ''
         const wantsPassword = typeof body.password === 'string' && body.password.length > 0

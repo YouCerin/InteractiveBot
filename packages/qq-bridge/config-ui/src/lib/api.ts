@@ -650,6 +650,31 @@ export const api = {
     password?: string
     syncToConfig?: boolean
   }) => request<ServersPropertiesApplyResult>('POST', '/api/servers/properties', body),
+  /**
+   * ★ **把服务端那份里的 RCON 密码抄进本桥接的配置**（使用者问「rcon 密码被忘记了怎么办」）。
+   *
+   * 密码是明文存在两边，而**服务端那份是权威**（它拿它校验每一个 RCON 连接）⇒
+   * 只要它还在，抄过来就行，**一次重启都不用**（改服务端那份才要重启、还会踢在线玩家）。
+   * ★ 这条路的全部意义是「**不用看到密码也能对齐**」：密码只在桥接进程内存里走一趟
+   *   （读文件 → 写 config），响应里**只有"抄了什么类别"**，没有值、也没有长度。
+   * ★ 服务端那份是空的时如实拒绝（没有可抄的 ⇒ 用"写入"那条路设一个新的）。
+   */
+  serversRconAdopt: (serverId: string) =>
+    request<ServersPropertiesAdoptResult>('POST', '/api/servers/properties', { serverId, adoptFromFile: true }),
+}
+
+/** `POST /api/servers/properties` 走「抄过来」那条路的结果。 */
+export interface ServersPropertiesAdoptResult {
+  ok: boolean
+  serverId: string
+  path: string
+  from: string
+  /** ★ 只说类别，**不说值也不说长度** */
+  adopted: { password: boolean; rconPort: number | null }
+  applied: { ok: boolean; why?: string }
+  /** ★ 含「不必重启服务端」 */
+  note: string
+  restartNeeded: boolean
 }
 
 /** `GET /api/servers/properties` 的结果。 */

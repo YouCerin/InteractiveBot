@@ -333,6 +333,20 @@ const handler = createApiHandler({
       __password: 'THIS_SHOULD_NEVER_LEAK',
     }
   },
+  // ★ 「把服务端那份抄过来」：返回值里**有密码**（它就是用来写 config 的）——
+  //   所以这条路要用**另一个**必泄串，才能证明路由真的把它挡住了（用同一个串会假绿）。
+  serversRconCredentials: async ({ serverId } = {}) => {
+    if (serverId === 's2') return { ok: false, why: '服务端那份里的 rcon.password 是**空的** —— 没有可抄的。' }
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    return {
+      ok: true,
+      serverId: 's1',
+      path: 'C:\\fake\\store\\mc-main\\server.properties',
+      from: '归属档',
+      rconPort: 25575,
+      password: 'COPIED-FROM-PROPERTIES-MUST-NOT-LEAK',
+    }
+  },
 })
 
 const server = await serveApi({ port: 0, handler, log: (m) => logs.push(String(m)) })
@@ -818,6 +832,35 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★ 同步结果也如实回带', applied.json?.data?.synced?.ok === true, JSON.stringify(applied.json?.data?.synced))
   check('★★ 字段白名单：返回里没有依赖塞进来的 `__password`',
     st.json?.data?.__password === undefined && applied.json?.data?.__password === undefined)
+
+  // ── ④-d-6 「把服务端那份抄过来」（零重启对齐两边；使用者问「rcon 密码被忘记了怎么办」）──
+  //
+  // 这条路的价值：密码明文存在两边，而**服务端那份是权威** ⇒ 只要它还在，抄过来就行，
+  // **一次重启都不用**（改服务端那份才要重启、还会踢在线玩家）。
+  // ★ 它必须做到"**不用看到密码也能对齐**"：密码只在我们进程内存里走一趟（读文件 → 写 config），
+  //   任何响应都不带它出门 —— 所以桩里用的是**另一个**必泄串，才能证明白名单真的挡住了它。
+  check('（准备）先把这一台的密码清掉，模拟"忘了/没配"', await (async () => {
+    const r = await saveSrv({ server: { id: 's1', password: null } })
+    return r.status === 200 && s1().password === ''
+  })())
+  const adopted = await propsPost({ serverId: 's1', adoptFromFile: true })
+  check('★★ 抄过来 → 200', adopted.status === 200, adopted.text.slice(0, 160))
+  check('★★★ 响应里**没有那个密码**（桩里塞的是 `COPIED-FROM-PROPERTIES-MUST-NOT-LEAK`）',
+    !adopted.text.includes('COPIED-FROM-PROPERTIES-MUST-NOT-LEAK'), adopted.text.slice(0, 160))
+  check('★★★ 也**不说长度**（长度也是信息）', !/长度|位/.test(String(adopted.json?.data?.adopted === undefined ? '' : JSON.stringify(adopted.json.data.adopted))),
+    JSON.stringify(adopted.json?.data?.adopted))
+  check('★★★ 密码**真的写进了 config.json**（否则"抄过来"是假的）',
+    s1().password === 'COPIED-FROM-PROPERTIES-MUST-NOT-LEAK', `len=${String(s1().password ?? '').length}`)
+  check('★ 端口也一起对齐（文件里写了端口时）', s1().rconPort === 25575, String(s1().rconPort))
+  check('★★ 如实说"**不必重启服务端**"（这是它与"写入"那条路的关键区别）',
+    adopted.json?.data?.restartNeeded === false && /不必重启/.test(String(adopted.json?.data?.note ?? '')),
+    String(adopted.json?.data?.note ?? ''))
+  check('★★★ 服务端那份里**没有密码**时如实拒绝（没有可抄的 ⇒ 得设一个新的）',
+    (await propsPost({ serverId: 's2', adoptFromFile: true })).status === 400)
+  check('★ 抄之前那一台**啥都没动**（失败不留半个状态）', (() => {
+    const row = rawConfigStub.servers.find((s) => s.id === 's2') ?? {}
+    return !row.password
+  })())
 
   // ── ④-e 主动检测（`POST /api/servers/probe`）与实时后台（`GET /api/servers/console`）──
   const probe = async (body) => {

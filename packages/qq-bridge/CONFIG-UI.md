@@ -2944,6 +2944,7 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 | GET | `/api/servers/console?serverId=…&limit=N` | 服务器**控制台最新输出**（「实时后台」折叠栏的数据源）。**只读**；回带 `encoding`（真机是 `gbk` —— 那个文件不是 UTF-8） |
 | GET | `/api/servers/properties?serverId=…` | ★ 读**服务端自己的** `server.properties` 里 RCON 那三项的当前状态。**只读**；回 `path`/`from`（那个文件的路径，以及它是从哪儿推出来的：归属档的 `cwd` 还是 `servers[].cwd`）、`settings{enableRcon,rconPort,passwordSet}`、`mismatch{port,password}`（它和本桥接这份配置**对不上**的两项 —— 对不上时 RCON 照样连不上）。★★ **永不回密码本身**，连长度都不回 |
 | POST | `/api/servers/properties` | ★ 一键把 RCON 配好（0.3.2 收尾）。body `{serverId, enableRcon?, rconPort?, password?, syncToConfig?}` —— 三项至少给一个，否则 400。★★★ **只改那三行**（`enable-rcon`/`rcon.port`/`rcon.password`），其余行**逐字保留**；写前**备份**；写前**重读一次**，内容变了就**拒绝写**（乐观并发：不盖掉别处的改动）。★★ 默认**顺手把两份配置对齐**（`syncToConfig !== false` 时同时写 `config.json` 的 `servers[].rconPort/password`）—— 只改一半等于没修。★ 回带 `note`（含「**要重启服务端才生效**」，界面照抄别自己编）、`backup`、`changed[]`、`synced`。⚠️ **响应里没有密码** |
+| POST | `/api/servers/properties`（`{serverId, adoptFromFile:true}`） | ★★ **「密码忘了 ⇒ 把服务端那份抄过来」**（使用者问「rcon 密码被忘记了怎么办」）：密码明文存在两边，而**服务端那份是权威**（它拿它校验每个 RCON 连接）⇒ 只要它还在，抄过来就行，**一次重启都不用**（改服务端那份才要重启、还会踢在线玩家）。它把 `server.properties` 里的 `rcon.password`（有端口就一起）写进 `config.json`，★ **密码只在桥接进程内存里走一趟，响应里只有 `adopted{password,rconPort}` 这个"抄了什么类别"，既没有值也没有长度**。★ 服务端那份是空的 ⇒ 400 并指向"写入"那条路。★ 回带 `restartNeeded:false` + 「不必重启服务端」 |
 
 **★ 保存/删除后即时生效**：后端会现读盘上的列表并**重建监测循环**
 （`bridge.reloadServers()`）—— 不必重启桥接、不断 QQ、不打断在跑的回合。

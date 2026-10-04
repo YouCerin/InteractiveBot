@@ -637,6 +637,16 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
         describe: 'probe',
         note: 'probe',
       }),
+      // 「把服务端那份抄过来」也要注入（**第八次**同一处）—— 它同样只在 POST 那条路由里被调用，
+      // 漏了就会让探测拿到 501 并报"文档声称已实现、代码里其实是占位"。
+      serversRconCredentials: async ({ serverId } = {}) => ({
+        ok: true,
+        serverId,
+        path: 'C:\\probe\\server.properties',
+        from: '归属档',
+        rconPort: 25575,
+        password: 'probe-password',
+      }),
       requestRestart: () => {},
       requestStop: () => {},
       powerUpdateDelayMs: 0,

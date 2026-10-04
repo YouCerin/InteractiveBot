@@ -2999,6 +2999,57 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * **把服务端那份 RCON 凭据读出来**（给"抄过来"那条路用；0.3.2 收尾）。
+   *
+   * ★ 为什么需要它（使用者 2026-10-04 问：「rcon 密码被忘记了怎么办」）：
+   *   密码是**明文**存在两边（服务端 `server.properties` / 我们 `config.json`）——
+   *   所以"忘了"通常只是"不知道去哪儿看"。而市面上最容易走错的一步是：
+   *   为了对齐两边去**改服务端那份并重启**（那会踢掉在线玩家）。
+   *   其实**服务端那份是权威**（它拿它校验每一个 RCON 连接）⇒ 只要它还在，
+   *   抄过来就行，**一次重启都不用**。
+   *
+   * ★ 返回值里有密码本身，所以**只给路由层用来写 config**：
+   *   任何接口响应都不许带它出门（路由那段是字段白名单，另有断言盯着）。
+   */
+  async readServerRconCredentials({ serverId = '' } = {}) {
+    const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+    const server = list.find((s) => s && String(s.id) === String(serverId)) ?? null
+    if (!server) return { ok: false, why: `配置里没有 id 为「${serverId}」的服务器` }
+    const workspace = this.config?.dsh?.workspace ?? ''
+    const at = resolvePropertiesPath({ workspace, server })
+    if (!at.ok) return { ok: false, why: at.why, serverId: server.id }
+    const file = readPropertiesFile(at.path)
+    if (!file.ok) return { ok: false, why: file.why, serverId: server.id, path: at.path }
+    const s = readRconSettings(file.text)
+    // ★ 空密码**没有可抄的**：如实说，并指向"设一个新的"那条路（别静默地把空串写进 config ——
+    //   那会让这台服从此"看起来配了密码、其实连不上"）。
+    if (s.passwordSet !== true) {
+      return {
+        ok: false,
+        serverId: server.id,
+        path: at.path,
+        why: `服务端那份里的 rcon.password 是**空的** —— 没有可抄的。请用"写入"那条路设一个新的（它会同时改两边）。`,
+      }
+    }
+    // 密码本身只在这里出现（内存里），下面立刻被路由写进 config
+    const password = (() => {
+      for (const line of file.text.split(/\r?\n/)) {
+        const m = /^\s*rcon\.password\s*=(.*)$/.exec(line)
+        if (m) return m[1]
+      }
+      return ''
+    })()
+    return {
+      ok: true,
+      serverId: server.id,
+      path: at.path,
+      from: at.from,
+      rconPort: s.rconPort, // 可能是 null（文件里没写）⇒ 路由那边"有值才写"
+      password,
+    }
+  }
+
+  /**
    * **测试用**的薄口：把一条服务器事件直接喂进"要不要自动播报"那条链。
    *
    * ★ 为什么留一个测试入口而不是让测试自己去造 loop：那条链的输入是
