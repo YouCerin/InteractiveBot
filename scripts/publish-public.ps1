@@ -30,6 +30,17 @@ param(
   [string]$RepoUrl = 'https://github.com/YouCerin/InteractiveBot.git',
   [string]$CommitEmail = '150148477+YouCerin@users.noreply.github.com',
   [string]$CloneDir = '',
+  # Which branch of the sanitised clone to publish. Empty = the branch the clone
+  # checked out, i.e. whatever the DEV repo had checked out when you ran this.
+  # WHY this parameter exists (hit for real on 2026-10-04): this script used to
+  # hard-code `git push origin main`, which only worked while the dev repo's
+  # checked-out branch WAS `main`. Development later moved to `0.3.0alpha`, so a
+  # fresh local clone has NO local `main` at all (only remotes/origin/main) and
+  # `git push origin main` fails with "src refspec main does not match any".
+  [string]$Branch = '',
+  # Which branch to publish TO on GitHub. Kept separate so the public repo's
+  # default branch stays `main` even when we publish from a work branch.
+  [string]$RemoteBranch = 'main',
   [switch]$SkipPush,
   [switch]$KeepClone
 )
@@ -87,6 +98,14 @@ $env:GIT_COMMIT_EMAIL = $CommitEmail
   ((Join-Path $tools 'scrub-ids-stdin.mjs') -replace '\\','/') | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "history rewrite failed (see output above)" }
 Ok "history rewritten (_release removed; identifiers scrubbed)"
+
+# Which local branch are we publishing? (default: whatever the clone checked out)
+if (-not $Branch) { $Branch = ((& git -C $CloneDir rev-parse --abbrev-ref HEAD) | Out-String).Trim() }
+if (-not $Branch -or $Branch -eq 'HEAD') { Fail "cannot determine the branch to publish (detached HEAD?); pass -Branch <name>" }
+& git -C $CloneDir rev-parse --verify --quiet "refs/heads/$Branch" | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail "the clone has no local branch '$Branch' (pass -Branch <name>)" }
+$pubTip = ((& git -C $CloneDir rev-parse $Branch) | Out-String).Trim()
+Ok "publishing local '$Branch' -> github '$RemoteBranch' (tip $pubTip)"
 
 Step "2/5 point origin at GitHub (a fresh clone already has origin = the dev repo)"
 RunGit @('-C',$CloneDir,'remote','set-url','origin',$RepoUrl) | Out-Null
@@ -149,25 +168,30 @@ if ($SkipPush) {
   $env:GIT_TERMINAL_PROMPT = '0'
   $env:GCM_INTERACTIVE = 'never'
   Write-Host "  dev HEAD  $devHead"
-  Write-Host "  clone HEAD $cloneHead"
-  $pushOut = (& git -C $CloneDir push origin main 2>&1 | Out-String)
+  Write-Host "  clone     $Branch -> $RemoteBranch  ($pubTip)"
+  # NOTE: GCM_INTERACTIVE=never above means a FIRST push cannot prompt for
+  # credentials -- it fails with an auth error instead of hanging (that is the
+  # intent: an unattended run must not block). So authenticate ONCE before the
+  # first publish, e.g.:  git ls-remote <RepoUrl>
+  # (Git Credential Manager then caches it for this user.)
+  $pushOut = (& git -C $CloneDir push origin "${Branch}:${RemoteBranch}" 2>&1 | Out-String)
   if ($LASTEXITCODE -ne 0) {
     Write-Host $pushOut
     # Classify the failure. Do NOT tell the user to --force unless the remote really
     # has a different history: on 2026-09-30 the push simply could not reach
     # github.com:443 (21 s timeout) and the old message sent the reader to --force,
     # i.e. it pointed at the wrong fix for a network problem.
-    if ($pushOut -match 'unable to access|Failed to connect|Could not connect|Could not resolve host|Connection (timed out|refused)|timed out') {
-      Fail "push could not REACH the remote (network / DNS / proxy). Nothing was published by this run -- retry later. Do NOT use --force for this."
-    } elseif ($pushOut -match 'Authentication failed|could not read Username|Permission denied|403') {
-      Fail "push was refused by CREDENTIALS (auth). Fix the credential used for $RepoUrl and retry. Do NOT use --force for this."
+    if ($pushOut -match 'unable to access|Failed to connect|Could not connect|Could not resolve host|Connection (timed out|refused)|timed out|AcquireCredentialsHandle') {
+      Fail "push could not REACH the remote (network / TLS / proxy). Nothing was published by this run -- retry later. Do NOT use --force for this."
+    } elseif ($pushOut -match 'Authentication failed|could not read Username|Permission denied|403|terminal prompts disabled') {
+      Fail "push was refused by CREDENTIALS (auth). Authenticate once first (git ls-remote $RepoUrl), then retry. Do NOT use --force for this."
     } elseif ($pushOut -match '\[rejected\]|non-fast-forward|fetch first|failed to push some refs') {
-      Fail "push REJECTED: the remote already has a DIFFERENT rewrite of this history (someone else published?). If nobody else works on that repo, re-run with: git -C '$CloneDir' push --force-with-lease origin main"
+      Fail "push REJECTED: the remote $RemoteBranch is not an ancestor of what we are publishing (different rewrite, or someone else published). If nobody else works on that repo, re-run with: git -C '$CloneDir' push --force-with-lease origin ${Branch}:${RemoteBranch}"
     } else {
       Fail "push failed (exit $LASTEXITCODE). Read the output above -- do not guess at the cause."
     }
   }
-  Ok "pushed main"
+  Ok "pushed $Branch -> $RemoteBranch"
   # NOTE: verify the remote head, but DO NOT crash when the network hiccups here.
   # Hit for real on 2026-09-30: the push landed (git printed "main -> main"), then
   # this ls-remote timed out, $remote came back null, and `.Trim()` on null threw
@@ -175,15 +199,15 @@ if ($SkipPush) {
   # publish was reported as a failure, with a message that says nothing about the
   # real cause. Now: no output => say "cannot verify" and print the manual command;
   # only a NON-EMPTY mismatch is a failure.
-  $remoteRaw = ((& git -C $CloneDir ls-remote origin refs/heads/main 2>$null) | Out-String).Trim()
+  $remoteRaw = ((& git -C $CloneDir ls-remote origin "refs/heads/$RemoteBranch" 2>$null) | Out-String).Trim()
   if (-not $remoteRaw) {
     Write-Host "  WARN  could not verify the remote head (ls-remote returned nothing -- network?)." -ForegroundColor Yellow
     Write-Host "        The push output above is authoritative; verify manually with:" -ForegroundColor Yellow
-    Write-Host "        git -C `"$CloneDir`" ls-remote origin refs/heads/main" -ForegroundColor Yellow
+    Write-Host "        git -C `"$CloneDir`" ls-remote origin refs/heads/$RemoteBranch" -ForegroundColor Yellow
   } else {
     $remote = ($remoteRaw -split '\s+')[0]
-    if ($remote -ne $cloneHead) { Fail "remote main is $remote but local is $cloneHead -- push did not land" }
-    Ok "verified remote main == $cloneHead"
+    if ($remote -ne $pubTip) { Fail "remote $RemoteBranch is $remote but local $Branch is $pubTip -- push did not land" }
+    Ok "verified remote $RemoteBranch == $Branch ($pubTip)"
   }
   Write-Host "  tags were NOT pushed on purpose (old tags stay local; create the release tag when making a Release)"
 }
