@@ -220,6 +220,13 @@
       "assertions": 255
     },
     {
+      "cmd": "node mocks/verify-log-source.mjs",
+      "purpose": "★★★ **游戏内事件源**（0.3.2 P3，52 项）：读服务端控制台输出，解析出聊天/玩家进出。★★★ 这一套的核心是**编码**，而且是真机逼出来的：`say 夹具-测试消息` 落进 `forge1.console.log` 的字节是 `bcd0bedf2db2e2cad4cffbcfa2` —— **GBK**，不是 UTF-8（Windows 中文版 JVM 默认 `file.encoding=GBK`，而 P2 把 stdout 原样重定向进那个文件）⇒ **任何按 UTF-8 读它的代码在真机上一个中文字都读不出来**。∴ 夹具里的中文是**真 GBK 字节**（`mocks/fixtures/chat-dialects.mjs`，且有一条断言逐字节核对我们的编码与真机一致），解码层按「UTF-8 严格解不过才回退 GBK」判定，**反向也有一条**（正常 UTF-8 中文不许被错解成乱码）。★ 方言覆盖：Forge 真机逐字 / `[Not Secure]` 前缀 / 中文（GBK）/ 中文玩家名 / 原版 / Paper 线程名 / Fabric 圆括号记录器 / 噪音（含 `[Rcon]` 自话不许被当成玩家聊天 —— 否则会形成自环）/ 正文含 `<` 与 `]: `（第一版「取最后一个 `]: `」会切成半句）。★ 四条边界：**只吐完整行**（服务端正在写的一行留在游标之外，下次接着读）、文件变小 ⇒ 判为轮转并从头读、游标**落盘**（否则重启重放旧聊天）、认不出的行**不猜**但把计数如实带回。★ 全程真临时文件；不连服务端、不调模型。",
+      "network": false,
+      "costs": "none",
+      "assertions": 52
+    },
+    {
       "cmd": "node mocks/verify-ui-types.mjs",
       "purpose": "★★ **UI 类型检查守卫**（0.3.2 收尾，5 项）：把 `npm run build` 的第一步 `tsc -b` 接进测试链。存在的理由是一次**真实的疏漏**：我给 `ConsolePanel.tsx` 写了四个没用上的 `Card*` 导入，却宣称「类型检查通过」—— 因为我跑的是 `tsc --noEmit -p tsconfig.json`，而那份是**项目引用**（`files: []` + `references`），那样跑**不检查被引用的 `tsconfig.app.json`**，而 `noUnusedLocals: true` 正好写在 app 那份里 ⇒ 错误只在用户 `npm run build` 时才炸出来。★ 判据因此是 `tsc -b`（走项目引用），并有一条断言专门盯着「tsconfig.json 必须是项目引用形态」以防有人把它改成单文件后这道守卫静默失效。★ 它**不跑 `vite build`**（那要 esbuild，受限沙箱里 spawn EPERM）—— 类型检查与打包是两件事。★ 缺 `config-ui/node_modules` 时**明确跳过并声明「跳过不算通过」**（本项目对「跳过 ≠ 通过」有专门纪律）。★ 守卫本身被验证过**会红**：故意插一个未使用导入时它退出码 1。",
       "network": false,
