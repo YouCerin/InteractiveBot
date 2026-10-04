@@ -443,6 +443,45 @@ export function createServerLoop({
       if (!entry) return null
       return entry.monitor.snapshot()
     },
+    /**
+     * **一次性检测**（界面上的"主动检测"按钮）。
+     *
+     * ★★★ 它与 `tick()` 的关键区别：**不喂状态机、不产出事件、不改累计计数**。
+     *   为什么必须分开（不是"顺手复用一下"）：`pollOne` 会把这次结果喂进
+     *   `monitor.feed(...)`，于是"连不上"会累加 `failStreak` ⇒ **使用者点几次按钮
+     *   就可能把一台好好的服务器自己点成 down**（并触发一次自动重启）。
+     *   一个"看一眼"的按钮绝不该有那个副作用。
+     *
+     * @returns {Promise<{ok:boolean, serverId:string, snapshot:object}>}
+     */
+    probeOnce: async (server) => {
+      const s = server ?? null
+      if (!s?.id) return { ok: false, serverId: '', snapshot: { reachable: null, error: '没有这台服务器' } }
+      if (s.enabled === false) {
+        return { ok: false, serverId: s.id, snapshot: { reachable: null, skipped: 'disabled', error: '这台是停用的' } }
+      }
+      if (!s.password) {
+        return {
+          ok: false,
+          serverId: s.id,
+          snapshot: { reachable: null, misconfigured: true, error: '没配 RCON 密码（config.json 的 servers[].password）' },
+        }
+      }
+      // ★ 用**临时连接**（不复用循环里那个）：一次性检测不该打乱采样循环的连接状态
+      const client = makeClient({ host: s.host, port: s.rconPort, password: s.password, log })
+      try {
+        const snap = sample ? await sample(s, client) : await defaultSample(s, client)
+        return { ok: snap?.reachable === true, serverId: s.id, snapshot: { ...snap, probed: true } }
+      } catch (error) {
+        return { ok: false, serverId: s.id, snapshot: { reachable: false, probed: true, error: `检测抛异常：${error?.message ?? error}` } }
+      } finally {
+        try {
+          client.close()
+        } catch {
+          /* 关不掉无所谓 */
+        }
+      }
+    },
   }
 }
 

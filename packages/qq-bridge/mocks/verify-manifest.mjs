@@ -597,6 +597,10 @@ section('★ CONFIG-UI.md 必须覆盖所有配置项（用户硬要求：涉及
       serversCommand: async () => ({ ok: true, command: 'probe', reply: '', output: '', nextByte: 0, rotated: false, caveat: '' }),
       normalizeServer: (e) => (e && typeof e === 'object' ? { id: String(e.id ?? 'probe') } : null),
       onServersChanged: async () => ({ ok: true, changed: false, count: 0 }),
+      // 主动检测 + 控制台输出（0.3.2 收尾的界面新增）—— 同样必须注入，否则走
+      // notImplemented 会被报成"文档谎称已实现"（**这是这条检查第六次抓漏注入了**）。
+      serversProbe: async () => ({ ok: true, serverId: 'probe', snapshot: { reachable: true, probed: true } }),
+      serversConsole: () => ({ ok: true, lines: [], total: 0, encoding: 'utf8', why: '' }),
       requestRestart: () => {},
       requestStop: () => {},
       powerUpdateDelayMs: 0,

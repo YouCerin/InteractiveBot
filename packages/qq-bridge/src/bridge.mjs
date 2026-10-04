@@ -129,6 +129,11 @@ function looksLikeMcCommand(text) {
   return MC_COMMAND_SHAPE.test(String(text ?? '').trim())
 }
 
+// ★ P3/收尾用到的几个：读服务器控制台（`readServerConsole`）。
+//   为什么在这里 import 而不是动态：它们只是 `node:fs` 的普通函数，没有加载成本。
+import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+// ★ 控制台日志的解码（真机是 **GBK**，不是 UTF-8 —— 见 `log-source.mjs` 文件头）
+import { decodeConsoleBytes } from './servers/log-source.mjs'
 import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './memory-stats.mjs'
 import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
 import { appendTurnOps, appendOp } from './oplog.mjs'
@@ -1448,6 +1453,90 @@ export class Bridge extends EventTarget {
       this.log(`❌ [servers] 启动接管时抛异常（机器人照常工作）：${error?.message ?? error}`)
     }
     return this
+  }
+
+  /**
+   * **一次性检测一台服务器**（界面上的"主动检测"按钮）。
+   *
+   * ★★★ 它**不喂状态机、不产出事件、不改累计计数**（见 `loop.mjs` 的 `probeOnce`）。
+   *   为什么必须这样：`pollOne` 会把结果喂进 `monitor.feed(...)`，于是"连不上"会累加
+   *   `failStreak` ⇒ **使用者点几次按钮就可能把一台好好的服务器自己点成 down**，
+   *   进而触发一次自动重启。一个"看一眼"的按钮绝不该有那个副作用。
+   */
+  async probeServerForApi({ serverId = '' } = {}) {
+    try {
+      const id = String(serverId ?? '').trim()
+      if (!id) return { ok: false, why: '必须给 serverId' }
+      const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+      const s = list.find((x) => x?.id === id)
+      if (!s) return { ok: false, why: `配置里没有 id 为「${id}」的服务器` }
+      if (!this.#serverLoop) {
+        // 懒建一个循环对象**只为拿到它的采样器**（`probeOnce` 不喂状态机、不起定时器）。
+        this.#serverLoop = createServerLoop({
+          workspace: this.config?.dsh?.workspace,
+          servers: () => (Array.isArray(this.config.servers) ? this.config.servers : []),
+          pollMs: this.config.serversPollMs,
+          log: () => {},
+          onEvent: () => {},
+        })
+      }
+      const r = await this.#serverLoop.probeOnce(s)
+      this.log(`🔎 [servers] 主动检测 ${s.name ?? id}：${r?.ok ? '通' : '不通'}${r?.snapshot?.error ? `（${r.snapshot.error}）` : ''}`)
+      return r
+    } catch (error) {
+      return { ok: false, why: `主动检测失败：${error?.message ?? error}` }
+    }
+  }
+
+  /**
+   * **读服务器控制台的最新输出**（界面上的"实时后台"折叠栏）。
+   *
+   * ★ 与"控制台命令"那块共用同一份解码逻辑（`decodeConsoleBytes`）——
+   *   真机那个文件是 **GBK**，按 UTF-8 读出来全是替换字符（见 `log-source.mjs` 文件头）。
+   * ★ 只读尾部一块、只回文本行；**不回任何凭据**（那个文件里本来也不该有密码）。
+   */
+  readServerConsole({ serverId = '', limit = 200 } = {}) {
+    try {
+      const id = String(serverId ?? '').trim()
+      if (!id) return { ok: false, why: '必须给 serverId' }
+      const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+      const s = list.find((x) => x?.id === id)
+      if (!s) return { ok: false, why: `配置里没有 id 为「${id}」的服务器` }
+      const workspace = this.config?.dsh?.workspace
+      if (!workspace) return { ok: false, why: '没有工作区 ⇒ 定位不到控制台日志' }
+      // ★ 路径直接用字符串拼：本文件本来就没 import `node:path`（它的其它落盘处
+      //   也走字符串），引一个模块只为拼一次路径不值得。
+      //   `id` 已过一遍字符替换，防路径穿越。
+      const safeId = String(id).replace(/[^a-zA-Z0-9_.-]/g, '_')
+      const file = `${workspace}/runtime/servers/${safeId}.console.log`
+      if (!existsSync(file)) {
+        return { ok: true, lines: [], total: 0, encoding: 'utf8', file, why: '还没有控制台输出（服务端没被本程序拉起过，或还没写过）' }
+      }
+      const size = statSync(file).size
+      const want = Math.min(size, 256 * 1024)
+      const fd = openSync(file, 'r')
+      let text = ''
+      let encodingUsed = 'utf8'
+      try {
+        const buf = Buffer.alloc(want)
+        let got = 0
+        while (got < want) {
+          const n = readSync(fd, buf, got, want - got, size - want + got)
+          if (n <= 0) break
+          got += n
+        }
+        const dec = decodeConsoleBytes(buf.subarray(0, got), 'auto')
+        text = dec.text
+        encodingUsed = dec.encoding
+      } finally {
+        closeSync(fd)
+      }
+      const all = text.split(/\r?\n/).filter((l) => l.trim())
+      const n = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 2000) : 200
+      return { ok: true, lines: all.slice(-n), total: all.length, encoding: encodingUsed, file }
+    } catch (error) {
+      return { ok: false, why: `读控制台失败：${error?.message ?? error}` }
+    }
   }
 
   /**

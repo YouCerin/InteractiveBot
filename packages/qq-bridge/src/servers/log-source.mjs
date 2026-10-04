@@ -102,6 +102,19 @@ const SELF_RE = /^(?:\[Not Secure\]\s*)?\[(Rcon|Server)\]\s*/
 const CHAT_RE = /^(?:\[Not Secure\]\s*)?<([^\s<>]+)>\s*(.*)$/
 const JOIN_RE = /^([^\s]+) joined the game$/
 const LEAVE_RE = /^([^\s]+) (?:left the game|lost connection:.*)$/
+/**
+ * ★★★ **「名 → UUID」的真机形状**（这是 P3 绑定的关键来源，真机逐字取证）：
+ *
+ *     [11:56:16] [User Authenticator #1/INFO] [minecraft/ServerLoginPacketListenerImpl]:
+ *                UUID of player YoCerin is 00000000-0000-4000-8000-000000000001
+ *
+ * ★ 为什么它比 `list uuids` 更好：**玩家一登录就写，不用他说话、也不用他还在线**。
+ *   `list uuids` 只在"此刻在线"时才有（实测形状 `YoCerin (bbf13b2f-…)`），
+ *   而绑定恰恰发生在一个刚进服的人身上 —— 那条日志比 RCON 更早、更可靠。
+ * ★ 记录器名（`ServerLoginPacketListenerImpl`）在版本间可能微调 ⇒ 只锚定
+ *   `UUID of player <名> is <uuid>` 这一段（它在 1.8~1.21 都是这个措辞）。
+ */
+const UUID_RE = /^UUID of player ([^\s]+) is ([0-9a-fA-F-]{32,36})$/
 const DEATH_RE = /^([^\s]+) (?:was |were |drowned|blew up|burned|fell |hit the ground|tried to swim|withered|starved|suffocated|went off with a bang|experienced kinetic energy|froze to death|was killed)/
 
 /**
@@ -126,6 +139,10 @@ export function parseConsoleLine(rawLine) {
 
   const join = JOIN_RE.exec(body)
   if (join) return { kind: 'join', name: join[1] }
+
+  // ★★★ 「名 → UUID」（玩家一登录就写）—— P3 的绑定靠它，别漏
+  const uuid = UUID_RE.exec(body)
+  if (uuid) return { kind: 'uuid', name: uuid[1], uuid: uuid[2].toLowerCase() }
 
   const leave = LEAVE_RE.exec(body)
   if (leave) return { kind: 'leave', name: leave[1] }

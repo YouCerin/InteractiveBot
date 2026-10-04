@@ -3472,6 +3472,10 @@ async function main() {
       //   （op/ban/stop 都能做），只从本机网页进（API 只绑 127.0.0.1），
       //   **绝不进 QQ 工具面**（那条面是"只说话 + 只读"）。
       serversCommand: async ({ serverId, command } = {}) => bridge.runServerCommand({ serverId, command }),
+      // ★ 主动检测：真连一次 + 只读命令，**不喂状态机**（点了不会把服务器"点成 down"）
+      serversProbe: async ({ serverId } = {}) => bridge.probeServerForApi({ serverId }),
+      // ★ 控制台实时输出（只读；已按真机编码解码 —— 那个文件是 GBK）
+      serversConsole: ({ serverId, limit } = {}) => bridge.readServerConsole({ serverId, limit }),
       // ★ 归一化**复用 config.mjs 那一份**（与启动读配置同一实现）——
       //   另写一份必然分叉，而分叉的表现是"界面存进去的"与"启动时读到的"不是一回事。
       normalizeServer: (entry) => normalizeServerEntry(entry),

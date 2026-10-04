@@ -257,6 +257,31 @@ const handler = createApiHandler({
     return { id, name: String(entry.name ?? id), host: '127.0.0.1', port: 25565, rconPort: 25575, password: '', enabled: true }
   },
   onServersChanged: async () => ({ ok: true, changed: true, count: 2 }),
+  // 主动检测（0.3.2 收尾）：桩里**故意**回带一个必泄串，让"字段白名单"那条断言能抓漏
+  // （同 `serversList` 的套路）。
+  serversProbe: async ({ serverId } = {}) => {
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    return {
+      ok: true,
+      serverId,
+      snapshot: { reachable: true, players: 1, playerNames: ['YoCerin'], tps: 20, probed: true, __password: 'THIS_SHOULD_NEVER_LEAK' },
+    }
+  },
+  // 控制台最新输出：桩里回一段**含中文**的内容（真机那个文件是 GBK）
+  serversConsole: ({ serverId } = {}) => {
+    if (serverId !== 's1') return { ok: false, why: `没有 id 为「${serverId}」的服务器` }
+    return {
+      ok: true,
+      lines: [
+        '[12:00:00] [Server thread/INFO] [minecraft/MinecraftServer]: <YoCerin> 你好',
+        '[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: Saving players',
+      ],
+      total: 2,
+      encoding: 'gbk',
+      why: '',
+      __password: 'THIS_SHOULD_NEVER_LEAK',
+    }
+  },
 })
 
 const server = await serveApi({ port: 0, handler, log: (m) => logs.push(String(m)) })
@@ -591,6 +616,42 @@ section('④-d /api/servers —— 服务器监测状态（0.3.2 P2/P4 服务器
   check('★★★ 明确回带"状态文件刻意保留"（那是"我起过它"的归属证据，删了就失去重启能力）',
     delOk.json?.data?.keptStateFiles === true && /归属证据/.test(String(delOk.json?.data?.note ?? '')),
     String(delOk.json?.data?.note ?? ''))
+
+  // ── ④-e 主动检测（`POST /api/servers/probe`）与实时后台（`GET /api/servers/console`）──
+  const probe = async (body) => {
+    const res = await fetch(url('/api/servers/probe'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json = null
+    try {
+      json = JSON.parse(text)
+    } catch {
+      /* 非 JSON 按文本看 */
+    }
+    return { status: res.status, text, json }
+  }
+  check('★★ 主动检测缺 serverId ⇒ 400（不猜是哪一台）', (await probe({})).status === 400)
+  const probed = await probe({ serverId: 's1' })
+  check('★ 主动检测 → 200 且回带 snapshot', probed.status === 200 && probed.json?.data?.snapshot?.reachable === true, probed.text.slice(0, 120))
+  check('★★★ 检测结果标了 `probed: true`（与后台采样那一份区分开 —— 它不参与 up/down 判定）',
+    probed.json?.data?.snapshot?.probed === true)
+  check('★★★ 主动检测响应里也**一个字符都没有密码**', !probed.text.includes('THIS_SHOULD_NEVER_LEAK'))
+  check('★ 不认识的 serverId 如实报错', (await probe({ serverId: 'nope' })).status === 400)
+
+  const consoleRes = await fetch(url('/api/servers/console?serverId=s1&limit=10'), { signal: AbortSignal.timeout(15_000) })
+  const consoleText = await consoleRes.text()
+  const consoleJson = JSON.parse(consoleText)
+  check('★ 实时后台 → 200 且回带文本行', consoleRes.status === 200 && Array.isArray(consoleJson?.data?.lines) && consoleJson.data.lines.length === 2)
+  check('★★★ **如实回带编码**（真机那个文件是 `gbk` —— 按 UTF-8 读会全是替换字符）',
+    consoleJson?.data?.encoding === 'gbk', String(consoleJson?.data?.encoding))
+  check('★ 中文行**没有被破坏**（桩里回的是"你好"）', consoleText.includes('你好') || JSON.stringify(consoleJson.data.lines).includes('你好'))
+  check('★★★ 实时后台响应里也**一个字符都没有密码**', !consoleText.includes('THIS_SHOULD_NEVER_LEAK'))
+  const consoleNoId = await fetch(url('/api/servers/console'), { signal: AbortSignal.timeout(15_000) })
+  check('★★ 实时后台缺 serverId ⇒ 400（不猜）', consoleNoId.status === 400)
 }
 
 // ══════════════════════════════════════════════════════════════════════════

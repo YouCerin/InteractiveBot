@@ -2919,6 +2919,8 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 | POST | `/api/servers/save` | body `{server}`：新增/更新一台。归一化**复用 `normalizeServerEntry`**（与启动读配置同一份，避免"界面存进去的"与"启动时读到的"分叉）；`id` 空 ⇒ 400 |
 | POST | `/api/servers/delete` | body `{serverId}`；缺 `serverId` ⇒ 400。★ **状态文件刻意保留**（那是"我起过它"的归属证据，删了就失去重启能力） |
 | POST | `/api/servers/command` | body `{serverId, command}`：手动跑一条控制台命令。缺 `serverId`／空命令／超长（>500 字）⇒ 400；★★★ **完整控制台（op 级别）**，**字段白名单**（密码绝不出去） |
+| POST | `/api/servers/probe` | body `{serverId}`：**主动检测**一次（真连 RCON + 只读命令）。缺 `serverId` ⇒ 400。★★ 它**不喂状态机、不累加「连续失败」** —— 点几次都不会把一台好好的服务器「点成 down」 |
+| GET | `/api/servers/console?serverId=…&limit=N` | 服务器**控制台最新输出**（「实时后台」折叠栏的数据源）。**只读**；回带 `encoding`（真机是 `gbk` —— 那个文件不是 UTF-8） |
 
 **★ 保存/删除后即时生效**：后端会现读盘上的列表并**重建监测循环**
 （`bridge.reloadServers()`）—— 不必重启桥接、不断 QQ、不打断在跑的回合。

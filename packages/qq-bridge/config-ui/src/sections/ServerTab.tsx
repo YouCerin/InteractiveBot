@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertCircle, Plus, RefreshCw, Server, ShieldQuestion, Trash2, Wrench } from 'lucide-react'
+import { AlertCircle, Activity, Plus, RefreshCw, Server, ShieldQuestion, Trash2, Wrench } from 'lucide-react'
 
 import { api, isNotImplemented, type ServerRow, type ServersResult } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -110,6 +110,25 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
       await load()
     } catch (e) {
       setNotice(`没删成：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  /** 主动检测结果（按 serverId 存；**不写进 `data`** —— 它是"点出来的"，不是采样那一份） */
+  const [probes, setProbes] = useState<Record<string, { at: number; text: string; ok: boolean }>>({})
+
+  const probe = async (row: ServerRow) => {
+    setBusyId(`probe:${row.id}`)
+    try {
+      const r = await api.serversProbe(row.id)
+      const snap = r.snapshot ?? {}
+      const text = snap.reachable === true
+        ? `通（在线 ${snap.players ?? '拿不到'} 人 · TPS ${snap.tps ?? '拿不到'}）`
+        : `不通：${snap.error || (snap.skipped === 'disabled' ? '这台是停用的' : '没记下原因')}`
+      setProbes((prev) => ({ ...prev, [row.id]: { at: Date.now(), text, ok: snap.reachable === true } }))
+    } catch (e) {
+      setProbes((prev) => ({ ...prev, [row.id]: { at: Date.now(), text: e instanceof Error ? e.message : String(e), ok: false } }))
     } finally {
       setBusyId(null)
     }
@@ -233,9 +252,25 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
-              {/* ── ★★ 活证据（这一页最要紧的一块）── */}
+              {/* ── ★★ 服务器状态检测（这一页最要紧的一块）── */}
               <div className="rounded-md border px-3 py-2">
-                <div className="text-xs font-medium">监测活证据</div>
+                <div className="flex items-center gap-2 text-xs font-medium">
+                  服务器状态检测
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto h-6 gap-1 px-2 text-xs"
+                    disabled={busyId === `probe:${s.id}`}
+                    onClick={() => void probe(s)}
+                  >
+                    <Activity className={cn('h-3.5 w-3.5', busyId === `probe:${s.id}` && 'animate-pulse')} />
+                    {busyId === `probe:${s.id}` ? '检测中…' : '主动检测'}
+                  </Button>
+                </div>
+                <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
+                  ★ 上面那个是**后台采样的活证据**；「主动检测」是**现在真连一次**。
+                  两者不同：检测**不参与 up/down 判定**（点几次都不会把服务器"点成 down"）。
+                </p>
                 {s.monitor ? (
                   <div className="text-muted-foreground mt-1 space-y-0.5 text-xs">
                     <div>
@@ -254,6 +289,12 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                     ⚠️ **还没采过样**（监测循环没在跑，或刚启动）—— 这一栏空着不等于"一切正常"。
                   </div>
                 )}
+                {/* ★ 主动检测的结果：**单独一块**（它不是采样那一份，不参与 up/down 判定） */}
+                {probes[s.id] && (
+                  <div className={cn('mt-2 border-t pt-1.5 text-xs', probes[s.id].ok ? 'text-emerald-600' : 'text-amber-600')}>
+                    主动检测（{agoText(probes[s.id].at)}）：{probes[s.id].text}
+                  </div>
+                )}
               </div>
 
               {/* ── ★★ 归属：能不能重启的唯一依据 ── */}
@@ -269,15 +310,16 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                       own?.owner === 'bridge' ? 'text-emerald-600' : own?.owner === 'external' ? 'text-amber-600' : 'text-muted-foreground',
                     )}
                   >
-                    {own?.owner === 'bridge' ? '✅ 是我起的' : own?.owner === 'external' ? '⚠️ 不是我起的' : '⛔ 没在跑'}
+                    {own?.owner === 'bridge' ? '✅ 由本程序拉起' : own?.owner === 'external' ? '⚠️ 不是本程序拉起的' : '⛔ 没在跑'}
                     {own?.weak ? '（弱证据：命令行比对）' : ''}
                   </span>
+                  {/* ★ 用户拍板的文案：括号里说清"什么情况下会自动重启" */}
+                  <span className="text-muted-foreground">（只有本程序拉起的进程可自动重启）</span>
                   <div className="text-muted-foreground mt-0.5">{own?.why ?? '（拿不到归属信息）'}</div>
                   <div className="text-muted-foreground mt-1">
                     重启能力：<span className={cn(canRestart ? 'text-emerald-600' : 'text-amber-600')}>{canRestart ? '✅ 可用' : '⛔ 不可用'}</span>
                     {!s.startExeSet && !s.startCommandSet && '（没配 `startExe`/`startCommand` —— 我不知道怎么启动它）'}
-                    {s.startExeSet && !canRestart && own?.owner !== 'bridge' && '（需要服务端**由机器人拉起**：`--supervise start`）'}
-                    {!s.startExeSet && s.startCommandSet && own?.owner !== 'bridge' && '（需要服务端**由机器人拉起**：`--supervise start`）'}
+                    {canRestart === false && own?.owner === 'bridge' && (s.startExeSet || s.startCommandSet) && '（已由本程序拉起，但当前处于冷却/等指令状态）'}
                   </div>
                 </div>
               </div>

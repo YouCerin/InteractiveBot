@@ -319,6 +319,11 @@ export function createApiHandler(deps) {
     //      （本服务只绑 127.0.0.1），**绝不进 QQ 工具面**（那条面是"只说话 + 只读"）。
     //   ★ 它与 `serversAction` 的区别：这条真的往服务端发命令，那条只改重启状态机。
     serversCommand,
+    // `probeServerForApi({serverId})` —— **主动检测**一次（真连 + 只读命令），
+    //   ★ 不喂状态机（点了不会把服务器"点成 down"，见路由注释）。
+    serversProbe,
+    // `readServerConsole({serverId, limit})` —— 控制台**实时输出**（已按真机编码解码）。
+    serversConsole,
     // `normalizeServer(entry)` —— **与启动读配置同一份**归一化（不另写一份，见路由注释）。
     normalizeServer,
     // `onServersChanged()` —— 让盘上的服务器列表**即时生效**（重建监测循环）。
@@ -848,6 +853,61 @@ export function createApiHandler(deps) {
         const limit = Number(queryParam(req, 'limit')) || 50
         const r = await scheduleHistory({ limit })
         return r?.ok === false ? fail(r.status ?? 500, r.why ?? '读历史失败') : ok(r)
+      }
+
+      // ── 服务器**主动检测**与**控制台实时输出**（0.3.2 收尾，界面用）────────
+      //
+      // ★★ `POST /api/servers/probe`：真连一次并跑只读命令，**不喂状态机**。
+      //   为什么必须"不喂"：采样循环那条路会把结果喂进 `monitor.feed(...)`，
+      //   于是"连不上"会累加 `failStreak` ⇒ **点几次按钮就可能把一台好好的服务器
+      //   自己点成 down**，进而触发自动重启。一个"看一眼"的按钮绝不该有那个副作用。
+      if (method === 'POST' && path === '/api/servers/probe') {
+        if (typeof serversProbe !== 'function') return notImplemented('服务器主动检测')
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        const serverId = String(body.serverId ?? '').trim()
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        const r = await serversProbe({ serverId })
+        if (r?.ok === false && r?.why) return fail(r.status ?? 400, r.why)
+        // ★★★ **字段白名单**（同 `/api/servers` 的纪律）：不把依赖的返回值直接转出去。
+        //   ★ 这是同一条纪律第三次抓到我：控制台那条、这条，第一版都是 `ok(r)` 直接转，
+        //     于是依赖带回的任何多余字段（包括密码）都会原样出这个门。
+        //     白名单让"泄露凭据"在**结构上不可能**，而不是靠实现者记得。
+        const s = r?.snapshot ?? {}
+        return ok({
+          ok: Boolean(r?.ok),
+          serverId: String(r?.serverId ?? serverId),
+          snapshot: {
+            reachable: s.reachable === true ? true : s.reachable === false ? false : null,
+            players: typeof s.players === 'number' ? s.players : null,
+            playerNames: Array.isArray(s.playerNames) ? s.playerNames.slice(0, 200).map(String) : null,
+            tps: typeof s.tps === 'number' ? s.tps : null,
+            version: typeof s.version === 'string' ? s.version : null,
+            error: typeof s.error === 'string' ? s.error : null,
+            skipped: typeof s.skipped === 'string' ? s.skipped : '',
+            misconfigured: s.misconfigured === true,
+            /** ★ 标明"这是点按钮测出来的"，与后台采样那一份区分开 */
+            probed: true,
+            at: Number.isFinite(Number(s.at)) ? Number(s.at) : Date.now(),
+          },
+        })
+      }
+
+      // `GET /api/servers/console?serverId=…&limit=…` —— 「实时后台」折叠栏的数据源。
+      // ★ **只读**：只回控制台日志的文本行（已按真机编码解码 —— 那个文件是 GBK）。
+      if (method === 'GET' && path === '/api/servers/console') {
+        if (typeof serversConsole !== 'function') return notImplemented('服务器控制台输出')
+        const serverId = String(queryParam(req, 'serverId') ?? '').trim()
+        if (!serverId) return fail(400, '必须带 serverId（不猜是哪一台）')
+        const limit = Number(queryParam(req, 'limit')) || 200
+        const r = serversConsole({ serverId, limit })
+        if (r?.ok === false) return fail(r.status ?? 400, r.why ?? '读控制台失败')
+        // ★ 字段白名单（同 `/api/servers` 的纪律）：只放行这几个键，别的一律不出门
+        return ok({
+          lines: Array.isArray(r?.lines) ? r.lines.slice(0, 2000) : [],
+          total: Number(r?.total) || 0,
+          encoding: typeof r?.encoding === 'string' ? r.encoding : 'utf8',
+          why: typeof r?.why === 'string' ? r.why : '',
+        })
       }
 
       // ── 服务器**控制台**（0.3.2 收尾：手动输指令）──────────────────────

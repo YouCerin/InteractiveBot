@@ -617,6 +617,20 @@ export const api = {
   /** 删掉一台服务器条目。★ 状态文件（归属证据）**刻意保留**，返回里会说明。 */
   serversDelete: (serverId: string) =>
     request<ServersDeleteResult>('POST', '/api/servers/delete', { serverId }),
+
+  /**
+   * **主动检测**一次：真连一次 RCON 并跑只读命令，把结果如实带回来。
+   *
+   * ★★ 它**不喂状态机**（不会累加"连续失败"）—— 所以点几次都不会把一台好好的
+   *   服务器"点成 down"。这是它与后台采样循环的关键区别。
+   */
+  serversProbe: (serverId: string) => request<ServersProbeResult>('POST', '/api/servers/probe', { serverId }),
+  /**
+   * 读服务器**控制台的最新输出**（「实时后台」折叠栏）。
+   * ★ `encoding` 会如实告诉你是 `gbk` 还是 `utf8` —— 真机那个文件是 GBK。
+   */
+  serversConsole: (serverId: string, limit = 200) =>
+    request<ServersConsoleResult>('GET', `/api/servers/console?serverId=${encodeURIComponent(serverId)}&limit=${limit}`),
 }
 
 // ── 0.3.2 服务器监测（CONFIG-UI.md §2.12）─────────────────────────────────
@@ -730,6 +744,37 @@ export interface ServersDeleteResult {
   keptStateFiles: boolean
   note: string
   applied: { ok: boolean; changed?: boolean; count?: number; why?: string }
+}
+
+/**
+ * **主动检测**的结果（`POST /api/servers/probe`）。
+ * ★ `snapshot.probed === true` 标明这是"点按钮测出来的"，不是采样循环那一份 ——
+ *   界面要如实区分（前者不参与 up/down 判定）。
+ */
+export interface ServersProbeResult {
+  ok: boolean
+  serverId: string
+  snapshot: {
+    reachable: boolean | null
+    players?: number | null
+    playerNames?: string[] | null
+    tps?: number | null
+    error?: string | null
+    skipped?: string
+    misconfigured?: boolean
+    probed?: boolean
+    at?: number
+  }
+  why?: string
+}
+
+/** 服务器**控制台最新输出**（`GET /api/servers/console`）。 */
+export interface ServersConsoleResult {
+  lines: string[]
+  total: number
+  /** ★ 真机是 `gbk`（Windows 中文版 JVM 默认编码）—— 如实回带，供界面标注 */
+  encoding: string
+  why: string
 }
 
 // ── 0.3.2 定时任务（CONFIG-UI.md §2.11）────────────────────────────────────

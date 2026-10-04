@@ -122,11 +122,9 @@ for (const d of DIALECTS) {
     const { text } = decodeConsoleBytes(rawBuf, 'auto')
     const ev = parseConsoleLine(text)
     if (ev) {
-      got.push(
-        ev.kind === 'onlineOnly'
-          ? { kind: null, name: ev.name, online: true }
-          : { kind: ev.kind, name: ev.name, ...(ev.text !== undefined ? { text: ev.text } : {}) },
-      )
+      if (ev.kind === 'onlineOnly') got.push({ kind: null, name: ev.name, online: true })
+      else if (ev.kind === 'uuid') got.push({ kind: 'uuid', name: ev.name, uuid: ev.uuid })
+      else got.push({ kind: ev.kind, name: ev.name, ...(ev.text !== undefined ? { text: ev.text } : {}) })
     } else {
       got.push({ kind: null })
     }

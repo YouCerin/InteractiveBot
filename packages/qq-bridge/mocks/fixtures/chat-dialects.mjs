@@ -203,6 +203,18 @@ export const DIALECTS = [
     expect: [{ kind: 'chat', name: 'Steve', text: 'fabric style' }],
   },
   {
+    id: 'uuid-of-player',
+    why: '★★★ 「名 → UUID」的真机形状（P3 绑定的关键来源：玩家一登录就写，不用他说话、也不用他还在线）',
+    lines: [
+      asciiLine('[11:56:16] [User Authenticator #1/INFO] [minecraft/ServerLoginPacketListenerImpl]: ', 'UUID of player YoCerin is 00000000-0000-4000-8000-000000000001'),
+      asciiLine(prefix(T(17)), 'YoCerin joined the game'),
+    ],
+    expect: [
+      { kind: 'uuid', name: 'YoCerin', uuid: '00000000-0000-4000-8000-000000000001' },
+      { kind: 'join', name: 'YoCerin' },
+    ],
+  },
+  {
     id: 'noise',
     why: '★★ 噪音不许被当成聊天：RCON 自话、日志、命令回显、成就、死亡、空行',
     lines: [
