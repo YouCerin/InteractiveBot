@@ -59,7 +59,7 @@ const SERVER = { id: 'forge1', name: '主服（Forge 1.20.1）', host: '127.0.0.
  * 造一个最小可用的真桥接。
  * @param {{semantic?: boolean, players?: object[]}} o
  */
-function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null } = {}) {
+function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null, readServers = null, servers = null } = {}) {
   const WS = join(ROOT, `ws-${Math.random().toString(36).slice(2)}`)
   mkdirSync(join(WS, 'runtime'), { recursive: true })
   const router = new SessionRouter({ log: () => {} })
@@ -77,7 +77,7 @@ function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null
     memory: { enabled: false, affect: { prewake: 'off' } },
     image: { enabled: false },
     wake: { policy: semantic ? 'semantic' : 'off' },
-    servers: [{ ...SERVER }],
+    servers: servers ?? [{ ...SERVER }],
   }
 
   const rpc = new EventTarget()
@@ -102,7 +102,7 @@ function wiringBridge({ semantic = false, groupAllow = [GROUP], wakeJudge = null
   }
 
   const sendQueue = new SendQueue({ ...config.send, log })
-  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, log, wakeJudge })
+  const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, log, wakeJudge, readServers })
   // ★ 游戏内那条通道的执行器换成桩：**只换执行器**，命令的构造一个都不放宽 ——
   //   这里收到的 `command` 正是真机上会发给 RCON 的那一串。
   const gameCommands = []
@@ -411,6 +411,31 @@ console.log('\n=== ⑬ 私聊里发 `/绑定`：一句**确定性**指路，**�
   eq(strangerMsgs.length, 1, '★ 只收到那句统一的"只对名单内的人开放"')
   ok(/名单/.test(strangerMsgs[0]?.text ?? ''), '★★ 而且**不是**绑定流程的指路（不泄露这里有这条路）')
   await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑭ 在界面上打开 `gameChat` ⇒ 读控制台的循环**真的起来**（那个复选框不许撒谎）===')
+{
+  const off = [{ ...SERVER, gameChat: false }]
+  let served = off
+  const { bridge } = wiringBridge({ servers: off, readServers: () => served })
+  bridge.attach()
+  eq(bridge.gameChatStats().running, false, '（准备）gameChat 关着 ⇒ **没有**读控制台的循环')
+
+  served = [{ ...SERVER, gameChat: true }]
+  const r = bridge.reloadServers()
+  eq(r.changed, true, '★ 列表变了（保存生效）')
+  eq(
+    bridge.gameChatStats().running,
+    true,
+    '★★★ 打开 gameChat 之后循环**真的起来了** —— 否则界面提示"已即时生效、不必重启桥接"就是**撒谎**，' +
+      '而症状是"我明明打开了，游戏里说话它不理我"且不报任何错',
+  )
+
+  served = [{ ...SERVER, gameChat: false }]
+  bridge.reloadServers()
+  eq(bridge.gameChatStats().running, false, '★ 再关掉 ⇒ 循环停掉（不会偷偷继续读日志）')
+  await bridge.close({ timeoutMs: 200 })
+  eq(bridge.gameChatStats().running, false, '★ 收尾时也停掉（不留一个还在读日志的定时器）')
 }
 
 rmSync(ROOT, { recursive: true, force: true })

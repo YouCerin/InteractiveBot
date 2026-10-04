@@ -2314,6 +2314,11 @@ export class Bridge extends EventTarget {
     }
     this.config.servers = next
     this.#startServerLoop()
+    // ★★ 0.3.2 P3：**游戏内对话的循环也要跟着重建**（`#startGameChatLoop` 从头判
+    //   "有没有任何一台开了 `gameChat`"）。不重建的话界面上的那个复选框会**撒谎**：
+    //   保存成功、提示"已即时生效、不必重启桥接"，而读控制台的循环其实根本没起来
+    //   —— 表现是"我在界面上打开了，可游戏里说话它不理我"，且不报任何错。
+    this.#startGameChatLoop()
     this.log(
       `♻️ [servers] 服务器列表已更新（${next.length} 台）—— 监测循环已按新列表重启` +
         '（不必重启桥接）',
@@ -5374,6 +5379,13 @@ export class Bridge extends EventTarget {
     //   留一个句柄给下一次启动；同语料库那条"用完就关"的理由）。
     try {
       this.#serverLoop?.stop()
+    } catch {
+      /* 停不掉也不影响收尾 */
+    }
+    // ★ 0.3.2 P3：读游戏内聊天的那个循环也要停 —— 它虽然 `unref()` 过（不会拖住进程
+    //   退出），但收尾期间它还会继续读日志文件，而那些日志/连接接下来的归属已经变了。
+    try {
+      this.#gameChat?.stop()
     } catch {
       /* 停不掉也不影响收尾 */
     }
