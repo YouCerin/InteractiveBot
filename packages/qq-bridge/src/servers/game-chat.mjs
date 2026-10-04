@@ -57,8 +57,8 @@ export function decideGameChat({ name = '', uuid = null, bound = null, reminded 
     action: 'remind',
     text:
       `你好，${String(name ?? '')}。我还不知道你是群里的谁 —— 要在这里跟我说话，先绑定一下：\n` +
-      '在聊天里输入 mc bind（**不要加斜杠**），我给你一个 6 位码；' +
-      '把码发到群里（@我 并写 /mc bind 你的码）就绑好了。',
+      '在聊天里输入 \\mc bind（**反斜杠**），我给你一个 6 位码；' +
+      '把码发到群里（@我 并写 \\mc bind 你的码）就绑好了。',
   }
 }
 

@@ -112,8 +112,13 @@ const DEFAULT_START_WAIT_MS = 180_000
  *      判据是"第一个词是不是配置里真实存在的 id"。
  *   ④ 形状判据必须**纯同步**（`looksLikeMcCommand`），普通消息不产生额外 `await` ——
  *      见那个函数的注释（无条件 `await` 会扰动原有时序，代价很大）。
+ * ★ 形状判据：**反斜杠（对外格式）与一到两个斜杠都认**（`\mc list` / `/mc list` / `//mc list`）——
+ *   与 `bind`/`unbind` 那条通道保持同一个口径（使用者把对外写法定成了 `\`，见
+ *   `parseGameBindRequest` 里那条实测）。
+ *   不这么写的话，`\mc list` 会**既不走绑定通道、也不走控制台通道**，
+ *   而是掉进普通聊天（模型会瞎答一句），那是最难查的一种"没反应"。
  */
-const MC_COMMAND_SHAPE = /^\/mc(?:\s|$)/i
+const MC_COMMAND_SHAPE = /^[\\/]{1,2}mc(?:\s|$)/i
 /**
  * 这条文本**看起来**是不是 `/mc` 指令（**纯同步、零副作用**）。
  *
@@ -122,7 +127,7 @@ const MC_COMMAND_SHAPE = /^\/mc(?:\s|$)/i
  *   实测教训：无条件 `await` 会扰动"主动回合 vs 随后到达的用户消息"那条竞争，
  *   使 `verify-schedule` 报 `unsettled top-level await`（退出码 13）——
  *   那种失败看起来与本地指令毫无关系，极难定位。
- * ★ 形状判据**只看开头**：必须以 `/mc` 作为一个词开头，
+ * ★ 形状判据**只看开头**：必须以 `/mc`（或 `//mc`）作为一个词开头，
  *   所以群里聊到"那个 /mc 命令"**不会**命中。
  */
 function looksLikeMcCommand(text) {
@@ -130,14 +135,16 @@ function looksLikeMcCommand(text) {
 }
 
 /**
- * **绑定指令通道**（0.3.2 P3）：群里发 `/mc bind <码>`（+ `/mc unbind <目标>`），桥接自己处理。
+ * **绑定指令通道**（0.3.2 P3）：群里发 `\mc bind <码>`（+ `\mc unbind <目标>`），桥接自己处理。
  *
- * ⚠️ 2026-10-04 流程改动后，这条通道**寄居在 `/mc` 前缀下**（原来是 `/绑定`）：
- *   使用者的口径是「群里发 `@小鲸鱼 /mc bind <绑定码>`」。`bind` / `unbind`
- *   因此在 `/mc` 下成了**保留字**（见 `parseMcBindCommand` 的注释）。
+ * ⚠️ 2026-10-04 流程改动后，这条通道**寄居在 `mc` 前缀下**（原来是 `/绑定`），
+ *   对外格式是**反斜杠**（使用者的口径：游戏里 `/` 开头会被当命令、进不了日志；
+ *   群里两个字符本来无所谓，但两处用同一个格式对使用者更省事）。
+ *   斜杠那几个形状**也认** —— 见 `parseMcBindCommand` 的注释。
+ *   `bind` / `unbind` 在 `mc` 下是**保留字**。
  *
  * ★★★ 插入点是**刻意的**（与 `/mc` 那条**不一样** —— 那条在唤醒判定之后）：
- *     · 必须在**唤醒判定（`decideTrigger`）之前**：群里发 `/mc bind 123456`
+ *     · 必须在**唤醒判定（`decideTrigger`）之前**：群里发 `\mc bind 123456`
  *       是**不会 @ 机器人**的（谁会为了一串码去 @ 它），而唤醒判定对"没 @ 也没命中
  *       关键词"的群消息直接 return ⇒ 放在它后面等于**这条通道根本不存在**；
  *     · 必须在**语义唤醒闸门之前**：闸门可能判"沉默"，于是"玩家来绑定却被判沉默，
@@ -149,7 +156,7 @@ function looksLikeMcCommand(text) {
  *   `unsettled top-level await` 的形式变红，而看起来与这里毫无关系）。
  */
 function looksLikeBindCommand(text) {
-  return /^\/mc\b/i.test(String(text ?? '').trim())
+  return /^[\\/]{1,2}mc\b/i.test(String(text ?? '').trim())
 }
 
 // ★ P3/收尾用到的几个：读服务器控制台（`readServerConsole`）。
@@ -1696,13 +1703,15 @@ export class Bridge extends EventTarget {
    */
   async #handleMcLocalCommand({ text, kind, peerId, senderId, tier }) {
     const raw = String(text ?? '').trim()
-    // ★ 形状判据：必须以 `/mc` **作为一个词**开头（`/mc` / `/mc xxx`），
-    //   而不是"文本里出现过 /mc" —— 群里聊到"那个 /mc 命令"不该触发。
-    if (!/^\/mc(?:\s|$)/i.test(raw)) return { matched: false }
+    // ★ 形状判据：必须以 `\mc` / `/mc` / `//mc` **作为一个词**开头，
+    //   而不是"文本里出现过 mc" —— 群里聊到"那个 mc 命令"不该触发。
+    // ★ 反斜杠是**对外格式**（游戏内以 `/` 开头会被当命令，见 `parseGameBindRequest`）；
+    //   斜杠那几个形状仍然收（零代价，装了服务端插件之后就能用）。
+    if (!/^[\\/]{1,2}mc(?:\s|$)/i.test(raw)) return { matched: false }
     // ★★ 参数消歧（实测踩到的真 bug）：`/mc list` 里的 `list` 是**命令**，
     //   不是服务器 id。靠正则分不出来 ⇒ **按配置里真实存在的 id 来消歧**：
     //   第一个词命中某个 id 才算 id，否则整串都是命令（id 留空，交给"只有一台就自动选"）。
-    const rest = raw.replace(/^\/mc\s*/i, '').trim()
+    const rest = raw.replace(/^[\\/]{1,2}mc\s*/i, '').trim()
     if (!rest) {
       await this.#safeSend(kind, peerId, '用法：`/mc [服务器id] <命令>` —— 例如 `/mc list`、`/mc forge tps`')
       return { matched: true, ok: false, text: '没给命令' }
@@ -1758,7 +1767,7 @@ export class Bridge extends EventTarget {
   }
 
   /**
-   * **绑定指令通道**（0.3.2 P3）：`/绑定` 取码、`/绑定 <码>` 提交、`/解绑 <目标>` 解绑。
+   * **绑定指令通道**（0.3.2 P3）：`\mc bind` 取码指路、`\mc bind <码>` 提交、`\mc unbind <目标>` 解绑。
    *
    * ══════════════════════════════════════════════════════════════════════════
    * 这条通道的规矩（设计文档 §5.2，逐条都是硬要求）
@@ -1790,11 +1799,11 @@ export class Bridge extends EventTarget {
       // ★ 用 `roster.decide` 的结论，**不看群内角色**（那条安全边界见 roster.mjs）。
       const verdict = this.roster?.decide?.({ kind, peerId, senderId }) ?? { respond: false, tier: '' }
       if (String(verdict.tier ?? '') !== 'admin') {
-        this.log(`🔗 [bind] 有人发了 /mc unbind 但不是管理员（${peerKey}）⇒ 按普通聊天处理，不执行也不解释`)
+        this.log(`🔗 [bind] 有人发了 \\mc unbind 但不是管理员（${peerKey}）⇒ 按普通聊天处理，不执行也不解释`)
         return { matched: false }
       }
       if (parsed.kind === 'unbind-help') {
-        const msg = '用法：`/mc unbind <游戏名或QQ号>`'
+        const msg = '用法：`\\mc unbind <游戏名或QQ号>`'
         await this.#safeSend(kind, peerId, msg)
         return { matched: true, ok: false, text: msg }
       }
@@ -1807,7 +1816,7 @@ export class Bridge extends EventTarget {
       return { matched: true, ok: r.ok, text: msg }
     }
 
-    // `/绑定` 只认**群**：那正是设计文档定下的入口（私聊是 fail-closed，
+    // `\mc bind` 只认**群**：那是使用者定的入口（私聊是 fail-closed，
     // 为绑定去开私聊白名单等于把门开着）。
     if (kind !== 'group' || !this.roster?.isGroupAllowed?.(peerId)) {
       // ★★ 私聊里不是"当作普通聊天"就完事 —— 那会让**模型**去回答一条绑定指令，
@@ -1819,19 +1828,19 @@ export class Bridge extends EventTarget {
         const v = this.roster?.decide?.({ kind, peerId, senderId }) ?? { respond: false }
         if (v.respond) {
           const msg =
-            '绑定要在**群里**做：先让玩家在游戏里输 `mc bind` 拿一个 6 位码，' +
-            '然后在机器人所在的群里发 `/mc bind <码>`。私聊这条路是关着的（也不打算开）。'
+            '绑定要在**群里**做：先让玩家在游戏里输 `\\mc bind` 拿一个 6 位码，' +
+            '然后在机器人所在的群里发 `\\mc bind <码>`。私聊这条路是关着的（也不打算开）。'
           this.log(`🔗 [bind] ${peerKey} 在私聊里发绑定指令 ⇒ 给了一句确定性指路（不调模型）`)
           await this.#safeSend(kind, peerId, msg)
           return { matched: true, ok: false, text: msg }
         }
       }
-      this.log(`🔗 [bind] ${peerKey} 发了 /mc bind 但这里不是"已允许的群" ⇒ 当作普通聊天`)
+      this.log(`🔗 [bind] ${peerKey} 发了 \\mc bind 但这里不是"已允许的群" ⇒ 当作普通聊天`)
       return { matched: false }
     }
     if (!senderId) return { matched: false }
 
-    // ── ② `/mc bind` 没带码 / 带了坏码 ⇒ 指路（**不在这里发码**）───────────
+    // ── ② `\mc bind` 没带码 / 带了坏码 ⇒ 指路（**不在这里发码**）───────────
     //
     // ★★ 为什么**不能**在这里发码（第一版就是这么做的，已被使用者否掉）：
     //   码必须**在游戏里生成**并与那个玩家的 UUID 挂在一起 —— 否则提交码的时候
@@ -1839,13 +1848,14 @@ export class Bridge extends EventTarget {
     //   （第一版的"资格"那一套，而且同时有两份资格时根本无法判断）。
     if (parsed.kind === 'bind-help') {
       const msg =
-        '绑定码要**在游戏里拿**：让玩家进服后在聊天里输入 `mc bind`（**不要加斜杠**），' +
-        '我会单独把 6 位码发给**他本人**；他把码发到这里：`/mc bind <码>`。'
+        '绑定码要**在游戏里拿**：让玩家进服后**在聊天里输入** `\\mc bind`（**反斜杠，不是斜杠** —— ' +
+        '以 `/` 开头的会被服务端当成命令，我们看不到那句），' +
+        '我会单独把 6 位码发给**他本人**；他把码发到这里：`\\mc bind <码>`。'
       await this.#safeSend(kind, peerId, msg)
       return { matched: true, ok: false, text: msg }
     }
     if (parsed.kind === 'bad-code') {
-      const msg = '码是 **6 位数字**（例如 `/mc bind 123456`）。让玩家在游戏里输 `mc bind` 重新拿一个。'
+      const msg = '码是 **6 位数字**（例如 `\\mc bind 123456`）。让玩家在游戏里输 `\\mc bind` 重新拿一个。'
       await this.#safeSend(kind, peerId, msg)
       return { matched: true, ok: false, text: msg }
     }
@@ -1854,7 +1864,7 @@ export class Bridge extends EventTarget {
     if (parsed.kind === 'redeem') {
       const r = bindByCode({ workspace, qqId: senderId, code: parsed.code, chatKey: peerKey })
       if (!r.ok) {
-        const msg = '这个码现在不能用（不存在、已过期、或者已经被用过了）。让玩家在游戏里输 `mc bind` 重新拿一个。'
+        const msg = '这个码现在不能用（不存在、已过期、或者已经被用过了）。让玩家在游戏里输 `\\mc bind` 重新拿一个。'
         this.log(`🔗 [bind] ${peerKey} 提交的码不可用（${r.why}）—— 码本身不记`)
         await this.#safeSend(kind, peerId, msg)
         return { matched: true, ok: false, text: msg }
@@ -1998,7 +2008,7 @@ export class Bridge extends EventTarget {
       }
     }
 
-    // ② ★★★ 游戏内那句"我要绑定"（`mc bind`）—— **优先于**下面的绑定状态判定
+    // ② ★★★ 游戏内那句"我要绑定"（`\mc bind`）—— **优先于**下面的绑定状态判定
     //
     // 为什么必须排在前面：一个**已经绑定**的玩家也可能重新说一次（换绑/自检），
     // 要是被"已绑定 ⇒ 交给模型"先吃掉，那句话就变成了普通聊天（模型会瞎答一句）。
@@ -2010,7 +2020,7 @@ export class Bridge extends EventTarget {
         await this.#gameTellraw(
           server,
           name,
-          '我还没拿到你的身份（UUID）—— 退出去重进一次服务器，然后再试 `mc bind`。',
+          '我还没拿到你的身份（UUID）—— 退出去重进一次服务器，然后再试 \\mc bind。',
           'yellow',
         )
         this.log(`⚠️ [bind] 「${name}」要绑定码，但还没解析到他的 UUID（不发码）`)
@@ -2028,7 +2038,7 @@ export class Bridge extends EventTarget {
         server,
         name,
         `你的绑定码是 ${issued.code}（${mins} 分钟内有效、只能用一次）。\n` +
-          '把它发到我们那个群里，格式是：@小鲸鱼 /mc bind ' +
+          '把它发到我们那个群里，格式是：@小鲸鱼 \\mc bind ' +
           issued.code,
         'yellow',
       )
@@ -3230,7 +3240,7 @@ export class Bridge extends EventTarget {
 
     const rendered = renderSegments(payload.message, { selfId: this.onebot.selfId })
 
-    // ── ③-0 绑定指令通道：`/绑定` / `/绑定 <码>` / `/解绑 <目标>`（0.3.2 P3）────
+    // ── ③-0 绑定指令通道：`\mc bind` / `\mc bind <码>` / `\mc unbind <目标>`（0.3.2 P3）────
     //
     // ★★★ 位置是**刻意的，而且与 `/mc` 那条**不一样**（设计文档 §5.2 写明）：
     //   · 必须在**唤醒判定之前**：玩家在群里发 `/绑定` 是**不会 @ 机器人**的

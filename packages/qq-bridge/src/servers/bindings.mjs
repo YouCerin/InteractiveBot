@@ -19,12 +19,18 @@
  * ══════════════════════════════════════════════════════════════════════════
  * ```
  * 玩家进服（未绑定）        → 只给他本人一条 tellraw：怎么拿码
- * 玩家在**游戏里**说 mc bind → 生成一张 6 位码，**与那个 UUID 挂在一起**
+ * 玩家在**游戏里**说 \mc bind → 生成一张 6 位码，**与那个 UUID 挂在一起**
  *                              → 只给他本人 tellraw：码 + 下一步
- * 玩家在**群里**发 @小鲸鱼 /mc bind <码>
+ * 玩家在**群里**发 @小鲸鱼 \mc bind <码>
  *                          → 桥接本地拦截（一次模型调用都没有）→ **当场绑定**
  *                          → 群里回一句 + **在游戏里给那个玩家一条成功通知**
  * ```
+ *
+ * ★★ 为什么是**反斜杠**（这是实测结论，不是设计偏好）：以 `/` 开头的输入会被
+ *   Minecraft 当成命令，而我们的服务端上没注册过叫 `mc` 的命令 ⇒ 服务端回玩家一句
+ *   "Unknown command"，**那句不写进控制台日志** ⇒ 我们的游戏内事件源看不到。
+ *   `\` 在游戏里只是普通字符 ⇒ 那句话以**聊天**发出 ⇒ 进日志 ⇒ 读得到。
+ *   使用者 2026-10-04 实测 `//mc bind` 不行，于是改成 `\mc bind`。
  *
  * ★★ 与第一版的关键差别（为什么这一版更好，记下来免得改回去）：
  *   第一版是"群里 `/绑定` 取码 → 群里提交 → **下一次游戏内发言**才写死映射"
@@ -60,12 +66,15 @@ export const CODE_TTL_MS = 5 * 60 * 1000
 /** 码的形状：6 位数字（`/^\d{6}$/`）。 */
 export const CODE_RE = /^[0-9]{6}$/
 
-/** 群里的两条指令（**必须带 `/mc` 前缀**才命中 —— 误伤概率天然极低）。 */
-export const MC_BIND_COMMAND = '/mc bind'
-export const MC_UNBIND_COMMAND = '/mc unbind'
+/**
+ * 群里的两条指令。★ 对外格式是 **`\mc bind`**（反斜杠，使用者 2026-10-04 实测后定的）。
+ *   同时**也认** `/mc bind` 与 `//mc bind` —— 见 `parseMcBindCommand` 的注释。
+ */
+export const MC_BIND_COMMAND = '\\mc bind'
+export const MC_UNBIND_COMMAND = '\\mc unbind'
 
-/** 游戏内那句请求（**没有斜杠** —— 见文件头与 `parseGameBindRequest` 的注释）。 */
-export const GAME_BIND_WORDS = 'mc bind'
+/** 游戏内那句请求，**规范形状**（见 `parseGameBindRequest` 里那条实测）。 */
+export const GAME_BIND_WORDS = '\\mc bind'
 
 /** 审计里只留 UUID 的前几位（够核对，又不构成一份可直接用的对照表）。 */
 export function shortUuid(uuid) {
@@ -193,28 +202,34 @@ export function readAudit(workspace, limit = 20) {
 // ── 两条指令的形状（纯函数，零模型调用）────────────────────────────────────
 
 /**
- * 识别**群里**那两条 `/mc` 指令。
+ * 识别**群里**那两条指令。
  *
- * 认的形状：
- *   `/mc bind`                → `help`（还没码 ⇒ 告诉他先去游戏里拿）
- *   `/mc bind 123456`         → `redeem`（提交码）
- *   `/mc bind abc` / `12345`  → `bad-code`（**必须命中**：否则会掉进管理员控制台那条路，
- *                                把 `bind abc` 当成一条服务端命令发出去）
- *   `/mc unbind <玩家名或QQ号>` → `unbind`（**只有管理员**，权限在桥接那边判）
+ * 认的形状（前缀允许 **一个反斜杠** 或 **一到两个斜杠**）：
+ *   `\mc bind` / `//mc bind`         → `bind-help`（还没码 ⇒ 告诉他先去游戏里拿）
+ *   `\mc bind 123456`                → `redeem`（提交码）
+ *   `\mc bind abc` / `12345`         → `bad-code`（**必须命中**：否则会掉进管理员控制台
+ *                                      那条路，把 `bind abc` 当成一条服务端命令发出去）
+ *   `\mc unbind <玩家名或QQ号>`       → `unbind`（**只有管理员**，权限在桥接那边判）
+ *
+ * ★★ 为什么改成**反斜杠**（使用者 2026-10-04 **实测**）：游戏里以 `/` 开头的输入会被
+ *   当成命令（见 `parseGameBindRequest` 里那段实测记录），所以游戏内必须换成 `\`。
+ *   群里那两个字符本来只是普通文本、怎么都行，但**两处用同一个格式**对使用者更省事
+ *   ⇒ 群里也统一成 `\mc bind`。斜杠那几个形状**仍然收**（零代价，将来若真装了服务端
+ *   插件、斜杠命令能被看见了，这一条不用改）。
+ *   ⚠️ 但**完全不带前缀**的 `mc bind 123456` 不认：那会误伤普通聊天。
  *
  * ★★★ 为什么"带别的东西也要命中、不能落回普通聊天"：`/mc` 前缀下面还有一条
- *   **管理员控制台**通道。`/mc bind xyz` 若不在这里被拦下，管理员发它就会真的
+ *   **管理员控制台**通道。`\mc bind xyz` 若不在这里被拦下，管理员发它就会真的
  *   往服务端发一条 `bind xyz` 命令 —— 那不是我们想表达的语义。所以
- *   `bind` / `unbind` 这两个词在 `/mc` 下是**保留字**。
+ *   `bind` / `unbind` 这两个词在这里是**保留字**。
  *
- * @returns {{hit:false} | {hit:true, kind:'help'|'bad-code'|'bind-help'|'unbind-help'}
+ * @returns {{hit:false} | {hit:true, kind:'bind-help'|'bad-code'|'unbind-help'}
  *           | {hit:true, kind:'redeem', code:string} | {hit:true, kind:'unbind', target:string}}
  */
 export function parseMcBindCommand(text) {
   const raw = String(text ?? '').trim()
-  if (!raw.startsWith('/')) return { hit: false }
-  // 只认 `/mc` 开头（大小写不敏感）
-  const m = /^\/mc\b\s*(.*)$/i.exec(raw)
+  // 一个反斜杠，或一到两个斜杠；完全不带前缀一律不算（避免误伤普通聊天）
+  const m = /^[\\/]{1,2}mc\b\s*(.*)$/i.exec(raw)
   if (!m) return { hit: false }
   const rest = String(m[1] ?? '').trim()
   if (!rest) return { hit: false } // 裸 `/mc` 是"用法提示"那条路，不归这里
@@ -234,15 +249,20 @@ export function parseMcBindCommand(text) {
 /**
  * 识别**游戏内**那句请求。
  *
- * ★★★ 为什么是 `mc bind`（**没有斜杠**）而不是 `/mc bind`（使用者原话）：
- *   Minecraft 里**以 `/` 开头的输入是"命令"**，会被客户端交给服务端去当命令执行；
- *   而我们的服务端上**没有**注册过叫 `mc` 的命令 ⇒ 服务端只会回玩家一句
- *   "Unknown command"，**而且这一句不会写进控制台日志**。我们的游戏内事件源
- *   读的正是控制台日志（`runtime/servers/<id>.console.log`）⇒ **看不到**。
- *   ∴ 在**不写服务端插件/模组**的前提下，玩家必须把 `mc bind` 当**聊天**发出来。
- *   界面上那句提醒因此要写清"不要加斜杠"，并且说明原因（否则玩家一定会加）。
- * ★ 仍然接受带斜杠的形状：将来若真装了插件、把 `/mc bind` 反馈进控制台，
- *   这一条不用改就能用。
+ * ★★★ **规范形状是 `\mc bind`（反斜杠）—— 这一条是使用者 2026-10-04 在真机上实测出来的**：
+ *   · `//mc bind` **不行**。Minecraft 里以 `/` 开头的输入会被当成"命令"交给服务端执行，
+ *     而我们的服务端上**没有**注册过叫 `mc` 的命令 ⇒ 服务端只回玩家一句
+ *     "Unknown command"，**而这一句按 vanilla/Forge 的实现不写进控制台日志** ⇒
+ *     我们的游戏内事件源（读的就是那个日志）**看不到**。
+ *     （`//` 也一样：客户端把去掉第一个 `/` 之后的 `/mc bind` 当命令发，服务端再剥一个
+ *     得到 `mc bind`，仍然"没这条命令"。实测印证了这条推断。）
+ *   · `\mc bind` **可以**：反斜杠在 Minecraft 里只是普通字符 ⇒ 那句话以**聊天**发出去
+ *     ⇒ 落进控制台日志（`<玩家名> \mc bind`）⇒ 我们读得到。
+ *     ★ 这条不是猜的：真机日志里的玩家聊天形状 `<名> 正文` 是我们早就在解析的
+ *     （`mocks/fixtures/chat-dialects.mjs` 有真 GBK 字节的夹具）。
+ *
+ * ★ 仍然接受 `/mc bind` 与 `mc bind`（**零代价的兜底**）：将来若真装了服务端插件、
+ *   把斜杠命令反馈进控制台，这一条不用改；玩家忘了打反斜杠也不会卡住。
  *
  * @returns {{hit:boolean}}
  */
@@ -252,7 +272,8 @@ export function parseGameBindRequest(text) {
     .replace(/\s+/g, ' ')
     .toLowerCase()
   if (!s) return { hit: false }
-  const bare = s.startsWith('/') ? s.slice(1).trim() : s
+  // 前缀（反斜杠或斜杠）**全部剥掉**，归一到同一个形状；不带前缀的 `mc bind` 也认
+  const bare = s.replace(/^[\\/]+/, '').trim()
   return { hit: /^mc\s+bind$/.test(bare) }
 }
 

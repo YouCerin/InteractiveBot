@@ -248,7 +248,7 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                 )}
                 {/* ★ 0.3.2 P3：游戏内对话开着时给一个徽章 —— 否则"这台服在听人说话"从界面上看不出来 */}
                 {s.gameChat && (
-                  <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600" title="读这台服的控制台，让已绑定 UUID↔QQ 的玩家在游戏里说话（游戏里说 mc bind 拿码，群里发 /mc bind 码）；未绑定的只会收到一条只给他本人的 tellraw">
+                  <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600" title="读这台服的控制台，让已绑定 UUID↔QQ 的玩家在游戏里说话（游戏里说 \mc bind 拿码，群里发 \mc bind 码）；未绑定的只会收到一条只给他本人的 tellraw">
                     🎮 游戏内对话
                   </span>
                 )}

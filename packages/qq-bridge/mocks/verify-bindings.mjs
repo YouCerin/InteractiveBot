@@ -79,31 +79,38 @@ const UUID_B = '11111111-2222-3333-4444-555555555555'
 const QQ_A = '100000001'
 const QQ_B = '100000002'
 
-console.log('\n=== ① 游戏内那句请求（`mc bind`）与群里那两条指令的形状 ===')
+console.log('\n=== ① 游戏内那句请求（`\\mc bind`）与群里那两条指令的形状 ===')
 {
-  // ── 游戏内：**没有斜杠**（原因写在 bindings.mjs 的 `parseGameBindRequest` 上）──
-  eq(parseGameBindRequest('mc bind'), { hit: true }, '★★ `mc bind` ⇒ 认得（真实形状）')
-  eq(parseGameBindRequest('  MC   Bind  '), { hit: true }, '★ 大小写与多余空白都能容忍')
-  eq(parseGameBindRequest('/mc bind'), { hit: true }, '★ 带斜杠也认（将来装了插件、把它反馈进控制台就能用）')
-  eq(parseGameBindRequest('mc bind 123456'), { hit: false }, '★★ 多带了码 ⇒ 不认（那是另一回事）')
+  // ── 游戏内：**反斜杠**（使用者真机实测出来的形状，见 `parseGameBindRequest`）──
+  eq(parseGameBindRequest('\\mc bind'), { hit: true }, '★★ `\\mc bind` ⇒ 认得（**实测可用的形状**）')
+  eq(parseGameBindRequest('  \\MC   Bind  '), { hit: true }, '★ 大小写与多余空白都能容忍')
+  eq(parseGameBindRequest('mc bind'), { hit: true }, '★ 不带前缀也认（**兜底**：玩家忘了打反斜杠不会卡住）')
+  eq(parseGameBindRequest('/mc bind'), { hit: true }, '★ 带斜杠也留着（装了服务端插件之后就能用）')
+  eq(parseGameBindRequest('//mc bind'), { hit: true }, '★ 两个斜杠同理（实测它在游戏里进不来，但认它零代价）')
+  eq(parseGameBindRequest('\\mc bind 123456'), { hit: false }, '★★ 多带了码 ⇒ 不认（那是另一回事）')
   eq(parseGameBindRequest('bind'), { hit: false }, '★★ 光一个 bind 不认（英文聊天里会误伤）')
   eq(parseGameBindRequest('我要 mc bind 一下'), { hit: false }, '★★ 句中提到 ⇒ 不认')
   eq(parseGameBindRequest(''), { hit: false }, '空 ⇒ 不认')
   eq(parseGameBindRequest(null), { hit: false }, 'null ⇒ 不认（永不抛）')
 
-  // ── 群里：`/mc bind ...` / `/mc unbind ...` ──
-  eq(parseMcBindCommand('/mc bind 123456'), { hit: true, kind: 'redeem', code: '123456' }, '★★ 提交码 ⇒ redeem')
-  eq(parseMcBindCommand('/MC BIND 000000'), { hit: true, kind: 'redeem', code: '000000' }, '★ 大小写不敏感（前导零不丢）')
-  eq(parseMcBindCommand('/mc bind'), { hit: true, kind: 'bind-help' }, '★ 没带码 ⇒ 指路（**不在这里发码**）')
-  // ★★★ 坏码也必须命中：否则 `/mc bind abc` 会掉进管理员控制台那条路
-  eq(parseMcBindCommand('/mc bind abc'), { hit: true, kind: 'bad-code' }, '★★★ 坏码 ⇒ 命中（不许掉进控制台那条路）')
+  // ── 群里：`\mc bind ...` / `\mc unbind ...`（斜杠那几个形状也收）──
+  eq(parseMcBindCommand('\\mc bind 123456'), { hit: true, kind: 'redeem', code: '123456' }, '★★ 提交码 ⇒ redeem')
+  eq(parseMcBindCommand('\\MC BIND 000000'), { hit: true, kind: 'redeem', code: '000000' }, '★ 大小写不敏感（前导零不丢）')
+  eq(parseMcBindCommand('/mc bind 123456'), { hit: true, kind: 'redeem', code: '123456' }, '★ 老的单斜杠形状仍然收')
+  eq(parseMcBindCommand('//mc bind 123456'), { hit: true, kind: 'redeem', code: '123456' }, '★ 双斜杠也收')
+  eq(parseMcBindCommand('\\mc bind'), { hit: true, kind: 'bind-help' }, '★ 没带码 ⇒ 指路（**不在这里发码**）')
+  // ★★★ 坏码也必须命中：否则 `\mc bind abc` 会掉进管理员控制台那条路
+  eq(parseMcBindCommand('\\mc bind abc'), { hit: true, kind: 'bad-code' }, '★★★ 坏码 ⇒ 命中（不许掉进控制台那条路）')
   eq(parseMcBindCommand('/mc bind 12345'), { hit: true, kind: 'bad-code' }, '★★ 5 位 ⇒ bad-code')
-  eq(parseMcBindCommand('/mc unbind YoCerin'), { hit: true, kind: 'unbind', target: 'YoCerin' }, '★ 解绑（管理员）')
-  eq(parseMcBindCommand('/mc unbind'), { hit: true, kind: 'unbind-help' }, '★ 解绑没给目标 ⇒ 用法')
-  eq(parseMcBindCommand('/mc unbind 100000001'), { hit: true, kind: 'unbind', target: '100000001' }, '★ 解绑也认 QQ 号')
-  // ★ 别的 `/mc` 子命令**不属于这条通道**（它们要走管理员控制台那条路）
-  eq(parseMcBindCommand('/mc list'), { hit: false }, '★★ `/mc list` 不归绑定通道（那是控制台指令）')
-  eq(parseMcBindCommand('/mc'), { hit: false }, '★ 裸 `/mc` 不归这里')
+  eq(parseMcBindCommand('\\mc unbind YoCerin'), { hit: true, kind: 'unbind', target: 'YoCerin' }, '★ 解绑（管理员）')
+  eq(parseMcBindCommand('\\mc unbind'), { hit: true, kind: 'unbind-help' }, '★ 解绑没给目标 ⇒ 用法')
+  eq(parseMcBindCommand('\\mc unbind 100000001'), { hit: true, kind: 'unbind', target: '100000001' }, '★ 解绑也认 QQ 号')
+  // ★ 别的 `mc <子命令>`**不属于这条通道**（它们要走管理员控制台那条路）
+  eq(parseMcBindCommand('\\mc list'), { hit: false }, '★★ `\\mc list` 不归绑定通道（那是控制台指令）')
+  eq(parseMcBindCommand('/mc list'), { hit: false }, '★★ `/mc list` 同理')
+  eq(parseMcBindCommand('\\mc'), { hit: false }, '★ 裸 `\\mc` 不归这里')
+  // ★★ 完全不带前缀 ⇒ 一律不认（否则普通聊天里聊到 bind 就被吞）
+  eq(parseMcBindCommand('mc bind 123456'), { hit: false }, '★★★ 不带前缀的 `mc bind 123456` ⇒ **不认**（避免误伤闲聊）')
   eq(parseMcBindCommand('我要绑定'), { hit: false }, '★★ 句子里含"绑定" ⇒ 不命中')
   eq(parseMcBindCommand(''), { hit: false }, '空 ⇒ 不命中')
 }
@@ -294,8 +301,8 @@ console.log('\n=== ⑦ 游戏内发言该做什么：纯判定（不猜）===')
   eq(decideGameChat({ name: 'A', uuid: UUID_A, bound: { qqId: QQ_A } }).action, 'turn', '★ 已绑定 ⇒ 交给唤醒判定与模型')
   const remind = decideGameChat({ name: 'A', uuid: null, bound: null })
   eq(remind.action, 'remind', '★ 未绑定 ⇒ 提示一次')
-  ok(/mc bind/.test(remind.text), '★★ 提示里给的是**新流程**（游戏里输入 mc bind）', remind.text.slice(0, 40))
-  ok(/不要加斜杠/.test(remind.text), '★★★ 而且明说"不要加斜杠"（否则玩家一定会加，而加了我们就看不到）')
+  ok(/\\mc bind/.test(remind.text), '★★ 提示里给的是**新流程**（游戏里输入 \\mc bind）', remind.text.slice(0, 40))
+  ok(/反斜杠/.test(remind.text), '★★★ 而且明说"反斜杠"（玩家一定会按习惯打斜杠，而斜杠进不来）')
   eq(
     decideGameChat({ name: 'A', uuid: null, bound: null, reminded: true }).action,
     'ignore',

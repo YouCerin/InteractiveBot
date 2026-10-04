@@ -9,16 +9,22 @@
  * 的东西。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 流程（2026-10-04 使用者重新定的口径）
+ * 流程（2026-10-04 使用者定的口径）
  * ══════════════════════════════════════════════════════════════════════════
  * ```
- * 玩家进服（未绑定）        → 只给他本人一条 tellraw：怎么拿码（**不要加斜杠**）
- * 玩家在**游戏里**说 mc bind → 生成一张 6 位码（与那个 UUID 挂在一起）
- *                              → 只给他本人 tellraw：码 + 下一步
- * 玩家在**群里**发 @我 /mc bind <码>
- *                          → 桥接本地拦截（一次模型调用都没有）→ **当场绑定**
- *                          → 群里回一句 + **在游戏里给那个玩家一条成功通知**
+ * 玩家进服（未绑定）          → 只给他本人一条 tellraw：怎么拿码
+ * 玩家在**游戏里**说 \mc bind  → 生成一张 6 位码（与那个 UUID 挂在一起）
+ *                                → 只给他本人 tellraw：码 + 下一步
+ * 玩家在**群里**发 @我 \mc bind <码>
+ *                            → 桥接本地拦截（一次模型调用都没有）→ **当场绑定**
+ *                            → 群里回一句 + **在游戏里给那个玩家一条成功通知**
  * ```
+ * ★★ 为什么是**反斜杠**：使用者 2026-10-04 实测 `//mc bind` 在游戏里**不行** ——
+ *   以 `/` 开头的输入会被服务端当命令，而那句"未知命令"**不写进控制台日志**，
+ *   我们的游戏内事件源看不到。`\` 在游戏里只是普通字符 ⇒ 那句话以**聊天**发出 ⇒ 进日志。
+ *   斜杠那几个形状**仍然收**（零代价的兜底，装了服务端插件之后就能用）——
+ *   第 ④-b 节专门盯这件事。
+ *
  * ∴ 关键断言：① 取码与提交**都不产生模型调用**；② 提交那一刻**就**绑上了
  *   （不再有"下次说话才落实"）；③ **每个玩家只收到给他本人的** tellraw；
  *   ④ 绑定成功通知**立刻**回到游戏里（抢绑藏不住）。
@@ -153,14 +159,14 @@ console.log('\n=== ① ★★★ 玩家在游戏里说 `mc bind` ⇒ 一张只�
   bridge.attach()
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
 
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   eq(rpc.prompts.length, 0, '★★★ 取码**一次模型调用都没有**')
   eq(sent.length, 0, '★★ 也没往 QQ 发任何东西（码是游戏内的私密消息）')
   const tells = gameCommands.filter((c) => c.what === 'tellraw')
   eq(tells.length, 1, '★ 恰好一条 tellraw')
   ok(tells[0].command.startsWith(`tellraw ${PLAYER} `), '★★★ 收件人是**他本人**（不是 @a）')
   ok(/\d{6}/.test(tells[0].command), '★ 里面给了 6 位码')
-  ok(/\/mc bind/.test(tells[0].command), '★★ 而且告诉了他下一步：群里发 `/mc bind <码>`')
+  ok(/\\mc bind/.test(tells[0].command), '★★ 而且告诉了他下一步：群里发 `\\mc bind <码>`')
   ok(Boolean(codeFromTellraw(tells[0].command)), '★ 码能从那串命令里读出来（形状是我们要的）')
   await bridge.close({ timeoutMs: 200 })
 }
@@ -170,11 +176,11 @@ console.log('\n=== ② ★★★ 群里 `/mc bind <码>` ⇒ **当场绑定** + 
   const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
   bridge.attach()
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const code = codeFromTellraw(gameCommands.at(-1)?.command)
   const tellsBefore = gameCommands.filter((c) => c.what === 'tellraw').length
 
-  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `\\mc bind ${code}`))
   eq(rpc.prompts.length, 0, '★★★ 提交码也**零模型调用**')
   eq(r.reason, 'bind-command', '★ 这一轮以「绑定指令」结束')
 
@@ -208,10 +214,10 @@ console.log('\n=== ③ ★★★ 语义唤醒闸门开着时：取码/提交两�
   const { bridge, rpc, sent, gameCommands } = wiringBridge({ semantic: true, wakeJudge: judge })
   bridge.attach()
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const code = codeFromTellraw(gameCommands.at(-1)?.command)
 
-  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, `\\mc bind ${code}`))
   eq(judgeCalls, 0, '★★★ 判定器**一次都没被问过** —— 绑定通道确实排在闸门之前')
   ok(sent.some((x) => /绑好了/.test(x.text)), '★★ 即使判定器"会判沉默"，绑定照样成立（这一步没白做）')
   eq(rpc.prompts.length, 0, '★ 依然零模型调用')
@@ -227,20 +233,38 @@ console.log('\n=== ④ 形状不对的提交：**必须在这里拦下**，不�
 {
   const { bridge, rpc, sent, WS } = wiringBridge()
   bridge.attach()
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/mc bind abc'))
-  ok(sent.some((x) => /6 位数字/.test(x.text)), '★★ `/mc bind abc` ⇒ 一句"码是 6 位数字"')
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '\\mc bind abc'))
+  ok(sent.some((x) => /6 位数字/.test(x.text)), '★★ `\\mc bind abc` ⇒ 一句"码是 6 位数字"')
   eq(rpc.prompts.length, 0, '★ 零模型调用')
   eq(listBindings(WS).length, 0, '★ 什么都没绑上')
 
   const before = sent.length
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/mc bind'))
-  eq(sent.length, before + 1, '★ `/mc bind`（没码）⇒ 指路')
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, '\\mc bind'))
+  eq(sent.length, before + 1, '★ `\\mc bind`（没码）⇒ 指路')
   ok(/游戏里/.test(sent.at(-1)?.text ?? ''), '★★ 指路说清"码要在游戏里拿"（**不在这里发码**）')
+  ok(/反斜杠/.test(sent.at(-1)?.text ?? ''), '★★★ 而且说清是**反斜杠**（斜杠在游戏里进不来，实测过）')
   eq(rpc.prompts.length, 0, '★ 零模型调用')
 
-  // ★★ 别的 `/mc` 子命令**不许**被绑定通道吞掉（它们要走管理员控制台那条路）
+  // ★★ 别的 `mc <子命令>`**不许**被绑定通道吞掉（它们要走管理员控制台那条路）
   const r = await bridge.handleEvent(groupMsg(GROUP, ADMIN, '/mc list'))
   ok(r.reason !== 'bind-command', '★★★ `/mc list` **不走**绑定通道（那是控制台指令）', String(r.reason))
+  const r2 = await bridge.handleEvent(groupMsg(GROUP, ADMIN, '\\mc list'))
+  ok(r2.reason !== 'bind-command', '★★★ `\\mc list` 也**不走**绑定通道（反斜杠在控制台通道同样认）', String(r2.reason))
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ④-b 老的单斜杠形状仍然收（**零代价的兜底**，装了服务端插件之后就能用）===')
+{
+  const { bridge, WS, gameCommands } = wiringBridge()
+  bridge.attach()
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  // 游戏内：`/mc bind` 也认（真机上进不来，但认它不花什么）
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '/mc bind' })
+  const code = codeFromTellraw(gameCommands.at(-1)?.command)
+  ok(Boolean(code), '★ 游戏内 `/mc bind` 也给码（认它是零代价的兜底）')
+  // 群里：单斜杠同样能绑定
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★★ 群里单斜杠 `/mc bind <码>` 照样绑定')
   await bridge.close({ timeoutMs: 200 })
 }
 
@@ -255,13 +279,13 @@ console.log('\n=== ⑤ 未绑定玩家：提示**每次进服最多一次**；�
   eq(rpc.prompts.length, 0, '★★★ 未绑定的玩家说话 ⇒ **一次模型调用都没有**（零成本）')
   const tells1 = gameCommands.filter((c) => c.what === 'tellraw')
   eq(tells1.length, 1, '★ 只有一条 tellraw（提醒他绑定）')
-  ok(/mc bind/.test(tells1[0].command), '★ 提醒里给出了**新流程**')
+  ok(/\\mc bind/.test(tells1[0].command), '★ 提醒里给出了**新流程**（\\mc bind）')
 
   await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 再问一次' })
   eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 第二次说话**不再提示**（每次进服最多一次）')
 
   // ★★★ 但"已经提示过"**不能**把 `mc bind` 也挡住 —— 那是玩家主动来绑定的
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const tells2 = gameCommands.filter((c) => c.what === 'tellraw')
   eq(tells2.length, 2, '★★★ 提示过之后 `mc bind` **照样**给码（这两件事是独立的）')
   ok(/\d{6}/.test(tells2.at(-1).command), '★ 新码给了')
@@ -334,15 +358,15 @@ console.log('\n=== ⑨ 管理员 `/mc unbind`：能解掉、零模型调用；�
   const { bridge, rpc, sent, WS } = wiringBridge()
   bridge.attach()
   bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc unbind ${PLAYER}`))
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `\\mc unbind ${PLAYER}`))
   eq(lookupByUuid(WS, UUID), null, '★ 管理员解绑成功')
   eq(rpc.prompts.length, 0, '★ 解绑也是零模型调用')
   ok(/解绑了/.test(sent.at(-1)?.text ?? ''), '★ 如实回报')
 
   bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
   const before = sent.length
-  const r = await bridge.handleEvent(groupMsg(GROUP, MEMBER, `/mc unbind ${PLAYER}`))
-  ok(r.reason !== 'bind-command', '★★ 非管理员发 `/mc unbind` ⇒ **不命中**这条通道', String(r.reason))
+  const r = await bridge.handleEvent(groupMsg(GROUP, MEMBER, `\\mc unbind ${PLAYER}`))
+  ok(r.reason !== 'bind-command', '★★ 非管理员发 `\\mc unbind` ⇒ **不命中**这条通道', String(r.reason))
   eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★★★ 绑定**没有被解掉**（非管理员解不动）')
   ok(sent.length === before, '★ 也没有任何"你没有权限"的回应（那等于告诉所有人这里有后门）')
   await bridge.close({ timeoutMs: 200 })
@@ -353,10 +377,10 @@ console.log('\n=== ⑩ 不在白名单的群：`/mc bind <码>` 一个回话都�
   const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
   bridge.attach()
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const code = codeFromTellraw(gameCommands.at(-1)?.command)
 
-  const r = await bridge.handleEvent(groupMsg(OTHER_GROUP, ADMIN, `/mc bind ${code}`))
+  const r = await bridge.handleEvent(groupMsg(OTHER_GROUP, ADMIN, `\\mc bind ${code}`))
   eq(sent.length, 0, '★★ 群白名单外 ⇒ **不回话**（与普通消息同一条纪律：群里不解释）')
   eq(rpc.prompts.length, 0, '★ 也没有模型调用')
   eq(lookupByUuid(WS, UUID), null, '★★★ 而且**没有绑上**（白名单是硬门）')
@@ -425,12 +449,12 @@ console.log('\n=== ⑭ 同一张码不能用第二次：归属不会被第二个
   const { bridge, WS, gameCommands } = wiringBridge()
   bridge.attach()
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const code = codeFromTellraw(gameCommands.at(-1)?.command)
 
-  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `/mc bind ${code}`))
+  await bridge.handleEvent(groupMsg(GROUP, ADMIN, `\\mc bind ${code}`))
   eq(listBindings(WS).length, 1, '（准备）绑上了一条')
-  await bridge.handleEvent(groupMsg(GROUP, MEMBER, `/mc bind ${code}`))
+  await bridge.handleEvent(groupMsg(GROUP, MEMBER, `\\mc bind ${code}`))
   eq(listBindings(WS).length, 1, '★★★ 还是只有一条（同一张码不能用第二次）')
   eq(lookupByUuid(WS, UUID)?.qqId, ADMIN, '★★★ 归属**没有被第二个人抢走**')
   await bridge.close({ timeoutMs: 200 })
@@ -441,7 +465,7 @@ console.log('\n=== ⑮ 认不出 UUID ⇒ 绝不发一张没处挂的码 ===')
   const { bridge, rpc, gameCommands } = wiringBridge()
   bridge.attach()
   // ★ 没收到过 uuid 事件 ⇒ 认不出他是谁 ⇒ **不发码**
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const tells = gameCommands.filter((c) => c.what === 'tellraw')
   eq(tells.length, 1, '★ 回了一条 tellraw')
   ok(/重进/.test(tells[0].command), '★★ 让他重进一次（而不是发一张挂不到人身上的码）')
@@ -456,7 +480,7 @@ console.log('\n=== ⑯ 取码时记的那台服不见了 ⇒ 改成在别的服�
   const { bridge, WS, gameCommands, logs } = wiringBridge({ servers: [{ ...SERVER }, other] })
   bridge.attach()
   await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
-  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: 'mc bind' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
   const code = codeFromTellraw(gameCommands.at(-1)?.command)
   // 把码搬到一台"已经不存在的服务器"上（模拟码里那台被删/改名）
   const { store } = readStore(WS)

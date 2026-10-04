@@ -157,8 +157,8 @@ export function ServerForm({
           游戏内对话（读这台服的控制台，让**已绑定 UUID↔QQ** 的玩家在游戏里跟小鲸鱼说话）
           <span className="text-muted-foreground mt-0.5 block text-[11px]">
             ★ 回复是**公屏 `say`**（全服可见）；未绑定的玩家只会收到一条只给他本人的 `tellraw`，
-            告诉他去游戏里说 <code>mc bind</code>（**没有斜杠**）拿码，再到群里发{' '}
-            <code>@我 /mc bind 码</code>（**每次进服最多一次**）。
+            告诉他去游戏里说 <code>\mc bind</code>（**反斜杠** —— 斜杠会被服务端当命令、我们看不到）拿码，
+            再到群里发 <code>@我 \mc bind 码</code>（**每次进服最多一次**）。
             <br />★ 只有**本程序拉起**的服务端才有那个控制台日志 —— 别人手动起的服读不到东西
             （日志里会有一行说明，**不是故障**）。
             <br />★ 权限**按绑定的那个 QQ** 判：那个 QQ 不在名单里，游戏里也说不上话。
