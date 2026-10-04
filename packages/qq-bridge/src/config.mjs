@@ -228,6 +228,36 @@ export function normalizeServerEntry(item) {
      *      因为它要求能碰到这台机器）。
      */
     commandFromQQ: item.commandFromQQ === true,
+    /**
+     * ★★★ **游戏内对话**（0.3.2 P3）。**默认 false。**
+     *
+     * 打开之后，桥接会去读**这台服务器的控制台日志**（`runtime/servers/<id>.console.log`），
+     * 把里面的玩家聊天当输入：
+     *   · **已绑定 UUID↔QQ** 的玩家说的话 ⇒ 走唤醒判定 ⇒ 模型 ⇒ 回复发到**公屏 `say`**；
+     *   · **未绑定**玩家说的话 ⇒ **不进模型**（零成本），只给他本人一条 `tellraw`
+     *     告诉他去群里发 `/绑定`（每次进服最多一次）。
+     *
+     * ★★ 三条必须一起读的边界（否则会以为它比实际能做得多）：
+     *   ① 只有**本程序拉起**的服务端才有那个控制台日志（P2 的 stdout 重定向）——
+     *      别人手动起的服，这条路读不到东西（会留一行日志说明，不是故障）；
+     *   ② 权限**按绑定的那个 QQ** 判（与 QQ 侧 fail-closed 完全一致）——
+     *      QQ 不在名单里，游戏里也说不上话；
+     *   ③ 回复是**公屏**：全服可见 ⇒ 进游戏的内容**共享同一道隐私闸**，
+     *      而且提示词里会明说"这一轮全服都看得见"。
+     */
+    gameChat: item.gameChat === true,
+    /**
+     * 这台服务器的控制台日志编码（`auto` / `utf8` / `gbk`）。
+     *
+     * ★ 默认 `auto` 就够（先按 UTF-8 严格解，出现替换字符再按 GBK 重解）——
+     *   真机上是 **GBK**（Windows 中文版 JVM 的 `file.encoding`），
+     *   详见 `src/servers/log-source.mjs` 的取证。
+     * ★ 之所以仍然开放这一项：万一某台服把编码显式设成了别的，
+     *   `auto` 会解成乱码（**而乱码不会报错**，只会表现为"它读不懂玩家说什么"）。
+     */
+    logEncoding: ['auto', 'utf8', 'gbk'].includes(String(item.logEncoding ?? '').trim())
+      ? String(item.logEncoding).trim()
+      : 'auto',
     // 拉起之后最多等多久（毫秒）。0 = 用桥接默认（3 分钟；模组服首次启动实测 1~2 分钟）。
     startWaitMs:
       Number.isFinite(Number(item.startWaitMs)) && Number(item.startWaitMs) > 0
@@ -658,6 +688,10 @@ export function normalizeConfig(c) {  const src = c ?? {}
     // ★ 采样间隔（毫秒）。**有下限**（`servers/loop.mjs` 的 `MIN_POLL_MS` = 15 秒）：
     //   模组服的 `list` 偶尔要几秒，再密只是白耗 CPU 与 RCON 连接。
     serversPollMs: Number.isFinite(Number(src.serversPollMs)) && Number(src.serversPollMs) > 0 ? Number(src.serversPollMs) : undefined,
+    // ★ 游戏内对话读控制台的间隔（毫秒）。**下限 1 秒**（`game-chat.mjs` 的 `MIN_CHAT_POLL_MS`）。
+    //   与 `serversPollMs`（下限 15 秒）是**两个数**：聊天要秒级，采样不需要 ——
+    //   硬用同一个值必然让其中一个错（30 秒才回一句话不叫对话）。
+    gameChatPollMs: Number.isFinite(Number(src.gameChatPollMs)) && Number(src.gameChatPollMs) > 0 ? Number(src.gameChatPollMs) : undefined,
     // 安全相关的开关（**默认全是保守值**）。
     security: {
       // ★ 允许把"内网/本机地址"的图片发出去（默认关）。

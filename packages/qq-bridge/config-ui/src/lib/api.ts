@@ -678,6 +678,14 @@ export interface ServerRow {
    * （那种环境里点一下，服务端起来就会被进程树回收，而界面显示"成功"）。
    */
   manageOnStart: boolean
+  /**
+   * **游戏内对话**（0.3.2 P3）。
+   * 打开后桥接会读这台服务器的控制台日志，把里面的玩家聊天当输入：
+   * 已绑定 UUID↔QQ 的玩家说的话会走模型，回复发到**公屏 `say`**；
+   * 未绑定的玩家只收到一条只给他本人的 `tellraw`（告诉他去群里发 `/绑定`）。
+   * ★ 只有**本程序拉起**的服务端才有那个控制台日志（别人手动起的读不到，不是故障）。
+   */
+  gameChat: boolean
   failThreshold: number | null
   rules: { minTps: number | null; maxPlayers: number | null }
   /** 活证据：这台采过样才有（`null` = 还没采过） */

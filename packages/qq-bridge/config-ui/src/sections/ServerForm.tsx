@@ -46,6 +46,8 @@ export function ServerForm({
     startArgs: '',
     cwd: '',
     manageOnStart: server?.manageOnStart ?? false,
+    // ★ 0.3.2 P3：游戏内对话（默认关 —— "无人开口就动手/就听"的能力默认关）
+    gameChat: server?.gameChat ?? false,
     enabled: server?.enabled !== false,
   })
   const [busy, setBusy] = useState(false)
@@ -68,6 +70,7 @@ export function ServerForm({
         tpsCommand: form.tpsCommand.trim(),
         enabled: form.enabled,
         manageOnStart: form.manageOnStart,
+        gameChat: form.gameChat,
       }
       // ★ 密码：**只在填了的时候才送**（留空 = 不改），否则会把已有密码抹成空串
       if (form.password) payload.password = form.password
@@ -141,6 +144,25 @@ export function ServerForm({
       <label className="mt-1 flex items-center gap-2 text-xs">
         <input type="checkbox" checked={form.manageOnStart} disabled={busy} onChange={(e) => set('manageOnStart', e.target.checked)} />
         启动接管（桥接启动时接管已在跑的、或拉起没在跑的；**端口活着时绝不重复拉起**）
+      </label>
+      <label className="mt-1 flex items-start gap-2 text-xs">
+        <input
+          className="mt-0.5"
+          type="checkbox"
+          checked={form.gameChat}
+          disabled={busy}
+          onChange={(e) => set('gameChat', e.target.checked)}
+        />
+        <span>
+          游戏内对话（读这台服的控制台，让**已绑定 UUID↔QQ** 的玩家在游戏里跟小鲸鱼说话）
+          <span className="text-muted-foreground mt-0.5 block text-[11px]">
+            ★ 回复是**公屏 `say`**（全服可见）；未绑定的玩家只会收到一条只给他本人的 `tellraw`，
+            告诉他去群里发 <code>/绑定</code>（**每次进服最多一次**）。
+            <br />★ 只有**本程序拉起**的服务端才有那个控制台日志 —— 别人手动起的服读不到东西
+            （日志里会有一行说明，**不是故障**）。
+            <br />★ 权限**按绑定的那个 QQ** 判：那个 QQ 不在名单里，游戏里也说不上话。
+          </span>
+        </span>
       </label>
 
       {err && <p className="text-destructive mt-2 text-xs">保存失败：{err}</p>}

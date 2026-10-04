@@ -234,6 +234,20 @@
       "assertions": 33
     },
     {
+      "cmd": "node mocks/verify-bindings.mjs",
+      "purpose": "★★★ **UUID ↔ QQ 绑定**（0.3.2 P3，108 项）：`src/servers/bindings.mjs` + `tellraw.mjs` + `game-chat.mjs` 的纯函数面。★ 守的全是「错了不会报错」的那几种：① **本地指令形状** —— `/绑定` 命中、`/绑定 123456` 命中，而 `/绑定 你好` / `/绑定 12345` / `/绑定abc` / 句子里含「绑定」一律**不命中**（判宽了会把普通闲聊吞掉 = 「机器人不理我」，判窄只是回到普通聊天：失败方向不对称，所以往窄了判）；② **码是一次性 + 5 分钟 TTL**（它是发在群里的 —— 设计文档 §5.6 承认的代价，能重复用或能用一小时都会把那个代价放大一个数量级）；③ **码绝不进审计**（同 `memory-audit.mjs`：审计不含秘密），UUID 只留**前 8 位**；④ **改绑两边都清 + 各自留痕**（同一 QQ 只能绑一个 UUID、同一 UUID 只能绑一个 QQ；「他什么时候被顶替的」事后要查得到）；⑤ **`tellraw` 的名字必须严格校验** —— 它是**选择器**，名字里塞进 `@` 会把「只给本人」变成 `@a` 全服广播，不合法就**拒绝构造**（不是「尽力拼一个」），JSON 只由 `JSON.stringify` 生成且正文压成一行（换行会被当成下一条命令）；⑥ **多份待绑定资格时绝不猜**（猜错 = 把别人的身份算到你头上）。★ 还有一组「坏输入」断言：坏表能**被看出来**（不是静默当空）、只有一段坏时其它段照常可用、缺参数一律拒绝但永不抛、坏时间不许写成 NaN 进台账。",
+      "network": false,
+      "costs": "none",
+      "assertions": 108
+    },
+    {
+      "cmd": "node mocks/verify-game-wiring.mjs",
+      "purpose": "★★★ **游戏内对话的接线**（0.3.2 P3，76 项）：真 `Bridge` + 桩 rpc/onebot（执行器可注入，**但命令的构造一个字都不放宽** —— 测试里看到的正是真机会发给 RCON 的那串命令）。★ 为什么必须有这一套：本项目最贵的缺陷是接线（先例：任务段那次「从未注入过」的静默事故，124 项纯函数断言一条都没抓到）。它盯的是**只有走完整桥接才看得见**的东西：① ★★★ **绑定码走完整桥接时一次 `rpc.prompt` 都没有发**（设计文档 §10.1 接线级验收第⑤条逐字要求）；② 它必须在**语义唤醒闸门之前**生效 —— 用桩判定器断言「码这一轮**根本没问过**判定器」（放在闸门之后会**静默失效**：`semantic` 下玩家来绑定可能被判「沉默」，码白发了），并有一条**对照组**（同样开着闸门，普通消息**确实**会问判定器）证明那个 0 不是「桩没接上」；③ 未绑定玩家说话 ⇒ **零模型调用** + 只给他本人一条 `tellraw`（收件人是他自己，不是 `@a`）+ **每次进服最多一次**（退服再进可以再提示一次）；④ 已绑定玩家说话命中唤醒词 ⇒ 真的产生 `session/prompt`，**会话就是那个 QQ 的会话**（与 QQ 私聊逐字同一个 sessionId），回复走**公屏 `say`** 而**完全不碰 QQ 通道**；⑤ 提示词里的来源标注**如实说是公屏**并明确警告「全服所有人都看得见」（不这么做模型会以为在一对一私聊里，把私密的东西说给全服听）；⑥ 有资格时一说话就写死绑定 + 给本人 `tellraw` 确认，且确认里**没有 QQ 号**（设计文档 §5.5：服务端只拿到「绑定了没有」）；⑦ 两份资格时**不写任何绑定**；⑧ 绑定但 QQ 不在名单里 ⇒ 零模型调用 + 如实说是名单问题；⑨ 没唤醒 ⇒ 不插嘴；⑩ 管理员 `/解绑` 有效、非管理员发同一形状**不命中**且**解不掉**也**不解释**；⑪ 对照组：QQ 那条路的来源标注与提示词**照旧**，没被游戏通道带偏；⑫ 私聊里发 `/绑定` ⇒ 一句**确定性**指路 + 零模型调用（不让模型去编一套流程），而**名单外的人**只收到那句统一的「只对名单内的人开放」（不泄露这里有这条路）。",
+      "network": false,
+      "costs": "none",
+      "assertions": 76
+    },
+    {
       "cmd": "node mocks/verify-ui-types.mjs",
       "purpose": "★★ **UI 类型检查守卫**（0.3.2 收尾，5 项）：把 `npm run build` 的第一步 `tsc -b` 接进测试链。存在的理由是一次**真实的疏漏**：我给 `ConsolePanel.tsx` 写了四个没用上的 `Card*` 导入，却宣称「类型检查通过」—— 因为我跑的是 `tsc --noEmit -p tsconfig.json`，而那份是**项目引用**（`files: []` + `references`），那样跑**不检查被引用的 `tsconfig.app.json`**，而 `noUnusedLocals: true` 正好写在 app 那份里 ⇒ 错误只在用户 `npm run build` 时才炸出来。★ 判据因此是 `tsc -b`（走项目引用），并有一条断言专门盯着「tsconfig.json 必须是项目引用形态」以防有人把它改成单文件后这道守卫静默失效。★ 它**不跑 `vite build`**（那要 esbuild，受限沙箱里 spawn EPERM）—— 类型检查与打包是两件事。★ 缺 `config-ui/node_modules` 时**明确跳过并声明「跳过不算通过」**（本项目对「跳过 ≠ 通过」有专门纪律）。★ 守卫本身被验证过**会红**：故意插一个未使用导入时它退出码 1。",
       "network": false,
@@ -961,7 +975,7 @@
         "type": "object[]",
         "default": [],
         "optional": true,
-        "note": "★★ **0.3.2 P2 服务器监测**（每台一条）：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,manageOnStart,startWaitMs,commandFromQQ,startExe,startArgs,startCommand,cwd,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ **默认空数组 = 这一层完全不工作，而且一次网络请求都不发**。★ `password` 只进 config.json（属于 `user` 类受保护路径：永不进包、永不进日志与错误信息 —— 代码里有断言逐字盯着）；`config.example.json` 里它**必须是空串**（`verify-release-hygiene.mjs` 有字段级断言，因为现有的密钥正则**抓不到 RCON 密码**这种任意字符串）。★ 判据：**默认只把「连不上」算 down**（连续 `failThreshold` 次才判定，防抖动误报）；`rules` 里的阈值只产出**异常报告**、**不触发重启**（「TPS 低就重启」是赌博）。★ `tpsCommand` 留空 = **不问** TPS（不是「问了没拿到」）；`manageOnStart` 默认 false（桥接启动时要不要接管/拉起它）；`commandFromQQ` **默认 false**（★ 它是唯一一条「外部消息能改游戏服务器状态」的通道 —— 打开后**管理员**拥有这台服务器的**完整控制台（op 级别）**，两条路都受它控制：管理员在群里发 `/mc [id] <命令>`（桥接**本地拦截执行**，不经模型）与模型调 `mc_command` 工具（读本轮 MC 域授权文件，非管理员一律拒绝）。★★★ 两条**已知并接受**的代价：① `op` 可提权 ⇒ 命令白名单**事实上失效**；② 管理员 QQ 被盗 = 服务器 op 被劫持。判定依据是桥接写的一份**明文授权文件**，模型能伪造 ⇒ 挡得住外部陌生人，**挡不住模型主动伪造**）。★ 这一层**不认识任何具体服务端**（没有版本判断），原版/Paper/Forge/Fabric/NeoForge 通用；巡检入口 `--servers [--probe]`。"
+        "note": "★★ **0.3.2 P2 服务器监测**（每台一条）：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,manageOnStart,startWaitMs,commandFromQQ,startExe,startArgs,startCommand,cwd,gameChat,logEncoding,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ **默认空数组 = 这一层完全不工作，而且一次网络请求都不发**。★ `password` 只进 config.json（属于 `user` 类受保护路径：永不进包、永不进日志与错误信息 —— 代码里有断言逐字盯着）；`config.example.json` 里它**必须是空串**（`verify-release-hygiene.mjs` 有字段级断言，因为现有的密钥正则**抓不到 RCON 密码**这种任意字符串）。★ 判据：**默认只把「连不上」算 down**（连续 `failThreshold` 次才判定，防抖动误报）；`rules` 里的阈值只产出**异常报告**、**不触发重启**（「TPS 低就重启」是赌博）。★ `tpsCommand` 留空 = **不问** TPS（不是「问了没拿到」）；`manageOnStart` 默认 false（桥接启动时要不要接管/拉起它）；`commandFromQQ` **默认 false**（★ 它是唯一一条「外部消息能改游戏服务器状态」的通道 —— 打开后**管理员**拥有这台服务器的**完整控制台（op 级别）**，两条路都受它控制：管理员在群里发 `/mc [id] <命令>`（桥接**本地拦截执行**，不经模型）与模型调 `mc_command` 工具（读本轮 MC 域授权文件，非管理员一律拒绝）。★★★ 两条**已知并接受**的代价：① `op` 可提权 ⇒ 命令白名单**事实上失效**；② 管理员 QQ 被盗 = 服务器 op 被劫持。判定依据是桥接写的一份**明文授权文件**，模型能伪造 ⇒ 挡得住外部陌生人，**挡不住模型主动伪造**）。★ `gameChat`（**默认 false**）：打开后桥接会读**这台服的控制台日志**（P2 的 stdout 重定向），把 `parseConsoleLine()` 认出来的玩家聊天当输入 —— 已绑定 UUID↔QQ 的玩家说的话走唤醒判定 ⇒ 模型 ⇒ 回复发到**公屏 `say`**；未绑定的玩家**不进模型**（零成本），只给他本人一条 `tellraw` 告诉他去群里发 `/绑定`（**每次进服最多一次**）。★★★ 三条必须一起读的边界：① **只有本程序拉起**的服务端才有那个控制台日志，别人手动起的服读不到（日志里有一行说明，**不是故障**）；② 权限**按绑定的那个 QQ** 判（与 QQ 侧 fail-closed 一致）；③ 回复是**公屏** ⇒ 进游戏的内容共享**同一道隐私闸**，而且提示词里的来源标注会被整条替换成「这是公屏、全服都看得见」。★ `logEncoding` 默认 `auto`（真机上是 **GBK**：Windows 中文版 JVM 的 `file.encoding`；auto 会先按 UTF-8 严格解、出现替换字符再按 GBK 重解）。★ 这一层**不认识任何具体服务端**（没有版本判断），原版/Paper/Forge/Fabric/NeoForge 通用；巡检入口 `--servers [--probe]`。"
       },
       {
         "key": "serversPollMs",
@@ -969,6 +983,13 @@
         "default": 30000,
         "optional": true,
         "note": "★ 服务器监测多久采样一次（毫秒）。**有下限**（`servers/loop.mjs` 的 `MIN_POLL_MS` = 15 秒）：模组服的 `list` 偶尔要几秒，再密只是白耗 CPU 与 RCON 连接。默认 30 秒。"
+      },
+      {
+        "key": "gameChatPollMs",
+        "type": "number",
+        "default": 2000,
+        "optional": true,
+        "note": "★★ 0.3.2 P3 **游戏内对话**读控制台的间隔（毫秒）。**有下限**（`servers/game-chat.mjs` 的 `MIN_CHAT_POLL_MS` = 1 秒）。★ 它必须与 `serversPollMs` **分开**：采样 15 秒下限是合理的（RCON 连接有代价），而「30 秒才回一句话」不叫对话 —— 两件事节奏差一个数量级，硬用同一个值必然让其中一个错。★ 只读日志文件（stat + 读增量），不碰网络。"
       },
       {
         "key": "wake.policy",
@@ -1781,9 +1802,10 @@
       "★★★ 0.3.0alpha：拆掉「闲聊态 / 工作态」双态，说话方式只剩一份（2026-10-02，承 0.3.0beta）。★ 为什么拆：分两态等于同一份提示词里两处对同一件事给**相反**指令（基座「认真问事实、技术问题时，就认真答」对上口吻「**极短** / 别把一句回答扩成一段」），模型只能自己挑一套听；判定本身还要花一次模型调用、还会判错。融合的**唯一新增条款**是 `WORK_ALLOWANCE`（默认极短 + 真在干活时允许说清），**不是**把那两句都留下 —— 留下一对相反指令正是这次要消灭的东西本身。★ 落点：新增 `src/voice.mjs`（唯一口径 `VOICE_STYLE` / `WORK_ALLOWANCE` / `composeVoice`，**没有按态提前返回**了；⚠️ **这个文件与 `src/voice-source.mjs` 都在第二步被删除** —— 说话方式改写成\"就写在人设文件里\"）、`src/persona-sections.mjs`（从旧 `chat-mode.mjs` 拆出的人设分节与节名归一，纯函数）、`src/voice-source.mjs`（读常量正文 / 三条守卫写回，取代 `chat-style-sync.mjs`；**第二步删除**）；删除 `src/chat-mode.mjs` / `src/styles.mjs` / `src/chat-style-sync.mjs` 与 `styles/` 整个目录、配置组 `chat.mode.*`（9 个键，`config.json` / `config.example.json` 里只留一句「已下线 + `removed: true`」，老配置里残留的键静默忽略）、界面上「对话风格（闲聊态 / 工作态）」卡片、`src/api.mjs` 的 `hasChatModeKey`、`bridge.mjs` 的 `#detectTurnMode` / `#makeModeJudge` / `#ensureModeJudge` / `#chatStyleForTurn` 与 `modeJudge` / `chatStyleDir` 两个注入参数、`channel-prompt.mjs` 那句「这一轮是闲聊」、人设策略那行的日志前缀 `[chat-mode]` → `[voice]`、`CONFIG-UI.md` §2.4.1 整节。★ 保留（别写反）：**第一步**里人设库 `personas/*.md` **一个字没改**（当时仍只**替换**【怎么说话】【别变成客服】两节，编号式 `二、怎么说话` 也认，其余各节逐字保留）—— ⚠️ **这一步的\"替换\"在第二步已被推翻**：说话方式现在**就写在人设文件里**，`src/voice.mjs` / `src/voice-source.mjs` 与那套按节替换一起删除，提示词直接用整份人设；「先应一声」**保留并默认开启**（只去掉\"闲聊态不发\"那条抑制，**静默时段那条抑制仍在**）；分条发送（`splitReplyForSend`）没动；唤醒判定器（`wake-judge.mjs` 的 `createWakeJudge`）不受影响；评审台仍在，**第一步**评审目标曾是 `src/voice.mjs`（`--style` 删除，`server.mjs` 的选项收成单一 `voicePath`，`/api/apply` 仍是 404）—— **第二步起评审目标是当前那份人设文件**（选项改名 `personaPath`，`/api/health` 的 `styleFile.path` 指向 `personas/小鲸鱼（完整带情绪）.md`），`/api/apply` **仍是 404**、路由仍是 13 条。★ 行为变化：改口吻要改 `src/voice.mjs` 的 `VOICE_STYLE`（**第二步起改成改 `personas/小鲸鱼（完整带情绪）.md`**），而且**改了要重启**（0.3.0beta 的风格文件是每轮现读）；老 `styles/闲聊.md` 的改动**升级后不再生效**（那个目录**从来没进过发布包**，`scripts/assemble-release.mjs` 的 `COPY_DIRS` 里没有它，线上一直跑的就是内置常量）。★ 测试：`mocks/verify-voice-style.mjs`（第一步自报 131 项）取代 `mocks/verify-chat-mode.mjs`（**该套件已在第二步删除**，内容断言归位到 `verify-persona.mjs`）；`verify-chat-review.mjs` 第一步 288 项 → **第二步 277 项**（删掉的是 `voice-source` 那 11 条\"同步守卫\"断言，那一层已不存在）；`verify-memory-roundtrip.mjs` 第 ⑱ 节的逐字基线**加了 `.regenerate-golden` 这道闩**（没有标记就拒绝自动生成），并且第一步**先把说话方式那一段剥掉再逐字比**（改文案不该让\"结构没漂\"这条断言误红），另有定向断言负责\"说话方式真的逐字进去了、且只注入一次\" —— ⚠️ **第二步这条\"先剥掉再比\"已取消**：说话方式在人设文件里，属于**数据**，改它就**应该**重建基线，∴ 回到**整份提示词逐字比对**（基线 8806 → **8693 字**）。详见 `docs/0.3.0alpha-release-notes.md`。"
     ],
     "todo": [
-      "★★★ **0.3.2 P3：游戏内对话**（唯一还没开工的 0.3.2 里程碑）。三件事：① **聊天事件源** —— 首选**子进程 stdout**（P2 的日志句柄本来就在我们手上，§6.3.3 说这是「白拿」的，不必再做日志尾随、也不必写服务端插件），但**方言表仍是 P3 的活**（vanilla/Paper/Forge/Fabric/NeoForge 的聊天行格式不同）；② **UUID ↔ QQid 绑定** —— 游戏内生成码 + 桥接侧落表 + **群聊里发码**（不是 DM、不是新开「绑定群」）；绑定变更必须让本人知道（`tellraw` 确认 + 留痕），**抢绑无法静默**；未绑定的玩家不能对话；③ **回应通道** —— 码/提醒走 `tellraw`（私密），普通回复走 `say`。★ 它必须插在**语义唤醒闸门之前**且**命中即 return**（有接线级断言要求），否则「玩家来绑定却被判沉默，码白发了」。★ v1 明确**不写任何服务端代码**（用户拍板）。★ 命令白名单仍是**只说话 + 只读**。",
       "★ **发布包要重建**：`_release/InteractiveBot-0.3.2-win-x64` 是旧的，而 `verify-release-hygiene.mjs` 有一道门禁是「当前 src/ + mcp/ 的模块引用都能在**真实发布包**里找到」—— 新增 `src/servers/console.mjs` 之后它**如实变红**（报 `src/bridge.mjs:130 → src/servers/console.mjs`）。★ 这不是缺陷、**也不该加豁免**：修法是重新打包（`scripts/assemble-release.mjs`），而不是放宽那道门。",
-      "★ 界面产物要重建：`config-ui/src` 新增了 `ConsolePanel.tsx` / `ServerForm.tsx` 与三个接口方法 ⇒ 跑 `npm run build` 让 `dist` 跟上来（`verify-ui-status` 会报 stale 直到重建）。",
+      "★ 界面产物要重建：`config-ui/src` 新增了 `ConsolePanel.tsx` / `ServerForm.tsx` 与三个接口方法 ⇒ 跑 `npm run build` 让 `dist` 跟上来（`verify-ui-status` 会报 stale 直到重建）。★ 0.3.2 P3 又加了 `gameChat` 复选框与 🎮 徽章 ⇒ 同样要重建（已完成）。",
+      "★ **待办（0.3.2 P3 的尾巴）**：控制台里的**绑定列表与解绑按钮**。目前 `GET /api/servers` 已回 `gameChat`，`bridge.bindingsForApi()` 也已经写好（UUID 只回前 8 位），但**还没有 HTTP 路由**，也**没有界面** ⇒ 管理员解绑只能发 `/解绑 <游戏名或QQ号>`。★ 加路由时记得：字段白名单 + `verify-manifest.mjs` 的探针桩 + `CONFIG-UI.md` 同步（本项目这三条各踩过）。",
+      "★ 可选：把**定时任务的投递目标**扩到「游戏内」（设计文档 §3 的 `目标=QQ 群/私聊/游戏内`）。目前只有**回复**走游戏通道（`#deliverToGame`），主动任务那条走的是 `#deliver`（QQ 传输形状）⇒ 要做就先把「投递到哪」抽成一层，别在 `#deliver` 里塞分支。",
       "★ 可选：`POST /api/servers/action` 只放行 `retry`/`abandon`；`start`/`stop` 刻意留在 CLI（**不做界面按钮**）—— 理由见 CONFIG-UI.md §2.12：那种环境里点一下，服务端起来就会被进程树回收，而界面会显示「成功」。",
       "可选：人设文件的**导入/导出**（把一套人设发给别人）—— 目前只能复制文件",
       "可选：/api/start 与 /api/stop（UI 直接启停机器人；目前需用 start.bat）",

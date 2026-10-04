@@ -1097,6 +1097,8 @@ export function createApiHandler(deps) {
           startExe: typeof s.startExe === 'string' ? s.startExe : '',
           tpsCommand: typeof s.tpsCommand === 'string' ? s.tpsCommand : '',
           manageOnStart: s.manageOnStart === true,
+          // ★ 0.3.2 P3：游戏内对话（界面上的开关）。字段白名单照旧逐个放行。
+          gameChat: s.gameChat === true,
           failThreshold: s.failThreshold ?? null,
           rules: {
             minTps: s.rules?.minTps ?? null,

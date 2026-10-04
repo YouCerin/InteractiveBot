@@ -2957,8 +2957,9 @@ cd packages/qq-bridge && node sticker-label/server.mjs --open   # 或双击 启�
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `servers` | object[] | `[]` | 每台一条：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,manageOnStart,startWaitMs,startExe,startArgs,startCommand,cwd,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ 空数组 = 不工作、零网络请求 |
+| `servers` | object[] | `[]` | 每台一条：`{id,name,host,port,rconPort,password,enabled,failThreshold,tpsCommand,manageOnStart,startWaitMs,startExe,startArgs,startCommand,cwd,gameChat,logEncoding,rules:{minTps,maxPlayers,cooldownMs,maxAttempts}}`。★ 空数组 = 不工作、零网络请求 |
 | `serversPollMs` | number | 30000 | 多久采样一次（有 15 秒下限）。★ 界面可以给一个只读展示；**不要**做成无下限的输入框 |
+| `gameChatPollMs` | number | 2000 | 游戏内对话**读控制台**的间隔（下限 1 秒）。★ 与 `serversPollMs` 是**两个数**：聊天要秒级，采样不需要 |
 
 ★ 每台服务器的**条目级启用开关**要能单独改（`servers[].enabled`）——
 它与功能总开关（有没有配服务器）**不是**一回事。
@@ -3017,6 +3018,33 @@ agent 沙箱**）会把它一起收走 ⇒ 从那种环境里点一下"启动"�
 ```
 可用  ⇔  归属是我（own.owner === 'bridge'）
 ```
+
+#### ★★★ 游戏内对话（0.3.2 P3）：界面上必须显示、且必须**如实说边界**
+
+每台服务器的卡片上要显示 `servers[].gameChat` 的状态与一个小徽章
+（开着时 `🎮 游戏内对话`）。表单里是**条目级复选框**（默认**关**）。
+
+**界面必须原样带上的四句话**（少一句就会让使用者以为它比实际能做得多）：
+
+1. 打开后，**已绑定 UUID↔QQ** 的玩家在游戏里说的话会走模型，
+   回复发到**公屏 `say`**（**全服可见**）；
+2. **未绑定**的玩家说话**不进模型**（零成本），只收到一条**只给他本人**的 `tellraw`，
+   告诉他去群里发 `/绑定` —— 而且**每次进服最多一次**；
+3. **只有本程序拉起**的服务端才有那个控制台日志；别人手动起的服**读不到东西**
+   （日志里会有一行说明，**不是故障**）；
+4. 权限**按绑定的那个 QQ** 判 —— 那个 QQ 不在名单里，游戏里也说不上话。
+
+★ 绑定流程（界面里要能照着念）：玩家在**群里**发 `/绑定` 拿一个 6 位码
+（**5 分钟、一次性**）→ 发 `/绑定 <码>` 交回来 → **绑定真正成立在他下一次进游戏
+说话那一刻**（那时会给他本人一条 `tellraw` 确认）。
+管理员解绑目前**只有** `/解绑 <游戏名或QQ号>`（**控制台里还没有这个按钮**，
+是待办 —— 别在文档里写成已有）。
+
+| 键 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `servers[].gameChat` | boolean | `false` | 读这台服的控制台，让已绑定的玩家在游戏里说话。★ **默认关**（"无人开口就听"的能力默认关） |
+| `servers[].logEncoding` | `'auto'\|'utf8'\|'gbk'` | `'auto'` | 控制台日志编码。★ 真机上是 **GBK**（Windows 中文版 JVM 的 `file.encoding`），`auto` 会自己回退。★ 开放它的理由：万一某台服显式设了别的编码，解成乱码**不会报错**，只会表现为"它读不懂玩家说什么" |
+| `gameChatPollMs` | number | 2000 | 读控制台的间隔（下限 1 秒）。★ 与 `serversPollMs` 是两个数（聊天要秒级） |
 ★ 若将来真要做"启动"按钮，前提是服务端由**桥接进程自己**持有（桥接活着它才活着），
 而不是由一次性的 CLI 命令启动 —— 那时点按钮才名副其实。
 

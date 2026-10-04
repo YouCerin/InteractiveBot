@@ -246,6 +246,12 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                     🟡 正在启动{Math.round(s.starting.waitedMs / 1000) > 0 ? `（已等 ${Math.round(s.starting.waitedMs / 1000)} 秒）` : ''}
                   </span>
                 )}
+                {/* ★ 0.3.2 P3：游戏内对话开着时给一个徽章 —— 否则"这台服在听人说话"从界面上看不出来 */}
+                {s.gameChat && (
+                  <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600" title="读这台服的控制台，让已绑定 UUID↔QQ 的玩家在游戏里说话；未绑定的只会收到一条只给他本人的 tellraw">
+                    🎮 游戏内对话
+                  </span>
+                )}
                 <span className="ml-auto flex items-center gap-1.5">
                   <Button variant="outline" size="sm" disabled={busyId === s.id} onClick={() => openForm(s)}>
                     编辑
@@ -388,6 +394,9 @@ export function ServerTab({ demo = false }: { demo?: boolean }) {
                   {s.manageOnStart
                     ? ' · 启动接管：开（桥接启动时会接管已在跑的、或拉起没在跑的；端口活着时绝不重复拉起）'
                     : ' · 启动接管：关（要手动 `supervise-server.bat start`）'}
+                  {s.gameChat
+                    ? ' · 🎮 游戏内对话：开（读这台服的控制台；已绑定的玩家能在这里说话，回复走公屏 say）'
+                    : ' · 🎮 游戏内对话：关（玩家在游戏里说什么都进不来）'}
                 </span>
               </div>
             </CardContent>

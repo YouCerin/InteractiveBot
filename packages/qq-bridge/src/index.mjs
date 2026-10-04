@@ -1712,6 +1712,47 @@ async function main() {
           console.log(`   ${new Date(Number(r.at) || 0).toLocaleString()}  [${r.event}] ${r.serverName}：${r.text}`)
         }
       }
+
+      // ── 0.3.2 P3：游戏内对话与绑定表（**只读**，不连服务端）──────────────
+      //
+      // ★ 为什么它必须在这里：发布包里**没有 `mocks/`**（那是 FORBIDDEN），
+      //   所以使用者手上没有测试，只有这几条只读巡检能回答"现在到底谁绑上了"。
+      //   设计文档 §12.2 的原话：这不是装饰，是**替代品**。
+      // ★ 不显示完整 UUID（只给前 8 位）：够核对，又不构成一份可直接用的对照表。
+      if (workspace) {
+        const { listBindings, pendingQualifications } = await import('./servers/bindings.mjs')
+        const binds = listBindings(workspace)
+        const pend = pendingQualifications(workspace)
+        console.log('')
+        console.log(`UUID ↔ QQ 绑定（${binds.length} 条；表在 runtime/bindings.json —— 属使用者数据，永不进包）：`)
+        if (binds.length === 0) console.log('   （还没有 —— 玩家在群里发 `/绑定` 走完流程之后才会有）')
+        for (const b of binds) {
+          const when = b.at ? new Date(Number(b.at)).toLocaleString() : ''
+          console.log(`   ${b.name || '（没记名字）'}  UUID ${b.uuid8}…  →  QQ ${b.qqId}${when ? `   ${when}` : ''}`)
+        }
+        if (pend.length > 0) {
+          console.log(`   待确认的资格：${pend.length} 份 —— 那个人在游戏里说一句话就会落实`)
+        }
+        // ★ 游戏内对话的开关与它**必然依赖**的那个文件是不是存在 —— 一起说清
+        const chatty = list.filter((s) => s && s.gameChat === true && s.enabled !== false)
+        if (chatty.length === 0) {
+          console.log('   游戏内对话：关（`servers[].gameChat` 全是 false ⇒ 不读任何控制台、玩家说话进不来）')
+        } else {
+          const { consoleLogPath } = await import('./servers/console.mjs')
+          const { existsSync } = await import('node:fs')
+          for (const s of chatty) {
+            const f = consoleLogPath(workspace, s.id)
+            const has = existsSync(f)
+            console.log(
+              `   游戏内对话：已对「${s.name ?? s.id}」打开` +
+                (has
+                  ? '（控制台日志在，读得到）'
+                  : `　⚠️ **读不到它的控制台日志**（${f}）—— 只有**本程序拉起**的服务端才会把 stdout 写进那个文件；` +
+                    '别人手动起的服要走这条路得让本程序来拉（`manageOnStart`）。**这不是故障。**'),
+            )
+          }
+        }
+      }
       console.log('')
       if (dry) console.log('   （去掉 `--dry` 会真采一次；采样只用只读命令 `list`，不改服务端任何状态）')
       console.log('')

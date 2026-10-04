@@ -128,6 +128,9 @@ export async function buildChannelPrompt({
    *    这样它能在不起桥接的情况下被逐字审阅（同文件第⑱节的基线测试）。
    *  ★ 空数组 ⇒ 这一整段不存在（没有可补的、语料库关着、私聊）—— 见 `#recentMissedMessages`。 */
   recentMissed = [],
+  /** ★ 0.3.2 P3：**整条替换**来源标注用的正文（不带方括号）。空串 ⇒ 用默认那两行之一。
+   *  `[来自 ...]` 的方括号与末尾时间戳仍由本模块加，传入的只是中间那一段。 */
+  channelOrigin = '',
 } = {}) {
   const stamp = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`
 
@@ -169,8 +172,17 @@ export async function buildChannelPrompt({
   //    而任务段却一直在说"用带 # 的消息 id 引用回复" —— **承诺了一个不存在的能力**。
   //    ⚠️ 它每轮都变 → 只能待在**易变区**（origin 本来就在易变区，不破坏前缀缓存）。
   const msgIdPart = messageId != null && String(messageId) !== '' ? `  #${String(messageId)}` : ''
-  const origin =
-    kind === 'group'
+  // ── ★ 0.3.2 P3：**游戏内**那条通道的来源标注（由桥接现算，传进来就整条替换）──
+  //
+  // 为什么必须替换而不是"补一句"：游戏内的回合在会话上是 `private:<QQ号>`
+  // （复用那个人的记忆与权限），所以默认那条 origin 会写**「来自 QQ 私聊」**——
+  // 那是**错的上下文**：那个人其实是在服务器公屏上说话，而回复也会
+  // **当场发到公屏、全服可见**。让模型以为在一对一私聊里，它就会把私密的东西
+  // 说给全服听。这与"来源标注必须如实区分私聊与群聊"是同一条纪律。
+  // ★ 为空串时逐字保持原样 ⇒ `prompt-golden.txt` 那套逐字基线不受影响。
+  const origin = channelOrigin
+    ? `[${channelOrigin}  ${stamp}]`
+    : kind === 'group'
       ? `[来自 QQ 群 ${peerId}${chatPart}，发言人 ${senderId ?? '?'}${namePart}${rolePart}${who}${msgIdPart}  ${stamp}]`
       : `[来自 QQ 私聊 ${senderId ?? '?'}${namePart}${who}${msgIdPart}  ${stamp}]`
 

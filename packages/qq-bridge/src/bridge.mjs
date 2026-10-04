@@ -129,6 +129,26 @@ function looksLikeMcCommand(text) {
   return MC_COMMAND_SHAPE.test(String(text ?? '').trim())
 }
 
+/**
+ * **绑定指令通道**（0.3.2 P3）：群里发 `/绑定` / `/绑定 <码>`，桥接自己处理。
+ *
+ * ★★★ 它与 `/mc` 那条通道**同一个形状，但插入点更靠前** —— 这是设计文档 §5.2
+ *   明确要求的，理由是硬的：
+ *     · 必须在**唤醒判定（`decideTrigger`）之前**：群里发 `/绑定` 是**不会 @ 机器人**的
+ *       （玩家在群里粘贴一串码，没人会去 @ 它），而唤醒判定对"没 @ 也没命中关键词"的
+ *       群消息直接 return ⇒ 放在它后面等于**这条通道根本不存在**；
+ *     · 必须在**语义唤醒闸门之前**：闸门可能判"沉默"，于是"玩家来绑定却被判沉默，码白发了"；
+ *     · 必须在**群白名单之后**：否则等于给所有群开后门（下面复用 `roster.isGroupAllowed`）。
+ * ★ 命中即 `return`：这一轮**一次模型调用都不产生**（省钱，也不给模型"看到这条码"的机会）。
+ * ★ 判据是**纯同步**的（同 `looksLikeMcCommand` 那条纪律：普通消息不产生额外 `await`，
+ *   否则会扰动"主动回合 vs 随后到达的消息"那条竞争，`verify-schedule` 会以
+ *   `unsettled top-level await` 的形式变红，而看起来与这里毫无关系）。
+ */
+function looksLikeBindCommand(text) {
+  const s = String(text ?? '').trim()
+  return s.startsWith('/绑定') || s.toLowerCase().startsWith('/bind') || s.startsWith('/解绑')
+}
+
 // ★ P3/收尾用到的几个：读服务器控制台（`readServerConsole`）。
 //   为什么在这里 import 而不是动态：它们只是 `node:fs` 的普通函数，没有加载成本。
 import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
@@ -169,6 +189,22 @@ import { createServerLoop } from './servers/loop.mjs'
 import { createRestarter } from './servers/restart.mjs'
 import { runConsoleCommand } from './servers/console.mjs'
 import { runMcCommand } from './servers/command-gate.mjs'
+// ★ 0.3.2 P3：游戏内对话（绑定表 / 回应通道 / 读控制台的循环）
+import {
+  bindUuid,
+  issueCode,
+  listBindings,
+  lookupByName,
+  lookupByUuid,
+  parseBindCommand,
+  pendingQualifications,
+  redeemCode,
+  shortUuid,
+  unbind,
+  unbindByName,
+} from './servers/bindings.mjs'
+import { buildSay, buildTellraw, chunkForSay, PLAYER_NAME_RE } from './servers/tellraw.mjs'
+import { createGameChatLoop, decideGameChat } from './servers/game-chat.mjs'
 import { createSupervisor, defaultPortOpen as defaultPortProbe } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
 //   授权文件，供 MCP 子进程里的技能读取（理由与边界见那个文件的文件头）。
@@ -383,6 +419,20 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * **测试用**的注入口：替换"往游戏里发一条命令"的那个执行器（0.3.2 P3）。
+   *
+   * ★ 为什么需要它：游戏内那条通道的**每一次发言都要真连一台 RCON**（`say` / `tellraw`），
+   *   不给注入口的话，"游戏里说一句话 → 模型 → 回复发到公屏"这条链
+   *   **永远只能靠真机验** —— 而本项目最贵的缺陷恰好是接线。
+   * ★ 它只替换**执行器**：命令**怎么构造**（`buildSay` / `buildTellraw` 的校验与模板）
+   *   一个都不放宽 —— 测试里能看到的正是真机上会发出去的那串命令。
+   */
+  setGameConsoleForTest(runner) {
+    this.#testGameConsole = typeof runner === 'function' ? runner : null
+  }
+  #testGameConsole = null
+
+  /**
    * 每个会话"近期真的见过的消息 id"（H6 引用校验用）。
    *
    * chatKey → string[]（按见到顺序，超出 `MAX_SEEN_IDS` 就丢最旧的）。
@@ -420,6 +470,32 @@ export class Bridge extends EventTarget {
 
   /** ★ H15：投递账本里的"所有者"（本进程）。惰性算一次，同一个进程内不变。 */
   #deliveryOwner = ''
+
+  /**
+   * ★ 0.3.2 P3：读游戏内聊天的循环（`null` = 一台服务器都没开 `gameChat`）。
+   * @type {{start:Function, stop:Function, tick:Function, isRunning:Function, stats:Function}|null}
+   */
+  #gameChat = null
+
+  /**
+   * ★ 0.3.2 P3：**这一趟进服已经提示过"怎么绑定"的人**（`serverId:玩家名`）。
+   *
+   * 为什么必须记：设计文档 §13.1 拍板"未绑定提醒 **每次进服最多一次**"——
+   * 刷屏的提示等于没有提示。玩家 `join` 时清掉他那一项（下次进服再提示一次）。
+   * ★ 只在内存：桥接重启会让所有人重新收到一次提示。这是**刻意的取舍**
+   *   （落盘要多一份状态，而"重启后多提示一次"的代价只是一句话）。
+   */
+  #gameReminded = new Set()
+
+  /**
+   * ★ 0.3.2 P3：**游戏名 → UUID**（`serverId:玩家名` → uuid）。
+   *
+   * 来源有两处，都要用（缺一个就会出现"明明在玩却说不知道你是谁"）：
+   *   · `UUID of player X is <uuid>` —— 玩家**一登录就写**，不用他说话、也不用还在线；
+   *   · 绑定表里记着的名字（`lookupByName`）—— 跨重启仍认得出老玩家。
+   * ★ 也只在内存：它只是"这一次会话内的快捷索引"，真正的映射在绑定表里。
+   */
+  #gameUuids = new Map()
 
   /** 已经报过"表情名字不在表里"的名字（同一个名字只报一次，防刷屏）。 */
   #stickerWarned = new Set()
@@ -1443,6 +1519,11 @@ export class Bridge extends EventTarget {
     // ★ 事件产出来后怎么用是**另一件事**（见 `#onServerEvent`）：
     //   它写进事件台账，并按任务定义里的 `announce` 档位决定要不要**自动播报**。
     this.#startServerLoop()
+    // ── 0.3.2 P3：游戏内对话（读控制台 → 绑定 → 模型 → `say`/`tellraw`）────────
+    //
+    // ★ 位置：紧挨着监测循环（两者都读同一台服务器的控制台，但节奏不同）。
+    // ★ 它**不关心服务器活不活**：日志文件在就有的读，不在就跳过并留一行说明。
+    this.#startGameChatLoop()
     // ★★★ 启动时接手服务端（`servers[].manageOnStart`，设计文档 §6.3.1）。
     //
     // 为什么排在监测之后：先让监测跑起来（"出问题主动播报"越早在线越好），
@@ -1691,6 +1772,453 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * **绑定指令通道**（0.3.2 P3）：`/绑定` 取码、`/绑定 <码>` 提交、`/解绑 <目标>` 解绑。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 这条通道的规矩（设计文档 §5.2，逐条都是硬要求）
+   * ══════════════════════════════════════════════════════════════════════════
+   *   · **可用范围**：`/绑定` 只在**已允许的群**里生效（复用 `roster.isGroupAllowed`，
+   *     **不新造名单** —— 多一张名单就多一处不一致）；
+   *   · **归属**：绑定/改绑一律绑给**发送者本人**（`senderId`）。
+   *     ★★ **绝不绑给消息里写的任何人** —— 否则谁在群里看见码，就能把它绑到别人头上；
+   *   · **回应**：**只回给发起人**，确定性文案，**不走模型**（群里刷屏的指令回应是噪音）；
+   *   · **留痕**：`bindings-audit.jsonl` 记一行（谁、何时、哪个群、UUID 前 8 位），
+   *     ★ **绝不记码本身**（审计不含秘密，与 `memory-audit.mjs` 同一条纪律）；
+   *   · **失败话术**：一句极短的话，不吵、不重复、不猜（群是公共场合）。
+   *
+   * @returns {Promise<{matched: false} | {matched: true, ok: boolean, text: string}>}
+   */
+  async #handleBindLocalCommand({ text, kind, peerId, senderId }) {
+    if (!looksLikeBindCommand(text)) return { matched: false }
+    const parsed = parseBindCommand(text)
+    // ★ 形状像 `/绑定xxx` 这种（带了别的字）**不命中** ⇒ 照常走普通聊天。
+    //   往窄了判是刻意的：误吞一条闲聊 = "机器人不理我"，而漏判只是回到普通聊天。
+    if (!parsed.hit) return { matched: false }
+
+    const workspace = this.config?.dsh?.workspace
+    const peerKey = `${kind}:${peerId}`
+
+    // ── ① 权限与范围（**先判，再碰任何盘上状态**）──────────────────────────
+    if (parsed.kind === 'unbind') {
+      // 解绑：管理员专用（控制台 / 管理员私聊 / 群里 @）。
+      // ★ 用 `roster.decide` 的结论，**不看群内角色**（那条安全边界见 roster.mjs）。
+      const verdict = this.roster?.decide?.({ kind, peerId, senderId }) ?? { respond: false, tier: '' }
+      if (String(verdict.tier ?? '') !== 'admin') {
+        this.log(`🔗 [bind] 有人发了 /解绑 但不是管理员（${peerKey}）⇒ 按普通聊天处理，不执行也不解释`)
+        return { matched: false }
+      }
+      const r = unbindByName({ workspace, name: parsed.target, by: `admin:${senderId}` })
+      const msg = r.ok
+        ? `解绑了：${String(r.name || r.uuid).slice(0, 32)}（QQ ${r.qqId}）`
+        : '没有这条绑定（我按游戏名和 QQ 号都找过一遍）—— 什么都没改。'
+      this.log(`🔗 [bind] 解绑（${peerKey}·admin）目标「${parsed.target.slice(0, 24)}」⇒ ${r.ok ? '成功' : `失败(${r.why})`}`)
+      await this.#safeSend(kind, peerId, msg)
+      return { matched: true, ok: r.ok, text: msg }
+    }
+
+    // `/绑定` 只认**群**：那正是设计文档定下的入口（私聊是 fail-closed，
+    // 为绑定去开私聊白名单等于把门开着）。
+    if (kind !== 'group' || !this.roster?.isGroupAllowed?.(peerId)) {
+      // ★★ 私聊里不是"当作普通聊天"就完事 —— 那会让**模型**去回答一条绑定指令，
+      //   而它只会编一套流程出来（绑定这条路压根不在私聊里）。所以给一句
+      //   **确定性**的指路，并且**一次模型调用都不产生**。
+      // ★ 前提是这个人本来就在名单里：名单外的人**什么都不回**（fail-closed，
+      //   与"群里不回、私聊只回一句统一话术"完全一致）。
+      if (kind === 'private') {
+        const v = this.roster?.decide?.({ kind, peerId, senderId }) ?? { respond: false }
+        if (v.respond) {
+          const msg =
+            '绑定要在**群里**做：在机器人所在的群里发 `/绑定` 拿一个 6 位码，再发 `/绑定 <码>`。' +
+            '私聊这条路是关着的（也不打算开）。'
+          this.log(`🔗 [bind] ${peerKey} 在私聊里发绑定指令 ⇒ 给了一句确定性指路（不调模型）`)
+          await this.#safeSend(kind, peerId, msg)
+          return { matched: true, ok: false, text: msg }
+        }
+      }
+      this.log(`🔗 [bind] ${peerKey} 发了 /绑定 但这里不是"已允许的群" ⇒ 当作普通聊天`)
+      return { matched: false }
+    }
+    if (!senderId) return { matched: false }
+
+    // 一台都没开游戏内对话时，如实说清（否则使用者会以为绑上就能用）
+    const chatty = (Array.isArray(this.config?.servers) ? this.config.servers : []).filter(
+      (s) => s && s.gameChat === true && s.enabled !== false,
+    )
+    if (chatty.length === 0 && parsed.kind === 'issue') {
+      const msg = '绑定先不急：现在**没有任何一台服务器**打开「游戏内对话」（`servers[].gameChat`）。打开之后再用这条指令。'
+      await this.#safeSend(kind, peerId, msg)
+      return { matched: true, ok: false, text: msg }
+    }
+
+    // ── ② 取码 ────────────────────────────────────────────────────────────
+    if (parsed.kind === 'issue') {
+      const r = issueCode({ workspace, qqId: senderId, chatKey: peerKey })
+      if (!r.ok) {
+        const msg = `取码失败（${r.why}）—— 请稍后再试。`
+        await this.#safeSend(kind, peerId, msg)
+        return { matched: true, ok: false, text: msg }
+      }
+      // ★ 回应发在**群里**（`peerKey` 就是那个群）—— 设计文档 §5.4 的原文是
+      //   「QQ 侧那条是**群内只回发起人**」：意思是**只针对他回一条**，
+      //   不是"向全群播报"，也不是"改成私聊"（私聊是 fail-closed 的门，玩家进不来）。
+      // ★★ 由此带来一条**必须写在明处的代价**（§5.6 全节都在讲它）：
+      //   **码在群里是所有人可见的** ⇒ 同群的人有机会抢先提交。
+      //   缓解办法有三样，都在实现里：**一次性** + **5 分钟 TTL** +
+      //   **绑定真的成立时给那个 UUID 本人 `tellraw` 确认**（抢绑藏不住）。
+      //   想把这条路堵死不是"在这里假装它私密"，而是加第二因子（需要服务端插件，
+      //   已按用户裁决留作可选硬化项，不进 v1）。
+      const mins = Math.max(1, Math.round((r.until - Date.now()) / 60000))
+      const msg =
+        `绑定码：\`${r.code}\`（${mins} 分钟内有效、只能用一次）。\n` +
+        `把它发回本群：\`/绑定 ${r.code}\` —— 然后去游戏里说一句话，绑定才算真的成立。`
+      this.log(`🔗 [bind] 给 ${peerKey} 出了一张绑定码（码**不进日志**，${mins} 分钟内有效）`)
+      await this.#safeSend(kind, peerId, msg)
+      return { matched: true, ok: true, text: msg }
+    }
+
+    // ── ③ 提交码 ──────────────────────────────────────────────────────────
+    if (parsed.kind === 'redeem') {
+      const r = redeemCode({ workspace, qqId: senderId, code: parsed.code, chatKey: peerKey })
+      if (!r.ok) {
+        const msg = '这个码现在不能用（不存在、已过期、或者已经被用过了）。发 `/绑定` 重新拿一个。'
+        this.log(`🔗 [bind] ${peerKey} 提交的码不可用（${r.why}）—— 码本身不记`)
+        await this.#safeSend(kind, peerId, msg)
+        return { matched: true, ok: false, text: msg }
+      }
+      const msg =
+        '收到，资格已经生效。**最后一步在游戏里**：进服后随便说一句带唤醒词的话，' +
+        '我会在那个 UUID 上把绑定落实，并单独告诉你一声。'
+      this.log(`🔗 [bind] ${peerKey} 的绑定资格已生效（等游戏内发言落实）`)
+      await this.#safeSend(kind, peerId, msg)
+      return { matched: true, ok: true, text: msg }
+    }
+
+    return { matched: false }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 0.3.2 P3：游戏内对话（读控制台 → 绑定 → 模型 → `say` / `tellraw`）
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // 三条设计纪律（设计文档 §5.3 / §5.4 / §5.5），改这里之前先读：
+  //   ① **未绑定 = 不能对话**，而且它的话**不进模型**（零成本）：只给本人一条
+  //      `tellraw` 说明怎么绑，且**每次进服最多一次**（刷屏的提示等于没有提示）；
+  //   ② **未绑定提醒与绑定回执走 `tellraw`（只给本人）**，普通回复走公屏 `say`；
+  //   ③ **任何进入游戏的内容都必须过隐私闸** —— 那一条不用在这里做：它在上游
+  //      （`#runTurn` 里、`#deliver` 之前），游戏通道与 QQ 通道**共用同一道门**。
+
+  /** `serverId:玩家名` —— 两张内存索引（已提示过 / 已知 UUID）共用的键。 */
+  #gameKey(serverId, name) {
+    return `${String(serverId ?? '')}:${String(name ?? '')}`
+  }
+
+  /**
+   * 收到一条游戏内事件（`chat` / `join` / `leave` / `uuid` / `onlineOnly`）。
+   * ★ 永不抛（调用方是读日志的循环，抛了会连累后面所有人的话）。
+   */
+  async #onGameEvent(server, event) {
+    const sid = String(server?.id ?? '')
+    const name = String(event?.name ?? '')
+    if (!sid || !name) return
+    const key = this.#gameKey(sid, name)
+    const workspace = this.config?.dsh?.workspace ?? ''
+
+    if (event.kind === 'uuid') {
+      // ★ `UUID of player X is …`：玩家**一登录就写**（比 `list uuids` 更早更可靠）
+      this.#gameUuids.set(key, String(event.uuid ?? '').toLowerCase())
+      return
+    }
+    if (event.kind === 'join') {
+      // ★ 进服 = 重置"已提示过"，于是**每次进服最多提示一次**这条纪律成立
+      this.#gameReminded.delete(key)
+      const known = lookupByName(workspace, name)
+      if (known?.uuid) this.#gameUuids.set(key, known.uuid)
+      return
+    }
+    if (event.kind === 'leave') {
+      this.#gameReminded.delete(key)
+      return
+    }
+    if (event.kind !== 'chat') return // `onlineOnly`（死亡/成就）不产生任何行为
+
+    try {
+      // ★ 把结果**返回出去**（不只是 await）：这一条链的输入是"服务端的一行日志"，
+      //   离线测试唯一能观察到它的地方就是这个返回值 —— 吞掉返回值等于让
+      //   "游戏内说话 → 模型 → 公屏"这条路又变回"只能靠真机验"。
+      return await this.#onGameChat(server, event)
+    } catch (error) {
+      this.log(`❌ [game-chat] 处理「${name}」的发言时抛异常（已吞掉，其它人照常）：${error?.stack ?? error}`)
+      return { handled: false, reason: 'error', error: String(error?.message ?? error) }
+    }
+  }
+
+  /**
+   * 一条游戏内发言该怎么处理。
+   *
+   * 顺序（**不能换**）：
+   *   ① 解析 UUID（内存索引 → 绑定表里的名字）；
+   *   ② 未绑定 ⇒ 看 QQ 侧有没有"刚绑定过的资格"⇒ 成立就**当场写死映射**；
+   *   ③ 仍未绑定 ⇒ 提示（每次进服一次）或问"你是哪一个"；
+   *   ④ 已绑定 ⇒ 权限判定（**按那个 QQ**）⇒ 唤醒判定（与 QQ 侧**共用关键词表**）⇒ 模型；
+   *   ⑤ 回复走 `say` 公屏（`#deliverToGame`）。
+   */
+  async #onGameChat(server, event) {
+    const sid = String(server?.id ?? '')
+    const name = String(event.name ?? '')
+    const text = String(event.text ?? '')
+    const workspace = this.config?.dsh?.workspace ?? ''
+    const key = this.#gameKey(sid, name)
+
+    // ① UUID
+    let uuid = this.#gameUuids.get(key) ?? null
+    if (!uuid) {
+      const known = lookupByName(workspace, name)
+      if (known?.uuid) {
+        uuid = known.uuid
+        this.#gameUuids.set(key, uuid)
+      }
+    }
+
+    // ② + ③ 绑定状态
+    let bound = uuid ? lookupByUuid(workspace, uuid) : null
+    const pending = pendingQualifications(workspace)
+    const decision = decideGameChat({
+      name,
+      uuid,
+      bound,
+      pending,
+      reminded: this.#gameReminded.has(key),
+    })
+
+    if (decision.action === 'bind' && decision.qqId) {
+      const r = bindUuid({
+        workspace,
+        uuid,
+        name,
+        qqId: decision.qqId,
+        // 审计里记"资格是从哪个群来的"（`pendingQualifications` 带回来的是群会话键）
+        chatKey: String(pending[0]?.chatKey ?? ''),
+        by: 'game-speech',
+      })
+      if (!r.ok) {
+        this.log(`🔗 [bind] 「${name}」的绑定没写进去（${r.why}）—— 下一次发言会再试一次`)
+      } else {
+        // ★★★ **抢绑藏不住**（设计文档 §5.6 档 A 的兜底）：绑定真的成立时，
+        //   立刻给**那个 UUID 本人**一条只给他看的确认。
+        //   ⚠️ 特意**不写 QQ 号**：设计文档 §5.5 的边界是"服务端只拿到'绑定了没有'，
+        //   拿不到 QQ 号"。要查是谁绑的，管理员看留痕/绑定表。
+        const extra = r.replaced || r.stolenFrom ? '（这条覆盖了原来的一条绑定，已留痕）' : ''
+        await this.#gameTellraw(
+          server,
+          name,
+          `绑定成立：这个游戏身份已经和一个 QQ 号绑在一起了${extra}。` +
+            '如果这不是你做的，请立刻找管理员 —— 每次绑定变更都会留下记录。',
+          'yellow',
+        )
+        this.log(
+          `🔗 [bind] 「${name}」（UUID ${shortUuid(uuid)}…）已绑到 QQ ${decision.qqId}` +
+            `${r.replaced ? `｜覆盖了原来的 QQ ${r.replaced.qqId}` : ''}` +
+            `${r.stolenFrom ? `｜该 QQ 原来绑的是 UUID ${shortUuid(r.stolenFrom.uuid)}…` : ''}`,
+        )
+        bound = lookupByUuid(workspace, uuid)
+      }
+    }
+
+    if (!bound) {
+      if (decision.action === 'remind' || decision.action === 'ask') {
+        if (decision.text) await this.#gameTellraw(server, name, decision.text, 'yellow')
+        this.#gameReminded.add(key)
+        if (decision.action === 'ask') {
+          this.log(`🔗 [bind] 「${name}」说话时有 ${pending.length} 份待绑定资格 ⇒ **不猜**，已提示他重新取码`)
+        }
+      }
+      return
+    }
+
+    // ④ 权限：**按绑定的那个 QQ** 判（与 QQ 侧 fail-closed 完全一致）
+    const qqId = String(bound.qqId ?? '')
+    const verdict = this.roster?.decide?.({ kind: 'private', peerId: qqId, senderId: qqId }) ?? {
+      respond: false,
+      reason: 'no-roster',
+      tier: '',
+    }
+    if (!verdict.respond) {
+      if (!this.#gameReminded.has(key)) {
+        this.#gameReminded.add(key)
+        await this.#gameTellraw(
+          server,
+          name,
+          '你的绑定没问题，但那个 QQ 不在机器人的可用名单里 —— 现在还不能在这里跟我说话。让管理员把那个 QQ 加进名单就行。',
+          'yellow',
+        )
+      }
+      this.log(`🔗 [bind] 「${name}」（QQ ${qqId}）不在名单里 ⇒ 游戏内不参与（${verdict.reason ?? '?'}）`)
+      return
+    }
+
+    // 唤醒判定：与 QQ 侧**共用关键词表**（设计文档 §5.3）。
+    // ★ 这里把 `groupEnabled` 显式置真：游戏内对话由 `servers[].gameChat` 这个
+    //   **自己的开关**把关，不该再被"群聊总开关"连坐（那会让"我只想让它
+    //   在游戏里说话"变成必须同时打开群聊）。
+    const wake = decideTrigger({
+      kind: 'group',
+      text,
+      mentioned: false,
+      raw: text,
+      selfId: this.onebot?.selfId ?? '',
+      keywords: this.wakeKeywords ?? this.config.trigger?.keywords,
+      switches: { ...(this.config.trigger ?? {}), groupEnabled: true },
+    })
+    if (!wake.respond) return
+
+    this.log(`[game-chat] 唤醒（${wake.reason}${wake.hit ? `:${wake.hit}` : ''}）「${name}」→ 按 QQ ${qqId} 跑一轮`)
+
+    // ⑤ 跑一轮模型，回复**直接发到公屏**
+    return this.#runTurn({
+      // ★★ 会话与权限**都按那个 QQ 走**（`private:<QQ号>`）：游戏内的话与他在 QQ
+      //   私聊里的话落进**同一段记忆、同一个会话** —— 那正是"绑定"要买到的东西。
+      //   ⚠️ 代价（必须如实说，别以为界面上看不出来）：控制台的会话列表里，
+      //   这一轮会以**那个人的 QQ 私聊**形式留下痕迹（`#runTurn` 里的
+      //   `#mirrorThinking` 会写一条思考记录）。之所以不另开一个 `game:` 会话键：
+      //   那会把同一个人的记忆劈成两半（QQ 里说的和游戏里说的互相不知道），
+      //   而"绑定"的全部意义就是"这两边是同一个人"。★ 代价是**显示层**的：
+      //   界面上它看起来像一次 QQ 私聊 —— 所以在那里补一句来源会更好，
+      //   但那属于控制台会话展示的活（已记在 PROJECT.json 的待办里）。
+      kind: 'private',
+      peerId: qqId,
+      senderId: qqId,
+      tier: verdict.tier,
+      rendered: { text, mentioned: false, replyTo: null, imageRefs: [], videoRefs: [] },
+      reason: wake.reason,
+      deliverTo: { channel: 'game', server, playerName: name },
+      // ★ 来源标注整条替换：不这么做，模型会以为在一对一私聊里，
+      //   而它说的每一句都会**当场印在全服公屏上**（见 channel-prompt.mjs）。
+      channelOrigin:
+        `来自 Minecraft 服务器「${String(server?.name ?? sid)}」的**公屏**，` +
+        `说话的是游戏里的玩家 ${name}（已绑定到 QQ ${qqId}）。` +
+        '★ 你这一轮的回复会**直接发到那个公屏上 —— 全服所有人都看得见**，' +
+        '所以不要说出任何只该让一个人知道的内容（地址、号码、记忆原文、私下的约定等）',
+    })
+  }
+
+  /**
+   * 给**某个玩家本人**发一条 `tellraw`（只给他看）。
+   *
+   * ★ 名字**必须**过 `PLAYER_NAME_RE`（`buildTellraw` 里判）—— 那是防**选择器注入**的
+   *   唯一一道门：能塞进 `@` 的名字会让"只给本人"变成"给全服广播"。
+   * ★ 永不抛：失败只记日志（增强路径）。
+   */
+  async #gameTellraw(server, player, text, color = '') {
+    const built = buildTellraw({ player, text, color })
+    if (!built.ok) {
+      this.log(`⚠️ [game-chat] 这条 tellraw 没发出去（${built.why}）—— 内容：${String(text ?? '').slice(0, 60)}`)
+      return { ok: false, why: built.why }
+    }
+    return this.#runGameCommand(server, built.command, 'tellraw')
+  }
+
+  /**
+   * 跑一条**游戏内回应通道**的命令（`say` / `tellraw`）。
+   *
+   * ★★ 它**不经过 `command-gate.mjs` 的管理员闸** —— 那道闸管的是"从 QQ 下任意
+   *   控制台命令"（op 级别）。这里是**固定形状的两条发言通道**，参数由模板生成、
+   *   命令名写死，玩家名与正文都过校验 ⇒ 不是同一种风险。
+   *   （这一点必须写在明处：拿掉管理员闸不等于没有闸，闸在这里是"命令形状"。）
+   * ★ 失败只记账不抛：说不上话不是致命错误，但**必须留痕**。
+   */
+  async #runGameCommand(server, command, what = 'say') {
+    try {
+      // ★ 测试注入口（见 `setGameConsoleForTest`）：只换执行器，不换命令的构造。
+      const r =
+        typeof this.#testGameConsole === 'function'
+          ? await this.#testGameConsole({ server, command, what })
+          : await runConsoleCommand({
+              server,
+              command,
+              workspace: this.config?.dsh?.workspace ?? '',
+            })
+      if (!r.ok) {
+        this.log(`❌ [game-chat] ${what} 没发出去（${r.why ?? '未知原因'}）—— 「${String(server?.name ?? server?.id ?? '?')}」`)
+        return { ok: false, why: r.why ?? '未知原因' }
+      }
+      return { ok: true }
+    } catch (error) {
+      this.log(`❌ [game-chat] ${what} 抛异常（已吞掉，机器人照常工作）：${error?.message ?? error}`)
+      return { ok: false, why: String(error?.message ?? error) }
+    }
+  }
+
+  /**
+   * 把一轮回复发进游戏（**公屏 `say`**，设计文档 §5.4）。
+   *
+   * ── 为什么**不直接复用 `#deliver`**（这条边界是刻意划的，改之前先读）──────
+   * `#deliver` 是**QQ 传输形状**的：它发**表情包**、发 QQ **内置脸**、挂
+   * `[reply:#id]` **引用气泡**、按 QQ 的单条上限（1500 字）硬切，还往
+   * **投递账本**里写一份"这条 QQ 回复发到哪了"。这些东西**在游戏里一样都不存在** ——
+   * 把 `#deliver` 整个搬过来，只会凭空多出四件游戏里没有的东西，并且让
+   * "QQ 那条路"与"游戏那条路"从此必须一起改。
+   *
+   * ── 共用的是**上游**（所以没有分叉出第二套行为）────────────────────────────
+   * 模型那一轮、终检门（内部泄漏）、**隐私闸门**、`[reply:]`/`[sticker:]` 标记剥离、
+   * 兜底话术**全部在 `#runTurn` 里、在调用本方法之前**已经跑过（见那里的位置纪律）。
+   * 这里只负责"把已经审过的那串字，按游戏的方式送出去"，并**共用同一份拟人延迟**。
+   *
+   * ── 投递账本为什么不用 ────────────────────────────────────────────────────
+   * 账本是"QQ 那一侧丢没丢"的凭据；游戏这一侧的凭据是**服务端控制台自己的日志**
+   * （我们发出去的 `say` 会原样落在里面）。多记一份只会多一个可能与现实不符的来源。
+   */
+  async #deliverToGame(server, playerName, answer, { turnStartedAt = null } = {}) {
+    const text = String(answer ?? '')
+    if (!text.trim()) return
+
+    // ── 拟人延迟（与 QQ 侧**同一套** `computeReplyDelay`）────────────────────
+    // ★ 为什么游戏里也要延迟：公屏上"秒回一长段"同样一眼是机器。
+    //   而且**感知下限**这件事在两边是一回事（总时长≈档位目标）。
+    const elapsedMs =
+      typeof turnStartedAt === 'number' && Number.isFinite(turnStartedAt)
+        ? Math.max(0, Date.now() - turnStartedAt)
+        : undefined
+    const { delayMs } = computeReplyDelay({
+      textLength: text.length,
+      humanize: this.config.humanize,
+      ...(elapsedMs === undefined ? {} : { elapsedMs }),
+    })
+    if (delayMs > 0) {
+      this.log(`[game-chat] 拟人延迟 ${Math.round(delayMs / 1000)} 秒后再发到公屏（回复 ${text.length} 字）`)
+      await this.#sleepUnlessClosing(delayMs)
+    }
+
+    // ── 分片：游戏只按**长度**切（公屏信息密度低，分太多条只会刷屏）──────────
+    const chunks = chunkForSay(text)
+    if (chunks.length === 0) return
+
+    let sent = 0
+    for (const chunk of chunks) {
+      const built = buildSay({ text: chunk })
+      if (!built.ok) {
+        this.log(`⚠️ [game-chat] 这一片没能构造出 say 命令（${built.why}）`)
+        continue
+      }
+      const r = await this.#runGameCommand(server, built.command, 'say')
+      if (!r.ok) {
+        // ★ 发不出去 = 对方以为"它没理我"。**必须留痕**，且**绝不重发、绝不重跑模型**
+        //   （同 H17 那三条纪律：重跑会再花一次钱，还可能给出与刚才不同的答案）。
+        this.log(
+          `❌ [game-chat] 回复没能发到「${String(server?.name ?? server?.id ?? '?')}」的公屏` +
+            `（已发 ${sent}/${chunks.length} 片）：${r.why} —— **不重发、更不会重跑模型**`,
+        )
+        return { ok: false, sent, total: chunks.length }
+      }
+      sent += 1
+    }
+    this.log(
+      `[game-chat] 已回复「${String(server?.name ?? server?.id ?? '?')}」公屏` +
+        `（${text.length} 字，${sent} 条；玩家 ${String(playerName ?? '')}）`,
+    )
+    return { ok: true, sent, total: chunks.length }
+  }
+
+  /**
    * 起（或重启）服务器监测循环。
    *
    * ★ 抽出来是为了让"改了服务器列表"能**即时生效**（`reloadServers()`）：
@@ -1723,6 +2251,35 @@ export class Bridge extends EventTarget {
     } catch (error) {
       // 监测起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
       this.log(`❌ [servers] 服务器监测启动失败（机器人照常工作）：${error?.message ?? error}`)
+    }
+  }
+
+  /**
+   * 起"读游戏内聊天"的循环（0.3.2 P3）。
+   *
+   * ★ 只有**显式打开了 `servers[].gameChat`** 才建 —— 这与"危险的能力默认关"
+   *   同一条口径（它会**代表玩家对模型说话**，而且要读控制台日志）。
+   *   一台都没开 ⇒ **不起定时器、不读任何文件**。
+   * ★ 它与 `#startServerLoop` 是**两个循环**（节奏差一个数量级，见 `game-chat.mjs` 文件头）。
+   */
+  #startGameChatLoop() {
+    try {
+      this.#gameChat?.stop?.()
+      this.#gameChat = null
+      const servers = Array.isArray(this.config.servers) ? this.config.servers : []
+      if (!this.config.dsh?.workspace) return
+      if (!servers.some((s) => s && s.gameChat === true && s.enabled !== false)) return
+      this.#gameChat = createGameChatLoop({
+        workspace: this.config.dsh.workspace,
+        servers: () => (Array.isArray(this.config.servers) ? this.config.servers : []),
+        pollMs: this.config.gameChatPollMs,
+        log: this.log,
+        onEvent: (server, event) => this.#onGameEvent(server, event),
+      })
+      this.#gameChat.start()
+    } catch (error) {
+      // 游戏内对话起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
+      this.log(`❌ [game-chat] 游戏内对话启动失败（QQ 侧照常工作）：${error?.message ?? error}`)
     }
   }
 
@@ -1984,6 +2541,9 @@ export class Bridge extends EventTarget {
         // ★ 启动接管：桥接启动时要不要管这台（界面显示用）。
         //   它与"点一下就启动"是两件事 —— 界面**不做**启动按钮（见 CONFIG-UI.md §2.12）。
         manageOnStart: s.manageOnStart === true,
+        // ★ 0.3.2 P3：游戏内对话（界面上的开关 + 说明）。
+        //   ★ 它决定"读不读这台服的控制台、听不听里面的人说话"，所以界面必须能看见。
+        gameChat: s.gameChat === true,
         failThreshold: s.failThreshold,
         rules: s.rules ?? {},
         monitor,
@@ -2016,6 +2576,50 @@ export class Bridge extends EventTarget {
    */
   onServerEventForTest(row) {
     return this.#onServerEvent(row)
+  }
+
+  /**
+   * **游戏内事件**的测试入口（0.3.2 P3）。
+   *
+   * ★ 为什么必须有它：那条链的输入是**服务端控制台的一行**，而真造出那一行
+   *   要求真的拉起一台 Minecraft 服务端 —— 那会让"游戏内对话"这条接线
+   *   **永远只能靠真机验**，而本项目最贵的缺陷恰好是接线（先例：任务段那次
+   *   "从未注入过"的静默事故，124 项纯函数断言一条都没抓到）。
+   * ★ 它**不是**给产品代码调用的（生产路径由 `#startGameChatLoop` 的 onEvent 触发）；
+   *   行为与那条路径**完全一致**（同一个私有方法）。
+   */
+  onGameEventForTest(server, event) {
+    return this.#onGameEvent(server, event)
+  }
+
+  /** 绑定指令通道的测试入口（0.3.2 P3）—— 同上，走的是同一个私有方法。 */
+  handleBindLocalCommandForTest(o) {
+    return this.#handleBindLocalCommand(o)
+  }
+
+  /** 游戏内对话的循环状态（只读；给巡检与排障用）。 */
+  gameChatStats() {
+    return {
+      running: Boolean(this.#gameChat?.isRunning?.()),
+      ...(this.#gameChat?.stats?.() ?? {}),
+      reminded: this.#gameReminded.size,
+      knownUuids: this.#gameUuids.size,
+    }
+  }
+
+  /**
+   * 绑定表（只读；给巡检与界面用）。
+   * ★ UUID 只给前 8 位（`uuid8`）—— 完整 UUID 是敏感数据，界面上没必要给全。
+   */
+  bindingsForApi() {
+    const workspace = this.config?.dsh?.workspace ?? ''
+    const rows = listBindings(workspace)
+    return {
+      ok: true,
+      count: rows.length,
+      bindings: rows.map((r) => ({ uuid8: r.uuid8, qqId: r.qqId, name: r.name, at: r.at })),
+      pending: pendingQualifications(workspace).map((p) => ({ qqId: p.qqId, at: p.at, until: p.until })),
+    }
   }
 
   /**
@@ -2543,6 +3147,39 @@ export class Bridge extends EventTarget {
 
     const rendered = renderSegments(payload.message, { selfId: this.onebot.selfId })
 
+    // ── ③-0 绑定指令通道：`/绑定` / `/绑定 <码>` / `/解绑 <目标>`（0.3.2 P3）────
+    //
+    // ★★★ 位置是**刻意的，而且与 `/mc` 那条**不一样**（设计文档 §5.2 写明）：
+    //   · 必须在**唤醒判定之前**：玩家在群里发 `/绑定` 是**不会 @ 机器人**的
+    //     （谁会在粘贴一个 6 位码的时候去 @ 它），而 `decideTrigger` 对"没 @ 也没
+    //     命中关键词"的群消息**直接 return** ⇒ 放在它后面等于**这条通道根本不存在**，
+    //     而且一声不响（最坏的一种失效）；
+    //   · 在**语义唤醒闸门之前**：闸门可能判"沉默"，于是"玩家来绑定却被判沉默，码白发了"；
+    //   · 在**群白名单之后**：判定在 `#handleBindLocalCommand` 里面（复用
+    //     `roster.isGroupAllowed`，**不新造名单**），所以这里先做一次纯同步形状判定。
+    // ★ 形状判据是**纯同步**的：普通消息不产生额外 `await`
+    //   （理由同 `looksLikeMcCommand`，见它的注释）。
+    // ★ 命中即 `return`：这一轮**一次模型调用都不产生**。
+    // ★★ 它还刻意排在**身份核实 / 记镜像 / 记语料库之前** —— 那三件事都会把
+    //   **消息原文**留在盘上或界面上，而绑定码的纪律是"用过即作废、别到处留"。
+    //   排在它们之后不会报错，只会让那张码多躺在两个不必要的文件里。
+    if (looksLikeBindCommand(rendered.text)) {
+      try {
+        const local = await this.#handleBindLocalCommand({
+          text: rendered.text,
+          kind,
+          peerId,
+          senderId,
+        })
+        if (local.matched) {
+          return { handled: true, reason: 'bind-command', peerId, senderId }
+        }
+      } catch (error) {
+        // 绑定通道炸了**不该**让这条消息消失 —— 留痕后继续走普通聊天
+        this.log(`❌ [bind] 绑定指令通道抛异常（这条按普通聊天处理）：${error?.message ?? error}`)
+      }
+    }
+
     // ③-前 身份核实（**从协议端取真实昵称/群内角色**）
     //
     // ★ 为什么放在"记镜像"之前：镜像要带上"这句话是谁说的"，界面上才能
@@ -2597,6 +3234,8 @@ export class Bridge extends EventTarget {
       atTargets: (rendered.text.match(/@[^\s@]+/g) ?? []).join(','),
       replyToId: rendered.replyTo,
     })
+
+    // （绑定指令通道见上面「③-0」—— 它刻意排在**记镜像/记语料库之前**）
 
     // ② 唤醒判定
     const decision = decideTrigger({
@@ -3495,7 +4134,7 @@ export class Bridge extends EventTarget {
     }
   }
 
-  async #runTurn({ kind, peerId, senderId, tier, rendered, reason, identity = null, imageRefs = [], messageId = null, seq = 0 }) {
+  async #runTurn({ kind, peerId, senderId, tier, rendered, reason, identity = null, imageRefs = [], messageId = null, seq = 0, deliverTo = null, channelOrigin = '' }) {
     const chatKey = `${kind}:${peerId}`
     // ★★ 本轮的起算点（回应速度档位用）。
     //
@@ -3762,6 +4401,8 @@ export class Bridge extends EventTarget {
               chatKey,
               // 消息 id（H6）：提示词里要给出它，模型才可能写 `[reply:#id]`
               messageId,
+              // ★ 游戏内那条通道的来源标注（空串 ⇒ 逐字不变，见 channel-prompt.mjs）
+              channelOrigin,
             }),
           },
         ]
@@ -4054,7 +4695,9 @@ export class Bridge extends EventTarget {
       // ★ 两条触发的关系：模型主动写的标签优先（`requestedLabel` 已经过词表校验）；
       //   模型没写才让桥接自主补。**同一轮最多一张**（配额里还有 maxPerTurn 兜底）。
       let sticker = null
-      if (!faceId && this.config?.skills?.sticker?.enabled !== false) {
+      // ★ `!deliverTo`：游戏内那条通道**发不了表情包**（`say` 只有文字）——
+      //   不挡这一下的话，一轮游戏内回复会**白扣一次表情配额**，而图哪儿都没去。
+      if (!faceId && !deliverTo && this.config?.skills?.sticker?.enabled !== false) {
         const picked = this.#decideSticker({
           chatKey,
           answer,
@@ -4073,13 +4716,21 @@ export class Bridge extends EventTarget {
       }
 
       // 登记进 in-flight：收尾时要等它发完，否则延迟中的回复会被掐死
-      const delivering = this.#deliver(kind, peerId, answer, result, {
-        replyTo,
-        faceId,
-        sticker,
-        // ★ 档位要靠它算"已经花了多久"（见 #runTurn 顶部的 turnStartedAt）
-        turnStartedAt,
-      })
+      const delivering =
+        deliverTo?.channel === 'game'
+          ? // ★★ 0.3.2 P3：游戏内那条通道**不走 `#deliver`**。
+            //   理由写在 `#deliverToGame` 上（`#deliver` 是 QQ 传输形状的：
+            //   表情包 / 内置脸 / `[reply:]` / QQ 单条上限 —— 搬进游戏只会
+            //   凭空多出几件游戏里根本不存在的东西）。共用的是**上游**：
+            //   模型那一轮、终检门、**隐私闸门**都在上面，一条都不会漏。
+            this.#deliverToGame(deliverTo.server, deliverTo.playerName, answer, { turnStartedAt })
+          : this.#deliver(kind, peerId, answer, result, {
+              replyTo,
+              faceId,
+              sticker,
+              // ★ 档位要靠它算"已经花了多久"（见 #runTurn 顶部的 turnStartedAt）
+              turnStartedAt,
+            })
       this.#inFlight.add(delivering)
       try {
         await delivering
@@ -4099,7 +4750,14 @@ export class Bridge extends EventTarget {
             '**不重发、更不会重跑模型**（重跑会再花一次模型调用，还可能给出与刚才不同的答案）',
         )
         settle()
-        await this.#safeSend(kind, peerId, '⚠️ 我这边没能把回复发出去，你刚才那条可能没收到 —— 请再发一次。')
+        if (deliverTo?.channel === 'game') {
+          // ★ 通道是游戏时，**不能**用 `#safeSend` 去 QQ 私聊里解释 —— 那会把
+          //   "游戏里没收到"变成"QQ 里收到一条莫名其妙的私聊"。改走同一条游戏通道
+          //   （`#gameTellraw` 本身就是尽力而为、失败只记日志）。
+          await this.#gameTellraw(deliverTo.server, deliverTo.playerName, '⚠️ 我这边没能把话说到公屏上 —— 刚才那条可能没发出去。')
+        } else {
+          await this.#safeSend(kind, peerId, '⚠️ 我这边没能把回复发出去，你刚才那条可能没收到 —— 请再发一次。')
+        }
         return { handled: false, reason: 'send-failed', error: error?.message ?? String(error) }
       } finally {
         this.#inFlight.delete(delivering)
@@ -4475,6 +5133,9 @@ export class Bridge extends EventTarget {
       // ★ 出错只降级：某个技能的 promptSections() 抛错，只记一行日志并跳过它，
       //   绝不能让整个提示词装配失败 —— 那等于机器人彻底不说话。
       skillSections: this.#skillSections(),
+      // ★ 0.3.2 P3：游戏内那条通道把来源标注整条换掉（否则模型会以为在一对一私聊里，
+      //   而它说出去的每一句都会**当场印在服务器公屏上**）。空串 ⇒ 逐字不变。
+      channelOrigin: opts.channelOrigin ?? '',
       log: (m) => this.log(m),
       warn: (what, error) => this.#warnInjectOnce(what, error),
       sessionState: this.#sessionState,
