@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, workspaceFileUrl, type Conversation, type ConversationsResult } from '@/lib/api'
 import { InlineNote } from '@/components/common'
 import { cn } from '@/lib/utils'
-import { ImageOff, Loader2, MessageSquareOff, User, Users } from 'lucide-react'
+import { Gamepad2, ImageOff, Loader2, MessageSquareOff, User, Users } from 'lucide-react'
 import { CorpusSearch } from '@/sections/CorpusSearch'
 
 function fmtTime(ms: number): string {
@@ -100,6 +100,13 @@ function ThinkingBlock({ text, at }: { text: string; at: number }) {
   )
 }
 
+/** 通道类型的人话名字（会话列表与标题栏共用一处，免得两处漂）。 */
+function kindLabel(kind: string): string {
+  if (kind === 'group') return '群聊'
+  if (kind === 'game') return '游戏内对话'
+  return '私聊'
+}
+
 /**
  * 会话显示名：**优先用协议端核实到的名字**（群聊=群名，私聊=对方昵称），
  * 没有才退回号码。
@@ -109,8 +116,13 @@ function ThinkingBlock({ text, at }: { text: string; at: number }) {
  *
  * ⚠️ 核实不到时**只显示号码** —— 不猜、不拿 `用户<号码>` 之类拼出来的东西顶替。
  * 那会让使用者以为核实成功了。
+ *
+ * ★ 游戏内那条通道（`kind === 'game'`）的名字来自**我们自己的配置**
+ *   （「游戏内对话 · 主服」），`peerId` 是**服务器 id**（不是号码），
+ *   所以它不套用"名字（号码）"那套写法。
  */
 function peerName(c: Conversation): string {
+  if (c.kind === 'game') return c.name || c.peerId || c.chatKey
   const id = c.peerId || c.chatKey
   // `nameVerified !== true` 时 name 可能是空串或不可信，一律只用号码
   if (c.nameVerified === true && c.name) return `${c.name}（${id}）`
@@ -119,6 +131,7 @@ function peerName(c: Conversation): string {
 
 /** 列表里的短标题：名字最长，优先显示名字；只有号码时不显示"（号码）"括号。 */
 function peerShort(c: Conversation): string {
+  if (c.kind === 'game') return c.name || c.peerId || c.chatKey
   if (c.nameVerified === true && c.name) return c.name
   return c.peerId || c.chatKey
 }
@@ -255,7 +268,9 @@ export function ConversationsTab({
               <MessageSquareOff className="h-6 w-6" />
               还没有任何会话。
               <br />
-              有人给机器人发私聊后，这里就会出现。
+              有人给机器人发私聊/群消息后，这里就会出现；
+              <br />
+              游戏内的对话会单独出现在一个「游戏内对话」窗口里。
             </div>
           )}
           {convs.map((c) => (
@@ -271,6 +286,8 @@ export function ConversationsTab({
               <div className="flex items-center gap-1.5">
                 {c.kind === 'group' ? (
                   <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                ) : c.kind === 'game' ? (
+                  <Gamepad2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 ) : (
                   <User className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 )}
@@ -304,8 +321,8 @@ export function ConversationsTab({
                 <span className="font-medium">{peerShort(active)}</span>
                 <span className="ml-2 font-mono text-xs text-muted-foreground">{active.peerId}</span>
                 <span className="ml-2 text-xs text-muted-foreground">
-                  {active.kind === 'group' ? '群聊' : '私聊'} · {active.messageCount} 条
-                  {active.kind === 'group' && Object.keys(active.senders ?? {}).length > 0
+                  {kindLabel(active.kind)} · {active.messageCount} 条
+                  {active.kind !== 'private' && Object.keys(active.senders ?? {}).length > 0
                     ? ` · ${Object.keys(active.senders ?? {}).length} 位发言人`
                     : ''}
                 </span>
@@ -322,7 +339,7 @@ export function ConversationsTab({
                   ⚠️ 它**只搜当前打开的会话** —— 语料库里存着所有会话的消息，
                   不限定会话就等于把别的群/别人的私聊显示在这个页面上。 */}
               <CorpusSearch
-                kind={active.kind === 'group' ? 'group' : 'private'}
+                kind={active.kind === 'group' ? 'group' : active.kind === 'game' ? 'game' : 'private'}
                 peerId={String(active.peerId)}
                 demo={demo}
               />

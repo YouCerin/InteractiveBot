@@ -514,7 +514,7 @@ export const api = {
     return request<LogChunk>('GET', `/api/logs/stream${qs ? `?${qs}` : ''}`)
   },
   /** 本地语料检索。★★ **必须带会话**（缺了会 400 —— 那是故意的 fail-closed，不跨会话）。 */
-  corpusSearch: (q: { q: string; kind: 'private' | 'group'; peerId: string; limit?: number }) => {
+  corpusSearch: (q: { q: string; kind: 'private' | 'group' | 'game'; peerId: string; limit?: number }) => {
     const p = new URLSearchParams({ q: q.q, kind: q.kind, peerId: q.peerId })
     if (q.limit !== undefined) p.set('limit', String(q.limit))
     return request<CorpusResult>('GET', `/api/corpus/search?${p}`)

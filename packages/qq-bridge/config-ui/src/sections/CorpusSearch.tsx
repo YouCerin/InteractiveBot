@@ -21,13 +21,15 @@ import { cn } from '@/lib/utils'
  *    后端缺参数会直接 **400**，而这里**只允许搜当前打开的那个会话**。
  * ★ 字段叫 `preview`（**截断预览**，不是全文）：别把它当完整消息展示，
  *    所以这里对预览加一句说明，而不是假装它是全文。
+ * ★★ `kind` 还能是 `'game'`（0.3.2 收尾）：游戏内那条通道**单独一个窗口**，
+ *    它的消息也进语料库（`game:<服务器id>`）⇒ 这个框在那种窗口里**照常能搜**。
  */
 export function CorpusSearch({
   kind,
   peerId,
   demo = false,
 }: {
-  kind: 'private' | 'group'
+  kind: 'private' | 'group' | 'game'
   peerId: string
   demo?: boolean
 }) {

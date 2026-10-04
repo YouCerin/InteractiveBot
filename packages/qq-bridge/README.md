@@ -290,6 +290,8 @@ node mocks/verify-servers.mjs                 # ★★ 协议与状态机（255 
 #        （那种情况能确定他在跟它说话 —— 也照顾"桥接启动时他已在服里"的人）。
 #     ★★ 两条"门"的分工：**能不能说话**看**绑定**（不必再加私聊白名单）；
 #        **有多大权限**只看 `access.adminUsers` —— 非管理员在游戏里是**只读用户**。
+#     ★★ 控制台「对话」页里，游戏内的话是**单独一个窗口**（「游戏内对话 · 主服」，
+#        不再混进那个人的 QQ 私聊）；里面有玩家说的、它回公屏的、以及只发给本人的那些话。
 #     ⚠️ 游戏内那句是 `\mc bind`（**反斜杠**）—— 这是**实测**出来的：以 `/` 开头的输入会被
 #        Minecraft 当成"命令"，而我们的服务端上没注册过叫 mc 的命令 ⇒ 服务端只回玩家一句
 #        "Unknown command"，**而那一句不写进控制台日志** ⇒ 我们看不到。`\` 在游戏里只是
@@ -308,7 +310,7 @@ node src/index.mjs --servers                  # 顺带列出绑定表、还没�
 node tools/probe-tellraw.mjs                  # ★ 真机取证：两台通道（tellraw/say）在你这台服上到底通不通
 node tools/probe-tellraw.mjs --send           # ★ 再加一格：给在线玩家真发一条（会出现在他游戏里）
 node mocks/verify-bindings.mjs                # ★★ 绑定/码/tellraw 注入（136 项，不连网）
-node mocks/verify-game-wiring.mjs             # ★★★ 走完整桥接的接线（107 项：命中即零模型调用）
+node mocks/verify-game-wiring.mjs             # ★★★ 走完整桥接的接线（123 项：命中即零模型调用）
 
 # ⑤-b7 回到第 N 步
 #   ★ 三件如实说明（做不到的必须说清，否则就是个骗人的功能）：

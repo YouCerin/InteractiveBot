@@ -1256,8 +1256,10 @@ export function createApiHandler(deps) {
         const peerId = String(queryParam(req, 'peerId') ?? '').trim()
         const limit = Number(queryParam(req, 'limit')) || 20
         if (!q) return fail(400, '要搜什么？给一个 q 参数')
-        if ((kind !== 'private' && kind !== 'group') || !peerId) {
-          return fail(400, '检索必须指定会话：kind=private|group 且 peerId=QQ号或群号（不跨会话检索）')
+        // ★ `kind=game` 也放行（0.3.2 收尾）：游戏内那条通道单独一个窗口
+        //   （`game:<服务器id>`），它的消息同样进语料库 ⇒ 那个窗口里的"搜历史"要能用。
+        if ((kind !== 'private' && kind !== 'group' && kind !== 'game') || !peerId) {
+          return fail(400, '检索必须指定会话：kind=private|group|game 且 peerId=QQ号/群号/服务器id（不跨会话检索）')
         }
         try {
           return ok(searchCorpus({ query: q, chatKey: `${kind}:${peerId}`, limit }))

@@ -579,6 +579,83 @@ console.log('\n=== ⑯ 取码时记的那台服不见了 ⇒ 改成在别的服�
   await bridge.close({ timeoutMs: 200 })
 }
 
+console.log('\n=== ⑰ ★★★ 控制台预览里**单独一个「游戏内对话」窗口**（不混进那个人的 QQ 私聊）===')
+{
+  const { bridge, WS, gameCommands } = wiringBridge()
+  bridge.attach()
+  // ★ 先**不绑定**：进服那条提醒会进窗口（notice），顺便把它也验掉
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'join', name: PLAYER })
+  const afterJoin = bridge.listConversations().find((c) => c.chatKey === `game:${SERVER.id}`)
+  ok(Boolean(afterJoin), '★★★ 一进服就建出了 `game:forge1` 窗口（进服提醒把它带出来了）')
+  ok(
+    (afterJoin?.messages ?? []).some((m) => m.role === 'notice' && /还没绑定/.test(String(m.text))),
+    '★★ 进服提醒在窗口里记为 **notice**',
+  )
+  // 取码那条也是 notice（**只给他本人**的话）
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '\\mc bind' })
+  const withCode = bridge.listConversations().find((c) => c.chatKey === `game:${SERVER.id}`)
+  ok(
+    (withCode?.messages ?? []).filter((m) => m.role === 'notice').length >= 2,
+    '★★★ 绑定码那条也进了窗口（**只给他本人**的话照样看得见）',
+  )
+
+  // ★ 绑定之后再说一句 ⇒ 窗口里该有玩家那句与它回公屏那句
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
+
+  // ★ 那个人的 **QQ 私聊** 会话与**游戏内**窗口必须是两个
+  await bridge.handleEvent(privateMsg(ADMIN, '小鲸鱼 在吗'))
+  const convs = bridge.listConversations()
+  const game = convs.find((c) => c.chatKey === `game:${SERVER.id}`)
+  const priv = convs.find((c) => c.chatKey === `private:${ADMIN}`)
+  ok(Boolean(priv), '（对照）那个人的 QQ 私聊会话也在（各是各的）')
+  eq(game?.kind, 'game', '★ 它的 kind 是 `game`（界面据此显示 🎮 与「游戏内对话」）')
+  eq(game?.peerId, SERVER.id, '★ peerId 是**服务器 id**（不是 QQ 号）')
+  ok(
+    /游戏内对话 · 主服/.test(String(game?.name ?? '')),
+    '★★ 窗口名 = 「游戏内对话 · <服务器名>」（来自我们自己的配置，不是猜的）',
+    String(game?.name),
+  )
+  ok(
+    !convs.some((c) => c.chatKey === `private:${ADMIN}` && c.messages.some((m) => /游戏内|还没绑定/.test(String(m.text)))),
+    '★★★ 游戏内那条**没有**混进 QQ 私聊窗口',
+  )
+
+  // ★ 窗口里三样都要有：玩家说的、它回的公屏话、以及只发给本人的 notice
+  const roles = (game?.messages ?? []).map((m) => m.role)
+  ok(roles.includes('user'), '★★ 窗口里有**玩家说的那句**')
+  ok(roles.includes('bot'), '★★ 也有**它回公屏的那句**（否则看起来像"它没理人"）')
+  ok(roles.includes('notice'), '★★ 还有**只发给本人的那些话**（进服提醒/绑定码/绑定成功）')
+  const userMsg = (game?.messages ?? []).find((m) => m.role === 'user')
+  eq(userMsg?.senderName, PLAYER, '★★★ 说话人显示的是**游戏里的名字**（不是 QQ 号）')
+  eq(userMsg?.senderId, ADMIN, '★ 同时留着绑定的 QQ 号（可以用来核对是谁）')
+  ok(
+    (game?.messages ?? []).some((m) => m.role === 'notice' && new RegExp(`→ ${PLAYER}：`).test(String(m.text))),
+    '★★★ 私密那些记成「→ 玩家：正文」—— 它是**点对点**的，不是公屏发言，这个区别看得出',
+  )
+  void gameCommands
+  await bridge.close({ timeoutMs: 200 })
+}
+
+console.log('\n=== ⑱ 窗口里的"搜历史"是真的能搜到（游戏内消息也进语料库）===')
+{
+  const { bridge, WS } = wiringBridge()
+  bridge.attach()
+  bindUuid({ workspace: WS, uuid: UUID, name: PLAYER, qqId: ADMIN, by: 'test' })
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 记住铁傀儡农场' })
+  const r = bridge.searchHistory({ chatKey: `game:${SERVER.id}`, query: '铁傀儡', limit: 5 })
+  ok(r.ok, '★ 语料库可用（没关）')
+  // ★ 字段名是 `preview`（截断预览），不是 `content`/`text` —— 断言写错会**假失败**
+  ok(
+    (r.rows ?? []).some((row) => /铁傀儡/.test(String(row.preview ?? ''))),
+    '★★★ 游戏内那句话**进了语料库**（所以那个窗口里的"搜历史"不是摆设）',
+    JSON.stringify((r.rows ?? []).slice(0, 1)),
+  )
+  await bridge.close({ timeoutMs: 200 })
+}
+
 rmSync(ROOT, { recursive: true, force: true })
 
 console.log('')

@@ -1942,6 +1942,19 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * **游戏内那条通道在控制台预览里的会话键**（一台服一个窗口）。
+   *
+   * ★ 为什么是"一台服一个"而不是"一个玩家一个"：游戏内的回复走的是**公屏** ——
+   *   它本来就是**一个公共频道**，所有人都在同一个空间里说话。按人分窗口反而
+   *   看不出"当时公屏上都有谁"。说话人靠每条消息上的 `senderName` 区分。
+   * ★ 前缀用 `game:` 而不是复用 `group:`/`private:` —— 界面要能一眼看出来这是
+   *   游戏里的对话（它是**第三种**通道，不是 QQ 群也不是 QQ 私聊）。
+   */
+  #gameChatKey(serverId) {
+    return `game:${String(serverId ?? '')}`
+  }
+
+  /**
    * 收到一条游戏内事件（`chat` / `join` / `leave` / `uuid` / `onlineOnly`）。
    * ★ 永不抛（调用方是读日志的循环，抛了会连累后面所有人的话）。
    */
@@ -2158,17 +2171,33 @@ export class Bridge extends EventTarget {
 
     this.log(`[game-chat] 唤醒（${wake.reason}${wake.hit ? `:${wake.hit}` : ''}）「${name}」→ 按 QQ ${qqId} 跑一轮`)
 
+    // ── ★★★ 控制台预览：游戏内的话**单独一个窗口**（使用者 2026-10-04 要求）──
+    //
+    // 会话键（记忆/锁/去重）仍然是那个 QQ 的私聊，但**展示**走 `game:<服务器>`：
+    //   ① 把玩家这句记进那个窗口（带**游戏里的名字** —— 那才是这句话的说话人）；
+    //   ② 顺手进语料库（于是那个窗口里的"搜历史"是真的能搜到东西的）。
+    const gKey = this.#gameChatKey(sid)
+    const gWho = { kind: 'game', peerId: sid, chatName: `游戏内对话 · ${String(server?.name ?? sid)}` }
+    this.#mirror(gKey, 'user', text, { ...gWho, senderId: qqId, senderName: name })
+    this.#recordCorpus({
+      kind: 'game',
+      peerId: sid,
+      messageId: null,
+      userId: qqId,
+      senderName: name,
+      text,
+      isBot: false,
+      mediaCount: 0,
+      atTargets: '',
+      replyToId: null,
+    })
+
     // ⑤ 跑一轮模型，回复**直接发到公屏**
     return this.#runTurn({
       // ★★ 会话与权限**都按那个 QQ 走**（`private:<QQ号>`）：游戏内的话与他在 QQ
       //   私聊里的话落进**同一段记忆、同一个会话** —— 那正是"绑定"要买到的东西。
-      //   ⚠️ 代价（必须如实说，别以为界面上看不出来）：控制台的会话列表里，
-      //   这一轮会以**那个人的 QQ 私聊**形式留下痕迹（`#runTurn` 里的
-      //   `#mirrorThinking` 会写一条思考记录）。之所以不另开一个 `game:` 会话键：
-      //   那会把同一个人的记忆劈成两半（QQ 里说的和游戏里说的互相不知道），
-      //   而"绑定"的全部意义就是"这两边是同一个人"。★ 代价是**显示层**的：
-      //   界面上它看起来像一次 QQ 私聊 —— 所以在那里补一句来源会更好，
-      //   但那属于控制台会话展示的活（已记在 PROJECT.json 的待办里）。
+      // ★ 而**展示**走 `displayKey`（游戏内那个窗口）—— 两件事分开，见 `#runTurn`
+      //   里 `dKey` 那段长注释。
       kind: 'private',
       peerId: qqId,
       senderId: qqId,
@@ -2176,7 +2205,9 @@ export class Bridge extends EventTarget {
       tier,
       rendered: { text, mentioned: false, replyTo: null, imageRefs: [], videoRefs: [] },
       reason: wake.reason,
-      deliverTo: { channel: 'game', server, playerName: name },
+      deliverTo: { channel: 'game', server, playerName: name, qqId },
+      displayKey: gKey,
+      display: gWho,
       // ★ 来源标注整条替换：不这么做，模型会以为在一对一私聊里，
       //   而它说的每一句都会**当场印在全服公屏上**（见 channel-prompt.mjs）。
       channelOrigin:
@@ -2200,7 +2231,19 @@ export class Bridge extends EventTarget {
       this.log(`⚠️ [game-chat] 这条 tellraw 没发出去（${built.why}）—— 内容：${String(text ?? '').slice(0, 60)}`)
       return { ok: false, why: built.why }
     }
-    return this.#runGameCommand(server, built.command, 'tellraw')
+    const r = await this.#runGameCommand(server, built.command, 'tellraw')
+    // ★★ 控制台预览里记一条 notice（**只给他本人**的那些话也要看得见：
+    //    未绑定提醒、绑定码、绑定成功通知）。记成 `→ 玩家：正文` 而不是冒充
+    //    "某个发言人说的" —— 它是**点对点**的，不是公屏发言，这个区别必须看得见。
+    // ★ 它**只在内存镜像里**（控制台预览），**不进任何日志文件**：绑定码的纪律是
+    //   "不进日志"（见 `bindings.mjs`），而控制台预览是使用者本机的实时视图 ——
+    //   与群里那条回执同一个口径（那条也带着码进了镜像）。
+    this.#mirror(this.#gameChatKey(server?.id), 'notice', `→ ${String(player ?? '')}：${built.text}`, {
+      kind: 'game',
+      peerId: String(server?.id ?? ''),
+      chatName: `游戏内对话 · ${String(server?.name ?? server?.id ?? '')}`,
+    })
+    return r
   }
 
   /**
@@ -2235,7 +2278,7 @@ export class Bridge extends EventTarget {
   }
 
   /**
-   * 把一轮回复发进游戏（**公屏 `say`**，设计文档 §5.4）。
+   * 把一轮回复发进游戏（**公屏 `tellraw @a`**，设计文档 §5.4）。
    *
    * ── 为什么**不直接复用 `#deliver`**（这条边界是刻意划的，改之前先读）──────
    * `#deliver` 是**QQ 传输形状**的：它发**表情包**、发 QQ **内置脸**、挂
@@ -2250,10 +2293,11 @@ export class Bridge extends EventTarget {
    * 这里只负责"把已经审过的那串字，按游戏的方式送出去"，并**共用同一份拟人延迟**。
    *
    * ── 投递账本为什么不用 ────────────────────────────────────────────────────
-   * 账本是"QQ 那一侧丢没丢"的凭据；游戏这一侧的凭据是**服务端控制台自己的日志**
-   * （我们发出去的 `say` 会原样落在里面）。多记一份只会多一个可能与现实不符的来源。
+   * 账本是"QQ 那一侧丢没丢"的凭据；游戏这一侧的凭据是**桥接自己的日志**
+   * （见下面那句"说（公屏）："）——`tellraw` **不写服务端控制台日志**（实测），
+   * 所以不能指望它。多记一份只会多一个可能与现实不符的来源。
    */
-  async #deliverToGame(server, playerName, answer, { turnStartedAt = null } = {}) {
+  async #deliverToGame(server, playerName, answer, { turnStartedAt = null, qqId = '' } = {}) {
     const text = String(answer ?? '')
     if (!text.trim()) return
 
@@ -2303,6 +2347,26 @@ export class Bridge extends EventTarget {
       //   在「实时后台」里**看不到**了 ⇒ 由桥接日志补上这条记录（"失败不静默 / 可核对"
       //   这条能力不能因为换通道而丢掉）。
       this.log(`[game-chat] 说（公屏）：${built.text}`)
+      // ★★ 控制台预览里也记一条（那个「游戏内对话」窗口要能看到它自己说过什么）——
+      //    否则窗口里只有玩家的话、没有它的回复，看起来像"它没理人"。
+      this.#mirror(this.#gameChatKey(server?.id), 'bot', built.text, {
+        kind: 'game',
+        peerId: String(server?.id ?? ''),
+        chatName: `游戏内对话 · ${String(server?.name ?? server?.id ?? '')}`,
+      })
+      this.#recordCorpus({
+        kind: 'game',
+        peerId: String(server?.id ?? ''),
+        messageId: null,
+        userId: '',
+        senderName: '',
+        text: built.text,
+        isBot: true,
+        mediaCount: 0,
+        atTargets: '',
+        replyToId: null,
+      })
+      void qqId
       sent += 1
     }
     this.log(
@@ -4166,12 +4230,18 @@ export class Bridge extends EventTarget {
           if (id.name) entry.senderName = id.name
           if (id.roleLabel) entry.senderRole = id.roleLabel
         }
+        // ★★ 显式给的名字**优先于**身份核实的结果（2026-10-04 加）：
+        //    游戏内那条通道的说话人是**游戏里的玩家名**，而它**没有**协议端身份
+        //    （那个名字来自服务端日志，不是 QQ 昵称）。没有这一条的话，
+        //    「游戏内对话」窗口里所有发言都只剩一个 QQ 号，看不出是谁说的。
+        if (who.senderName) entry.senderName = String(who.senderName)
+        if (who.senderRole) entry.senderRole = String(who.senderRole)
         if (!conv.senders) conv.senders = {}
         // 谁说的这句话：界面按人显示。身份核实失败时只留号码，**不编名字**。
         conv.senders[entry.senderId] = {
-          name: id?.ok && id.name ? id.name : '',
-          roleLabel: id?.ok ? id.roleLabel ?? '' : '',
-          verified: Boolean(id?.ok),
+          name: entry.senderName ?? '',
+          roleLabel: entry.senderRole ?? '',
+          verified: Boolean(id?.ok) || Boolean(who.senderName),
           at: Date.now(),
         }
       }
@@ -4184,6 +4254,13 @@ export class Bridge extends EventTarget {
         const id = who.identity
         if (id.chatName) conv.name = id.chatName
         if (id.chatName || id.ok) conv.nameVerified = Boolean(id.chatName)
+      }
+      // ★★ 显式给的会话名（2026-10-04 加）：游戏内那条通道的名字来自**我们自己的
+      //    配置**（「游戏内对话 · 主服（Forge 1.20.1）」），那是**确定的**，
+      //    所以 `nameVerified: true` —— 它不是"猜的"，只是来源不是协议端。
+      if (who.chatName) {
+        conv.name = String(who.chatName)
+        conv.nameVerified = true
       }
 
       conv.messages.push(entry)
@@ -4293,8 +4370,19 @@ export class Bridge extends EventTarget {
     }
   }
 
-  async #runTurn({ kind, peerId, senderId, tier, rendered, reason, identity = null, imageRefs = [], messageId = null, seq = 0, deliverTo = null, channelOrigin = '' }) {
+  async #runTurn({ kind, peerId, senderId, tier, rendered, reason, identity = null, imageRefs = [], messageId = null, seq = 0, deliverTo = null, channelOrigin = '', displayKey = null, display = null }) {
     const chatKey = `${kind}:${peerId}`
+    // ★★★ 会话键（`chatKey`）与**展示键**（`dKey`）是两件事（2026-10-04 加）：
+    //   · `chatKey` 决定**会话/记忆/串行锁/去重** —— 游戏内那条通道刻意复用它绑定的
+    //     那个 QQ 的私聊键，让"同一个人在游戏里说的话"与"他在 QQ 里说的话"
+    //     落进**同一段记忆**（那正是"绑定"要买到的东西）；
+    //   · `dKey` 只决定**控制台预览里开哪个窗口** —— 游戏内的话单独一个
+    //     「游戏内对话 · <服务器>」窗口，而不是混进那个人的 QQ 私聊里
+    //     （使用者 2026-10-04 的要求：「可以在预览中单独建一个游戏内对话的窗口」）。
+    //   ∴ 只有**镜像**（`#mirror*`）走 `dKey`；其余一律走 `chatKey`。别顺手把
+    //     别的用途也改成 `dKey` —— 那会让"同一段记忆"这条设计无声地失效。
+    const dKey = displayKey ?? chatKey
+    const dWho = display ?? { kind, peerId }
     // ★★ 本轮的起算点（回应速度档位用）。
     //
     // 为什么是"回合开始"而不是"消息到达"：档位承诺的是**回复的回应速度**，
@@ -4714,7 +4802,7 @@ export class Bridge extends EventTarget {
       // ★ 把思考过程记进镜像（**只给界面看，不发到 QQ**）。
       //   放在"兜底回复"之前：即使这一轮模型一个字都没说，它的思考过程
       //   对使用者仍有价值（能看出它到底干了什么、卡在哪）。
-      this.#mirrorThinking(chatKey, result.thinking, { kind, peerId })
+      this.#mirrorThinking(dKey, result.thinking, dWho)
 
       // ── 带内标记（H6）：`[reply:id]` / `[sticker:名]` ─────────────────────
       //
@@ -4800,7 +4888,7 @@ export class Bridge extends EventTarget {
         )
         // 镜像里留痕（只给控制台看）—— 否则使用者会以为模型变成哑巴了，
         // 而实际是投递闸门在工作。
-        this.#mirrorThinking(chatKey, `[投递闸门] 拦下整条内部泄漏：${gated.why}`, { kind, peerId })
+        this.#mirrorThinking(dKey, `[投递闸门] 拦下整条内部泄漏：${gated.why}`, dWho)
         answer = LEAK_NOTICE
       } else if (gated.changed) {
         this.log(`[delivery] 投递前清洗：${gated.notes.join('；')}`)
@@ -4837,10 +4925,7 @@ export class Bridge extends EventTarget {
         )
         // 镜像里记下"原本想说什么"（只给控制台看，不发 QQ）——
         // 否则使用者会以为模型变哑巴了，而实际是隐私闸门在工作。
-        this.#mirrorThinking(chatKey, `[隐私闸门] 拦下一条含隐私的回复（${(priv.categories ?? []).join('、')}）`, {
-          kind,
-          peerId,
-        })
+        this.#mirrorThinking(dKey, `[隐私闸门] 拦下一条含隐私的回复（${(priv.categories ?? []).join('、')}）`, dWho)
         answer = BLOCKED_OUTPUT_NOTICE
       }
 
