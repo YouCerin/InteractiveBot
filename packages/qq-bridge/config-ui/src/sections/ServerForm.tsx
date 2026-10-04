@@ -307,6 +307,32 @@ export function ServerForm({
     }
   }
 
+  /**
+   * 「点那个按钮到底会写什么」—— 逐项列出**与文件里当前值的差**。
+   *
+   * ★★ 为什么必须有这一行（2026-10-04 真事故）：那个写入按钮原先的前提是"密码框非空"，
+   *   而密码框**永不回显**（留空 = 不改）⇒ 它**默认就是禁用的**。使用者把 `server-port`
+   *   改成 25566 再点，**什么都没发生、也没有任何报错**，于是"改了游戏端口不生效"
+   *   看起来像根本没修好。现在按钮永远是活的，而"会改什么"由这一行如实预告 ——
+   *   后端**只在值真的不同时才写**，所以没有差异时也要明说"点了不会改任何东西"。
+   */
+  const willWrite = (() => {
+    if (!rcon.info) return [] as string[]
+    const out: string[] = []
+    const fp = rcon.info.settings.serverPort
+    const wantP = parsePort(rcon.patch.serverPort)
+    if (wantP !== null && wantP !== fp) out.push(`server-port ${fp ?? '（文件里没有这一项）'} → ${wantP}`)
+    const fe = rcon.info.settings.enableRcon
+    if (rcon.patch.enableRcon !== fe) {
+      out.push(`enable-rcon ${fe === null ? '（文件里没有这一项）' : fe ? '开' : '关'} → ${rcon.patch.enableRcon ? '开' : '关'}`)
+    }
+    const frp = rcon.info.settings.rconPort
+    const wantRp = parsePort(rcon.patch.rconPort)
+    if (wantRp !== null && wantRp !== frp) out.push(`rcon.port ${frp ?? '（文件里没有这一项）'} → ${wantRp}`)
+    if (rcon.patch.password) out.push('rcon.password → 换成你填的那个新值')
+    return out
+  })()
+
   const field = (label: string, key: keyof typeof form, hint?: string, type = 'text', disabled = false) => (
     <label className="block text-xs">
       <span className="text-muted-foreground">{label}</span>
@@ -599,7 +625,15 @@ export function ServerForm({
                 >
                   随机密码
                 </Button>
-                <Button size="sm" disabled={rcon.busy || !rcon.patch.password} onClick={() => void applyRcon()}>
+                {/* ★★★ 这个按钮**不许**以"密码框非空"为前提（2026-10-04 真事故）。
+                    它原先写成 `disabled={rcon.busy || !rcon.patch.password}` —— 而密码框
+                    **永不回显**（留空 = 不改）⇒ 默认就是空的 ⇒ **按钮默认是死的**。
+                    那时这一块只管 RCON 三项，所以"要开 RCON 就得给密码"还讲得通；
+                    现在它还要写**游戏端口**与 **EULA** ⇒ 那条前提变成了陷阱：
+                    使用者把 `server-port` 改成 25566、点「写入」——**什么都不会发生**、
+                    **也没有任何报错**，于是"改了游戏端口不生效"看起来像是没修好。
+                    ∴ 判据只剩"正在写"这一条；"要改什么"由下面那行**待写入**如实说清。 */}
+                <Button size="sm" disabled={rcon.busy} onClick={() => void applyRcon()}>
                   {rcon.busy ? '写入中…' : '写入并同步到本桥接'}
                 </Button>
                 {/* ★ 「抄过来」那条路（使用者问「rcon 密码被忘记了怎么办」）：
@@ -616,6 +650,21 @@ export function ServerForm({
                   密码忘了？把服务端那份抄过来
                 </Button>
               </div>
+              {/* ★★ 「点那个按钮到底会写什么」—— 逐项列出**与文件里当前值的差**。
+                  为什么必须有：① 那个按钮曾经因为"密码框是空的"而**默认禁用** ⇒ 点了没反应、
+                  也没报错（"改了游戏端口不生效"看起来就像没修好）；② 即使按钮是活的，
+                  "我这次点下去到底改了没有"也不该靠猜 —— 后端**只在值真的不同时才写**，
+                  所以这里如实预告，没有差异时也明说"点了不会改任何东西"。 */}
+              {willWrite.length > 0 ? (
+                <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
+                  点「写入并同步到本桥接」会改：<b className="text-foreground">{willWrite.join('；')}</b>
+                  （其余行逐字不动）
+                </p>
+              ) : (
+                <p className="text-muted-foreground mt-1 text-[11px]">
+                  现在**没有**要改的（上面那几项与服务端文件里一致）—— 直接点「写入」不会改动任何东西。
+                </p>
+              )}
               <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
                 ★ 只改上面列出的那几行（<code>server-port</code> / <code>enable-rcon</code> /{' '}
                 <code>rcon.port</code> / <code>rcon.password</code>），其余**逐字保留**（写前备份；写前会重读一次，

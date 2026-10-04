@@ -262,10 +262,10 @@
     },
     {
       "cmd": "node mocks/verify-ui-types.mjs",
-      "purpose": "★★ **UI 类型检查守卫**（0.3.2 收尾，5 项）：把 `npm run build` 的第一步 `tsc -b` 接进测试链。存在的理由是一次**真实的疏漏**：我给 `ConsolePanel.tsx` 写了四个没用上的 `Card*` 导入，却宣称「类型检查通过」—— 因为我跑的是 `tsc --noEmit -p tsconfig.json`，而那份是**项目引用**（`files: []` + `references`），那样跑**不检查被引用的 `tsconfig.app.json`**，而 `noUnusedLocals: true` 正好写在 app 那份里 ⇒ 错误只在用户 `npm run build` 时才炸出来。★ 判据因此是 `tsc -b`（走项目引用），并有一条断言专门盯着「tsconfig.json 必须是项目引用形态」以防有人把它改成单文件后这道守卫静默失效。★ 它**不跑 `vite build`**（那要 esbuild，受限沙箱里 spawn EPERM）—— 类型检查与打包是两件事。★ 缺 `config-ui/node_modules` 时**明确跳过并声明「跳过不算通过」**（本项目对「跳过 ≠ 通过」有专门纪律）。★ 守卫本身被验证过**会红**：故意插一个未使用导入时它退出码 1。",
+      "purpose": "★★ **UI 类型检查守卫 + 一条 UI 源码守卫**（0.3.2 收尾，11 项）：把 `npm run build` 的第一步 `tsc -b` 接进测试链。存在的理由是一次**真实的疏漏**：我给 `ConsolePanel.tsx` 写了四个没用上的 `Card*` 导入，却宣称「类型检查通过」—— 因为我跑的是 `tsc --noEmit -p tsconfig.json`，而那份是**项目引用**（`files: []` + `references`），那样跑**不检查被引用的 `tsconfig.app.json`**，而 `noUnusedLocals: true` 正好写在 app 那份里 ⇒ 错误只在用户 `npm run build` 时才炸出来。★ 判据因此是 `tsc -b`（走项目引用），并有一条断言专门盯着「tsconfig.json 必须是项目引用形态」以防有人把它改成单文件后这道守卫静默失效。★★★ 第 ③ 节是**一次真事故的回归锁**（使用者原话：「即便在编辑页面修改了 serverport，依然显示 ⚠️ 它和本桥接这份配置对不上」）：`ServerForm.tsx` 那个「写入并同步到本桥接」按钮原先写成 `disabled={rcon.busy || !rcon.patch.password}`，而密码框**永不回显**（留空 = 不改）⇒ **它默认就是禁用的** ⇒ 使用者把 `server-port` 改成 25566 再点，**什么都没发生、也没有任何报错**（那一块原本只管 RCON 三项，后来扩成游戏端口 + EULA，那条前提就成了陷阱）。∴ 守卫盯的是**判据的形状**：剥掉注释后扫所有 `disabled={…}`，不许有一处以密码框非空为前提；★ 并带一条**对照**（把事故的那个形状喂进同一个扫描器必须被抓到），否则「0 处」可能只是「扫描器什么都没查」。另两条钉住 EULA 的同意纪律（普通写入那条路**不送** `agreeEula`、同意那条路**显式**送 `true`），一条钉住「待写入」预告存在。★ 它**不跑 `vite build`**（那要 esbuild，受限沙箱里 spawn EPERM）—— 类型检查与打包是两件事。★ 缺 `config-ui/node_modules` 时**明确跳过并声明「跳过不算通过」**（本项目对「跳过 ≠ 通过」有专门纪律）。★ 守卫本身被验证过**会红**：故意插一个未使用导入时它退出码 1（而这一次它真的抓到了自己注释里那个错的形状 —— 剥注释那步就是这么来的）。",
       "network": false,
       "costs": "none",
-      "assertions": 5
+      "assertions": 11
     },
     {
       "cmd": "node mocks/verify-mc-gate.mjs",
