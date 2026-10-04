@@ -849,6 +849,16 @@ export interface ScheduleListResult {
   ok: boolean
   /** 功能总开关（`schedule.enabled`）。★ 控件在**插件卡**上，这里只用于显示状态，不渲染第二个开关 */
   enabled: boolean
+  /**
+   * ★★ **定时器到底挂上了没有**（0.3.2 补）。
+   *
+   * 「开关开着」与「定时器挂上了」是**两件事**，必须分开显示：
+   * 只说前者会让界面在"开关开了、而它一条都不会触发"时说"功能已开启" ——
+   * 那是本项目最忌讳的"说了做不到"。
+   * ★ 正常情况下这两个值一致（开关一改就就地同步定时器）；不一致说明同步失败，
+   *   日志里有原因。
+   */
+  runnerRunning: boolean
   tasks: ScheduleTask[]
   /** 读不出来的任务（**要显示**，别静默少几条） */
   problems: { id: string; why: string }[]

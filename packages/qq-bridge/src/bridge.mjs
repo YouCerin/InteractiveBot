@@ -1494,23 +1494,7 @@ export class Bridge extends EventTarget {
     //     被跳过，而那时**使用者恰恰最需要被提醒**。
     // ★ 默认**关闭**（`schedule.enabled !== true` 即不开）：定时任务是"无人开口也说话"，
     //   按本项目"危险的能力默认关"的口径（同截图技能）。配置里显式写 true 才开。
-    try {
-      if (this.config.schedule?.enabled === true && this.config.dsh?.workspace) {
-        this.#schedule = createScheduleRunner({
-          workspace: this.config.dsh.workspace,
-          config: this.config,
-          bridge: {
-            resolveTarget: (opts) => this.resolveScheduleTarget(opts),
-            runProactiveTurn: (opts) => this.runProactiveTurn(opts),
-          },
-          log: this.log,
-        })
-        this.#schedule.start()
-      }
-    } catch (error) {
-      // 定时任务起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
-      this.log(`❌ [schedule] 定时任务启动失败（机器人照常工作）：${error?.message ?? error}`)
-    }
+    this.syncScheduleRunner()
 
     // ── 0.3.2 P2：服务器监测（采样 → 状态机 → 事件）──────────────────────
     //
@@ -2442,10 +2426,68 @@ export class Bridge extends EventTarget {
     return this.#schedule.tick({ reason: 'manual' })
   }
 
-  /** 定时任务的运行统计（只读，给巡检与界面用）。 */
+  /**
+   * 定时任务的运行统计（只读，给巡检与界面用）。
+   *
+   * ★★ `ok` 只表示"这个查询本身成功了"，**不代表定时器挂上了** ——
+   *   后者看 `running`。这两件事必须分开报：把它们合成一个 `ok:false`
+   *   会让界面只能显示"没有启动"，而说不出"**开关开着、但定时器没挂上**"
+   *   （那正是"我明明打开了它却不响"的形状）。
+   */
   scheduleStats() {
-    if (!this.#schedule) return { ok: false, why: '定时任务没有启动' }
-    return { ok: true, ...this.#schedule.stats() }
+    if (!this.#schedule) {
+      return { ok: true, running: false, why: '定时器没挂上（schedule.enabled !== true，或还没同步过）' }
+    }
+    return { ok: true, running: true, ...this.#schedule.stats() }
+  }
+
+  /**
+   * **让定时任务的开关即时生效**（0.3.2 补）—— 按活配置把定时器挂上或摘掉。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 为什么需要它（用户报的原文）
+   * ══════════════════════════════════════════════════════════════════════════
+   *   「我在拓展中开启了定时任务功能，但是标签页中显示未开启且读不到定时任务」
+   *
+   * 定时的**判定**本来每跳现读 `config.schedule`（那是 hot 的那一半），
+   * 但 `#schedule` 这个**定时器对象**原先只在 `attach()` 里建 ⇒ 用户在界面上
+   * "从关到开"之后，**一条任务都不会触发**，而界面上写着"功能已开启"。
+   * 这与 P3 的 `gameChat` 复选框是**同一个形状**的缺陷（保存了、提示生效了、
+   * 而那条路根本没接上），所以用同一种办法修：**改了就地重建**。
+   *
+   * ★ 幂等：状态一致时什么都不做（重复调用不会挂出第二个定时器）。
+   * ★ 失败只记日志、不抛（AGENT.md 第 9 条：增强路径不该拖垮桥接）。
+   *
+   * @returns {{ok: boolean, changed: boolean, running: boolean, why?: string}}
+   */
+  syncScheduleRunner() {
+    try {
+      const want = this.config?.schedule?.enabled === true && Boolean(this.config?.dsh?.workspace)
+      const has = Boolean(this.#schedule)
+      if (want === has) return { ok: true, changed: false, running: has }
+      if (!want) {
+        this.#schedule?.stop?.()
+        this.#schedule = null
+        this.log('🕒 [schedule] 定时任务已关闭 —— 定时器已摘掉（一条任务都不会触发）')
+        return { ok: true, changed: true, running: false }
+      }
+      this.#schedule = createScheduleRunner({
+        workspace: this.config.dsh.workspace,
+        config: this.config,
+        bridge: {
+          resolveTarget: (opts) => this.resolveScheduleTarget(opts),
+          runProactiveTurn: (opts) => this.runProactiveTurn(opts),
+        },
+        log: this.log,
+      })
+      this.#schedule.start()
+      this.log('🕒 [schedule] 定时任务已开启 —— 定时器已挂上（**立刻生效**，不必重启桥接）')
+      return { ok: true, changed: true, running: true }
+    } catch (error) {
+      // 起不来不该影响桥接 —— 但要留证据（AGENT.md 第 9 条）
+      this.log(`❌ [schedule] 定时任务同步失败（机器人照常工作）：${error?.message ?? error}`)
+      return { ok: false, changed: false, running: Boolean(this.#schedule), why: String(error?.message ?? error) }
+    }
   }
 
   /**

@@ -636,6 +636,48 @@ section('⑨ 扩展服务：写盘 + 改活配置（两件事都要做）')
   check('★ cold 插件：如实回 restartRequired=true（不假装生效）', coldPlugin.hot === false && coldPlugin.restartRequired === true)
   check('cold 插件带上了"为什么"', String(coldPlugin.why ?? '').length > 10)
 
+  // ── ★★ 0.3.2 补：开关落了之后的**回调**（`onToggled`）───────────────────
+  //
+  // 为什么必须有这一段：扩展服务改的是**活配置对象**，而"attach() 时才建的东西"
+  // （定时任务的定时器）不会自己出现 ⇒ 用户报的
+  // 「我在拓展中开启了定时任务功能，但是标签页中显示未开启且读不到定时任务」
+  // 有一半就是这个形状：开关显示开了，而它一条都不会触发。
+  {
+    const seen = []
+    const svc2 = createExtensionService({
+      config: live,
+      configPath,
+      skills,
+      skillsDir: SKILLS_DIR,
+      validate: validateConfig,
+      normalize: normalizeConfig,
+      onToggled: (info) => {
+        seen.push(`${info.type}:${info.id}:${info.enabled}`)
+        return { ok: true, running: info.enabled }
+      },
+    })
+    const on2 = await svc2.toggle({ type: 'plugin', id: 'schedule', enabled: true })
+    check('★★ 开关落盘后会**回调宿主**（定时器就地挂上的那次机会）', seen.includes('plugin:schedule:true'), seen.join(','))
+    check('★★ 宿主回报的 `applied` 原样带回给界面（不吞掉）', on2.applied?.running === true, JSON.stringify(on2).slice(0, 160))
+    check('★ 定时任务是 hot（0.3.2 起：开关一改就地同步定时器）', on2.hot === true && on2.restartRequired === false)
+
+    // ★ 回调**抛异常也不许**把"开关已经写盘了"变成一个 500
+    const svc3 = createExtensionService({
+      config: live,
+      configPath,
+      skills,
+      skillsDir: SKILLS_DIR,
+      validate: validateConfig,
+      normalize: normalizeConfig,
+      onToggled: () => {
+        throw new Error('回调故意炸')
+      },
+    })
+    const on3 = await svc3.toggle({ type: 'plugin', id: 'schedule', enabled: false })
+    check('★★ 回调抛异常 ⇒ 开关照旧成功（不留一个假的失败）', !on3.error && on3.enabled === false, JSON.stringify(on3).slice(0, 160))
+    check('★ 而且开关确实写进了盘', JSON.parse(readFileSync(configPath, 'utf8')).schedule?.enabled === false)
+  }
+
   const listToggle = await svc.toggle({ type: 'plugin', id: 'access', enabled: false })
   check('名单类插件没有开关 → 400 并说明去别处维护', listToggle.status === 400)
 

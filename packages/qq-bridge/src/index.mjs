@@ -66,6 +66,41 @@ import { projectDocStatus } from './project-doc.mjs'
 import { readContacts, writeContacts, summarizeContacts, CONTACTS_REL } from './contacts.mjs'
 import { readPrivacyAudit, scanPrivacy, PRIVACY_CATEGORIES } from './privacy.mjs'
 import { inspectMemory } from './memory-inspect.mjs'
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 0.3.2 P1 定时任务：**必须是模块级导入**（一次真实事故换来的）
+// ══════════════════════════════════════════════════════════════════════════
+// 事故形状（用户报的原文：「我在拓展中开启了定时任务功能，但是标签页中显示未开启
+// 且读不到定时任务：接口内部错误：listScheduleTasks is not defined」）：
+//   `--schedule` 那个 **CLI 段**里曾经用
+//   `const { listTasks: listScheduleTasks, … } = await import('./schedule.mjs')`
+//   造了一批**块级局部别名**，而任务页签的四条接口（`createApiHandler({…})` 那个
+//   对象，在 `main()` 的另一处）**照着抄了这些名字** ⇒ 那四条接口在真实运行时
+//   一律抛 `ReferenceError`，界面表现成「接口内部错误 + 任务页签什么都读不到」。
+//
+// ★★★ 为什么测试全绿却没抓到（这一条比 bug 本身更重要）：
+//   `verify-api-h13.mjs` 与 `verify-apitest.mjs` **各自造了一份路由对象**
+//   （各自 `import` 一份 `schedule.mjs` 并起个别名），于是它们测的是**副本**，
+//   而**这份真实接线从来没被跑过一次**。这是本项目最贵的那一类缺陷
+//   （同"任务段从未注入过"那次）。∴ 修法不只是补一个 import：
+//   另有一条会红的守卫 `mocks/verify-route-scope.mjs` 静态核对
+//   「路由对象里用到的名字都真的在作用域里」。
+//
+// ★ 为什么不继续用动态 import：这里本来就不需要懒惰 —— `index.mjs` 静态导入的
+//   `bridge.mjs` 早就导入了 `schedule.mjs`，动态导入省不下任何东西，
+//   却把"名字在不在作用域里"变成了一个**只有到运行时才知道**的问题。
+import {
+  listTasks as listScheduleTasks,
+  writeTask as writeScheduleTask,
+  deleteTask as deleteScheduleTask,
+  dueAt,
+  msUntilNext,
+  readFireIndex,
+  readLedger,
+  readKnownChats,
+  formatStamp,
+  FIRES_REL,
+  MISSED_REL,
+} from './schedule.mjs'
 
 // ── 日志：同时写控制台和文件 ──────────────────────────────────────────────
 let logFile = null
@@ -1465,19 +1500,11 @@ async function main() {
   //   走到真的启动桥接（`--delivery` 那次事故就是这么来的）。
   if (process.argv.includes('--schedule')) {
     ;(async () => {
-      const {
-        listTasks: listScheduleTasks,
-        writeTask: writeScheduleTask,
-        deleteTask: deleteScheduleTask,
-        dueAt,
-        msUntilNext,
-        readFireIndex,
-        readLedger,
-        readKnownChats,
-        formatStamp,
-        FIRES_REL,
-        MISSED_REL,
-      } = await import('./schedule.mjs')
+      // ★★ 别名在**模块顶部**统一导入（见那里的长注释）：这一段原来在这里
+      //    现场 `const { listTasks: listScheduleTasks, … } = await import(...)`，
+      //    而任务页签那四条接口抄了这些**块级局部名字** ⇒ 那四条接口在真机上
+      //    一律抛 `ReferenceError`（用户报的「接口内部错误：listScheduleTasks
+      //    is not defined」）。**别把这些名字改回局部别名。**
       const workspace = config.dsh?.workspace
       if (!workspace) {
         console.error('❌ 配置里没有 dsh.workspace，无法定位定时任务目录')
@@ -2396,6 +2423,16 @@ async function main() {
       preflightRetag({ workspace: config.dsh?.workspace, dir: config.skills?.sticker?.libraryDir ?? 'stickers' }),
   })
 
+  // ★★ 0.3.2 补：插件开关落了之后要**就地挂上/摘掉**的东西。
+  //
+  // 为什么需要（用户报的原文：「我在拓展中开启了定时任务功能，但是标签页中显示未开启
+  // 且读不到定时任务」）：扩展服务改的是**活配置对象**，所以"每一跳现读 config" 的
+  // 那部分立刻生效；但**定时器对象**（`bridge.#schedule`）原本只在 `attach()` 里建
+  // ⇒ 从关到开之后**一条任务都不会触发**，而界面写着"已开启"。
+  // ∴ 开关一落就通知宿主同步一次（`bridge.syncScheduleRunner()`，幂等）。
+  // ⚠️ `bridge` 在这个对象构造时**还没建**（它在下面），所以走一个晚绑定的口子 ——
+  //    直接闭包引用 `bridge` 也能work，但那样这个依赖是隐形的。
+  let bridgeRef = null
   const extensionService = createExtensionService({
     config,
     configPath,
@@ -2404,6 +2441,7 @@ async function main() {
     log,
     validate: validateConfig,
     normalize: normalizeConfig,
+    onToggled: () => (bridgeRef ? bridgeRef.syncScheduleRunner() : null),
   })
 
   if (checkOnly) {
@@ -2889,6 +2927,8 @@ async function main() {
     }
   }
   const bridge = new Bridge({ rpc, onebot, sendQueue, router, config, usageLedger, roster, log, skills: skillScan.skills, modelApiKey, readServers: readServersFromDisk })
+  // ★ 晚绑定：扩展服务那边的开关回调要用它（见上面 `bridgeRef` 的注释）。
+  bridgeRef = bridge
   // ★★ 0.3.2 起 `attach()` 是 async（`servers[].manageOnStart` 要等到服务端端口真的开放）。
   //   这里**必须接住它的拒绝**：否则启动期的接管失败会变成未处理的 Promise 拒绝。
   //   而且**不阻塞**后面连 OneBot —— 服务端可能要好几分钟才起来，
@@ -3419,6 +3459,12 @@ async function main() {
         return {
           ok: true,
           enabled: config.schedule?.enabled === true,
+          // ★★ 0.3.2 补：**开关开着 ≠ 定时器挂上了**。这两件事必须分开报 ——
+          //   否则界面只能说"没启动"，而说不出"开关开着、可定时器没挂上"
+          //   （用户报的「我在拓展中开启了定时任务功能，但是标签页中显示未开启」）。
+          //   ★ 它现在由 `bridge.syncScheduleRunner()` 在开关落盘时就同步，
+          //     所以正常情况下这两个值是一致的；不一致说明同步失败（日志里有）。
+          runnerRunning: bridge?.scheduleStats?.().running === true,
           tasks,
           problems: listed.problems,
           // 台账坏行数要带出去：界面得能说"有 N 行读不出来"，不许静默少几条

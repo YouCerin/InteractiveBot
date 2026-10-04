@@ -1130,6 +1130,34 @@ node src/index.mjs --schedule --history  # 最近**实际发出去的原文**（
 **默认关闭**（`schedule.enabled=false`）：它是本项目唯一一个**不用谁开口就往外发消息**的能力，
 按"危险的能力默认关"的口径处理（同截图技能）。
 
+**★★★ 开关是 hot 的，而且"开关开着 ≠ 定时器挂上了"（0.3.2 补）**
+
+起因是用户报的这条：「我在拓展中开启了定时任务功能，但是标签页中显示未开启且读不到定时任务：
+接口内部错误：`listScheduleTasks is not defined`」。它是**两个**叠在一起的缺陷：
+
+1. **接口直接崩**：`--schedule` 那个 CLI 段用 `const { listTasks: listScheduleTasks, … } =
+   await import('./schedule.mjs')` 造了一批**块级局部别名**，而任务页签那四条接口
+   照着抄了这些名字 ⇒ 真实运行时一律 `ReferenceError`（读/建/删/看历史**一起**废掉）。
+   修法是**模块级 import**；而**更重要的是加了一条会红的守卫**
+   `mocks/verify-route-scope.mjs`（静态审 `index.mjs` 里那份**真实**的路由对象，见下）。
+2. **开了却不跑**：`syncScheduleRunner()` 之前只挂在 `attach()` 里 ⇒ 界面上"从关到开"
+   之后**一条任务都不会触发**，而界面写着"功能已开启"。现在开关一落盘就
+   **就地同步定时器**（扩展服务的 `onToggled` → `bridge.syncScheduleRunner()`，幂等），
+   `plugins.mjs` 里 `schedule.hot` 也从 `false` 改成 `true`。
+   ★ 这两件事必须**一起**改：只改代码不改界面文案，界面就在承诺一件做不到的事。
+
+**★ 状态查询要分清两件事**：`bridge.scheduleStats()` 回 `{ok:true, running}` ——
+`ok` 是"查询成功"，`running` 才是"定时器挂上了"。`/api/schedule` 里对应
+`enabled`（开关）与 `runnerRunning`（定时器）**两个字段**，界面必须分开显示。
+
+**★★★ 为什么当时 81 套测试全绿却没抓到（这一条比 bug 本身值得记）**：
+`verify-api-h13.mjs` 与 `verify-apitest.mjs` **各自造了一份路由对象**（各自 import 一份
+`schedule.mjs`），所以它们测的是**副本**，而 `index.mjs` 里那份真实接线**从来没被跑过一次**。
+这与"任务段从未注入过"是同一类缺陷。∴ 新增 `mocks/verify-route-scope.mjs`：
+极简词法扫描 + 括号配对，直接审**真实那份**路由对象里用到的名字是不是都在作用域里
+（含正/负对照，以及一条"把别名拿掉必须变红"的反向对照）。它的边界如实写在文件头（启发式）。
+**加新接口时它就会盯着你**。
+
 **它是两条轴之外的第三条，别跟另外两条混**：
 
 | | `tasks.mjs`（任务台账） | `session-state.mjs` | **本模块（`schedule.mjs`）** |

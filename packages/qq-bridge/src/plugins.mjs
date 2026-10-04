@@ -247,16 +247,18 @@ export const BUILTIN_PLUGINS = [
     name: '定时任务',
     icon: '🕒',
     enabledPath: 'schedule.enabled',
-    // ★ hot：runner **每一跳**都现读 `config.schedule`（`schedule-runner.mjs` 的 `settings()`），
-    //   而 `config` 是活配置对象 ⇒ 开/关**下一跳就生效**（最多 30 秒）。
-    //   ⚠️ 但**已经起床的 runner 不会自己出现**：`#schedule` 是在 `attach()` 里建的，
-    //   所以"从关到开"要重启桥接才会挂上那个定时器 —— 这一点必须写在界面上，
-    //   否则使用者会以为"我打开了它就应该开始跑"，而它其实要等一次重启。
-    hot: false,
+    // ★★ 0.3.2 补：**现在是 hot 了**（原来是 false）。
+    //   判定那一半本来就是每跳现读 `config.schedule`（`schedule-runner.mjs` 的
+    //   `settings()`，`config` 是活配置对象）；缺的另一半是**定时器对象**
+    //   —— 它原先只在 `attach()` 里建，于是"从关到开"必须重启桥接。
+    //   现在开关落盘时会就地同步：扩展服务的 `onToggled` → `bridge.syncScheduleRunner()`
+    //   （幂等：状态一致就什么都不做），所以**开与关都是立刻生效的**。
+    //   ⚠️ 谁要再改回冷开关，**必须同时**把这句话与界面文案改回去 ——
+    //      否则界面会承诺一件做不到的事（这正是原来那条缺陷的形状）。
+    hot: true,
     why:
-      '判定本身是每跳现读 config.schedule（schedule-runner.mjs 的 settings()，hot 的那一半）；' +
-      '但**定时器对象**是 attach() 时建的（bridge.mjs 的 #schedule），' +
-      '所以"从关到开"要重启才会挂上那个 interval —— 关掉是下一跳生效、打开要重启',
+      '开关一改就**就地同步定时器**（`bridge.syncScheduleRunner()`，幂等）：' +
+      '开 = 挂上那个 interval，关 = 摘掉它。判定那一半本来就是每跳现读 `config.schedule`。',
     what:
       '到点了**主动说一句**（「8 点叫我一声」「提醒某某人吃饭」）—— 桥接第一次能**无人开口也说话**。' +
       '每条提醒**只发一次**；错过**不补发但会如实留证据**。',

@@ -53,6 +53,14 @@ function setPath(obj, path, value) {
  * @param {Function} [opts.log]
  * @param {Function} [opts.validate]  配置校验（默认从 config.mjs 取，便于测试注入）
  * @param {Function} [opts.normalize]
+ * @param {(info: {type:string, id:string, enabled:boolean, plugin:object|null}) => void} [opts.onToggled]
+ *        **开关落了之后**的回调（0.3.2 补）。宿主用它把"某些插件打开后要挂上的东西"
+ *        就地挂上 —— 目前是定时任务的定时器（`bridge.syncScheduleRunner()`）。
+ *        ★ 为什么需要这个口子：本服务改了**活配置对象**（所以"每跳现读"的那部分
+ *        立刻生效），但**对象是在 `attach()` 时建的**那一类东西不会自己出现 ⇒
+ *        界面显示"已开启"而它根本不跑。回调让宿主有机会把话说完。
+ *        ★ 它**不抛**：抛出去会让"开关已经写盘了"这件事变成一个 500，而实际上
+ *        开关是成功的（回调失败只在宿主侧记日志）。
  */
 export function createExtensionService({
   config,
@@ -62,6 +70,7 @@ export function createExtensionService({
   log = () => {},
   validate,
   normalize,
+  onToggled = null,
 } = {}) {
   const findSkill = (id) => skills.find((s) => s.id === String(id)) ?? null
 
@@ -219,12 +228,26 @@ export function createExtensionService({
         return { error: error.message, status: 422, extra: error.fatal ? { fatal: error.fatal } : {} }
       }
       setPath(config, plugin.enabledPath, value)
+      // ★★ 活配置改了，但"attach() 时才建的东西"不会自己出现 —— 通知宿主去同步。
+      //   这一次通知**必须发生在 return 之前**，否则界面拿到的 `hot` 就是空话。
+      let applied = null
+      if (typeof onToggled === 'function') {
+        try {
+          applied = onToggled({ type, id: plugin.id, enabled, plugin }) ?? null
+        } catch (error) {
+          log(`⚠️ [extensions] 开关回调抛异常（开关本身已生效）：${error?.message ?? error}`)
+        }
+      }
       return {
         type,
         id: plugin.id,
         enabled,
         hot: plugin.hot,
         restartRequired: plugin.hot !== true,
+        // ★ 宿主如实回报"挂上了没有"（例如定时器的 running）—— 界面据此说话。
+        //   ★ 它**不参与** restartRequired 的判定：那个字段的语义是"这个插件
+        //     登记表说它要不要重启"，拿宿主的返回值去改它会让两处口径打架。
+        applied,
         why: plugin.why,
         hint: plugin.hot
           ? `已${enabled ? '打开' : '关闭'}「${plugin.name}」，**立刻生效**。`

@@ -942,6 +942,62 @@ console.log('\n=== ⑫ ★★★ 接线级：走**完整桥接**（纯函数测�
     )
     await bridge.close({ timeoutMs: 200 })
   }
+
+  // ── ⑥ ★★★ 0.3.2 补：界面上"从关到开"必须**就地生效**，不许等重启 ──────
+  //
+  // 用户报的原文：「我在拓展中开启了定时任务功能，但是标签页中显示未开启且读不到
+  // 定时任务」。其中"开了却不跑"这一半的形状是：扩展服务改的是活配置对象，
+  // 而**定时器对象**原先只在 `attach()` 里建 ⇒ 开关显示已开启，一条都不会触发。
+  // 现在开关落盘时会调 `bridge.syncScheduleRunner()`（幂等），这一段钉住它。
+  {
+    const { bridge, rpc, sent, logs } = wiringBridge({ scheduleEnabled: false })
+    bridge.attach()
+    eq(bridge.scheduleStats().running, false, '（准备）关着 ⇒ 定时器没挂上')
+
+    // 模拟"在扩展页把它打开"：活配置对象被就地改了（扩展服务就是这么做的）
+    bridge.config.schedule.enabled = true
+    const on = bridge.syncScheduleRunner()
+    eq(on.changed, true, '★ 开关变了 ⇒ 就地挂上')
+    eq(on.running, true, '★★ 定时器真的挂上了')
+    eq(bridge.scheduleStats().running, true, '★★★ 状态查询也如实说它挂上了（界面据此显示"已开启"）')
+    ok(logs.some((l) => l.includes('定时任务已开启')), '★ 而且留了一行日志（+ immediately 生效这件事可查）')
+
+    // ★ 幂等：再调一次不许挂出第二个定时器
+    const again = bridge.syncScheduleRunner()
+    eq(again.changed, false, '★★ 再同步一次什么都不做（幂等：不会挂出第二个 interval）')
+    eq(again.running, true, '★ 仍然是在跑')
+
+    // ★ 挂上之后**真的会触发**（这才是"生效"的证据，不是返回值）
+    const before = sent.length
+    const due = Date.now()
+    writeTask({
+      workspace: bridge.config.dsh.workspace,
+      task: {
+        id: 'hot8',
+        title: '8 点叫我',
+        repeat: { kind: 'once', at: new Date(due - 1000).toISOString() },
+        target: { kind: 'private', peerId: ADMIN },
+        prompt: '叫我起床',
+        requestedBy: '主人',
+        timezone: TZ,
+      },
+      now: due - 2000,
+    })
+    // 先造一条"来过消息"的记录（目标判定要它，fail-closed）
+    await bridge.handleEvent(privateMsg(ADMIN, '在吗'))
+    const tick = await bridge.scheduleNow()
+    eq(tick.ok, true, '★★ 就地挂上之后**立刻能跑一跳**（不必重启桥接）')
+    ok(sent.slice(before).some((x) => x.text === '起床了！'), '★★★ 而且那条提醒真的发出去了')
+    eq(rpc.prompts.length >= 1, true, '★ 产生了一次模型调用')
+
+    // 关掉 ⇒ 摘掉
+    bridge.config.schedule.enabled = false
+    const off = bridge.syncScheduleRunner()
+    eq(off.changed, true, '★ 关掉 ⇒ 就地摘掉')
+    eq(bridge.scheduleStats().running, false, '★★ 状态查询如实说没挂上')
+    eq(bridge.scheduleNow().ok, false, '★ 摘掉之后不再跑（一条都不触发）')
+    await bridge.close({ timeoutMs: 200 })
+  }
 }
 
 // ── 收尾 ────────────────────────────────────────────────────────────────

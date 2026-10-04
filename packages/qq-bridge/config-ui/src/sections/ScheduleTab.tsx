@@ -186,10 +186,18 @@ export function ScheduleTab({ demo = false }: { demo?: boolean }) {
               <span
                 className={cn(
                   'inline-block h-2 w-2 rounded-full',
-                  data?.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40',
+                  data?.enabled && data?.runnerRunning
+                    ? 'bg-emerald-500'
+                    : data?.enabled
+                      ? 'bg-amber-500'
+                      : 'bg-muted-foreground/40',
                 )}
               />
-              {data?.enabled ? '功能已开启' : '功能**关闭**中（一条任务都不会触发）'}
+              {data?.enabled
+                ? data?.runnerRunning
+                  ? '功能已开启（定时器已挂上）'
+                  : '⚠️ 开关开着，但**定时器没挂上** —— 一条任务都不会触发（看日志里的 [schedule] 那几行）'
+                : '功能**关闭**中（一条任务都不会触发）'}
             </span>
             <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading} className="gap-1.5">
               <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
@@ -198,7 +206,7 @@ export function ScheduleTab({ demo = false }: { demo?: boolean }) {
           </div>
           <p className="text-muted-foreground text-xs leading-relaxed">
             ★ 总开关**不在这一页** —— 它在「扩展」页那张「🕒 定时任务」插件卡上（一个键只留一条写入口）。
-            另外：**关掉**是下一次检查就生效，**从关到开要重启桥接**（定时器是启动时挂上的）。
+            打开/关掉都是**立刻生效**（开关一落盘就就地挂上或摘掉那个定时器，不必重启桥接）。
           </p>
           <p className="text-muted-foreground text-xs leading-relaxed">
             ★ 每条提醒**只发一次**：触发点是算出来的，加上落盘的触发台账在**调模型之前**先认领。
