@@ -33,43 +33,49 @@ export const MAX_INFLIGHT_EVENTS = 4
 /**
  * 这条游戏内发言该怎么处理（**纯函数**，一条事件一次判定）。
  *
- * 三种结果，**每一种都有明确的理由**（不猜）：
+ * 两种结果：
  *   `turn`  —— 已绑定 ⇒ 交给唤醒判定与模型
- *   `remind`—— 未绑定且这一趟还没提示过 ⇒ 只给他本人一条"怎么绑定"
- *   `ignore`—— 未绑定且已经提示过 ⇒ 什么都不做（刷屏的提示等于没有提示）
+ *   `ignore`—— 未绑定 ⇒ **什么都不做**
  *
- * ★★ **"取绑定码"那一步不在这里**（2026-10-04 流程改动之后）：它由
- *   `parseGameBindRequest()` 单独判，而且**优先于本函数** —— 因为一个已经绑定的
- *   玩家重新说一次 `mc bind`（换绑/自检）也应该能拿到新码，而不该被
- *   "已绑定 ⇒ 交给模型"这条先吃掉。
+ * ★★★ **"未绑定的人说话"不再回提醒**（2026-10-04 使用者的要求）：
+ *   他原话是「由于**不能确定每次玩家都在跟小鲸鱼说话**，只有进入服务器时进行提醒」。
+ *   提醒改由 `#remindUnboundOnJoin()` 在**进服那一刻**发一次（那儿才知道"他刚来"）。
+ *   ∴ 未绑定的人说什么都**不进模型、也不回话**（零成本、也不打扰）。
+ *   ⚠️ 唯一的例外在桥接那边：他**明确叫了名字**（命中唤醒词）时补发一次 —— 那种情况
+ *   我们**确定**他在跟小鲸鱼说话，沉默反而会让他以为坏了。见 `#onGameChat`。
+ *
+ * ★★ **"取绑定码"那一步不在这里**：它由 `parseGameBindRequest()` 单独判，
+ *   而且**优先于本函数** —— 一个已经绑定的玩家重新说一次 `\mc bind`（换绑/自检）
+ *   也应该能拿到新码，而不该被"已绑定 ⇒ 交给模型"这条先吃掉。
  *
  * @param {object} o
- * @param {string} o.name            游戏内显示名（`<名> 正文` 里的那个）
- * @param {string|null} o.uuid        解析到的 UUID（拿不到就是 null）
- * @param {object|null} o.bound       `lookupByUuid()` 的结果
- * @param {boolean} o.reminded        这一趟进服是否已经提示过
- * @returns {{action:'turn'|'remind'|'ignore', text?:string}}
+ * @param {string|null} o.uuid   解析到的 UUID（拿不到就是 null）
+ * @param {object|null} o.bound  `lookupByUuid()` 的结果
+ * @returns {{action:'turn'|'ignore'}}
  */
-export function decideGameChat({ name = '', uuid = null, bound = null, reminded = false } = {}) {
+export function decideGameChat({ uuid = null, bound = null } = {}) {
   if (uuid && bound && bound.qqId) return { action: 'turn' }
-  if (reminded) return { action: 'ignore' }
-  return { action: 'remind', text: unboundReminder(name) }
+  return { action: 'ignore' }
 }
 
 /**
- * 「你还没绑定」那条提醒的**唯一文案**（进服提醒与说话兜底共用同一份）。
+ * 「你还没绑定」那条提醒的**唯一文案**（**只在进服那一刻**发一次）。
  *
- * ★ 为什么抽出来：它会出现在**两个地方**（进服那一刻、以及他说话时兜底），
- *   两处各写一遍必然会漂 —— 而漂了以后使用者看到的是两套说法，没法照着做。
- * ★ 文案的三条硬要求（都有断言）：
- *   ① 给的是 `\mc bind`，而且明说**反斜杠**（玩家一定会按习惯打斜杠，而斜杠进不来）；
- *   ② 说清"下一步在群里"（否则他不知道码要发到哪）；
- *   ③ 不写任何内部术语（"UUID""绑定表"这些对他没用）。
+ * ★★ 措辞是 2026-10-04 按使用者的要求改过的，改动的**理由**值得记住：
+ *   他原话是「由于**不能确定每次玩家都在跟小鲸鱼说话**，只有进入服务器时进行提醒」。
+ *   ∴ 这条文案不能再像"在回你那句话"：
+ *     · **不打招呼**（原来的「你好，X。」是在回应一次不存在的对话）；
+ *     · 说清它是**进服时的一次性提示**，不是有人在跟他聊天；
+ *     · 步骤压到最短（他要照做，不是读说明书）。
+ * ★ 三条硬要求（都有断言）：① 给的是 `\mc bind` 且明说**反斜杠**（玩家一定会按习惯
+ *   打斜杠，而斜杠进不来）；② 说清"码要发到群里"；③ 不写任何内部术语。
+ * ★ 前缀 `<小鲸鱼> ` 由 `tellraw.mjs` 的 `botLine()` 统一加（这里**不重复写**）。
  */
 export function unboundReminder(name = '') {
+  const who = String(name ?? '').trim()
   return (
-    `你好，${String(name ?? '')}。我还不知道你是群里的谁 —— 要在这里跟我说话，先绑定一下：\n` +
-    '在聊天里输入 \\mc bind（**反斜杠**），我给你一个 6 位码；' +
+    `${who ? `${who}，` : ''}你还没绑定，所以现在还没法在这里跟我说话。\n` +
+    '要绑定：在聊天里输入 \\mc bind（**反斜杠**，不是斜杠），我给你一个 6 位码；' +
     '把码发到群里（@我 并写 \\mc bind 你的码）就绑好了。'
   )
 }

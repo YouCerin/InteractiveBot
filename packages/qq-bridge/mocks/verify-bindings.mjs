@@ -48,8 +48,17 @@ import {
   unbindByName,
   writeStore,
 } from '../src/servers/bindings.mjs'
-import { SAY_CHUNK_CHARS, buildSay, buildTellraw, chunkForSay, oneLine, PLAYER_NAME_RE } from '../src/servers/tellraw.mjs'
-import { decideGameChat } from '../src/servers/game-chat.mjs'
+import {
+  BOT_NAME,
+  CHAT_CHUNK_CHARS,
+  botLine,
+  buildPublicChat,
+  buildTellraw,
+  chunkForChat,
+  oneLine,
+  PLAYER_NAME_RE,
+} from '../src/servers/tellraw.mjs'
+import { decideGameChat, unboundReminder } from '../src/servers/game-chat.mjs'
 
 let pass = 0
 let fail = 0
@@ -268,7 +277,7 @@ console.log('\n=== ⑥ `tellraw` 的选择器注入：名字不合法**拒绝发
 
   const good = buildTellraw({ player: 'YoCerin', text: '绑好了' })
   eq(good.ok, true, '★ 合法名 ⇒ 构造成功')
-  eq(good.command, 'tellraw YoCerin {"text":"绑好了"}', '★ 命令形状正确')
+  eq(good.command, 'tellraw YoCerin {"text":"<小鲸鱼> 绑好了"}', '★★ 命令形状正确，且**自动带上 `<小鲸鱼> ` 前缀**')
   const tricky = buildTellraw({ player: 'YoCerin', text: '他说"你好"\\ 走了' })
   ok(tricky.ok, '★ 含引号/反斜杠的正文也能构造')
   const payload = tricky.command.slice('tellraw YoCerin '.length)
@@ -278,42 +287,65 @@ console.log('\n=== ⑥ `tellraw` 的选择器注入：名字不合法**拒绝发
   } catch (error) {
     parsed = `解析失败：${error.message}`
   }
-  eq(parsed?.text, '他说"你好"\\ 走了', '★★ JSON 转义正确（round-trip 逐字相同）')
-  eq(buildTellraw({ player: 'YoCerin', text: '换\n行' }).text, '换 行', '★★ 换行被压成空格（否则会被当成下一条命令）')
+  eq(parsed?.text, '<小鲸鱼> 他说"你好"\\ 走了', '★★ JSON 转义正确（round-trip 逐字相同，前缀也在里面）')
+  eq(buildTellraw({ player: 'YoCerin', text: '换\n行' }).text, '<小鲸鱼> 换 行', '★★ 换行被压成空格（否则会被当成下一条命令）')
   ok(!/[\r\n]/.test(buildTellraw({ player: 'YoCerin', text: 'a\r\nb' }).command), '★ 命令里绝不出现换行')
   eq(buildTellraw({ player: 'YoCerin', text: '   ' }).ok, false, '★ 空正文 ⇒ 拒绝（不发一条空 tellraw）')
-  eq(buildTellraw({ player: 'YoCerin', text: 'x', color: 'yellow' }).command, 'tellraw YoCerin {"text":"x","color":"yellow"}', '★ 颜色走白名单')
-  eq(buildTellraw({ player: 'YoCerin', text: 'x', color: '@a' }).command, 'tellraw YoCerin {"text":"x"}', '★★ 颜色不是字母 ⇒ **丢掉它**（绝不放进去）')
+  eq(buildTellraw({ player: 'YoCerin', text: 'x', color: 'yellow' }).command, 'tellraw YoCerin {"text":"<小鲸鱼> x","color":"yellow"}', '★ 颜色走白名单')
+  eq(buildTellraw({ player: 'YoCerin', text: 'x', color: '@a' }).command, 'tellraw YoCerin {"text":"<小鲸鱼> x"}', '★★ 颜色不是字母 ⇒ **丢掉它**（绝不放进去）')
+  // ★★ 前缀**幂等**：调用方自己写了前缀也不会变成两个（否则就是 `<小鲸鱼> <小鲸鱼> …`）
+  eq(botLine('<小鲸鱼> 已经带前缀了'), '<小鲸鱼> 已经带前缀了', '★★ `botLine` 幂等（不会加两遍前缀）')
+  eq(botLine('没带前缀'), '<小鲸鱼> 没带前缀', '★ 没带的才加')
 
-  eq(buildSay({ text: '你好' }).command, 'say 你好', '★ say 形状正确')
-  eq(buildSay({ text: '  ' }).ok, false, '★ 空 say ⇒ 拒绝')
+  // ── 公屏那条：`tellraw @a`（**不是 `say`**）—— 使用者要求"像正常玩家、不要高亮" ──
+  const pub = buildPublicChat({ text: '你好' })
+  eq(pub.ok, true, '★ 公屏发言能构造')
+  eq(
+    pub.command,
+    'tellraw @a {"text":"<小鲸鱼> 你好"}',
+    '★★★ 公屏是 `tellraw @a` 且**带 `<小鲸鱼>` 前缀**（`say` 会渲染成 `[Server] …` 且带配色，不像玩家）',
+  )
+  ok(!/"color"/.test(pub.command), '★★★ **不带颜色** ⇒ 默认白色（使用者要求"不要高亮"）')
+  eq(JSON.parse(pub.command.slice('tellraw @a '.length)).text, '<小鲸鱼> 你好', '★ JSON 里就是那一行')
+  eq(buildPublicChat({ text: '  ' }).ok, false, '★ 空 ⇒ 拒绝')
+  ok(!/[\r\n]/.test(buildPublicChat({ text: 'a\r\nb' }).command), '★ 命令里绝不出现换行')
+  ok(!/§/.test(buildPublicChat({ text: '§c红' }).command), '★★★ 正文里的 `§` 被**剥掉**（它是原版格式码：留着模型就能自己上色/变乱码，正好违反"不要高亮"）')
+  eq(buildPublicChat({ text: '§c红' }).text, '<小鲸鱼> 红', '★ 剥掉之后剩下的是普通文字（不是变成空）')
+  eq(buildTellraw({ player: 'YoCerin', text: '§k乱' }).text, '<小鲸鱼> 乱', '★ 私密那条走同一个 `oneLine`，一样剥掉')
+
   eq(oneLine('a\u0007b'), 'ab', '★ 控制字符被去掉')
-  eq(chunkForSay('一'.repeat(SAY_CHUNK_CHARS + 1)).length, 2, `★ 超过 ${SAY_CHUNK_CHARS} 字 ⇒ 切两片`)
+  eq(chunkForChat('一'.repeat(CHAT_CHUNK_CHARS + 1)).length, 2, `★ 超过 ${CHAT_CHUNK_CHARS} 字 ⇒ 切两片`)
   ok(
-    chunkForSay('x'.repeat(SAY_CHUNK_CHARS * 2 + 5)).every((c) => c.length <= SAY_CHUNK_CHARS),
+    chunkForChat('x'.repeat(CHAT_CHUNK_CHARS * 2 + 5)).every((c) => c.length <= CHAT_CHUNK_CHARS),
     '★ 每一片都不超过上限',
   )
-  eq(chunkForSay('   ').length, 0, '★ 空白 ⇒ 零片（不发）')
+  eq(chunkForChat('   ').length, 0, '★ 空白 ⇒ 零片（不发）')
 }
 
-console.log('\n=== ⑦ 游戏内发言该做什么：纯判定（不猜）===')
+console.log('\n=== ⑦ 游戏内发言该做什么 + 进服提醒的措辞（纯判定，不猜）===')
 {
-  eq(decideGameChat({ name: 'A', uuid: UUID_A, bound: { qqId: QQ_A } }).action, 'turn', '★ 已绑定 ⇒ 交给唤醒判定与模型')
-  const remind = decideGameChat({ name: 'A', uuid: null, bound: null })
-  eq(remind.action, 'remind', '★ 未绑定 ⇒ 提示一次')
-  ok(/\\mc bind/.test(remind.text), '★★ 提示里给的是**新流程**（游戏里输入 \\mc bind）', remind.text.slice(0, 40))
-  ok(/反斜杠/.test(remind.text), '★★★ 而且明说"反斜杠"（玩家一定会按习惯打斜杠，而斜杠进不来）')
-  eq(
-    decideGameChat({ name: 'A', uuid: null, bound: null, reminded: true }).action,
-    'ignore',
-    '★★ 已经提示过 ⇒ 什么都不做（刷屏的提示等于没有提示）',
+  eq(decideGameChat({ uuid: UUID_A, bound: { qqId: QQ_A } }).action, 'turn', '★ 已绑定 ⇒ 交给唤醒判定与模型')
+  eq(decideGameChat({ uuid: null, bound: null }).action, 'ignore', '★★★ 未绑定的人说话 ⇒ **什么都不做**')
+  ok(
+    !('text' in decideGameChat({ uuid: null, bound: null })),
+    '★★★ 而且**不带任何要回他的话**（使用者：「不能确定每次玩家都在跟小鲸鱼说话」）',
   )
   // ★ UUID 还没解析出来时**不能**当"已绑定"（哪怕表里有一条）
   eq(
-    decideGameChat({ name: 'A', uuid: null, bound: { qqId: QQ_A } }).action,
-    'remind',
-    '★★ 拿不到 UUID ⇒ 不算已绑定（宁可提示一次，也不冒名）',
+    decideGameChat({ uuid: null, bound: { qqId: QQ_A } }).action,
+    'ignore',
+    '★★ 拿不到 UUID ⇒ 不算已绑定（宁可沉默，也不冒名）',
   )
+
+  // ── 进服提醒的措辞（它是**唯一**会主动发的那条）────────────────────────
+  const r = unboundReminder('YoCerin')
+  ok(/YoCerin/.test(r), '★ 点他的名字')
+  ok(/\\mc bind/.test(r), '★★ 给的是新流程（游戏里输入 \\mc bind）')
+  ok(/反斜杠/.test(r), '★★★ 而且明说"反斜杠"（玩家一定会按习惯打斜杠，而斜杠进不来）')
+  ok(/群里/.test(r), '★★ 说清了"码要发到群里"')
+  ok(!/^你好/.test(r), '★★★ **不再用打招呼开头**（它不是"在回你那句话"，而是进服时的一次性提示）')
+  ok(/还没绑定/.test(r), '★ 说清现状：还没绑定')
+  ok(!/UUID|绑定表|runtime/.test(r), '★ 不写任何内部术语')
 }
 
 console.log('\n=== ⑧ appendAudit 自身：缺 workspace 不抛；非数字时间不写成 NaN ===')

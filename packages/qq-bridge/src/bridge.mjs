@@ -212,7 +212,7 @@ import {
   shortUuid,
   unbindByName,
 } from './servers/bindings.mjs'
-import { buildSay, buildTellraw, chunkForSay, PLAYER_NAME_RE } from './servers/tellraw.mjs'
+import { buildPublicChat, buildTellraw, chunkForChat, PLAYER_NAME_RE } from './servers/tellraw.mjs'
 import { createGameChatLoop, decideGameChat, unboundReminder } from './servers/game-chat.mjs'
 import { createSupervisor, defaultPortOpen as defaultPortProbe } from './servers/supervise.mjs'
 // ★ 截图技能的管理员硬闸：把"这一轮谁在说话、是不是管理员"写成一份**按会话**的
@@ -433,7 +433,7 @@ export class Bridge extends EventTarget {
    * ★ 为什么需要它：游戏内那条通道的**每一次发言都要真连一台 RCON**（`say` / `tellraw`），
    *   不给注入口的话，"游戏里说一句话 → 模型 → 回复发到公屏"这条链
    *   **永远只能靠真机验** —— 而本项目最贵的缺陷恰好是接线。
-   * ★ 它只替换**执行器**：命令**怎么构造**（`buildSay` / `buildTellraw` 的校验与模板）
+   * ★ 它只替换**执行器**：命令**怎么构造**（`buildPublicChat` / `buildTellraw` 的校验与模板）
    *   一个都不放宽 —— 测试里能看到的正是真机上会发出去的那串命令。
    */
   setGameConsoleForTest(runner) {
@@ -1990,10 +1990,32 @@ export class Bridge extends EventTarget {
   }
 
   /**
+   * 这句话**命中唤醒词**了吗（纯读，不产生任何动作）。
+   *
+   * ★ 用的是**与已绑定玩家完全同一份**判据（`decideTrigger` + 同一份关键词表），
+   *   所以"未绑定的人叫了名字"与"已绑定的人叫了名字"不会出现两套口径。
+   * ★ 这里把 `groupEnabled` 显式置真：它是"群聊总开关"，与游戏内那条路无关
+   *   （游戏内由 `servers[].gameChat` 自己把关）。
+   */
+  #gameWakeHit(text) {
+    const r = decideTrigger({
+      kind: 'group',
+      text: String(text ?? ''),
+      mentioned: false,
+      raw: String(text ?? ''),
+      selfId: this.onebot?.selfId ?? '',
+      keywords: this.wakeKeywords ?? this.config.trigger?.keywords,
+      switches: { ...(this.config.trigger ?? {}), groupEnabled: true },
+    })
+    return r.respond === true
+  }
+
+  /**
    * **进服那一刻**给未绑定的玩家一条提醒（使用者 2026-10-04 明确要求）。
    *
    * ★ 为什么必须在进服时发（而不是等他先说话）：他不上来搭话就永远不知道要绑定，
-   *   而"不绑定就不能说话"这条规矩会让新玩家**完全不知道该干什么**。
+   *   而"不绑定就不能说话"这条规矩会让新玩家**完全不知道该干什么**；
+   *   而**说话时**又不宜提醒 —— 使用者原话是「不能确定每次玩家都在跟小鲸鱼说话」。
    * ★ 三条边界：
    *   ① **已绑定的人一个字都不发**（误报"你还没绑定"比不提醒更糟）——
    *      判据是绑定表（按 UUID，退化到按名字），不是"有没有见过他"；
@@ -2010,7 +2032,8 @@ export class Bridge extends EventTarget {
     const uuid = this.#gameUuids.get(key) ?? lookupByName(workspace, name)?.uuid ?? null
     const bound = uuid ? lookupByUuid(workspace, uuid) : null
     if (bound) return { handled: false, reason: 'already-bound' }
-    await this.#gameTellraw(server, name, unboundReminder(name), 'yellow')
+    // ★ 不传颜色：使用者要求"不要高亮，模仿正常玩家"（默认白色）
+    await this.#gameTellraw(server, name, unboundReminder(name))
     this.#gameReminded.add(key)
     this.log(`🔗 [bind] 「${name}」进服且未绑定 ⇒ 已给他本人一条提醒（每次进服最多一次）`)
     return { handled: true, reason: 'remind-on-join' }
@@ -2091,9 +2114,17 @@ export class Bridge extends EventTarget {
     })
 
     if (!bound) {
-      if (decision.action === 'remind') {
-        if (decision.text) await this.#gameTellraw(server, name, decision.text, 'yellow')
+      // ★★★ 未绑定的人说话：**默认什么都不做**（2026-10-04 使用者的要求）——
+      //   「不能确定每次玩家都在跟小鲸鱼说话」，所以不能因为他说了话就回他点什么。
+      //   提醒只在**进服那一刻**发一次（`#remindUnboundOnJoin`）。
+      // ⚠️ **一个窄得多的例外**：他**明确叫了名字**（命中唤醒词）时补发一次提醒 ——
+      //   那种情况我们**确定**他在跟小鲸鱼说话，而沉默会让他以为机器人坏了。
+      //   判定用的是**与已绑定玩家同一份**唤醒判据（不另造一套）。要严格"只有进服提醒"
+      //   就把这一段删掉（一处判断）。
+      if (!this.#gameReminded.has(key) && this.#gameWakeHit(text)) {
+        await this.#gameTellraw(server, name, unboundReminder(name))
         this.#gameReminded.add(key)
+        this.log(`🔗 [bind] 「${name}」未绑定但**明确叫了名字** ⇒ 补发一次绑定提醒（每次进服最多一次）`)
       }
       return
     }
@@ -2244,14 +2275,17 @@ export class Bridge extends EventTarget {
     }
 
     // ── 分片：游戏只按**长度**切（公屏信息密度低，分太多条只会刷屏）──────────
-    const chunks = chunkForSay(text)
+    const chunks = chunkForChat(text)
     if (chunks.length === 0) return
 
     let sent = 0
     for (const chunk of chunks) {
-      const built = buildSay({ text: chunk })
+      // ★★ 公屏那条是 `tellraw @a`（原来用 `say`）：使用者要求
+      //   「每条发言都要在前面加上 `<小鲸鱼>`，**不要高亮**，模仿正常玩家」——
+      //   `/say` 渲染成 `[Server] 正文` 且带配色，那是"服务端公告"而不是玩家发言。
+      const built = buildPublicChat({ text: chunk })
       if (!built.ok) {
-        this.log(`⚠️ [game-chat] 这一片没能构造出 say 命令（${built.why}）`)
+        this.log(`⚠️ [game-chat] 这一片没能构造出公屏命令（${built.why}）`)
         continue
       }
       const r = await this.#runGameCommand(server, built.command, 'say')
@@ -2264,6 +2298,11 @@ export class Bridge extends EventTarget {
         )
         return { ok: false, sent, total: chunks.length }
       }
+      // ★★★ **必须自己记一条**：`tellraw` 与服务端的 `say` 不同 —— 它**不写控制台日志**
+      //   （实测：`say` 会 echo 成 `[Rcon] …`，`tellraw` 一声不响）。所以它说过什么
+      //   在「实时后台」里**看不到**了 ⇒ 由桥接日志补上这条记录（"失败不静默 / 可核对"
+      //   这条能力不能因为换通道而丢掉）。
+      this.log(`[game-chat] 说（公屏）：${built.text}`)
       sent += 1
     }
     this.log(

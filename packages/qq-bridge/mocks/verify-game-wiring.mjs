@@ -327,6 +327,35 @@ console.log('\n=== ⑤-b ★★★ 已绑定的玩家进服：**一个字都不�
   await bridge.close({ timeoutMs: 200 })
 }
 
+console.log('\n=== ⑤-c 未绑定的人**说话**：默认不回；只有**明确叫了名字**才补一条提醒 ===')
+{
+  // 使用者的理由：「不能确定每次玩家都在跟小鲸鱼说话」⇒ 说话时不该回他什么。
+  // 但"桥接启动时他已经在线"这一类拿不到进服事件 ⇒ 有一个人永远不知道要绑定。
+  // ∴ 留一个**窄**兜底：他明确叫了名字（命中唤醒词）时补发**一次**（每次进服最多一次）。
+  const { bridge, rpc, gameCommands } = wiringBridge()
+  bridge.attach()
+  // 故意**不发 join**（模拟"桥接起来时他已经在服里了"）
+  await bridge.onGameEventForTest(SERVER, { kind: 'uuid', name: PLAYER, uuid: UUID })
+
+  // ① 普通闲聊 ⇒ 什么都不回（不进模型、也不提醒）
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '今天天气不错' })
+  eq(rpc.prompts.length, 0, '★★ 未绑定的闲聊 ⇒ 零模型调用')
+  eq(gameCommands.length, 0, '★★★ 而且**一个字都不回**（不能确定他在跟小鲸鱼说话）')
+
+  // ② 明确叫了名字 ⇒ 补一次提醒
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鲸鱼 在吗' })
+  const tells = gameCommands.filter((c) => c.what === 'tellraw')
+  eq(tells.length, 1, '★★★ 明确叫了名字 ⇒ 补发**一条**绑定提醒（那条情况我们确定他在跟它说话）')
+  ok(/\\mc bind/.test(tells[0].command), '★ 提醒里给的是 `\\mc bind`')
+  ok(tells[0].command.startsWith(`tellraw ${PLAYER} `), '★★ 只给他本人')
+  eq(rpc.prompts.length, 0, '★★ 而且仍然**不进模型**（未绑定 = 零成本）')
+
+  // ③ 再叫一次 ⇒ 不再重复（每次进服最多一次）
+  await bridge.onGameEventForTest(SERVER, { kind: 'chat', name: PLAYER, text: '小鱼 你在吗' })
+  eq(gameCommands.filter((c) => c.what === 'tellraw').length, 1, '★★ 再叫也不再重复提醒（"每次进服最多一次"仍然成立）')
+  await bridge.close({ timeoutMs: 200 })
+}
+
 console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ 真的跑了一轮，回复走**公屏 say** ===')
 {
   const { bridge, rpc, sent, WS, gameCommands } = wiringBridge()
@@ -350,8 +379,13 @@ console.log('\n=== ⑥ 已绑定玩家在游戏里说话：命中唤醒词 ⇒ �
   eq(qqReplies.length, 1, '★★★ 游戏那一轮的回复**没有**发到 QQ 私聊（只有上面那条 QQ 消息的回复）')
   eq(sent.length, 1, '★ QQ 通道上只有那一条（游戏那条完全没走 QQ）')
   const says = gameCommands.filter((c) => c.what === 'say')
-  eq(says.length, 1, '★ 恰好发了一条 `say`')
-  eq(says[0].command, 'say 我在。', '★ 命令形状正确（公屏）')
+  eq(says.length, 1, '★ 恰好发了一条公屏发言')
+  eq(
+    says[0].command,
+    'tellraw @a {"text":"<小鲸鱼> 我在。"}',
+    '★★★ 公屏那条是 `tellraw @a` 且**带 `<小鲸鱼>` 前缀**（`say` 会渲染成 `[Server] …` 带配色，不像玩家）',
+  )
+  ok(!/"color"/.test(says[0].command), '★★ **不带颜色**（使用者要求"不要高亮"）')
   eq(says[0].serverId, 'forge1', '★ 发到那台服务器上')
   await bridge.close({ timeoutMs: 200 })
 }
