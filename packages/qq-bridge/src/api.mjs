@@ -1710,6 +1710,67 @@ const STATIC_MIME = {
 }
 
 /**
+ * 「界面产物不在」时的那一页（0.3.2 收尾）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ★★★ 为什么不能只回一句 JSON（一次真机反馈）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 原来的响应是 `{"ok":false,"error":"控制台界面未构建（缺少 config-ui/dist）"}` ——
+ * 使用者**换了一台新设备**，打开控制台就看到这一行裸 JSON，而它缺了最要紧的两件事：
+ *   ① **它找的是哪个目录**（不写出来就只能猜：是没拷过来？拷错地方了？还是构建没做？）；
+ *   ② **现在该怎么办**（"未构建"三个字对"我明明拷了一份过来"的人是误导 ——
+ *      很常见的原因是**这次拷贝没带上 `dist/`**，而不是"没构建"）。
+ *
+ * ∴ 这里回一页人话，把「我看的是哪条路径」与「两条修法」都写出来，
+ *   并且把 `--ui` / `--check` 这两个自查入口指出来。
+ * ★ 它仍然是 **404**（这个资源确实不存在），只是不再是一句机器话。
+ */
+function missingUiPage(root) {
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>控制台界面不在这台机器上</title>
+<style>
+ body{font:14px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:52rem;margin:3rem auto;padding:0 1.25rem;color:#1f2328}
+ code{background:#f3f4f6;padding:.1rem .3rem;border-radius:.25rem;font-family:ui-monospace,Consolas,monospace}
+ pre{background:#f6f8fa;padding:.75rem 1rem;border-radius:.5rem;overflow:auto;font-family:ui-monospace,Consolas,monospace}
+ .warn{background:#fff8e1;border-left:4px solid #f59e0b;padding:.6rem .9rem;border-radius:.25rem}
+ h1{font-size:1.15rem} h2{font-size:1rem;margin-top:1.6rem} li{margin:.3rem 0}
+</style></head><body>
+<h1>控制台界面不在这台机器上</h1>
+<p>桥接本身**跑起来了**（你看到这一页就是它回的），但它要伺服的界面产物不存在：</p>
+<pre>${esc(root)}</pre>
+<p>它在这个目录里找 <code>index.html</code>，没有找到。</p>
+<div class="warn">
+ <b>最常见的原因是这次拷贝/解压没带上 <code>config-ui/dist/</code></b> ——
+ 它不是"构建产物可以不管"，而是仓库里**已入库**的一部分（4 个文件：<code>index.html</code>、
+  <code>assets/</code> 两个、以及构建溯源 <code>ui-build.json</code>）。
+ 很多打包/复制工具看着 <code>.gitignore</code> 里那一行裸 <code>dist/</code> 就把它跳过了。
+</div>
+<h2>两条修法（挑一条）</h2>
+<ol>
+ <li><b>用发布包</b>（最省事，包内自带已构建的界面）：去
+   <code>https://github.com/YouCerin/InteractiveBot/releases</code> 下
+   <code>InteractiveBot-*-win-x64.zip</code>，**完整解压**后从那个目录启动。<br>
+   已经拷了一份的话：确认里面 <code>config-ui/dist/index.html</code> 真的在（少了就重拷，别只拷一半）。</li>
+ <li><b>自己构建</b>（从源码跑的人走这条）：在<b>本包根目录</b>下
+   <pre>cd config-ui
+npm install
+npm run build</pre>
+   构建完刷新这一页即可。<code>npm run build</code> 的第一步是类型检查，
+   所以<b>它也会顺手把界面的类型错误告诉你</b>。</li>
+</ol>
+<h2>自查</h2>
+<ul>
+ <li><code>node src/index.mjs --check</code> —— 一次把"缺什么"列清楚（现在也会报这一项）。</li>
+ <li><code>node src/index.mjs --ui</code> —— 回答"手上这份界面产物是不是当前源码构建的"。</li>
+</ul>
+<p style="color:#57606a">⚠️ 界面缺失**不影响机器人回话**：收发 QQ 消息、记忆、定时任务都不经过这一页。</p>
+</body></html>
+`
+}
+
+/**
  * 创建静态文件处理器（伺服构建好的控制台界面）。
  *
  * 安全上只有两条，但都是硬性的：
@@ -1748,8 +1809,8 @@ function makeStaticHandler(staticDir) {
     if (!existsSync(file) || !statSync(file).isFile()) {
       file = join(root, 'index.html') // SPA 回退
       if (!existsSync(file)) {
-        res.writeHead(404, JSON_HEADERS)
-        res.end(JSON.stringify({ ok: false, error: '控制台界面未构建（缺少 config-ui/dist）' }))
+        res.writeHead(404, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(missingUiPage(root))
         return
       }
     }

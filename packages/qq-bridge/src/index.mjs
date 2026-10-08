@@ -2466,6 +2466,32 @@ async function main() {
         console.log(`📄 项目简介副本：${st.copyRel}（源 ${st.source}）`)
       }
     }
+    // ── 控制台界面产物在不在（0.3.2 收尾）────────────────────────────────
+    // ★ 起因是一次真机反馈：使用者**换了一台新设备**，打开控制台只看到一句裸 JSON
+    //   `{"ok":false,"error":"控制台界面未构建（缺少 config-ui/dist）"}` ——
+    //   而 `--check`（他一定会先跑的那条命令）**一个字都没提这件事**。
+    //   ∴ 自检必须把"界面产物在不在"也列出来：它不影响机器人回话，但**控制台打不开**，
+    //   而这件事在自检里看不见就只能等到有人去点浏览器才发现。
+    // ★ 契约不变：只报告、不连任何服务、不写任何文件。
+    {
+      const { checkUiFreshness, defaultUiDist } = await import('./ui-status.mjs')
+      const distDir = defaultUiDist()
+      const r = checkUiFreshness({ distDir })
+      if (r.status === 'missing') {
+        console.log(`⚠️ 控制台界面产物不在：${distDir}`)
+        console.log('   → 这一项**不影响机器人回话**（收发 QQ 消息不经过它），但控制台打不开。')
+        console.log('   → 用发布包的人：多半是这次拷贝/解压没带上 config-ui/dist（它不是"可以不管的构建产物"，是已入库的一部分）。')
+        console.log('   → 从源码跑的人：cd config-ui && npm install && npm run build')
+      } else if (r.status === 'stale') {
+        console.log(`⚠️ 控制台界面产物**过期**：${r.why}`)
+        console.log('   → 改了 config-ui/src 就要 npm run build，否则浏览器拿到的是旧界面。')
+      } else if (r.status === 'unstamped') {
+        console.log(`⚠️ 控制台界面产物**无法自证来源**：${r.why}`)
+      } else {
+        console.log(`🖥️  控制台界面：与当前源码同步（${distDir}）`)
+      }
+    }
+
     console.log('\n✅ 配置自检通过（--check 模式，未连接任何服务）\n')
     return
   }

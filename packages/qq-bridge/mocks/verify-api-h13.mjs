@@ -965,6 +965,41 @@ section('⑤ ★★★ 畸形返回不许拖垮进程（真机事故的回归锁
   await badServer.close()
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+section('⑥ ★★★ 界面产物不在时那一页必须**可操作**（新设备真机反馈的回归锁）')
+// ══════════════════════════════════════════════════════════════════════════
+{
+  // 真机形状：使用者换了一台新设备（多半是拷贝/解压没带上 `config-ui/dist`），
+  // 打开控制台只看到一句裸 JSON `{"ok":false,"error":"控制台界面未构建（缺少 config-ui/dist）"}`
+  // —— 它既没说"我看的是哪条路径"，也没说"现在该怎么办"。
+  // 这里用一个**不存在的 dist 目录**起一个真服务，按浏览器的方式请求一次。
+  const missingDist = join(TMP, 'no-such-config-ui-dist')
+  const uiServer = await serveApi({
+    port: 0,
+    handler: async () => null,
+    staticDir: missingDist,
+    log: (m) => logs.push(String(m)),
+  })
+  const res = await fetch(`http://127.0.0.1:${uiServer.port}/`, { signal: AbortSignal.timeout(10_000) })
+  const body = await res.text()
+  const ctype = String(res.headers.get('content-type') ?? '')
+
+  check('仍然是 404（这个资源确实不存在，不假装成功）', res.status === 404, String(res.status))
+  check('★★ 回的是 HTML，而不是一句裸 JSON', ctype.includes('text/html'), ctype)
+  check('★★★ 写出**它找的是哪条路径**（不写出来就只能猜是"没拷"还是"拷错地方"）',
+    body.includes(missingDist), missingDist)
+  check('★★ 点出最可能的原因：这次拷贝/解压没带上 config-ui/dist',
+    body.includes('config-ui/dist') && body.includes('拷贝'))
+  check('★★ 给出"自己构建"那条修法（cd config-ui && npm install && npm run build）',
+    body.includes('npm run build') && body.includes('npm install'))
+  check('★ 给出"用发布包"那条修法（Releases）', /releases/i.test(body))
+  check('★ 指向两个自查入口 --check / --ui', body.includes('--check') && body.includes('--ui'))
+  check('★ 如实说明它不影响回话（不吓人，也不装作没事）', body.includes('不影响机器人回话'))
+  // ★ 路径要转义（目录名里可能有 & < >）—— 注入面虽小，但"回显用户输入"就该按规矩来
+  check('★★ 路径经过 HTML 转义（不把目录名当标记渲染）', !/<script/i.test(body))
+  await uiServer.close()
+}
+
 await server.close()
 
 try {

@@ -407,9 +407,15 @@ cd InteractiveBot/packages/qq-bridge
 npm install                               # 装 ws + undici（纯 JS，无需编译）
 node setup.mjs                            # 把纯 JS 依赖收进 vendor/（幂等，可重复跑）
 copy config.example.json config.json      # 然后填 SnowLuma 的 token 与模型 API key
-node src/index.mjs --check                # 自检：DSH 在哪、协议端在不在、配置缺什么
+node src/index.mjs --check                # 自检：DSH 在哪、协议端在不在、配置缺什么、界面产物在不在
 node src/index.mjs                        # 正式跑
 ```
+
+> **界面产物（`config-ui/dist`）随仓库一起入库**，`git clone` 就有，不必自己构建。
+> 但如果你是用**别的方式**拷代码（很多打包工具看着 `.gitignore` 里那行裸 `dist/`
+> 就跳过它），换到新设备后打开控制台会看到「**控制台界面不在这台机器上**」那一页 ——
+> 它不影响机器人回话，页面上写着两条修法（重新完整拷贝，或在 `config-ui` 里
+> `npm install && npm run build`）。自查：`node src/index.mjs --check`。
 
 > ⚠️ **从源码跑必须先 `npm install`**：`vendor/`（包内自带的依赖副本）**不进 git**
 > —— 只有发布包里才有。少了这一步，症状是启动时报 `缺少依赖「ws」`，
