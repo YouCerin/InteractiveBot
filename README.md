@@ -27,6 +27,13 @@
 > 详见下面的「0.3.2 这一版更新了什么」；完整交代（含**升级须知**与仍然存在的边界）在
 > `docs/0.3.2-release-notes.md`。
 
+| | |
+|---|---|
+| 仓库 | <https://github.com/YouCerin/InteractiveBot> |
+| 下载（成品包，**自带 Node 运行时、解压即用**） | <https://github.com/YouCerin/InteractiveBot/releases/latest> |
+| 这一版改了什么 | [`docs/0.3.2-github-release.md`](docs/0.3.2-github-release.md)（发布说明）/ [`docs/0.3.2-release-notes.md`](docs/0.3.2-release-notes.md)（完整交代） |
+| 许可证 | Apache-2.0（[`LICENSE`](LICENSE) · [`NOTICE`](NOTICE) · 第三方出处 [`THIRD-PARTY.md`](THIRD-PARTY.md)） |
+
 ## 开源说明（**动手前先读这 6 条**）
 
 1. **许可证**：Apache-2.0（见 `LICENSE`、`NOTICE`）。第三方组件与出处见 `THIRD-PARTY.md`
@@ -286,7 +293,7 @@ node src/index.mjs --servers --probe --id mc-main   # 真连一次，逐项说�
 
 | 版本 | 一句话 |
 |---|---|
-| **0.3.2** | 服务器监测 / 启动接管 / 重启编排 / 完整控制台 / 游戏内对话（见本文档上一节） |
+| **0.3.2** | 服务器监测 / 启动接管 / 重启编排 / 完整控制台 / 游戏内对话（见本文档上一节）· [发布说明](docs/0.3.2-github-release.md) |
 | **0.3.1** | 0.3.0alpha 的内容经过实机缺陷修复后的打包版本（版本号按使用者要求提升） |
 | **0.3.0alpha** | 把"闲聊口吻"变成唯一说话方式、真正搬进人设文件；出厂人设收敛成一份 |
 | **0.3.0beta** | 闲聊 / 工作双态 + 聊天记录评审台 + 风格修订闭环 |
@@ -381,8 +388,22 @@ copy config.example.json config.json    # 模板：密钥与本机路径都是�
 
 ## 怎么跑起来（最短路径，Windows）
 
+### ① 用发布包（不想装 Node / 不想 clone 的人走这条）
+
+去 [Releases](https://github.com/YouCerin/InteractiveBot/releases/latest) 下载
+`InteractiveBot-0.3.2-win-x64.zip`（约 34 MB，**包里自带 Node 运行时**），解压到任意目录，
+双击 `start.bat`。它会在窗口里打印控制台地址（`http://127.0.0.1:3410`）——
+机器人是后台进程，**关掉那个窗口不等于关掉机器人**。
+
+> ⚠️ 包里**不含** DSH 本体与 QQ 协议端 SnowLuma（后者的许可证不允许随第三方安装包分发），
+> 也不含 ffmpeg（"视频识别"技能用）—— 见下面「开源说明」第 2 条与 `THIRD-PARTY.md`。
+> 发布包里那份 `config.json` 是**模板**（密钥全空），照着界面填即可。
+
+### ② 从源码跑
+
 ```bash
-git clone <仓库地址> && cd InteractiveBot/packages/qq-bridge
+git clone https://github.com/YouCerin/InteractiveBot.git
+cd InteractiveBot/packages/qq-bridge
 npm install                               # 装 ws + undici（纯 JS，无需编译）
 node setup.mjs                            # 把纯 JS 依赖收进 vendor/（幂等，可重复跑）
 copy config.example.json config.json      # 然后填 SnowLuma 的 token 与模型 API key
