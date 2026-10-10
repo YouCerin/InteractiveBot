@@ -72,6 +72,25 @@ if "%~1"=="--open-console" (
   goto :end
 )
 
+rem --- UI artifact presence ----------------------------------------------------
+rem  Why this check exists (2026-10-04, a real report): on a NEW device the
+rem  console showed only {"ok":false,"error":"console UI not built"} while the
+rem  bot itself was perfectly fine. The real cause is almost always this:
+rem  config-ui\dist IS part of the package/repo (the .gitignore exception for it
+rem  is deliberately at the very end of that file), but a bare "dist/" line
+rem  earlier in .gitignore makes many copy/zip tools SKIP that folder.
+rem  So: say it HERE, where a double-clicker will see it, with both fixes.
+rem  ASCII only (see the note at the top of this file) and no parentheses in the
+rem  echo text (a ")" would terminate the if-block early).
+if not exist "%~dp0config-ui\dist\index.html" (
+  echo [!] config-ui\dist\index.html is MISSING -- the web console cannot open.
+  echo     The bot still replies on QQ; only the console page is affected.
+  echo     Fix 1 - use the release package: extract it again, and keep config-ui\dist
+  echo     Fix 2 - from source: cd config-ui ^&^& npm install ^&^& npm run build
+  echo     Check:  start.bat --check
+  echo.
+)
+
 rem --- SnowLuma (QQ protocol endpoint) ----------------------------------------
 rem  Start it BEFORE the bridge: the bridge connects to its OneBot endpoint
 rem  during startup, and a bridge that cannot connect looks "up" but replies
