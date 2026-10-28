@@ -191,11 +191,12 @@ export function formatMemoryReport(report, { full = false } = {}) {
     for (const f of neverInjected) {
       lines.push(`      ${f.rel}（${f.entries} 条）`)
     }
-    lines.push('      注入清单只有三层：')
+    lines.push('      注入清单只有两层（0.3.3：群聊层已下线）：')
     lines.push('        · 全局 MEMORY.md（所有聊天）')
-    lines.push('        · 群聊 memory/groups/<群号>.md、memory/groups/<群号>-slang.md（只在该群）')
     lines.push('        · 个人 memory/people/<QQ>.md（**跟人走**：他的私聊 + 他在群里发言时）')
     lines.push('      另有 memory/directives.md（管理员指令）与 memory/facts-global.md（早期兼容）。')
+    lines.push('      ⚠️ `memory/groups/` 下如果还有文件，那是**已下线那一层的历史群档**：')
+    lines.push('         什么时候都不会被注入，归档到 memory/.migrated/groups/ 即可。')
     lines.push('      要让别的文件生效，得把它并进上面某一档（或改代码的注入清单）。')
   }
 

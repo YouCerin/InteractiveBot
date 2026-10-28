@@ -22,10 +22,6 @@ import { DIRS, resolveInPackage, findDshCli } from './local.mjs'
 import { lintKeywords } from './trigger.mjs'
 import { lintPersona } from './persona.mjs'
 import { buildSpeedPreset, DEFAULT_SPEED_PRESET, lintHumanize, detectSpeedPreset, SPEED_PRESETS } from './speed.mjs'
-// ★ 档位的**唯一口径**在 `affect-gate.mjs`（`normalizePrewakeMode` / `isPrewakeMode`）：
-//   这里只负责"在启动时把写错的值喊出来"，判定逻辑一行都不抄 —— 抄了必然与那边漂。
-import { isPrewakeMode, normalizePrewakeMode } from './affect-gate.mjs'
-
 /**
  * 把一个"路径列表"配置项解析成绝对路径数组。
  *
@@ -398,7 +394,65 @@ export function normalizeConfig(c) {  const src = c ?? {}
     //     · 出站幂等键（`transport.mjs` 的 `deliveryKey`，H9）：关掉会**退回"裸文本当键"**，
     //       于是"同一句话 8 秒内发给两个不同会话"会被误判成重复、第二个被丢掉 —— 那是已修的缺陷。
     //   给它们做开关，等于让"关掉功能"这个动作制造出新缺陷（同 src/plugins.mjs 的口径）。
-    delivery: { ledger: src.delivery?.ledger !== false },
+    delivery: {
+      ledger: src.delivery?.ledger !== false,
+      // ── ★★★ S3（0.3.3）：投递回执（"说了但没发出去"要让模型知道）──────────
+      //
+      // ★ 默认**开**：它是"说了没发出去"这件事的唯一告知通道，关掉等于回到
+      //   "模型以为自己说过了、使用者那边是断的"那个状态（E3）。
+      // ★ 但它是**纯增量**：三个限次参数都很紧（3 次/小时、20 秒间隔、同批只回执一次），
+      //   因为回执会占 token，措辞不当还会让模型反复道歉 —— 关掉 `enabled=false`
+      //   就完全回到今天的行为（一键回滚）。
+      receipt: {
+        enabled: src.delivery?.receipt?.enabled !== false,
+        // 每会话每小时最多回执几次（默认 3）。0 = 一次都不回执（等于关了）。
+        maxPerHour: Number.isFinite(Number(src.delivery?.receipt?.maxPerHour))
+          ? Math.max(0, Math.floor(Number(src.delivery.receipt.maxPerHour)))
+          : 3,
+        // 两次回执之间至少隔多久（默认 20 秒）—— 防止"一轮被限频，后面每轮都在道歉"。
+        minIntervalMs: Number.isFinite(Number(src.delivery?.receipt?.minIntervalMs))
+          ? Math.max(0, Math.floor(Number(src.delivery.receipt.minIntervalMs)))
+          : 20_000,
+      },
+      // ── ★★ S5e（0.3.3）：**跨通道投递**是能力，不是参数 ────────────────────
+      //
+      // 没开这一块之前，"把这条回复发到另一个通道"根本无路可走（`deliver()` 会对
+      // 跨通道直接抛错）。开了也只放行**白名单里逐条写下的目标**：
+      //   · 默认关（`enabled=false`）—— 加一行配置就等于授权，所以默认不授权；
+      //   · `allow` 只认 `通道:目标` 的字面量（`qq-group:123456`），**不接受通道级**
+      //     （"允许发到 game 通道"= 对所有服务器开放，那不是一条授权）。
+      //
+      // ⚠️ 0.3.3 只做了**内部能力 + 校验**，**没有**把它做成给模型用的工具：
+      //   那会是一个"机器人自己决定跨通道说话"的新能力，需要单独一轮讨论
+      //   （与 `humanize.interim` 一样，先问清楚再开）。
+      crossChannel: {
+        enabled: src.delivery?.crossChannel?.enabled === true,
+        allow: (Array.isArray(src.delivery?.crossChannel?.allow)
+          ? src.delivery.crossChannel.allow
+          : []
+        )
+          .map((x) => String(x ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 64),
+      },
+    },
+    // ── ★★★ 0.3.3（P3）：**群语感**（学到"这个群平时怎么说话"）────────────────
+    //
+    // 画像与样本由 `tools/distill-style-profile.mjs` 离线蒸馏（素材是人工判成
+    // "可用"的真实发言），产物在工作区 `store/style/profile.{md,json}`。
+    //
+    // 两个键，默认**都保守**：
+    //   · `enabled=false`：默认**关**。没配的人提示词**逐字不变**（golden 基线靠这条）；
+    //     而且样本是群友说过的话，默认外发给模型 API 不是"升级该有的副作用"。
+    //   · `samples=true`：开着时默认**带**样本（使用者明确说过「开启样本」）；
+    //     想要"只给统计、一条原话都不给"的最小面，把它设 false。
+    //
+    // ⚠️ 画像在**启动时读一次并缓存**：改完 `profile.json` 要重启桥接才生效
+    //   （与"配置只在启动时读一次"同一条语义，界面上也写明）。
+    style: {
+      enabled: src.style?.enabled === true,
+      samples: src.style?.samples !== false,
+    },
     // ── 本地语料库（0.2.3 给它一个开关）────────────────────────────────────
     //
     // 它是什么：每条消息落进 `runtime/corpus.sqlite`（FTS5 + trigram 中文检索），
@@ -520,6 +574,33 @@ export function normalizeConfig(c) {  const src = c ?? {}
           return {
             enabled: src_h.interim?.enabled !== false,
             afterMs: src_h.interim?.afterMs ?? 8000,
+            // ★★★ 0.3.3：谁来写这句垫场白。
+            //   `pool`（默认，升级前的行为）= 本地话术池按"类"挑一句：零成本、零延迟；
+            //   `ai` = **AI 按唤醒时的上下文自己决定**说什么（甚至决定不说），
+            //          话术池退居**兜底**（它没来得及 / 输出看不懂时用）。
+            // ⚠️ 默认必须是 `pool`：`ai` 会**每轮多一次模型调用**，那是要花钱的，
+            //   不能让升级顺手替使用者打开（同 corpus 那条"开关不改变现有部署行为"的纪律）。
+            mode: src_h.interim?.mode === 'ai' ? 'ai' : 'pool',
+            ai: {
+              // 生成用的超时。**0 / 缺省 = 自动**（由消费方按 afterMs 推算，见 `#ensureInterimAi`）。
+              //
+              // ★★★ 这里曾经写错，代价是**整个功能看起来是坏的**（使用者实测反馈「实装失败」）：
+              //   原写法是 `Number.isFinite(Number(x)) ? Math.max(200, Number(x)) : 0`，
+              //   而 `Number(0)` 是有限数 ⇒ **`0` 被夹成 `200`** —— 与"0 = 自动"的文档**正面矛盾**。
+              //   于是每次生成都在 200ms 被掐断（日志：`垫场白超时（200ms）`），
+              //   垫场白**永远**退回话术池，而所有单测都是绿的（它们注入桩、绕过了归一化这一层）。
+              //   ∴ 判据必须是"**正数才算显式值**"，不是"是不是有限数"。
+              timeoutMs:
+                Number.isFinite(Number(src_h.interim?.ai?.timeoutMs)) && Number(src_h.interim.ai.timeoutMs) > 0
+                  ? Math.max(200, Number(src_h.interim.ai.timeoutMs))
+                  : 0, // 0 = 用 afterMs 推算（见下方 lint/消费方）
+              // 每小时最多生成几次（与唤醒判定**各算各的**，互不挤占）
+              maxPerHour: Number.isFinite(Number(src_h.interim?.ai?.maxPerHour))
+                ? Math.max(0, Math.floor(Number(src_h.interim.ai.maxPerHour)))
+                : 120,
+              // 生成时带不带画像里"怎么说话"那一小段（默认带 —— 否则语气跟正文两套）
+              usePersona: src_h.interim?.ai?.usePersona !== false,
+            },
             messages: {
               thinking: arr(m.thinking),
               // 新名优先，旧名兜底（旧名 `web` / `working` 是重构前的写法）
@@ -563,22 +644,9 @@ export function normalizeConfig(c) {  const src = c ?? {}
       custom: src.persona?.custom || '',
     },
     // 跨重启记忆：不给 agent 加存储层，而是给它一个"记笔记"的约定
-    // （工作区是持久的，它本来就有读写文件的工具）。详见 src/memory.mjs。
+    // （工作区是持久的，它本来就有读写文件的工具）。详见 src/memory-store.mjs。
     memory: {
       enabled: src.memory?.enabled !== false,
-      // ── 情绪闸门（2026-09-30）：未唤醒的情绪要不要记 ─────────────────────
-      //
-      // ★ 默认 `off` = 升级前的行为（一个字都不问、不记）。
-      //   为什么默认不开：把它打开意味着"**机器人没参与的对话也会被记进某人的档案**"，
-      //   而实测那份真机语料里，未唤醒消息命中的 5 条**有 4 条是错的**
-      //   （对别人说的挽留、玩笑、说的是别人）—— 那是使用者该自己拍板的取舍，
-      //   不该由升级替他决定。详见 `src/affect-gate.mjs` 的模块头。
-      // ★ `shadow` 是给"想先看看它会记什么"的人准备的中间档：判定照跑、只写日志。
-      affect: {
-        // ★ 非法值**原样保留**（与 image.mode 同一条纪律：静默改写会让"我明明设了"无从查起），
-        //   真正用的时候由 `normalizePrewakeMode()` 一律按 `off` 处理并在这里告警。
-        prewake: src.memory?.affect?.prewake ?? 'off',
-      },
     },
     // 看图：QQ 图片 → 工作区落盘 → 模型（详见 src/images.mjs）。
     //
@@ -859,37 +927,46 @@ export function validateConfig(config) {
     }
   }
 
-  // ── 情绪闸门（2026-09-30）：未唤醒的倾诉要不要记 ──────────────────────────
+  // ── ★★★ 0.3.3：AI 垫场白（`humanize.interim.mode = 'ai'`）────────────────────
   //
-  // 三条都要说出来：① 写错了值（否则使用者以为开了、其实是 off）；
-  // ② 开了但通路不可用（= 一次都判不成，等于没开）；③ 开着时到底会多花什么。
+  // 三条都要说出来，否则使用者只会看到"配了却没效果"：
+  //   ① **每轮多一次模型调用**（要花钱）—— 这是他选错了档才知道的事；
+  //   ② 没配通路时它**常常来不及**（一次性 DSH 进程 3~5 秒 vs afterMs 8 秒）；
+  //   ③ 生成超时**配得比 afterMs 还大**时，它永远赶不上 —— 那一档等于白花钱。
   {
-    const raw = config.memory?.affect?.prewake
-    if (raw != null && String(raw).trim() !== '' && !isPrewakeMode(raw)) {
-      warn.push(
-        `memory.affect.prewake「${raw}」不是有效值（可选 off / shadow / judge），已按 off 处理。` +
-          `注意它**不会**"写别的值就当开着" —— 认不出的一律不记（宁可不记，也不要记错）。`,
-      )
-    }
-    const mode = normalizePrewakeMode(raw)
-    if (mode !== 'off') {
+    const it = config.humanize?.interim ?? {}
+    if (String(it.mode ?? '') === 'ai') {
       const j = config.wake?.judge ?? {}
       const viaHttp = Boolean(String(j.apiKey ?? '').trim())
+      const afterMs = Number(it.afterMs ?? 8000)
+      const configured = Number(it.ai?.timeoutMs ?? 0)
+      const effective = configured > 0 ? configured : Math.max(800, afterMs - 1500)
       warn.push(
-        `memory.affect.prewake = ${mode}：**机器人没参与的群聊也会被记进某人的档案** —— ` +
-          `判据是"规则先筛（本地情绪线索）+ 再问一次模型『这句话是不是在跟机器人说』"。` +
-          (mode === 'shadow'
-            ? '★ 现在是 **shadow**：判定照跑、结论只写日志，**一个字都不落盘**（这是你自己选的观察模式）。'
-            : '★ 现在是 **judge**：判定通过就会落进那个人的个人档（个人档**跟人走**，他在别的群也会被算上）。') +
+        'humanize.interim.mode = ai：垫场白改由**模型按上下文自己写**（还会自己决定"这一轮不先应声"）。' +
+          '★ 代价：**每个长回合多一次模型调用**。★ 拿不到时**自动退回话术池**那句 —— 那四组话术仍然有意义，别删。' +
           (viaHttp
-            ? `★ 通路：复用 wake.judge.apiKey ⇒ **直连** ${j.baseUrl}（约 1 秒）。`
-            : '★ 通路：没配 wake.judge.apiKey ⇒ 起**一次性 DSH 进程**（约 3~5 秒）。') +
-          `★ 只在"未唤醒 + 命中情绪线索"时才问（实测约每 280 条消息 1 次），上限 120 次/小时，超了一律**不记**。`,
+            ? '★ 通路：复用 wake.judge.apiKey ⇒ 直连（约 1 秒），来得及。'
+            : '★ 通路：没配 wake.judge.apiKey ⇒ 起**一次性 DSH 进程**（约 3~5 秒）—— ' +
+              `afterMs = ${afterMs}ms 时它**常常来不及**，于是多数回合会退回话术池。` +
+              '想要它稳，就配一把 wake.judge.apiKey，或把 afterMs 调大。'),
       )
-      if (!viaHttp && !config.dsh?.cliPath) {
+      if (effective >= afterMs) {
         warn.push(
-          'memory.affect.prewake 开着，但既没配 wake.judge.apiKey（所以走一次性 DSH 进程）、' +
-            'dsh.cliPath 也是空的：闸门无法工作，未唤醒的情绪会**一条都记不上**（每条都按"不记"处理）。',
+          // ★ 警告里**必须写完整键名**（`humanize.interim.ai.timeoutMs`）：使用者是拿着这行日志
+          //   去找该改什么的。第一版只写"timeoutMs"，配了 `wake.judge.timeoutMs` 的人会改错那个
+          //   —— 这正是"两个同名的键"最容易踩的坑。
+          `humanize.interim.ai.timeoutMs = ${effective}ms 不小于 humanize.interim.afterMs = ${afterMs}ms：` +
+            '生成**永远赶不上**发出那一刻，这一档会退化成"每次都用话术池、还白付一次模型调用"。' +
+            `把 humanize.interim.ai.timeoutMs 调小（0 = 自动）或把 humanize.interim.afterMs 调大。`,
+        )
+      }
+      // ★ 显式值**太小**也要说：比一次直连调用（约 1 秒）还短的值等于"每次都用话术池"。
+      //   实测的"实装失败"就是这个形状（值被夹到 200ms），所以宁可啰嗦。
+      if (configured > 0 && effective < 1200) {
+        warn.push(
+          `humanize.interim.ai.timeoutMs = ${effective}ms **太短**：一次直连模型调用通常就要 1 秒左右，` +
+            '这个值会让它几乎每次都超时、退回话术池（表现成"配了 AI 但没效果"）。' +
+            '建议写 0（自动，按 afterMs 推算）或 2000 以上。',
         )
       }
     }

@@ -31,6 +31,7 @@ import {
   readPrivacyAudit,
   PRIVACY_CATEGORIES,
   BLOCKED_OUTPUT_NOTICE,
+  buildOutputBlockNotice,
 } from '../src/privacy.mjs'
 import { applyMemoryItems, listMemoryFiles } from '../src/memory-store.mjs'
 
@@ -184,6 +185,39 @@ try {
     screenForStore('手机号 13800138000').why)
   check('输出侧安全话术**不含任何原文片段**',
     !BLOCKED_OUTPUT_NOTICE.includes('13800138000') && BLOCKED_OUTPUT_NOTICE.includes('不方便'))
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('⑤-b ★★★ 输出被拦之后，**告诉她那条没发出去**（0.3.3 真机缺陷）')
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // 真机事故（2026-10-20 00:14，私聊）：她的回复被闸门换成固定话术，**她不知道**，
+  // 于是下一轮说出「前面两条就在说这个，你没刷到？」—— 拿一件没发生的事质问对方。
+  // 这里钉住"告知"的三条性质：**说明白 / 禁止质问 / 不回显原文**。
+  {
+    const n1 = buildOutputBlockNotice({ categories: ['health'] })
+    check('★★ 明说"没有发出去"（不是含糊的"被拦下了"）', /没有发出去/.test(n1), n1.slice(0, 60))
+    check('★ 带上中文类别名（她才能判断是哪句触发的）', /健康医疗/.test(n1), n1.slice(0, 60))
+    check('★★ 复述**对方实际看到的那句话**（他为什么没接上）',
+      n1.includes(BLOCKED_OUTPUT_NOTICE), n1.slice(0, 160))
+    check('★★★ 点名禁止"你没刷到？"这类质问（事故原话）', /你没刷到/.test(n1))
+    check('★ 给出下一步（换说法 / 让对方自己保存）', /换个说法/.test(n1))
+    check('★★ 有 `[隐私闸门]` 前缀（与投递回执可区分，终检门也认得出）', n1.startsWith('[隐私闸门]'))
+
+    // ★ 最关键的一条：**告知里不许出现原文**，否则防线自己成了第二个泄露面。
+    const phone = '13800138000'
+    const n2 = buildOutputBlockNotice({ categories: ['phone'], count: 3 })
+    check('★★★ 告知里**不含原文**（只传类别，不传文本）', !n2.includes(phone))
+    check('★ 多条被拦时说清"最近 N 条"', /最近有 3 条/.test(n2), n2.slice(0, 40))
+    check('★ 多类别都列出来', /手机号/.test(buildOutputBlockNotice({ categories: ['health', 'phone'] })))
+    check('★ 认不出类别时不硬编拗口的话（只是不提类别）',
+      !/这类信息/.test(buildOutputBlockNotice({})) && /没有发出去/.test(buildOutputBlockNotice({})))
+    check('★ 空参数不崩（默认至少说一句）', buildOutputBlockNotice().startsWith('[隐私闸门]'))
+
+    // ★ 变异对照：告知如果退化成"只说出错了"，上面那条"禁止质问"会失去抓手 ——
+    //   所以这里直接核对"必须同时提到 没有发出去 + 对方收到的是那句话"。
+    check('★★ 变异对照：两件事必须同时说（缺一条就等于没说清）',
+      /没有发出去/.test(n1) && n1.includes(BLOCKED_OUTPUT_NOTICE))
+  }
 
   section('⑥ mayContainPrivacy 只能用来预筛（宁可多跑不可漏）')
   check('长数字串 → 需要细看', mayContainPrivacy('身份证 11010519491231002X') === true)

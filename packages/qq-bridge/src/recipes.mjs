@@ -209,11 +209,29 @@ export function pickRecipes(recipes, text, { now = new Date(), threshold = MATCH
 // 入库
 // ══════════════════════════════════════════════════════════════════════════
 
-/** 配方目录（工作区相对）。 */
-export const RECIPE_DIR = 'memory/recipes'
+/**
+ * 配方目录（工作区相对）。
+ *
+ * ★★ 0.3.3：从 `memory/recipes` 挪到 `recipes` —— 配方是**另一套子系统**
+ *   （"这种事一般怎么做"），不是记忆（"关于这个人/这件事的事实"）。
+ *   它原来住在记忆目录里，导致「记忆体检 / 记忆文件树」里混着一堆与记忆无关的 json。
+ *
+ * ⚠️ **老目录仍然读**（`LEGACY_RECIPE_DIR`）：已经存在的配方不能因为搬家就消失
+ *   （本项目最不能接受的一种坏就是"升级即失忆"）。写入一律落在**新目录**。
+ *   物理搬家用 `node tools/migrate-recipes-dir.mjs`。
+ */
+export const RECIPE_DIR = 'recipes'
+
+/** 旧位置（0.3.3 之前）：只读，兼容已存在的配方。 */
+export const LEGACY_RECIPE_DIR = 'memory/recipes'
 
 function recipeRel(id) {
   return `${RECIPE_DIR}/${id}.json`
+}
+
+/** 读一条配方时的两个候选路径（新的优先）。 */
+function recipePaths(root, id) {
+  return [join(root, recipeRel(id)), join(root, LEGACY_RECIPE_DIR, `${id}.json`)]
 }
 
 function readJson(file, fallback = null) {
@@ -279,23 +297,33 @@ export function normalizeRecipe(raw, { source = 'manual', now = new Date() } = {
   }
 }
 
-/** 读一条配方。 */
+/** 读一条配方（新目录优先，老目录兜底）。 */
 export function readRecipe({ workspace, id } = {}) {
   const root = String(workspace ?? '')
   if (!root || !id) return null
-  return readJson(join(root, recipeRel(id)), null)
+  for (const p of recipePaths(root, id)) {
+    const r = readJson(p, null)
+    if (r) return r
+  }
+  return null
 }
 
-/** 列出全部配方（按置信度降序）。 */
+/** 列出全部配方（按置信度降序）。新目录优先；同名 id 不重复。 */
 export function listRecipes({ workspace, now = new Date() } = {}) {
   const root = String(workspace ?? '')
-  const dir = join(root, RECIPE_DIR)
   const out = []
+  const seen = new Set()
   try {
-    if (!existsSync(dir)) return []
-    for (const f of readdirSync(dir).filter((x) => x.endsWith('.json'))) {
-      const r = readJson(join(dir, f), null)
-      if (r && r.id) out.push({ ...r, confidence: confidenceOf(r, now) })
+    // ★ 0.3.3：新目录 + 旧目录都读（旧的在 `memory/recipes`，只读兼容）。
+    //   顺序很重要：新的先读 ⇒ 同名配方以新目录那份为准（搬家后不会读到两份）。
+    for (const dir of [join(root, RECIPE_DIR), join(root, LEGACY_RECIPE_DIR)]) {
+      if (!existsSync(dir)) continue
+      for (const f of readdirSync(dir).filter((x) => x.endsWith('.json'))) {
+        const r = readJson(join(dir, f), null)
+        if (!r || !r.id || seen.has(r.id)) continue
+        seen.add(r.id)
+        out.push({ ...r, confidence: confidenceOf(r, now) })
+      }
     }
   } catch {
     return []

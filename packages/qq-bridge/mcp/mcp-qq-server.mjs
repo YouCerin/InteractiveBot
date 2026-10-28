@@ -55,12 +55,18 @@ import { pathToFileURL } from 'node:url'
 // ★ `verify-imports.mjs` 有断言盯着"相对导入不跑出包外"，这条在包内。
 import { runMcCommand } from '../src/servers/command-gate.mjs'
 
+// ── 0.3.3：她的日记（**实现只有一份**，在 `src/diary.mjs`）─────────────────
+//
+// ★ 这里**只做两件事**：把参数摆对、把结果翻成模型能读的话。
+//   限条数 / 限长度 / 隐私闸 / 时间戳全在那一份里 —— 别在这儿再写一遍。
+import { appendDiary, readRecentDiary, renderRecentDiary } from '../src/diary.mjs'
+
 // ── 协议版本：与 @modelcontextprotocol/sdk 的 stdio 服务端约定一致 ────────
 const PROTOCOL_VERSION = '2024-11-05'
 // ★ 版本号只有四个地方有（package.json / PROJECT.json / 这里 / RELEASE.md 的包名），
 //   升级时四处必须一起改 —— `mocks/verify-manifest.mjs` 有一条断言盯着这件事，
 //   症状是"包名写着 0.3.2、MCP 报的却是 0.3.0alpha"这种自相矛盾。
-const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.3.2' }
+const SERVER_INFO = { name: 'qq-bridge-qq-tools', version: '0.3.3' }
 
 /**
  * ★ 危险动作黑名单（默认放行其余一切）。
@@ -154,13 +160,25 @@ const ADMIN_ONLY_HINT =
   '如果当前说话的人不是管理员，就直说"这个我做不了"，不要偷偷做、也不要假装做过。'
 const READONLY_HINT =
   '【权限】只读动作，普通用户也可以用（但**不能**用它读取与他无关的会话内容）。'
+// ★ 0.3.3：日记的专用提示。默认那两句**都不能用** ——
+//   写的那条被套上"只读动作"就是骗模型；而"读取与他无关的会话内容"跟日记也没关系
+//   （日记是她自己写的，不是别人的聊天记录）。
+const DIARY_WRITE_HINT =
+  '【范围】写的是**她自己的日记**（工作区里的一个文件），不是聊天记录、也不会发出去；' +
+  '普通用户也能用。**只写不改不删**，也别拿别人的隐私去写。'
+const DIARY_READ_HINT = '【范围】只读**她自己写的日记**（不是别人的聊天记录），普通用户也能用。'
 const HONESTY_HINT =
   '【如实】这个工具返回失败就是**没做成** —— 照实说失败原因，不要回"好的已经做了"。'
 
-/** 把提示拼进描述（`tools/list` 时统一应用，保证不会漏掉某个工具）。 */
+/**
+ * 把提示拼进描述（`tools/list` 时统一应用，保证不会漏掉某个工具）。
+ *
+ * ★ 工具可以自带 `hint` 覆盖档位提示（0.3.3 起的口子）：日记是**写**的动作，
+ *   套上"只读动作"那句就是**说错话**（模型会照着它理解自己的权限）。
+ */
 function described(tool) {
-  const hints = `${tool.adminOnly ? ADMIN_ONLY_HINT : READONLY_HINT}${HONESTY_HINT}`
-  return `${tool.description}\n${hints}`
+  const hint = tool.hint ?? (tool.adminOnly ? ADMIN_ONLY_HINT : READONLY_HINT)
+  return `${tool.description}\n${hint}${HONESTY_HINT}`
 }
 
 const TOOLS = [
@@ -502,6 +520,48 @@ const TOOLS = [
         peerId: { type: 'string', description: '当前会话号（群号或 QQ 号）' },
       },
       required: ['command', 'kind', 'peerId'],
+    },
+  },
+  {
+    // ★★★ 0.3.3：她的日记。**只有两个动作**（写一条 / 翻最近几条），
+    //   没有删除、没有改日期、没有"帮我润色" —— 那些是主人的活（见 src/diary.mjs 文件头）。
+    //
+    // ★ 描述里**不出现**「你应该记录今天发生的事」：那不是任务，也不该被当任务完成。
+    //   工具只在"她自己想写点什么"的时候被调用；**没有定时器、没有提醒**。
+    // ★ 规矩（一天三条、一两句、别写总结句）写在这里，是因为它属于**工具契约**，
+    //   不属于角色卡 —— 角色卡不该出现"例文"（本项目的老规矩）。
+    name: 'diary_write',
+    adminOnly: false,
+    local: 'diaryWrite',
+    hint: DIARY_WRITE_HINT,
+    description:
+      '写一条日记（落到 `diary/diary.jsonl`，一行一条，你自己也能去翻）。' +
+      '想到什么就写什么；不想写就不写，没有人在等这篇。' +
+      '★ 一天最多三条，每条一两句 —— 写长了会被拒。' +
+      '★ 别写"今天真是充实的一天"这种总结句，也别写成汇报；一两句具体的东西就够了。' +
+      '★ 时间由系统给（现在几点就记几点），不能指定成别的日子。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '这一条的内容（一两句，最多 200 字）' },
+        mood: { type: 'string', description: '心情，几个字就行（可不填）' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'diary_read',
+    adminOnly: false,
+    local: 'diaryRead',
+    hint: DIARY_READ_HINT,
+    description:
+      '翻翻自己最近的日记（只读，几行原文）。' +
+      '想知道"上次那条后来怎么样了"、或者只是回头看看，都可以翻。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: '翻几条（默认 5，最多 50）' },
+      },
     },
   },
 ]
@@ -853,6 +913,39 @@ async function runMcCommandTool({ serverId, command, kind, peerId } = {}) {
   return { isError: false, text: parts.join('\n') }
 }
 
+/**
+ * **写一条日记**（0.3.3）。
+ *
+ * ★ 这里**不检查内容**：写什么、写不写，都是她的事（使用者原话「不要规定今天要写什么」）。
+ *   代码只守三条形状上的规矩 —— 一天三条、一两句、隐私闸 —— 且都在 `src/diary.mjs` 里。
+ * ★ 被拒时**如实回话**（"今天已经三条了"），不要替她润色、不要替她改写后重试；
+ *   拒了就是拒了，明天再写。
+ */
+function runDiaryWrite({ text, mood } = {}) {
+  const ws = config?.workspace
+  if (!ws) return { isError: true, text: '没有工作区路径 ⇒ 不知道日记该写到哪（这一层不可用）。' }
+  const r = appendDiary({ workspace: ws, text: String(text ?? ''), mood: String(mood ?? '') })
+  if (!r.ok) return { isError: true, text: `${r.why}。` }
+  return {
+    isError: false,
+    text: `写好了：${r.entry.时间}${r.entry.心情 ? `（${r.entry.心情}）` : ''} ${r.entry.内容}`,
+  }
+}
+
+/**
+ * **翻最近几条日记**（0.3.3，只读）。
+ *
+ * ★ 原样列表，不加解释、不加"你那时候真开心"这类点评 —— 那是她的日记，不是语料。
+ * ★ 坏行（手改坏的）**跳过并计数**，不抛错：日记是纯文本，人本来就会去改。
+ */
+function runDiaryRead({ limit } = {}) {
+  const ws = config?.workspace
+  if (!ws) return { isError: true, text: '没有工作区路径 ⇒ 读不到日记（这一层不可用）。' }
+  const r = readRecentDiary({ workspace: ws, limit: Number(limit) || 5 })
+  if (!r.ok) return { isError: true, text: r.why ?? '日记读不出来。' }
+  return { isError: false, text: renderRecentDiary(r) }
+}
+
 /** 当前档位下**对模型可见**的工具（`tools/list` 用它；`runTool` 也用它做 fail-closed 校验）。 */function visibleTools() {
   const readonly = config?.profile === 'readonly'
   return TOOLS.filter((t) => {
@@ -905,6 +998,14 @@ async function runTool(name, args) {
   }
   // ── 0.2.2：发图（自己下载 + 守卫 + base64 段）────────────────────────────
   if (tool.local === 'sendImage') return runSendImage(args ?? {})
+
+  // ── 0.3.3：她的日记（**本地文件**，不走 OneBot，也没有开关）──────────────
+  //
+  // ★ 为什么**不给开关**：日记不是"功能"，是她的本子 —— 关掉它等于把本子收走。
+  //   真要停就让她不写（工具描述里已经写明"不想写就不写"）。
+  // ★ 为什么**没有"到点写"的分支**：使用者原话「不要固定时间」—— 写的时间由她定。
+  if (tool.local === 'diaryWrite') return runDiaryWrite(args ?? {})
+  if (tool.local === 'diaryRead') return runDiaryRead(args ?? {})
 
   // ── 0.3.2 收尾：服务器控制台（**先过管理员硬闸**）─────────────────────────
   //
@@ -1075,4 +1176,4 @@ const invokedDirectly =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (invokedDirectly) startServer()
 
-export { TOOLS, BLOCKED_ACTIONS, described, runTool, runCorpusSearch, runForwardLog, runSendImage, readLiveConfig }
+export { TOOLS, BLOCKED_ACTIONS, described, runTool, runCorpusSearch, runForwardLog, runSendImage, runDiaryWrite, runDiaryRead, readLiveConfig }

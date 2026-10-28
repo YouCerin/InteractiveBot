@@ -264,6 +264,99 @@ async function main() {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('⑦ ★★★ 启动锁：两次同时启动只能起一个（真机事故的根因）')
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // 2026-10-20 10:57:33 的真机日志：两条 `[App] SnowLuma starting` 同一秒。
+  // 判断（探控制台/探端口）和 spawn 之间有几百毫秒到几秒的空隙，两个启动同时
+  // 进入这个窗口时**双方都看到"没人跑"**，于是都 spawn —— 端口被分掉：
+  // 一个拿 3000/3001，另一个的网页端退让到 5100 且适配器全 EADDRINUSE。
+  // 所以这里验的是**互斥**（锁），而不是又一道判断。
+  {
+    const { acquireLaunchLock, launchLockPath } = await import('../src/snowluma.mjs')
+    const lockPath = launchLockPath(ROOT)
+    const baseArgs = (log, extra = {}) => ({
+      config: cfg,
+      log,
+      // 探测慢一点，把"判断 → spawn"的空隙放大到测试可控的程度
+      probe: async () => {
+        await new Promise((r) => setTimeout(r, 60))
+        return { reachable: false }
+      },
+      detect: async () => ({ status: 'offline' }),
+      checkPort: async () => ({ inUse: false, method: 'bind', detail: '空闲' }),
+      probeAnswered: async () => ({ answered: false, status: null }),
+      // 真实存在、跑完就退出的入口：只验"发起了几次"，不在本节验它能不能工作
+      locateSnowluma: () => ({
+        cmd: join(process.cwd(), 'src', 'ports.mjs'),
+        cwd: join(process.cwd(), 'src'),
+        kind: 'mjs',
+        from: '测试注入',
+      }),
+      findNode: () => process.execPath,
+      register: () => {
+        spawns += 1
+        return { ok: true }
+      },
+      pkgRoot: ROOT,
+      ...extra,
+    })
+    let spawns = 0
+    const logs = []
+    const log = (m) => logs.push(m)
+
+    const [a, b] = await Promise.all([
+      startSnowluma(baseArgs(log)),
+      // 第二次：等待窗口设成 0，让测试不必真等 20 秒
+      startSnowluma(baseArgs(log, { waitMs: 0 })),
+    ])
+    check('★★ 两次并发启动**只 spawn 了一次**', spawns === 1, `${spawns} 次`)
+    check('★★ 第二次报"另一次启动正在进行"，而不是 started:true',
+      a?.data?.started === true && b?.data?.started === false && b?.data?.launchInProgress === true,
+      JSON.stringify({ a: a?.data?.started, b: b?.data ?? null }).slice(0, 140))
+    check('★ 第二次把话说明白（不跟着再起一个）',
+      /不跟着再起一个|另一次 SnowLuma 启动/.test(String(b?.data?.hint) + logs.join('\n')),
+      String(b?.data?.hint).slice(0, 90))
+    check('★ 第一次正常结束后**锁已释放**', !existsSync(lockPath))
+
+    // 崩溃残留：锁文件很旧（超过 staleMs）⇒ 接管，不能永远卡住启动
+    {
+      const { mkdirSync, writeFileSync } = await import('node:fs')
+      mkdirSync(join(ROOT, 'runtime'), { recursive: true })
+      writeFileSync(lockPath, JSON.stringify({ pid: 999999, at: Date.now() - 10 * 60_000 }), 'utf8')
+      check('★ 过期锁能被识别（staleMs 之内不算过期）',
+        acquireLaunchLock({ pkgRoot: ROOT, now: Date.now() - 11 * 60_000 }).ok === false)
+      const spawnedBefore = spawns
+      const r = await startSnowluma(baseArgs(log))
+      check('★★ 过期锁被接管，照常启动（不是"永远启动不了"）',
+        r?.data?.started === true && spawns === spawnedBefore + 1, JSON.stringify(r?.data ?? r).slice(0, 120))
+      check('★ 接管之后锁也释放掉了', !existsSync(lockPath))
+    }
+
+    // 失败路径也必须放锁：否则一次失败会把后续启动永久挡住
+    {
+      const spawnedBefore = spawns
+      const r = await startSnowluma({
+        ...baseArgs(log),
+        locateSnowluma: () => ({ cmd: null, cwd: null, kind: null, from: null }),
+      })
+      check('★ 入口找不到 ⇒ 如实失败（不装作启动成功）', r?.ok === false, JSON.stringify(r).slice(0, 110))
+      check('★★ 失败路径同样释放锁（不然下一次会被自己挡住）', !existsSync(lockPath))
+      check('★ 失败那次确实没 spawn', spawns === spawnedBefore)
+    }
+
+    // 锁内容可读：出问题时能回答"谁拿着锁"
+    {
+      const a1 = acquireLaunchLock({ pkgRoot: ROOT })
+      const raw = JSON.parse(readFileSync(lockPath, 'utf8'))
+      check('★ 锁里记着 pid 与时间（排查时能回答"谁拿着"）',
+        a1.ok === true && Number.isInteger(raw.pid) && Number.isFinite(raw.at), JSON.stringify(raw))
+      a1.release()
+      check('★ release 幂等（重复删不抛）', (() => { try { a1.release(); return true } catch { return false } })())
+    }
+  }
+
   console.log('')
   if (failures === 0) console.log('🎉 SnowLuma 第三防线 + PID 登记 + 就绪等待测试全部通过')
   else console.log(`⚠️ ${failures} 项失败`)

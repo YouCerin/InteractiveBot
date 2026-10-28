@@ -105,6 +105,17 @@ export async function buildChannelPrompt({
   log = () => {},
   warn = () => {},
   sessionState = null,
+  /** ★★★ S3（0.3.3）：上一轮「说了但没发出去」的回执（空串 = 没有）。
+   *  ★ 它**不是**"我说过的话"：只是给模型看的**动作提示**（"要接着说的，用一句新的话重新发"）。
+   *  由 `bridge.mjs` 的 `#takeDeliveryReceipt()` 取用即清（一次性语义，与记忆回执一致）。 */
+  deliveryReceipt = '',
+  /** ★★★ 0.3.3：上一轮回复被**隐私闸门**换掉了 —— 告诉她"那条没发出去"。
+   *  ★ 与 `deliveryReceipt` 是两件事：那个是"没发出去、请重发"，这个是"对方根本没收到"。
+   *  由 `bridge.mjs` 的 `#takePrivacyNotice()` 取用即清（一次性语义）。空串 ⇒ 一个字都不出现。 */
+  privacyNotice = '',
+  /** ★★ 0.3.3（P3）：群语感块（统计 + 少量真实样本）。空串 ⇒ 一个字都不出现。
+   *  由 `bridge.mjs` 的 `#styleBlockText()` 从 `store/style/profile.json` 渲染。 */
+  styleBlock = '',
   consumeGap = () => null,
   skillSections = [],
   /** "怎么写 `[sticker:标签]`"那几行（**只列库里真有货的标签**）。
@@ -192,6 +203,15 @@ export async function buildChannelPrompt({
   // 放在平台规则**之后**（硬规矩先说）、记忆**之前**（先身份后记忆）。
   if (personaText) lines.push('', personaText)
 
+  // ── ★★ 群语感（0.3.3 · P3）：这个群体"平时怎么说话"的统计 + 少量真实样本 ────
+  //
+  // ★ 位置：紧跟人设之后。它是"说话方式"的一部分（比人设更具体到**这个群**），
+  //   放在记忆/权限之前读起来才顺；而且它是**静态块**（同一份画像），
+  //   留在前缀里不吃缓存、也不因每轮的对话而抖动。
+  // ★ 空串 ⇒ 一个字都不出现（`style.enabled` 关着 / 画像没生成）——
+  //   这条对 `prompt-golden.txt` 的逐字基线同样重要：默认关时必须**逐字不变**。
+  if (styleBlock && String(styleBlock).trim()) lines.push('', String(styleBlock).trim())
+
   // ── 0.3.0alpha：这里原来有一句「这一轮是**闲聊**」（2026-10-01 加）────────
   //
   // 它当时的用途：人设里同时有两套口吻（基座 + 闲聊风格），模型读不出"这一轮
@@ -253,12 +273,12 @@ export async function buildChannelPrompt({
     const workspace = config.dsh.workspace
     // ★ 先查篡改：模型手里仍有 write 工具，可以绕过标记直接改记忆文件。
     verifyAndRestoreMemory({ workspace, log })
-    // ★ 三层记忆：把**这一轮是谁在说话**传下去 —— 个人层的注入口径是
-    //   "关于当前发言人"，群里因此只注入他那一份（别人看不到，别的群也看不到）。
-    //   ★★ 2026-10-01 用户要求：群聊记忆的开头要像个人记忆一样**带上群名**。
-    //   群名来自 `identity`（协议端核实过的 `get_group_list`），传下去只为把
-    //   "本群记忆"那一行的标签写成「本群记忆·摸鱼群（只在这个群）」；
-    //   查不到时留空，标签退回不带名字的写法（**不编名字**）。
+    // ★ 记忆：把**这一轮是谁在说话**传下去 —— 个人层的注入口径是
+    //   "关于当前发言人"，群里因此只注入他那一份（别人看不到）。
+    //   ★★ 0.3.3：**群聊层已下线**（使用者：群聊中的对话记忆归于个人），
+    //   所以群里写的每一条也落进发言人自己那份、注入也只有这一份。
+    //   `chatName` 仍然传下去，但它现在**只用于写文件头**（原来那个「本群记忆·群名」的
+    //   注入标签随群聊层一起下线了）—— 留着参数是为了少改一处调用形状，不是还有那一层。
     const recall = readMemoryForPrompt({
       workspace,
       kind,
@@ -342,6 +362,26 @@ export async function buildChannelPrompt({
     }
   }
 
+  // ── ★★★ S3（0.3.3）：上一轮「说了但没发出去」的回执 ────────────────────
+  //
+  // ★ 位置：**紧挨着正文之前**（与上一条同一条理由 —— 越靠近"此刻"越容易被遵循）。
+  // ★ 它**不是**记忆、也不是语料：只是给模型的**动作提示**。
+  //   措辞原则（表单 §S3 的风险项）：**给动作，不报故障** ——
+  //   说"你漏发了"会让模型下一轮先道歉一遍（对使用者是噪音）。
+  // ⚠️ 前缀 `[投递回执]` 由 `delivery-receipt.mjs` 生成，**终检门认得出它不是正文**。
+  if (deliveryReceipt && String(deliveryReceipt).trim()) {
+    lines.push('', String(deliveryReceipt).trim())
+  }
+
+  // ── ★★★ 0.3.3：上一轮被隐私闸门拦下（"她不知道"的缺陷修复）────────────────
+  //
+  // ★ 位置与上面那条一致：**紧挨着正文之前**（越靠近"此刻"越容易被遵循）。
+  // ★ 内容由 `privacy.mjs#buildOutputBlockNotice()` 生成（只有一处措辞）：
+  //   明说没发出去 + 复述对方看到的那句话 + 点名禁止"你没刷到？" + **不回显原文**。
+  if (privacyNotice && String(privacyNotice).trim()) {
+    lines.push('', String(privacyNotice).trim())
+  }
+
   lines.push('', origin, rendered.text)
 
   // ── H10：对话走向（纯规则，零模型调用）────────────────────────────────
@@ -384,9 +424,21 @@ export async function buildChannelPrompt({
 
   // ── 图片 ────────────────────────────────────────────────────────────
   // 如实说"图在哪、怎么看"。旧版写的是"当前通道未启用看图能力"，而能力一直都在。
-  const gotImages = images.filter((x) => x.ok)
-  const lostImages = images.filter((x) => !x.ok)
-  const skipped = Math.max(0, (rendered.images ?? 0) - images.length)
+  //
+  // ★★★ 0.3.3：**图分两组说** ——
+  //   ① 当前这条消息带的图（原有措辞不动）；
+  //   ② 更早某条消息带的图（"先发图、再叫它"那条路）。
+  //   为什么必须分开说：混成一句"这条消息里含 N 张图"会让模型把**别人的图算到当前这个人头上**，
+  //   而那是"对不上人"的经典错法（它会回一句"你发的这张图…"，可图根本不是他发的）。
+  //   ⚠️ 判据是**显式旗标** `source.fromContext`，不是"messageId 有没有值" ——
+  //     群消息的 id 经常是 null，用空串当判据会让两组撞在一起（实测踩过）。
+  const ownImages = images.filter((x) => !x?.source?.fromContext)
+  const ctxImages = images.filter((x) => x?.source?.fromContext)
+  const gotImages = ownImages.filter((x) => x.ok)
+  const lostImages = ownImages.filter((x) => !x.ok)
+  const gotCtx = ctxImages.filter((x) => x.ok)
+  const lostCtx = ctxImages.filter((x) => !x.ok)
+  const skipped = Math.max(0, (rendered.images ?? 0) - ownImages.length)
 
   if (gotImages.length > 0) {
     if (config.image?.mode === 'auto') {
@@ -400,8 +452,47 @@ export async function buildChannelPrompt({
       lines.push('（需要看内容时用 read_image 读对应文件；确定用不上就别读 —— 读图是要花 token 的。）')
     }
   }
+
+  // ── 上下文里那些图（"你没被叫到的时候，有人发过图"）──────────────────────
+  // ★ 这一段的存在就是"图被无视"那个 bug 的修复：在此之前，模型只知道有人**说了句话**，
+  //   完全不知道那是一张图（正文里只剩 `[图片]` 占位），也就永远不会去看。
+  if (ctxImages.length > 0) {
+    const byMessage = new Map()
+    for (const img of ctxImages) {
+      const src = img.source ?? {}
+      // 分组键：有 id 用 id，没有就用"发话人 + 正文"（群消息常常没有 id）
+      const id = String(src.messageId ?? '') || `${src.senderId ?? ''}|${src.text ?? ''}`
+      if (!byMessage.has(id)) byMessage.set(id, { source: src, items: [] })
+      byMessage.get(id).items.push(img)
+    }
+    lines.push('')
+    lines.push('（**你没被叫到的时候**，下面这些消息还带了图片 —— 它们也在工作区里，' +
+      '需要时用 read_image 读：）')
+    for (const [, group] of byMessage) {
+      const who = String(group.source.senderName ?? '').trim() || String(group.source.senderId ?? '').trim() || '某人'
+      // ★ 引用一句正文：让模型能把"这张图"与上下文里那一行**对上**
+      //   （上下文段里那行是 `名字: 正文`，所以这里带上正文片段是最省事的锚点）。
+      const snippet = String(group.source.text ?? '').trim()
+      const ok = group.items.filter((x) => x.ok)
+      const bad = group.items.filter((x) => !x.ok)
+      if (ok.length > 0) {
+        if (config.image?.mode === 'auto') {
+          lines.push(`· ${who}${snippet ? `（${snippet}）` : ''} 发的 ${ok.length} 张图**已直接附上**。`)
+        } else {
+          lines.push(`· ${who}${snippet ? `（${snippet}）` : ''} 发的 ${ok.length} 张图：${ok.map((x) => x.relPath).join('、')}`)
+        }
+      }
+      if (bad.length > 0) {
+        lines.push(`· ${who} 发的 ${bad.length} 张图没能取到：${bad.map((x) => x.reason ?? '未知原因').join('；')}`)
+      }
+    }
+    lines.push('（别当成本条消息的附图 —— 那是**更早那条**消息里的，说的时候按"你刚发的那张图"来讲。）')
+  }
   if (lostImages.length > 0) {
     lines.push(`（有 ${lostImages.length} 张图片没能取到：${lostImages.map((x) => x.reason).join('；')}。）`)
+  }
+  if (lostCtx.length > 0 && gotCtx.length === 0 && ctxImages.length > 0) {
+    lines.push(`（上下文里那几条消息的图片一张都没取到：${lostCtx.map((x) => x.reason).join('；')}。）`)
   }
   if (skipped > 0) {
     lines.push(`（另有 ${skipped} 张图片超出本条消息的处理上限，未处理。）`)

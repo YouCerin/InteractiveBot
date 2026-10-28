@@ -306,7 +306,11 @@ export function normalizeTask(raw, { now = Date.now() } = {}) {
               announce: normalizeAnnounce(raw.announce ?? raw.trigger?.announce),
             }
           : trigger.trigger,
-      target: { kind, peerId },
+      // ★★ S5d（0.3.3）：目标**多带一个 `channel`**（`qq-group` / `qq-private`）。
+      //   老任务文件里没有这个字段 ⇒ 读的时候由 `channelFromStored()` 按 `kind` 补
+      //   （**只读兼容，不回写**）：把补出来的值写回盘上，"当年存了什么"就没了。
+      //   `kind` 仍然保留 —— 它是 0.3.2 及以前唯一的字段，删掉会让老配置读不出来。
+      target: { kind, peerId, channel: kind === 'group' ? 'qq-group' : 'qq-private' },
       prompt,
       requestedBy: String(raw.requestedBy ?? '').replace(/\s+/g, ' ').trim().slice(0, 40),
       // ★ 默认 **true**：定时提醒的语义就是"到点就说"，

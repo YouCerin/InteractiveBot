@@ -89,8 +89,11 @@ try {
     check('带发言人编号清单（模型只认编号）', p.includes(`#1 = 无忘远霞(${A})`) && p.includes(`#2 = 阿玮(${B})`), '')
     check('带对话正文', p.includes('我最近这几个项目都是 ai 编程的') && p.includes('这个群是游戏群'), '')
     check('★ 明说"不要写 QQ 号"（它写了也会被拒）', /不要写 QQ 号/.test(p), '')
-    check('三档都解释清楚（person 必须带 who / group 不要带）',
-      /`person`/.test(p) && /`group`/.test(p) && /`global`/.test(p) && /必须带 who/.test(p), '')
+    check('★★ 0.3.3：只剩两档，且**两档都解释清楚**（person 必须带 who / global 不带）',
+      /`person`/.test(p) && /`global`/.test(p) && /必须带 who/.test(p) && !/`group`/.test(p),
+      /`group`/.test(p) ? '（还在教已经下线的 group 档）' : '')
+    check('★★ 明说"没有只跟本群有关那一档了"，并要求群里的事按"他提过"写',
+      /没有"只跟本群有关"那一档/.test(p) && /按"他提过"写/.test(p))
     check('★ 重复了那几条硬禁令（隐私 / 第三方负面 / 不抄原文）',
       /不记隐私/.test(p) && /不记对不在场的人的负面评价/.test(p) && /不要把对话原文抄进来/.test(p), '')
     check('宁少勿多的口径在（一次最多 8 条）', /最多 8 条/.test(p) && /宁少勿多/.test(p), '')
@@ -104,8 +107,19 @@ try {
   {
     const bare = normalizeBuildOutput('{entries:[{who:#1,scope:person,text:他在做爬虫},{scope:group,text:这个群是游戏群}]}')
     check('裸词 JSON 也能解析（与抽取同一套解析器）', bare.ok === true && bare.entries.length === 2, JSON.stringify(bare.entries?.length))
-    check('scope 认不出 → 归到 group（不猜成 person，person 是要写进某个人的档案的）',
-      normalizeBuildOutput('{entries:[{scope:啥,text:x}]}').entries[0].scope === 'group', '')
+    check('★★ 0.3.3：旧词 `group` 仍认，但现在与 `person` **同义**（都要求 who）',
+      normalizeBuildOutput('{entries:[{scope:group,text:x}]}').entries[0].scope === 'person')
+
+    // ★★ 兜底方向在 0.3.3 反过来了：**认不出 → `person`**（原来兜底到 group）。
+    //   为什么必须反向：兜底到 group 的旧语义是"不带 who 的会话档"，
+    //   而新布局里没有这种落点 —— 它最终一定会落到**某个发言人**名下。
+    //   兜底到 person 之后，`who` 为空会被**明确拒绝并说明原因**，而不是静默记到第一个人头上。
+    check('★★ 认不出的 scope → 兜底到 `person`（不是 group），而 who 为空时会被明确拒',
+      (() => {
+        const one = normalizeBuildOutput('{entries:[{scope:啥,text:x}]}').entries[0]
+        return one.scope === 'person' && one.who === ''
+      })(),
+      JSON.stringify(normalizeBuildOutput('{entries:[{scope:啥,text:x}]}').entries[0]))
     check('空 text 丢掉', normalizeBuildOutput('{entries:[{scope:group,text:""}]}').entries.length === 0, '')
     check('{"entries":[]} 是合法答案（确实没什么可记）', normalizeBuildOutput('{entries:[]}').ok === true, '')
     check('解析不出来 → ok:false（由调用方如实回报，不抛）', normalizeBuildOutput('这不是 JSON').ok === false, '')
@@ -158,7 +172,7 @@ try {
         runner: stub(
           '{entries:[{who:#1,scope:person,text:他做项目靠 AI 编程},' +
             '{who:#2,scope:person,text:他在写爬虫},' +
-            '{scope:group,text:这个群是游戏群}],note:"ok"}',
+            '{scope:global,text:大家都叫我小鲸鱼}],note:"ok"}',
         ),
         log: () => {},
       })
@@ -167,15 +181,22 @@ try {
         String(read(ws, `memory/people/${A}.md`)).includes('靠 AI 编程') &&
           String(read(ws, `memory/people/${B}.md`)).includes('在写爬虫'),
         '')
-      check('★ group 档落到群聊层（不落到任何个人档）',
-        String(read(ws, `memory/groups/${GROUP}.md`)).includes('游戏群') &&
-          !String(read(ws, `memory/people/${A}.md`)).includes('这个群是游戏群'),
+      // ★★ 0.3.3：`group` 档**已下线**（模型还写着它时与 person 同义）。
+      //   旧断言是"group 档落到群聊层、且不落到任何个人档"—— 语义已反转，整条重写：
+      //   这里改成断言**全局档**（真正与发言人无关的那一档）的行为，并另测 group 旧词。
+      check('★★ 全局档落 MEMORY.md，不进任何个人档',
+        String(read(ws, 'MEMORY.md')).includes('大家都叫我小鲸鱼') &&
+          !String(read(ws, `memory/people/${A}.md`)).includes('大家都叫我小鲸鱼'),
         '')
+      check('★★ 群档目录整个不存在（一个文件都没建）',
+        !existsSync(join(ws, 'memory', 'groups')), String(existsSync(join(ws, 'memory', 'groups'))))
       check('★★ 游标前进到最后一条（11→14）', r.cursorAfter === 14, String(r.cursorAfter))
       const cur = readCursor({ workspace: ws, chatKey: `group:${GROUP}` })
       check('  游标落盘了（重启后不会重复处理）', cur.lastId === 14, JSON.stringify(cur.rec))
-      check('  报告里带 wroteFiles（界面能显示"写进了哪几份"）',
-        Array.isArray(r.wroteFiles) && r.wroteFiles.length === 3, JSON.stringify(r.wroteFiles))
+      check('  报告里带 wroteFiles（界面能显示"写进了哪几份"）—— 现在是**两份个人档 + 全局**',
+        Array.isArray(r.wroteFiles) && r.wroteFiles.length === 3 &&
+          r.wroteFiles.every((f) => f === 'MEMORY.md' || f.startsWith('memory/people/')),
+        JSON.stringify(r.wroteFiles))
     }
 
     // ── 未知编号：丢弃并说明（**绝不兜底到当前发言人**）────────────────────

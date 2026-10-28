@@ -570,6 +570,30 @@ export function createImageInbox({ workspace, log = () => {}, now = () => Date.n
   }
 
   /**
+   * 按**内容哈希**查一张已经收过的图（`save` 用的就是同一个哈希）。
+   *
+   * ⚠️ 它**不是**"下之前先查缓存"那条路 —— 要算哈希就得先有字节，而那意味着已经下载了。
+   *   所以它的用途是：**手上已经有字节**时（`bridge.mjs` 的引用级缓存命中后从盘上读回来、
+   *   或别处已经拿到内容时）确认"这张图落在哪个文件上"，**省掉一次写盘的 EEXIST 尝试**。
+   *   "同一张图别再下一次网络请求"是 `#imageRefCache` 的职责，不是这里的。
+   */
+  function lookup(bytes, mediaType) {
+    const ext = MEDIA_TYPE_EXT[mediaType]
+    if (!ext || !bytes || !bytes.byteLength) return { ok: false, reason: '不支持的类型或空内容' }
+    try {
+      const sha = createHash('sha256').update(bytes).digest('hex')
+      const name = `${sha.slice(0, 16)}.${ext}`
+      const abs = join(dir, name)
+      const st = statSync(abs)
+      if (!st.isFile()) return { ok: false, reason: '不在盘上' }
+      return { ok: true, name, relPath: `${IMAGE_DIR}/${name}`, absPath: abs, bytes: st.size, deduped: true }
+    } catch {
+      // 文件不在（或被清掉了）→ 让调用方走正常下载
+      return { ok: false, reason: '不在盘上' }
+    }
+  }
+
+  /**
    * 清理：先按时间删过期的，再按总量删最旧的。
    *
    * ⚠️ 删除**必须用 `unlinkSync`**。实测在 Windows 上 `rmSync` 删单个文件
@@ -650,10 +674,15 @@ export async function refreshImageUrl(call, ref) {
  * @param {object} [opts.fetchOptions] 传给 fetchImageBytes 的注入项（测试用）
  * @param {Function} [opts.call]      OneBot call（用于刷新过期 url）
  * @param {number} [opts.maxCount]    最多处理几张
+ * @param {object} [opts.source]      ★ 0.3.3：这**一张（组）图出自哪条消息**。
+ *   `{ messageId?, from?, senderName?, text? }` —— 会被**原样附在每个结果上**，
+ *   供提示词写清"哪张图是哪条消息带的"。
+ *   为什么需要它：图可能来自**上一条没叫机器人的消息**（"先发图、再叫它"），
+ *   那时如果不说清出处，模型会把图算到当前这条消息头上（对不上人）。
  * @param {Function} [opts.log]
  * @returns {Promise<Array<{ok:boolean, relPath?:string, absPath?:string, mediaType?:string,
  *                          bytes?:number, deduped?:boolean, reason?:string, base64?:string,
- *                          withBase64?:boolean}>>}
+ *                          withBase64?:boolean, source?:object}>>}
  */
 export async function collectImages(opts) {
   const {
@@ -663,6 +692,7 @@ export async function collectImages(opts) {
     call = null,
     maxCount = 4,
     withBase64 = false,
+    source = null,
     log = () => {},
   } = opts ?? {}
 
@@ -670,12 +700,18 @@ export async function collectImages(opts) {
   const limited = refs.slice(0, Math.max(0, maxCount))
   for (let i = 0; i < limited.length; i++) {
     const ref = limited[i]
-    results.push(await collectOne({ ref, inbox, fetchOptions, call, withBase64, log }))
+    const one = await collectOne({ ref, inbox, fetchOptions, call, withBase64, log })
+    results.push(source ? { ...one, source } : one)
   }
   return results
 }
 
 async function collectOne({ ref, inbox, fetchOptions, call, withBase64, log }) {
+  // ⚠️ 这里**没有**"先查 inbox 缓存"这一步，而且这是刻意的：
+  //   inbox 的文件名就是**内容哈希**，要查它得先有内容 —— 而要拿到内容就得先下载。
+  //   于是"内容级去重"在下载之前是做不到的（它只在写盘时省一次 IO，见 `save`）。
+  //   "同一张图别再下一次"这件事必须靠**引用级缓存**（`file_id` / `url` → 已落盘路径），
+  //   那一份在 `bridge.mjs` 的 `#imageRefCache` 里 —— 因为只有那一层知道"这条引用用过没有"。
   const urls = []
   if (ref?.url) urls.push(ref.url)
 

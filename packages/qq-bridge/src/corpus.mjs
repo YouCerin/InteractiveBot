@@ -99,6 +99,7 @@ function ensureSchema(db) {
       chat_key TEXT NOT NULL,
       kind TEXT NOT NULL,
       peer_id TEXT NOT NULL,
+      channel TEXT,
       user_id TEXT,
       sender_name TEXT,
       content TEXT NOT NULL,
@@ -111,6 +112,17 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_key, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(created_at);
   `)
+  // ★★ 0.3.3 · S5d：老库**没有** `channel` 列（建表语句是 CREATE IF NOT EXISTS，
+  //   已有表不会被改）。这里补一次**增量迁移**：
+  //   · 加列（`ALTER TABLE ... ADD COLUMN` 是加法，不重写数据、不动索引）；
+  //   · 已经加过就报 `duplicate column name` —— 那是**正常情况**，不是错误。
+  //   ⚠️ **不回填**老行：老行 `channel` 保持 NULL，读的时候由 `channelFromStored()`
+  //   按 chatKey/kind 补 —— "当年存的是什么"在排查老问题时是唯一证据。
+  try {
+    db.exec('ALTER TABLE messages ADD COLUMN channel TEXT')
+  } catch (error) {
+    if (!/duplicate column name/i.test(String(error?.message ?? error))) throw error
+  }
   // ★ FTS5 用**外部内容表**（`content=`）而不是再存一份正文：
   //   两份正文迟早不一致，而外部内容表的正文只有一个来源（messages.content）。
   db.exec(`
@@ -148,6 +160,16 @@ function mapRow(row, perChar) {
     createdAt: Number(row.created_at),
     text: full.length > perChar ? `${full.slice(0, perChar)}…（本条被截断）` : full,
     truncated: full.length > perChar,
+    // ★★ 0.3.3（S5d）：这条消息**属于哪个通道**。老行没有这一列（NULL）——
+    //   这里**不猜**，如实给 `null`；需要判断"发去哪儿"的地方用
+    //   `channelFromStored()` 补（那是读侧的唯一补法）。
+    channel: row.channel == null || row.channel === '' ? null : String(row.channel),
+    // ★★ 0.3.3：**这条消息带了几张图**（发出去的时候就是正文里的 `[图片]` 占位）。
+    //   为什么要把这一列放出来：使用者报的那个 bug 就卡在"语料库知道那条带图、
+    //   但取上下文的人拿不到这个事实" —— 于是模型只知道有人说了句话，
+    //   完全不知道那是一条**图**，更不会去看它。
+    //   ⚠️ 它只是**计数**，不是地址（地址一个字都不进库 —— 那是隐私与体积的双重考虑）。
+    mediaCount: Number(row.media_count ?? 0),
   }
 }
 
@@ -221,6 +243,10 @@ export function createCorpus({ workspace, log = () => {}, readOnly = false } = {
   function recordInner({
     kind,
     peerId,
+    // ★★ 0.3.3 · S5d：通道（`qq-group` / `qq-private` / `game` / `console`）。
+    //   缺省留 NULL（老调用点、老库都这样）；**不根据 kind 猜一个填进去** ——
+    //   猜出来的值会让"这条到底走哪条通道"这件事看起来有据可查，其实没有。
+    channel = null,
     messageId = null,
     userId = null,
     senderName = null,
@@ -257,14 +283,15 @@ export function createCorpus({ workspace, log = () => {}, readOnly = false } = {
     try {
       const stmt = d.prepare(
         `INSERT OR IGNORE INTO messages
-           (message_id, chat_key, kind, peer_id, user_id, sender_name, content, is_bot, media_count, at_targets, reply_to_id, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           (message_id, chat_key, kind, peer_id, channel, user_id, sender_name, content, is_bot, media_count, at_targets, reply_to_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       const r = stmt.run(
         messageId == null ? null : String(messageId),
         chatKey,
         String(kind),
         String(peerId),
+        channel == null || channel === '' ? null : String(channel),
         userId == null ? null : String(userId),
         senderName == null ? null : String(senderName).slice(0, 60),
         content,

@@ -768,7 +768,7 @@ console.log('\n=== ⑫ ★★★ 接线级：走**完整桥接**（纯函数测�
       turn: { timeoutMs: 5000 },
       humanize: { enabled: false, chunkChars: 300 },
       persona: { preset: 'none' },
-      memory: { enabled: false, affect: { prewake: 'off' } },
+      memory: { enabled: false },
       image: { enabled: false },
       // ★ 定时任务：这一节要验的就是它开着的时候
       schedule: { enabled: scheduleEnabled },

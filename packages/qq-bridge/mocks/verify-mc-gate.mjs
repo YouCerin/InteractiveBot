@@ -451,7 +451,7 @@ console.log('\n=== ⑬ ★★★ 接线级：`/mc` 本地指令通道走**完整
       turn: { timeoutMs: 5000 },
       humanize: { enabled: false, chunkChars: 300 },
       persona: { preset: 'none' },
-      memory: { enabled: false, affect: { prewake: 'off' } },
+      memory: { enabled: false },
       image: { enabled: false },
       servers: [srv({ commandFromQQ })],
     }

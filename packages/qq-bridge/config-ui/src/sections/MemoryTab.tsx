@@ -144,7 +144,6 @@ export function MemoryTab({
   const workspace = getStr(cfg, 'dsh.workspace', 'workspace-qq')
   const memoryEnabled = getBool(cfg, 'memory.enabled', true)
   // 0.2.9 §2.5.1「未唤醒的倾诉」三档（off/shadow/judge，默认 off = 升级前的行为）
-  const prewake = getStr(cfg, 'memory.affect.prewake', 'off')
   // 0.2.9 §2.5.2「整理记忆」：当前要整理哪个会话/人的记忆（null = 对话框关着）
   const [buildTarget, setBuildTarget] = useState<BuildTarget | null>(null)
 
@@ -475,47 +474,6 @@ export function MemoryTab({
           >
             <Switch checked={memoryEnabled} onCheckedChange={(v) => patch('memory.enabled', v)} />
           </FieldRow>
-          {/* 0.2.9 §2.5.1「未唤醒的倾诉」三档：off（默认=升级前行为）/ shadow（只记账）/ judge（真记）。
-              ★ 三选一而不是两个开关：三个档位互斥，是同一个问题的三个答案（与 wake.policy 同一条理由）。 */}
-          <FieldRow
-            label="未唤醒的倾诉"
-            hint="群里没 @ 它、也没叫它名字的消息，如果有人是对着它倾诉，要不要记。默认关 = 升级前的行为。"
-          >
-            <div className="flex flex-wrap gap-2">
-              {[
-                { v: 'off', label: '不记（默认）', desc: '一个字都不问、不记。' },
-                { v: 'shadow', label: '先观察（影子）', desc: '判定照跑，结论只写日志，不落盘。' },
-                { v: 'judge', label: '真记', desc: '判定通过就写进那个人的个人档。' },
-              ].map((o) => {
-                const active = prewake === o.v
-                return (
-                  <button
-                    key={o.v}
-                    type="button"
-                    onClick={() => patch('memory.affect.prewake', o.v)}
-                    className={cn(
-                      'rounded-md border px-3 py-1.5 text-left text-xs transition-colors',
-                      active ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
-                    )}
-                  >
-                    <span className="font-medium">{o.label}</span>
-                    <span className="ml-1 text-muted-foreground">{o.desc}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </FieldRow>
-          {/* ★ 选 shadow / judge 时**就地写明代价**：这是"花一点钱 + 一点隐私面"换覆盖率，
-              必须让人在打开之前看见。不要承诺"能识别所有倾诉" —— 它只覆盖本地情绪线索命中的那些。 */}
-          {prewake !== 'off' && (
-            <InlineNote level="warn">
-              打开后，命中情绪线索的<strong>未唤醒消息</strong>会<strong>送给模型 API</strong>做一次判定
-              （实测约每 280 条消息 1 次、上限 120 次/小时）；判定通过的会记进
-              <strong>那个人</strong>的个人档 —— 个人档<strong>跟人走</strong>：他在<strong>别的群</strong>说过的话也会被算上。
-              它只覆盖"本地情绪线索命中"的那些，<strong>不是"能识别所有倾诉"</strong>。
-              {prewake === 'shadow' && ' 现在是影子模式：只写日志，一个字都不落盘。'}
-            </InlineNote>
-          )}
           <FieldRow label="工作区目录" hint="记忆文件就存在这里。写相对路径则相对桥接包根目录。">
             <div className="space-y-2">
               <Input

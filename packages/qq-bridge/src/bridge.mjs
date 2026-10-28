@@ -20,8 +20,8 @@ import { readFileSync as nodeReadFileSync } from 'node:fs'
 import { decideTrigger, REASON } from './trigger.mjs'
 import { renderSegments, markdownToPlain, splitForQQ } from './text.mjs'
 import { computeReplyDelay, isQuietNow, splitReplyForSend } from './humanize.mjs'
-// 记忆：桥接托管（见 memory-store.mjs）。旧的 memory.mjs 仍被 mocks 引用，
-// 但它那段"让模型自己去读写笔记"的指令已经**不再进入提示词**。
+// 记忆：桥接托管（见 memory-store.mjs）。0.3.3 起旧的 memory.mjs（"让模型自己去
+// 读写笔记"那套指令）**连文件带测试一起删了** —— 提示词里只剩托管这一套。
 import {
   applyMemoryItems,
   buildMemoryInstructionsV2,
@@ -29,6 +29,7 @@ import {
   migrateMemoryLayout,
   parseMemoryMarkers,
   readMemoryForPrompt,
+  retireGroupLayers,
   saveSnapshot,
   SCOPE,
   takeReceipt,
@@ -36,22 +37,27 @@ import {
   writeReceipt,
 } from './memory-store.mjs'
 import { parseRememberRequest } from './memory-keyword.mjs'
-// 情绪倾注的**确定性识别**：与关键词直写同理 —— "必须记下来"的事不能挂在模型自觉上。
-import { affectEntryText, detectAffectPour } from './affect-cues.mjs'
-// 承诺通道：**作出承诺必须记录**（双向；机器人那侧只在真的会发出去时才算数）。
-import { detectPromise, promiseEntryText } from './promises.mjs'
 // 个人层的**行为统计**（0.2.9 决定纳入）：确定性累加，只记数字不记内容。
 import { notePersonTurn } from './people-stats.mjs'
-// ★★ 情绪闸门（2026-09-30）：给"**未被唤醒**但有情绪信号"的消息加一道判定器。
-//   默认 `off`（一个字都不问、不记）；`shadow` 只记账不写盘；`judge` 才写。
-//   为什么不能直接把确定性判定前移到唤醒之前 —— 实测那批误记率 4/5，理由在模块头。
-import { createAffectGate, GATE_VERDICT, isPrewakeMode, normalizePrewakeMode, PREWAKE } from './affect-gate.mjs'
 import { appendAuditEntry } from './memory-audit.mjs'
 import { createConsolidateScheduler } from './memory-consolidate.mjs'
 import { gateDelivery, LEAK_NOTICE } from './delivery-gate.mjs'
 import { parseOutMarkers, resolveSticker, stickerNames, renderMarkerInstructions } from './markers.mjs'
 import { createCorpus, renderSearchResults } from './corpus.mjs'
 import { deliveryKey, describeGap, stickerFingerprint } from './transport.mjs'
+// ★★ 0.3.3 · S5：出站目标的**唯一**来源。`kind/peerId` 这种"会话键决定发去哪儿"的写法
+//   在出站路径上已经全部收口到 `deliver({channel, target, ...})` —— 见 `#deliver` 与 `#safeSend`。
+import {
+  CHANNELS,
+  DeliveryTargetError,
+  channelFromStored,
+  chatKeyOf,
+  checkCrossChannel,
+  requireTarget,
+  targetOfKind,
+} from './delivery-target.mjs'
+// ★ 0.3.3（P3）：群语感块由画像渲染出来（纯函数），桥接只负责读文件与开关。
+import { renderPromptStyleBlock } from './style-profile.mjs'
 import {
   buildStickerCandidates,
   buildStickerSelection,
@@ -167,7 +173,7 @@ import { decodeConsoleBytes } from './servers/log-source.mjs'
 // ★ 启动窗口：把"正在启动"与"挂了"分开（判据只有一处，监测与界面共用）
 import { clearStarting, describeStarting, evaluateStarting, markStarting, readStarting } from './servers/starting.mjs'
 import { noteTurn, noteMemoryAttempt, zeroWriteAlert, STATS_DEFAULTS } from './memory-stats.mjs'
-import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE } from './privacy.mjs'
+import { screenForOutput, logPrivacyBlock, BLOCKED_OUTPUT_NOTICE, buildOutputBlockNotice } from './privacy.mjs'
 import { appendTurnOps, appendOp } from './oplog.mjs'
 import { readTask, renderTaskBlock, noteTaskTurn, parseRollback, rollbackTask } from './tasks.mjs'
 // ★ 服务端的 `server.properties`（0.3.2 收尾）：界面上的「RCON 一键配好」走这两个模块。
@@ -188,9 +194,14 @@ import {
 import { listRecipes, pickRecipes, renderRecipeBlock, upsertRecipe } from './recipes.mjs'
 import { extractRecipe, runDirect, DEFAULT_EVERY_N as EXTRACT_DEFAULT_EVERY_N } from './extract.mjs'
 import { createWakeJudge, judgeTransport, JUDGE_DEFAULTS as WAKE_JUDGE_DEFAULTS, VERDICT as WAKE_VERDICT } from './wake-judge.mjs'
+import { createModelGate } from './model-gate.mjs'
 import { resolveDirectTarget, resolveExtractTarget } from './model-direct.mjs'
 import { buildPermissionInstructions, createRoster } from './roster.mjs'
-import { createInterimPicker } from './interim.mjs'
+import {
+  collect as collectDeliveryReceipt,
+  dedupeKey as deliveryReceiptDedupeKey,
+} from './delivery-receipt.mjs'
+import { createInterimPicker, createInterimAi, buildInterimAiPrompt } from './interim.mjs'
 import { buildPersona, mergeWakeKeywords } from './persona.mjs'
 import { resolveActivePersona } from './personas.mjs'
 import { personaVoiceSections } from './persona-sections.mjs'
@@ -198,7 +209,7 @@ import { ensureProjectDocCopy } from './project-doc.mjs'
 import { buildChannelPrompt } from './channel-prompt.mjs'
 import { collectSkillPromptSections, isSkillEnabled, skillToolFullName, callSkillAvailable } from './extensions.mjs'
 import { nicknameFor } from './contacts.mjs'
-import { createImageInbox, collectImages } from './images.mjs'
+import { createImageInbox, collectImages, readWorkspaceImage } from './images.mjs'
 import { createScheduleRunner } from './schedule-runner.mjs'
 import {
   claimEventFire,
@@ -297,13 +308,22 @@ export class Bridge extends EventTarget {
   #wakeJudge = null
 
   /**
-   * ★★ 情绪闸门（2026-09-30）：判"未被唤醒但有情绪信号的那句话是不是在跟机器人说"。
+   * ★★★ 0.3.3：**AI 垫场白**的生成器（只在 `humanize.interim.mode === 'ai'` 时建）。
    *
-   * 与唤醒判定器同样**懒建 + 只建一次**：档位（`memory.affect.prewake`）每次现读
-   * ⇒ 改完下一轮就生效；而小时预算必须跨消息累积，所以只能建一个。
-   * @type {{judge: Function, budget: Function}|null}
+   * 与唤醒判定器/情绪闸门同样**懒建 + 只建一次**：档位是活配置（改完下一轮生效），
+   * 但通路对象不该每轮重造（那会每轮读一次 key / 模型名）；小时预算也只能建一个。
+   * ★ 它**绝不抛**：建不起来就返回 null，消费方退回话术池 —— 垫场白是锦上添花。
+   * @type {{available:boolean, decide:Function}|null}
    */
-  #affectGate = null
+  #interimAi = null
+
+  /** ★ 0.3.3（P3）：群语感块（延迟加载 + 缓存；`loaded` 用来"只报一次缺失"）。 */
+  #styleBlockCache = ''
+
+  #styleBlockLoaded = false
+
+  /** 注入用的假生成器（测试/上层接管）。 */
+  interimAiInjected = null
 
   /**
    * 上一次记过日志的"人设形状"签名（`has:说话方式…` / `none:3`）。
@@ -483,6 +503,81 @@ export class Bridge extends EventTarget {
   #pendingGap = null
 
   /**
+   * ★★★ 0.3.3：**没被唤醒的那些消息带的图片引用**（按会话，最近 N 条，只在内存里）。
+   *
+   * ── 它修的是什么（使用者报的现象）────────────────────────────────────────
+   * 「某人发了一张图片，紧接着唤醒小鲸鱼」→ 那张图被完全无视。
+   * 根因：`imageRefs` 从来只跟着**当前这条**消息走。没被唤醒那条的引用当场丢弃，
+   * 于是下一轮它作为"被叫到之前的上下文"被读回来时，只剩一句 `[图片]` 的文字 ——
+   * 模型既不知道那是图，也没有任何路径能看。
+   *
+   * ── 三条纪律（缺一条就会变成新的坑）──────────────────────────────────────
+   *   ① **只记引用，不下载**：没被唤醒就绝不发网络请求（"不唤醒 = 零成本"那条是设计前提），
+   *      真正决定下不下的是**后面真的有人叫它时**（见 `#contextImages`）；
+   *   ② **有界**：每条会话只留 `#imageRefKeep` 条（时间 + 条数双重上限），
+   *      别让群里的刷屏把内存撑起来；
+   *   ③ **只记 URL/文件名这类纯数据**，且**不进语料库**（库只存 `media_count` 计数）。
+   *
+   * ★★ 为什么每条还要记**正文**：群消息的 `message_id` **经常是 null**
+   *   （协议端不给），而配对是靠"消息 id"做的 —— 没有 id 时唯一的锚点就是正文。
+   *   实测就卡在这里：引用的 messageId 是 `''`、语料库那行也是 `''`，
+   *   于是**每一行都"看起来对得上"**，只能靠正文区分。
+   * @type {Map<string, Array<{messageId: string, text: string, at: number, refs: object[]}>>}
+   */
+  #imageRefs = new Map()
+
+  /**
+   * 「同一张引用别下第二次」的缓存：`file_id` / `url` → 已落盘的 `{relPath, mediaType}`。
+   *
+   * ★ 为什么必须有：同一张图会在**两轮**里各用一次 ——
+   *   第一轮（没叫它）不下载；第二轮它作为上下文要下载。若中间还有一轮叫过它
+   *   （或这条消息本身也被叫过），那张图**已经在 inbox 里**了，再下一次纯属浪费，
+   *   而且 rkey 过期时那次重下往往**失败**（表现成"刚才还能看，现在看不到了"）。
+   *
+   * ⚠️ 判据是**引用**（`file_id` 优先，其次 URL），不是内容哈希 ——
+   *   内容哈希要拿到字节才知道，而那时网络请求已经发出去了，省不掉。
+   *   ∴ 命中的前提是"我们**确实下过这一条引用**"，这也是它不会误用的原因。
+   * @type {Map<string, {relPath: string, mediaType: string, at: number}>}
+   */
+  #imageRefCache = new Map()
+
+  /** 每个会话最多留多少条"带图但没叫它"的记录（内存里，够了就丢最旧的）。 */
+  #imageRefKeep = 20
+
+  /** 引用缓存的每条会话上限（超出丢最旧的键 —— Map 保持插入顺序）。 */
+  #imageRefCacheKeep = 200
+
+  /**
+   * ★★★ S3（0.3.3）：**上一轮"说了但没发出去"的回执**，按会话存、取用即清。
+   *
+   * ── 三个边界（缺一个就会变成新的噪音源）──────────────────────────────
+   *   ① **限次**：同会话每小时最多 `delivery.receipt.maxPerHour`（默认 3）次；
+   *      两次之间至少 `minIntervalMs`（默认 20 秒）—— 否则一轮被限频之后，
+   *      后面每一轮都在道歉，那比不回执更烦。
+   *   ② **去重**：同一批原文只回执一次（`dedupeKey`）。B3 的判据就是它：
+   *      "连续 3 次被去重丢弃 → 只回执 1 次"。
+   *   ③ **它不是"我说过的话"**：不进 mirror / 语料库 / 投递账本 ——
+   *      回执只存在于**下一轮的提示词**里（与记忆回执同款一次性语义）。
+   * @type {Map<string, {text: string, at: number}>}
+   */
+  #deliveryReceipts = new Map()
+
+  /** 回执的限次账本：`chatKey → { stamps: number[], keys: string[] }`（只留最近一小时）。 */
+  #deliveryReceiptLog = new Map()
+
+  /**
+   * ★★★ 0.3.3：**隐私闸门拦下了一条回复** —— 下一轮要告诉她（按会话，取用即清）。
+   *
+   * 与投递回执**不是同一件事**，所以不共用那个 map：
+   *   · 投递回执说「你说的话被**限频/去重**丢了，用一句新的话重发」；
+   *   · 这条说「你说的那条**根本没发出去**，别以为对方看过」。
+   * 两者的措辞、限次逻辑都不同（这条不该被限次：每次被拦都是一次"她不知道"的事故）。
+   *
+   * @type {Map<string, {categories: string[], count: number, at: number}>}
+   */
+  #privacyNotices = new Map()
+
+  /**
    * 会话状态（H10）：这段对话"聊到哪了" —— **纯规则、零模型调用、只在内存**。
    *
    * ★ 与任务台账（`tasks.mjs`）是**两条轴**：那个说"我在做什么任务、做到哪一步"
@@ -598,7 +693,7 @@ export class Bridge extends EventTarget {
    * @param {import('./session-bridge.mjs').SessionRouter} opts.router
    * @param {object} opts.config
    */
-  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, affectGate = null, modelApiKey = '', readServers = null, log = () => {} }) {
+  constructor({ rpc, onebot, sendQueue, router, config, usageLedger = null, roster = null, interimPicker = null, imageInbox = null, skills = null, wakeJudge = null, modelApiKey = '', readServers = null, log = () => {} }) {
     super()
     this.rpc = rpc
     this.onebot = onebot
@@ -620,10 +715,6 @@ export class Bridge extends EventTarget {
     //   从未注入过）。同一套辩证法在这里复用：**接线必须有它自己的断言。**
     //   不传 = 按配置现造（生产路径）。
     this.wakeJudgeInjected = wakeJudge
-    // ── 情绪闸门（2026-09-30）：**同样可注入**（理由与上面那段完全一样）─────
-    //   它的正常路径也要问一次模型；而这里要断言的恰恰是**桥接拿这个结论做了什么**
-    //   （影子模式写没写盘、判定说不通过时有没有手滑写进去、`off` 时有没有白花钱）。
-    this.affectGateInjected = affectGate
     // ── 主模型 key（0.2.9）：给**回合后抽取**走直连用 ──────────────────────
     // ★ 为什么由 `index.mjs` 传进来而不是在这里解析：主对话那条路的凭据是启动时
     //   用 `resolveModelCredentials()` 一次性解析的（含 `DSH_HOME/.credentials.yaml`
@@ -1163,10 +1254,320 @@ export class Bridge extends EventTarget {
   #recordCorpus(opts) {
     if (this.config.corpus?.enabled === false) return
     try {
-      this.#corpus?.record(opts)
+      // ★ S5d：通道随消息一起落库。**没给就按 `kind` 补**（`kind` 是入口事实，
+      //   不是猜）；`game` / `console` 的调用点显式给，别让这里去推断。
+      const channel = opts?.channel ?? channelFromStored({ kind: opts?.kind })
+      this.#corpus?.record({ ...opts, channel })
     } catch (error) {
       this.log(`❌ [corpus] 入库失败（这条不入库，其它功能不受影响）：${error?.message ?? error}`)
     }
+  }
+
+  /**
+   * 记下"这条消息带了哪些图"（**只记引用，不下载**）。
+   *
+   * ★ 调用点只有一处：**没被唤醒、也没被 @** 的那些消息（`decision.respond === false`）。
+   *   被唤醒的那些不用记 —— 它们当场就会走 `#collectImages`，而且结果直接进这一轮提示词。
+   *   （两处都记会造成"同一张图被处理两次"，那是白花钱，不是双保险。）
+   *
+   * @param {string} chatKey  `group:<群号>` / `private:<QQ>`
+   * @param {string|number|null} messageId 消息 id（用来跟语料库里那一行对上；**经常是 null**，见上）
+   * @param {Array<{url?:string, file?:string, fileId?:string}>} refs
+   * @param {string} [text] 这条消息的正文（没有 id 时靠它配对）
+   */
+  #rememberImageRefs(chatKey, messageId, refs, text = '') {
+    try {
+      if (!chatKey || !Array.isArray(refs) || refs.length === 0) return
+      const list = this.#imageRefs.get(chatKey) ?? []
+      // ⚠️ 引用里 URL 可能很长（带签名），但**必须留着** —— 它是我们唯一能重新取到图的东西。
+      //    `file` / `fileId` 是备用钥匙（URL 过期时用它换新地址，见 `refreshImageUrl`）。
+      const slim = refs
+        .filter((r) => r && (r.url || r.file || r.fileId))
+        .map((r) => ({
+          url: String(r.url ?? ''),
+          file: String(r.file ?? '').slice(0, 200),
+          fileId: String(r.fileId ?? '').slice(0, 200),
+        }))
+      if (slim.length === 0) return
+      list.push({
+        messageId: messageId == null ? '' : String(messageId),
+        text: String(text ?? '').trim().slice(0, 200),
+        at: Date.now(),
+        refs: slim,
+      })
+      // 有界：只留最近若干条（群里的刷屏不该把内存撑起来）
+      while (list.length > this.#imageRefKeep) list.shift()
+      this.#imageRefs.set(chatKey, list)
+    } catch (error) {
+      // 记引用失败**绝不能**影响收发消息（它只是"下一轮能不能看到图"）
+      this.log(`⚠️ [bridge] 记图片来源失败（下一轮可能看不到那张图）：${error?.message ?? error}`)
+    }
+  }
+
+  /**
+   * 取**这一轮上下文里那些消息带的图**（"先发图、再叫它"那条路）。
+   *
+   * ── 判定顺序（三步，缺一步就会出现"下了不该下的图"或"该下的没下"）─────────
+   *   ① 只认**上下文窗口里那几条**（`rows` 就是 `#recentMissedMessages` 用的那批行）——
+   *      不在窗口里的图与这一轮无关，**一张都不下**；
+   *   ② 窗口里那些行的 `mediaCount > 0` 才算数（**语料库只存计数，不存地址**：
+   *      地址在这里由 `#imageRefs` 按 `messageId` 反查 —— 两边的键就是消息 id）；
+   *   ③ 语料库关掉时（`corpus.enabled = false`）`rows` 本来就是空的 ⇒ 这里自然什么都不做，
+   *      也就是**退回改之前的行为**（不报错、不假装成功）。
+   *
+   * ── 成本口径（这一条决定了它敢不敢默认开）────────────────────────────────
+   *   只在**真的要回复**的这一轮、且**只对窗口内那几条**下载，张数仍受 `image.maxCount` 约束；
+   *   同一张引用下过一次就不再下（`#imageRefCache`）。
+   *   于是"发一堆图把机器人当免费图床"这条路仍然走不通：没叫它 → 一张都不下。
+   *
+   * @param {object} opts
+   * @param {string} opts.chatKey
+   * @param {Array<{messageId?: string, userId?: string, senderName?: string, mediaCount?: number, text?: string}>} opts.rows
+   * @param {number} [opts.maxCount]
+   * @returns {Array<{refs: object[], source: object}>} 每条"要下的那组图 + 它出自哪条消息"
+   */
+  #contextImageRefs({ chatKey, rows = [], maxCount = 4 } = {}) {
+    const out = []
+    if (!chatKey || !Array.isArray(rows) || rows.length === 0) return out
+    if (this.config.image?.enabled === false) return out
+    const kept = this.#imageRefs.get(chatKey)
+    if (!kept || kept.length === 0) return out
+
+    // 按消息 id 反查（**只看窗口里那几条**，而且是**从新到旧**取 —— 越近的越相关）。
+    // ★ 配对两级：**id 优先，正文兜底** —— 群消息的 id 经常是 null（协议端不给），
+    //   那时两边都是空串，只能靠正文认出"就是那条带图的消息"。
+    let budget = Math.max(0, Number(maxCount) || 0)
+    for (let i = rows.length - 1; i >= 0 && budget > 0; i -= 1) {
+      const row = rows[i] ?? {}
+      if (!(Number(row.mediaCount) > 0)) continue
+      const id = row.messageId == null ? '' : String(row.messageId)
+      const rowText = String(row.text ?? '').trim()
+      const hit = [...kept].reverse().find((x) => (id && x.messageId === id) || (!id && x.text && x.text === rowText))
+      if (!hit) continue
+      const refs = hit.refs.slice(0, budget)
+      if (refs.length === 0) continue
+      budget -= refs.length
+      out.push({
+        refs,
+        source: {
+          // ★★ `fromContext: true` 是**必需的**，别改成"看 messageId 有没有值"：
+          //   群消息的 id **经常是 null**，那时上下文那条的 `messageId` 就是空串 ——
+          //   而"空串"与"当前这条消息"（根本没有 source）在判据上会**撞在一起**，
+          //   结果是：**把别人发的图说成是当前这个人发的**。
+          //   实测就是被断言抓出来的（提示词里写着"这条消息里含 1 张图片"，
+          //   而那 1 张其实来自上一条）。∴ 归属必须是一个**显式**的旗标。
+          fromContext: true,
+          messageId: id || hit.messageId || '',
+          senderId: row.userId == null ? '' : String(row.userId),
+          senderName: String(row.senderName ?? '').trim(),
+          text: rowText.slice(0, 40),
+          mediaCount: Number(row.mediaCount) || refs.length,
+        },
+      })
+    }
+    out.reverse() // 提示词里按时间顺序读更自然（旧的在上面）
+    return out
+  }
+
+  /** 取引用缓存里那条（**区分引用，不区分内容**；见 `#imageRefCache` 的注释）。 */
+  #cachedImage(ref) {
+    const key = ref?.fileId ? `fid:${ref.fileId}` : ref?.url ? `url:${ref.url}` : ref?.file ? `file:${ref.file}` : ''
+    if (!key) return null
+    const hit = this.#imageRefCache.get(key)
+    if (!hit) return null
+    // ★ 复核文件**真的还在盘上**：inbox 会按时间/总量清理，
+    //   缓存里留着一条指向已删文件的路径会让模型去读一个不存在的文件
+    //   （那是"工具报错"，比"没图"更吵）。读不回来就当作没缓存，走正常下载。
+    //   ⚠️ 用 `readWorkspaceImage` 而不是 `existsSync(join(...))`：
+    //     本文件**刻意没有 import `node:path`**（见文件里那条注释），
+    //     而 `join` 这个名字在本文件里还被别处当普通函数用过 —— 引进来会踩到重名。
+    //     这里用现成的读取器，顺带把"路径跑出工作区"那道守卫也用上了。
+    try {
+      const read = readWorkspaceImage(hit.relPath, { workspace: this.config?.dsh?.workspace, maxBytes: 20 * 1024 * 1024 })
+      if (!read?.ok) return null
+    } catch {
+      return null
+    }
+    return { hit, key }
+  }
+
+  /** 把"这一条引用已经下过、落在哪个文件"记下来（供下一轮复用）。 */  #rememberImageFile(ref, one) {
+    try {
+      if (!ref || !one?.ok || !one.relPath) return
+      const key = ref.fileId ? `fid:${ref.fileId}` : ref.url ? `url:${ref.url}` : ref.file ? `file:${ref.file}` : ''
+      if (!key) return
+      this.#imageRefCache.set(key, {
+        relPath: one.relPath,
+        mediaType: one.mediaType ?? '',
+        at: Date.now(),
+      })
+      // 有界：Map 保持插入顺序，超出就丢最旧的键
+      while (this.#imageRefCache.size > this.#imageRefCacheKeep) {
+        const oldest = this.#imageRefCache.keys().next().value
+        this.#imageRefCache.delete(oldest)
+      }
+    } catch {
+      /* 缓存失败只是"下次可能重下一张"，不值得打断任何东西 */
+    }
+  }
+
+  /**
+   * ★★★ S3（0.3.3）：记下一轮要用的**投递回执**（"说了但没发出去"）。纯记录，不发送。
+   *
+   * @param {{chatKey:string, dropped:Array<{index:number,text:string,reason:string,kind:string}>}} opts
+   */
+  #noteDeliveryDrops({ chatKey, dropped = [] }) {
+    try {
+      const cfg = this.config.delivery?.receipt ?? {}
+      if (cfg.enabled === false) return
+      if (!chatKey || !Array.isArray(dropped) || dropped.length === 0) return
+
+      // ① 先过判据表（**没回执就不算用过额度** —— 额度很紧，3 次/小时）
+      const built = collectDeliveryReceipt(dropped, { maxItems: 3 })
+      if (!built.ok) {
+        // 认不出的原因**留日志**（否则"为什么没回执"永远查不出来）
+        if (built.unrecognized?.length) {
+          this.log(`[delivery] 有 ${built.unrecognized.length} 条丢弃原因认不出、按"不回执"处理：${built.unrecognized.join('；')}`)
+        }
+        return
+      }
+
+      const now = Date.now()
+      const log = this.#deliveryReceiptLog.get(chatKey) ?? { stamps: [], keys: [] }
+      log.stamps = log.stamps.filter((t) => now - t < 3_600_000)
+      const maxPerHour = Math.max(0, Number(cfg.maxPerHour ?? 3))
+      const minIntervalMs = Math.max(0, Number(cfg.minIntervalMs ?? 20_000))
+      const lastAt = log.stamps.length ? log.stamps[log.stamps.length - 1] : 0
+
+      // ② 限次（每小时 / 最小间隔）
+      if (log.stamps.length >= maxPerHour) {
+        this.#deliveryReceiptLog.set(chatKey, log)
+        this.log(`[delivery] 这次丢弃**不回执**：本小时已回执 ${log.stamps.length} 次（上限 ${maxPerHour}）—— ${built.items.length} 段`)
+        return
+      }
+      if (lastAt && now - lastAt < minIntervalMs) {
+        this.#deliveryReceiptLog.set(chatKey, log)
+        this.log(`[delivery] 这次丢弃**不回执**：距上次回执 ${Math.round((now - lastAt) / 1000)} 秒（最小间隔 ${Math.round(minIntervalMs / 1000)} 秒）`)
+        return
+      }
+
+      // ③ 去重（同一批原文只回执一次 —— B3 的判据）
+      const key = deliveryReceiptDedupeKey(dropped)
+      if (key && log.keys.includes(key)) {
+        this.#deliveryReceiptLog.set(chatKey, log)
+        this.log('[delivery] 这次丢弃**不回执**：同一批内容上一轮已经回执过了（不重复道歉）')
+        return
+      }
+
+      log.stamps.push(now)
+      if (key) log.keys = [...log.keys, key].slice(-20)
+      this.#deliveryReceiptLog.set(chatKey, log)
+      // ④ 取用即清：下一轮提示词读一次就删（与记忆回执同一套语义）
+      this.#deliveryReceipts.set(chatKey, { text: built.text, at: now })
+      this.log(
+        `[delivery] 已记下投递回执（下一轮提示词里会告诉模型）：${built.items.length} 段没发出去 —— ` +
+          built.items.map((i) => `${i.preview}（${i.why}）`).join('；'),
+      )
+    } catch (error) {
+      // 回执是**纯增量**：它坏掉绝不能影响这一轮（也不该抛到投递路径上）
+      this.log(`⚠️ [delivery] 生成投递回执失败（不影响这一轮）：${error?.message ?? error}`)
+    }
+  }
+
+  /** 取（并清空）某会话的投递回执 —— 一次性语义，与记忆回执一致。 */
+  #takeDeliveryReceipt(chatKey) {
+    if (!chatKey) return ''
+    const hit = this.#deliveryReceipts.get(chatKey)
+    if (!hit) return ''
+    this.#deliveryReceipts.delete(chatKey)
+    return hit.text
+  }
+
+  /**
+   * ★★★ 0.3.3：记下「这条回复被隐私闸门换成了固定话术」（下一轮提示词告诉她）。
+   *
+   * ★ 为什么不做限次：这一条**不是道歉、也不是噪音**，而是"你以为说过、其实没说过"
+   *   这个事实的更正。漏一次，她就会拿一件没发生的事去质问对方 —— 那正是这次缺陷。
+   * ★ 为什么只记类别：原文是隐私，回显它等于让防线自己变成第二个泄露面。
+   */
+  #noteOutputBlock({ chatKey, categories = [] }) {
+    if (!chatKey) return
+    const prev = this.#privacyNotices.get(chatKey)
+    // 同一会话连着被拦：合成一条并计数（不叠成好几段）
+    this.#privacyNotices.set(chatKey, {
+      categories: [...new Set([...(prev?.categories ?? []), ...(Array.isArray(categories) ? categories : [])])],
+      count: (prev?.count ?? 0) + 1,
+      at: Date.now(),
+    })
+    this.log(
+      `[privacy] 已记下"这条没发出去"的告知（下一轮提示词里告诉模型；` +
+        `这是本会话第 ${this.#privacyNotices.get(chatKey).count} 次）。`,
+    )
+  }
+
+  /** 取（并清空）某会话的隐私拦截告知 —— 一次性语义。 */
+  #takePrivacyNotice(chatKey) {
+    if (!chatKey) return ''
+    const hit = this.#privacyNotices.get(chatKey)
+    if (!hit) return ''
+    this.#privacyNotices.delete(chatKey)
+    return buildOutputBlockNotice({ categories: hit.categories, count: hit.count })
+  }
+
+  /**
+   * ★★★ 0.3.3：**出站隐私闸**（唯一实现，装在唯一出口上）。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * 为什么它必须在这里，而不是"每条路各写一遍"
+   * ══════════════════════════════════════════════════════════════════════════
+   * 原来那道闸只写在**交互回复**那段（`#runTurn` 里 `screenForOutput(answer)` 之后
+   * 换成固定话术）。于是**定时任务、服务器事件播报、提示类消息**这些直接调
+   * `#deliver` / `deliver` 的路径**完全不过闸** —— 它们说的话里的隐私会照发。
+   * 这类"漏一条路"的缺口不可能靠测试穷举（下一条新路就可能再漏），
+   * 所以判据只有一条：**闸装在出口上**，而不是装在调用点。
+   *
+   * 现在装在**三个位置**上，但只有**这一个实现**（幂等，重复调用不会重复告知）：
+   *   · `#runTurn`（交互回复，**表情包决策之前** —— 被拦下的回复不该再配图）；
+   *   · `#deliver`（回合级：分条**之前**拦，一条回复只替换一次）；
+   *   · `deliver`（出站漏斗：`onebot.send` 的唯一上游，将来任何新调用方都绕不过）。
+   *
+   * @param {{dest?: {chatKey?: string, channel?: string}, text?: string}} opts
+   * @returns {{text: string, blocked: boolean, categories: string[]}}
+   */
+  #screenOutbound({ dest, text } = {}) {
+    const raw = String(text ?? '')
+    if (!raw.trim()) return { text: raw, blocked: false, categories: [] }
+    let priv
+    try {
+      priv = screenForOutput(raw)
+    } catch (error) {
+      // 判据自己坏了 ⇒ **不放行也不静默**：按"含隐私"处理（fail-closed），
+      // 并照样告诉她（否则就是这一次修复要消除的那种"她不知道"）。
+      this.log(`⚠️ [privacy] 出站判定抛异常，按"拦下"处理：${error?.message ?? error}`)
+      this.#noteOutputBlock({ chatKey: dest?.chatKey ?? '', categories: [] })
+      return { text: BLOCKED_OUTPUT_NOTICE, blocked: true, categories: [] }
+    }
+    if (priv.ok) return { text: raw, blocked: false, categories: [] }
+
+    const categories = priv.categories ?? []
+    try {
+      logPrivacyBlock({
+        workspace: this.config?.dsh?.workspace,
+        side: 'output',
+        categories,
+        length: raw.length,
+        chatKey: dest?.chatKey ?? '',
+      })
+    } catch {
+      /* 审计失败不影响拦截（隐私优先） */
+    }
+    this.log(
+      `[privacy] ⚠️ 出站拦下一条（${categories.join('、') || '未知类别'}，${raw.length} 字）` +
+        `→ ${dest?.channel ? `${dest.channel}:` : ''}${dest?.chatKey || '?'}：改为固定话术。原文**没有**发出去。`,
+    )
+    // ★ 告诉她（下一轮提示词）——**只传类别，不传原文**。
+    this.#noteOutputBlock({ chatKey: dest?.chatKey ?? '', categories })
+    return { text: BLOCKED_OUTPUT_NOTICE, blocked: true, categories }
   }
 
   /**
@@ -1209,66 +1610,15 @@ export class Bridge extends EventTarget {
     const enabled = this.config.memory?.enabled !== false
     const keywordItems =
       keyword.hit && keyword.entry ? [{ scope: SCOPE.FACT, text: keyword.entry, source: 'keyword' }] : []
-    // ── 情绪倾注：**确定性通道**（第三条"不依赖模型"的写入路径）──────────────
-    //
-    // ★ 为什么必须有它：需求是"对面向机器人倾注情绪时**必须**记录"。
-    //   而本项目已两次实测证明"靠模型自觉"的漏报率接近 100%（本机几十轮 0 次提议；
-    //   参考项目 58 次运行 0 次调用）。所以这件事只能由桥接本地判定。
-    // ★ 为什么**不看 `complete`**：它取自**用户那句话本身**，与模型这轮跑没跑完无关
-    //   （超时了那句话也是完整的）—— 正是 H1 三分类里"用户的话照常落盘"那一类。
-    // ★ 落点是 `SCOPE.PERSON`（个人层，跟人走），归属由 `applyMemoryItems` 按
-    //   **本轮真实核实过的发言人**裁定 —— 模型插不上手。
-    const pour = detectAffectPour({ text: userText })
-    const affectText = pour.hit ? affectEntryText(pour) : ''
-    const affectItems = affectText ? [{ scope: SCOPE.PERSON, text: affectText, source: 'cue' }] : []
-    if (affectItems.length > 0) {
-      // 记一行**为什么记**（这是"必须记下来"这件事唯一的可观测痕迹）
-      this.log(`[memory] 情绪倾注 → 记入个人档（${pour.why}）：${affectText}`)
-    }
     const markerItems = complete
       ? parsed.items.map((it) => ({ ...it, source: 'marker' }))
       : []
 
-    // ── 承诺通道（0.2.9）：**作出承诺必须记录**（双向，确定性）──────────────
-    //
-    // ★ 为什么单独一条：承诺是长期记忆里代价最高的一类 —— 机器人自己许的诺忘了
-    //   就是"说话不算数"；对方许的诺忘了就会重复追问。而"靠模型自觉"的漏报率
-    //   在本项目实测接近 100%，所以和"记住 X"、情绪倾注一样，由桥接本地判定。
-    // ★ 落点是**会话层**（`SCOPE.FACT`）：承诺是"在这个对话里许的" ——
-    //   群聊落本群、私聊落那个人（私聊的会话层就是他的个人档）。
-    // ★ 机器人的那条**只在真的会发出去时**才记（`sent`）：被更新的消息作废的那一轮，
-    //   用户根本没看到那句话，记成"我答应过"就是**假记忆**。
-    const promiseItems = []
-    // ★★ 承诺带时间戳（2026-10-01 用户要求）：句子里那些相对时间（"明天""周四"）
-    //   离开当天就没有意义，所以落盘时附上**说的日期**。
-    //   ⚠️ 用 `Date.now()` 而不是模型给的时间：模型拿不到可信时钟。
-    const promiseAt = Date.now()
-    const botPledge = detectPromise({ text: clean, from: 'bot' })
-    if (botPledge.hit) {
-      if (sent) {
-        promiseItems.push({ scope: SCOPE.FACT, text: promiseEntryText({ ...botPledge, at: promiseAt }), source: 'promise' })
-        this.log(`[memory] 承诺 → 记入会话层（${botPledge.why}）：${promiseEntryText({ ...botPledge, at: promiseAt })}`)
-      } else {
-        // ★ 不作数的那一轮**也要留一行**：这一条是"我明明答应过，它怎么没记"这类
-        //   追问唯一的查证痕迹（不记是**对的**，但必须是**有理由的不记**）。
-        this.log(
-          `[memory] 承诺 → 不记（这一轮没真的发出去，对方没看到那句话）：${promiseEntryText(botPledge)}`,
-        )
-      }
-    }
-    const userPledge = detectPromise({ text: userText, from: 'user' })
-    if (userPledge.hit) {
-      // 用户那句话是**完整的**，与模型这轮跑没跑完无关（H1 三分类里的第一类）
-      promiseItems.push({ scope: SCOPE.FACT, text: promiseEntryText({ ...userPledge, at: promiseAt }), source: 'promise' })
-      this.log(`[memory] 承诺 → 记入会话层（${userPledge.why}）：${promiseEntryText({ ...userPledge, at: promiseAt })}`)
-    }
-
     if (!enabled) {
-      if (keywordItems.length || parsed.items.length || affectItems.length || promiseItems.length) {
+      if (keywordItems.length || parsed.items.length) {
         this.log(
           `[bridge] 记忆开关关闭，已剥离 ${parsed.items.length} 条提议、` +
-            `${keywordItems.length} 条关键词直写、${affectItems.length} 条情绪倾注、` +
-            `${promiseItems.length} 条承诺（都不落盘、不回执）`,
+            `${keywordItems.length} 条关键词直写（都不落盘、不回执）`,
         )
       }
       return { answer: clean, applied: 0, ignored: 0, keyword }
@@ -1289,7 +1639,8 @@ export class Bridge extends EventTarget {
       )
     }
 
-    const all = [...keywordItems, ...affectItems, ...promiseItems, ...markerItems]
+    // ★ 0.3.3：承诺通道已删除（使用者要求），现在只剩「关键词直写 + 模型标记」两条。
+    const all = [...keywordItems, ...markerItems]
     let outcome = { applied: [], ignored: [], wroteFiles: [] }
     if (all.length > 0) {
       outcome = applyMemoryItems({
@@ -1424,46 +1775,39 @@ export class Bridge extends EventTarget {
       this.log(`⚠️ [delivery-ledger] 启动时查未完成投递失败：${error?.message ?? error}`)
     }
 
-    // ── 旧布局迁移（三层记忆：全局 / 群聊 / 个人）──────────────────────────
+    // ── 旧布局迁移（记忆布局：全局 / 个人）────────────────────────────────
     //
     // ★ 为什么必须在**开始接消息之前**做：旧布局是 `memory/private-<QQ>.md`、
     //   `memory/group-<群号>.md`，新布局是 `memory/people/`、`memory/groups/`。
     //   不搬内容 = **升级即失忆**（文件还在，但再也不会被注入，而且不报错）。
     // ★ 它**不抛**、只搬不删（原件归档到 `memory/.migrated/`），而且幂等；
-    //   另外注入侧还有一层"旧路径回退读"兜底，所以迁移失败也不会真的丢记忆。
+    //   另外注入侧还有一层"旧路径回退读"兜底（**只管个人档**），所以迁移失败也不会真的丢记忆。
     try {
       const workspace = this.config?.dsh?.workspace
       if (workspace && this.config.memory?.enabled !== false) {
         const r = migrateMemoryLayout({ workspace, log: this.log })
         const n = r.moved.length + r.merged.length
-        if (n > 0) this.log(`[memory] 三层布局迁移完成：搬 ${r.moved.length} 份、合并 ${r.merged.length} 份`)
+        if (n > 0) this.log(`[memory] 布局迁移完成：搬 ${r.moved.length} 份、合并 ${r.merged.length} 份`)
         if (r.why.length > 0) this.log(`⚠️ [memory] 有几份旧记忆没迁成（原件仍在原处，注入回退仍读得到）：${r.why.join('；')}`)
+
+        // ── ★★★ 0.3.3：群聊层下线 ⇒ 把已有的群档归档 ──────────────────────
+        //
+        // ★ 必须在**上面那一步之后**：`migrateMemoryLayout` 会把更老的
+        //   `memory/group-<群号>.md` 收进 `memory/groups/`，这一步再把整个目录收走。
+        // ★ 使用者的决定是**不读也不迁**（详见 `retireGroupLayers` 的注释）：
+        //   群档里的条目大多认不出是谁说的，搬错比不搬更糟。
+        // ★ 归档**不做开关**：这是"这一层已经不存在了"的收尾动作，不是可选功能 ——
+        //   不做的话那些文件会一直躺在那儿，看起来像"群聊记忆还在用"。
+        const g = retireGroupLayers({ workspace, log: this.log })
+        if (g.kept.length > 0) {
+          this.log(
+            `⚠️ [memory] 有 ${g.kept.length} 份群档没归档成（它们**不会**被注入，但也没进 ${'memory/.migrated/groups/'}）：` +
+              g.kept.join('、'),
+          )
+        }
       }
     } catch (error) {
       this.log(`⚠️ [memory] 旧布局迁移整体失败（注入侧有回退读兜底，记忆不会丢）：${error?.message ?? error}`)
-    }
-
-    // ── 情绪闸门：把档位**在启动时说清楚**（2026-09-30）────────────────────
-    //
-    // ★ 为什么必须在这里说：它默认 `off`，而"开了没开"从行为上**看不出来** ——
-    //   没唤醒时不记是本来的行为，记了也只是磁盘上多一行。使用者不该靠翻文档
-    //   才知道自己现在是哪一档。★ 它**不在**这里建闸门对象（那是懒建的）：
-    //   建它要读配置里的通路，而这条日志只回答"档位是什么"。
-    {
-      const mode = this.#prewakeMode()
-      if (mode === PREWAKE.OFF) {
-        this.log('[memory] 情绪闸门：prewake=off（未唤醒的消息**只**判定不记录；想先看会记什么就设 shadow）')
-      } else {
-        this.log(
-          `[memory] 情绪闸门：prewake=${mode}` +
-            (mode === PREWAKE.SHADOW
-              ? '（判定照跑、**只写日志不落盘** —— 观察档）'
-              : '（判定通过就落进那个人的个人档 —— 个人档跟人走，他在别的群也算上）'),
-        )
-      }
-      if (!isPrewakeMode(this.config.memory?.affect?.prewake) && String(this.config.memory?.affect?.prewake ?? '') !== '') {
-        this.log(`⚠️ [memory] memory.affect.prewake 的取值「${this.config.memory.affect.prewake}」认不出，已按 off 处理`)
-      }
     }
 
     onebot.addEventListener('event', (e) => {
@@ -2425,43 +2769,43 @@ export class Bridge extends EventTarget {
 
     let sent = 0
     for (const chunk of chunks) {
-      // ★★ 公屏那条是 `tellraw @a`（原来用 `say`）：使用者要求
-      //   「每条发言都要在前面加上 `<小鲸鱼>`，**不要高亮**，模仿正常玩家」——
-      //   `/say` 渲染成 `[Server] 正文` 且带配色，那是"服务端公告"而不是玩家发言。
-      const built = buildPublicChat({ text: chunk })
-      if (!built.ok) {
-        this.log(`⚠️ [game-chat] 这一片没能构造出公屏命令（${built.why}）`)
-        continue
-      }
-      const r = await this.#runGameCommand(server, built.command, 'say')
-      if (!r.ok) {
+      // ★★★ S5：**这一片发给哪，由通道对象说**（`game` + 服务器 id），
+      //   不再由"某个 kind 字符串"决定 —— 渠道串味那一类事故（游戏内的话被投进
+      //   QQ 私聊）在结构上就没有入口了。
+      //   `tellraw` 的构造、日志、失败原因都在 `#deliverToGameChannel` 里，
+      //   这里是**规划**（延迟 / 分片 / 镜像 / 语料）那一半。
+      const r = await this.deliver({
+        channel: 'game',
+        target: String(server?.id ?? ''),
+        text: chunk,
+        opts: { server },
+      })
+      if (!r?.ok) {
         // ★ 发不出去 = 对方以为"它没理我"。**必须留痕**，且**绝不重发、绝不重跑模型**
         //   （同 H17 那三条纪律：重跑会再花一次钱，还可能给出与刚才不同的答案）。
         this.log(
           `❌ [game-chat] 回复没能发到「${String(server?.name ?? server?.id ?? '?')}」的公屏` +
-            `（已发 ${sent}/${chunks.length} 片）：${r.why} —— **不重发、更不会重跑模型**`,
+            `（已发 ${sent}/${chunks.length} 片）：${r?.reason ?? r?.why ?? '未知原因'} —— **不重发、更不会重跑模型**`,
         )
         return { ok: false, sent, total: chunks.length }
       }
-      // ★★★ **必须自己记一条**：`tellraw` 与服务端的 `say` 不同 —— 它**不写控制台日志**
-      //   （实测：`say` 会 echo 成 `[Rcon] …`，`tellraw` 一声不响）。所以它说过什么
-      //   在「实时后台」里**看不到**了 ⇒ 由桥接日志补上这条记录（"失败不静默 / 可核对"
-      //   这条能力不能因为换通道而丢掉）。
-      this.log(`[game-chat] 说（公屏）：${built.text}`)
+      const rendered = String(r.rendered ?? chunk)
       // ★★ 控制台预览里也记一条（那个「游戏内对话」窗口要能看到它自己说过什么）——
       //    否则窗口里只有玩家的话、没有它的回复，看起来像"它没理人"。
-      this.#mirror(this.#gameChatKey(server?.id), 'bot', built.text, {
+      this.#mirror(this.#gameChatKey(server?.id), 'bot', rendered, {
         kind: 'game',
         peerId: String(server?.id ?? ''),
+        channel: 'game',
         chatName: `游戏内对话 · ${String(server?.name ?? server?.id ?? '')}`,
       })
       this.#recordCorpus({
         kind: 'game',
         peerId: String(server?.id ?? ''),
+        channel: 'game',
         messageId: null,
         userId: '',
         senderName: '',
-        text: built.text,
+        text: rendered,
         isBot: true,
         mediaCount: 0,
         atTargets: '',
@@ -3398,11 +3742,13 @@ export class Bridge extends EventTarget {
    *   记账在任何提前 return 之前。
    */
   async runEventTurn({ task, row, target } = {}) {
-    const kind = target?.kind
-    const peerId = String(target?.peerId ?? '')
+    // ★ S5：同 `runProactiveTurn`（`kind/peerId/channel` 由 `resolveScheduleTarget` 一起给）
+    const kind = target?.kind ?? String(target?.chatKey ?? '').split(':')[0] ?? ''
+    const peerId = String(target?.peerId ?? String(target?.chatKey ?? '').split(':')[1] ?? '')
     const sessionId = String(target?.sessionId ?? '')
     if (!sessionId || !task || !row) return { ok: false, why: '缺少 sessionId / task / row（内部接线问题）' }
     const chatKey = `${kind}:${peerId}`
+    const dest = this.#targetOfStored({ channel: target?.channel, chatKey: target?.chatKey, kind, peerId })
     const turnStartedAt = Date.now()
 
     const collector = this.router.beginTurn(sessionId, {
@@ -3452,14 +3798,21 @@ export class Bridge extends EventTarget {
       if (!String(answer ?? '').trim()) {
         return { ok: false, why: result?.timedOut ? '回合超时' : '模型没有产出内容' }
       }
-      const outcome = await this.#deliver(kind, peerId, answer, result, {
+      const outcome = await this.#deliver(dest, answer, result, {
         replyTo: null,
         faceId: null,
         sticker: null,
         turnStartedAt,
       })
       if (outcome && outcome.ok === false) return { ok: false, why: `投递失败：${outcome.why ?? '未知原因'}` }
-      return { ok: true, text: answer, via: 'server-event' }
+      // ★★★ 0.3.3：如实回报**实际发出去的那段正文**（可能已被隐私闸换成固定话术）——
+      //   定时任务拿它记账/写历史，别把"模型原文"当成"用户收到的"。
+      return {
+        ok: true,
+        text: outcome?.text ?? answer,
+        via: 'server-event',
+        ...(outcome?.privacyBlocked ? { privacyBlocked: true } : {}),
+      }
     } catch (error) {
       this.log(`❌ [servers] 事件回合失败（「${task?.title ?? '?'}」）：${error?.message ?? error}`)
       return { ok: false, why: `事件回合失败：${error?.message ?? error}` }
@@ -3541,7 +3894,22 @@ export class Bridge extends EventTarget {
     if (!respond) {
       return { ok: false, why: `这个会话现在不接收消息（名单判定=${reason || '拒绝'}）—— 定时任务不绕过名单` }
     }
-    return { ok: true, sessionId, chatKey, tier, reason }
+    // ★★ 0.3.3 · S5：把 `kind / peerId / channel` **一起**返回。
+    //   在此之前这里只返回 `chatKey`，而 `runProactiveTurn` / `runEventTurn` 却去读
+    //   `target.kind` / `target.peerId` —— 于是那两个值一直是 `undefined`，账本里的
+    //   `chatKey` 长期是 `undefined:100000001`（没人发现，因为账本只被人肉看过）。
+    //   S5 的目标校验把它变成了**当场失败**，所以在这里一次补齐。
+    const channel = targetOfKind(k, id)
+    return {
+      ok: true,
+      sessionId,
+      chatKey,
+      tier,
+      reason,
+      kind: k,
+      peerId: id,
+      channel: channel.ok ? channel.channel : '',
+    }
   }
 
   /**
@@ -3561,11 +3929,15 @@ export class Bridge extends EventTarget {
    * @returns {Promise<{ok: boolean, text?: string, via?: string, why?: string}>}
    */
   async runProactiveTurn({ task, scheduledAt, lateByMs = 0, target } = {}) {
-    const kind = target?.kind
-    const peerId = String(target?.peerId ?? '')
+    // ★ S5：`kind/peerId` 现在由 `resolveScheduleTarget` 一起回来（以前是 undefined，
+    //   账本里的 chatKey 因此长期是 `undefined:<号码>`）。老调用方只给 chatKey 时也能兜住。
+    const kind = target?.kind ?? String(target?.chatKey ?? '').split(':')[0] ?? ''
+    const peerId = String(target?.peerId ?? String(target?.chatKey ?? '').split(':')[1] ?? '')
     const sessionId = String(target?.sessionId ?? '')
     if (!sessionId || !task) return { ok: false, why: '缺少 sessionId 或 task（内部接线问题）' }
     const chatKey = `${kind}:${peerId}`
+    // ★ 出站目标：显式 channel 优先，缺了按 chatKey/kind 补（老存储只读兼容）
+    const dest = this.#targetOfStored({ channel: target?.channel, chatKey: target?.chatKey, kind, peerId })
     const turnStartedAt = Date.now()
 
     const collector = this.router.beginTurn(sessionId, {
@@ -3616,7 +3988,7 @@ export class Bridge extends EventTarget {
       }
 
       // ── 投递：与普通回复**同一条管线**（三道闸一个都不绕过）──
-      const delivering = this.#deliver(kind, peerId, answer, result, {
+      const delivering = this.#deliver(dest, answer, result, {
         replyTo: null,
         faceId: null,
         sticker: null,
@@ -3626,7 +3998,13 @@ export class Bridge extends EventTarget {
       if (outcome && outcome.ok === false) {
         return { ok: false, why: `投递失败：${outcome.why ?? '未知原因'}` }
       }
-      return { ok: true, text: answer, via: 'model' }
+      // ★★★ 0.3.3：同上 —— 回报"实际发出去的正文"（可能已被换成固定话术）。
+      return {
+        ok: true,
+        text: outcome?.text ?? answer,
+        via: 'model',
+        ...(outcome?.privacyBlocked ? { privacyBlocked: true } : {}),
+      }
     } catch (error) {
       this.log(`❌ [schedule] 主动回合失败（「${task?.title ?? '?'}」）：${error?.message ?? error}`)
       return { ok: false, why: `主动回合失败：${error?.message ?? error}` }
@@ -3795,31 +4173,27 @@ export class Bridge extends EventTarget {
     })
     if (!decision.respond) {
       this.stats.skipped += 1
+      // ★★★ 0.3.3：**没叫它 ≠ 这条不用管** —— 图也得记下来。
+      //
+      //   使用者报的现象：「某人发了一张图片，紧接着唤醒小鲸鱼」时，那张图被完全无视。
+      //   根因就在这一行**之上**：`imageRefs` 只跟着**当前这条**消息走，
+      //   而没被唤醒的那条消息的图片引用**直接丢了** —— 下一轮它被当成上下文读回来时，
+      //   语料库里只有一句 `[图片]` 的文字，模型既不知道那是图、也没有任何路径可看。
+      //
+      //   ∴ 这里只**记引用**（不下载、不发请求 —— "不唤醒 = 零成本"那条纪律一个字不动），
+      //   等真的有人叫它时再按上下文窗口决定下不下（见 `#contextImages`）。
+      if ((rendered.imageRefs?.length ?? 0) > 0) {
+        this.#rememberImageRefs(mirrorKey, payload.message_id, rendered.imageRefs, rendered.text)
+      }
       // 记下"为什么没回" —— 群聊开了以后，这一条是排查"它怎么不理我"的关键。
       // 只在群聊里记，免得私聊那种"关了开关"的情况把日志刷满。
       if (kind === 'group') {
         this.log(`[bridge] 群 ${peerId} 未唤醒（${decision.reason}）：未 @ 且未命中关键词`)
       }
-      // ★★ 未唤醒**不等于**与它无关：有人可能在对着它倾诉、只是没叫它。
-      //   这里给那条路留一个出口（默认 `off` ⇒ 一次模型调用都不发；见 `#maybePrewakeAffect`）。
-      //   ⚠️ 位置在这里（而不是更早）是**故意的**：它是唯一不会与 `#settleMemory` 重复记账的地方
-      //     —— 被唤醒的那条走 `#runTurn` → `#settleMemory`，那条路本来就会记。
-      try {
-        await this.#maybePrewakeAffect({
-          kind,
-          peerId,
-          senderId,
-          senderName: identity?.ok ? identity.name : null,
-          chatKey: mirrorKey,
-          messageId: payload.message_id,
-          text: rendered.text,
-          // ★ 群名（协议端核实过）：只用于"新建那份群记忆时把头写成群名"
-          chatName: identity?.chatName ?? '',
-        })
-      } catch (error) {
-        // 增强路径：**任何**失败都不许影响消息处理（这里连日志都要给全）
-        this.#warnInjectOnce('情绪闸门', error)
-      }
+      // ⚠️ 这一句**必须留着**：没被唤醒就不往下走了（准入 / 唤醒 / 回合）。
+      //    删掉它的后果在本轮改动里真实发生过一次：整段 `#maybePrewakeAffect` 的
+      //    清理把这一行一起切掉了，语法检查照样过，但"未唤醒"的消息会**掉进**后面的
+      //    准入与回合流程 —— 那是"它突然开始回没叫它的消息"这种最坏的行为回归。
       return { handled: false, reason: decision.reason === 'group-disabled' ? 'group-disabled' : 'no-trigger' }
     }
     this.stats.triggered += 1
@@ -4520,8 +4894,8 @@ export class Bridge extends EventTarget {
    * @param {string} chatKey
    * @param {'user'|'bot'|'notice'} role
    * @param {string} text
-   * @param {{ kind?: string, peerId?: string, createIfMissing?: boolean,
-   *           senderId?: string, identity?: object }} [who]
+   * @param {{ kind?: string, peerId?: string, channel?: string, createIfMissing?: boolean,
+   *           senderId?: string, identity?: object, chatName?: string }} [who]
    */
   #mirror(chatKey, role, text, who = {}) {
     try {
@@ -4534,11 +4908,20 @@ export class Bridge extends EventTarget {
         conv = {
           kind: who.kind ?? k,
           peerId: who.peerId ?? id,
+          // ★ S5d：会话也带通道（老会话按 chatKey/kind 补 —— 只读兼容，不改历史）
+          channel: who.channel ?? channelFromStored({ chatKey, kind: who.kind ?? k }),
           status: 'idle',
           updatedAt: Date.now(),
           messages: [],
         }
         this.#conversations.set(chatKey, conv)
+      } else if (who.channel && conv.channel !== who.channel) {
+        // ★ 同一个会话键不允许换通道：那说明**某处把目标拼错了**（例如把游戏服务器 id
+        //   当成 QQ 号）。留日志比默默覆盖好 —— 覆盖之后"串味"就查不出来了。
+        this.log(
+          `⚠️ [bridge] 会话 ${chatKey} 的通道不一致（已有 ${conv.channel ?? '(未记录)'}，这次 ${who.channel}）` +
+            ' —— 保留原值，请检查这个出站目标是从哪儿来的',
+        )
       }
 
       // ── 发言人身份（同步到对话预览）──────────────────────────────────
@@ -4659,6 +5042,8 @@ export class Bridge extends EventTarget {
         chatKey,
         kind: conv.kind,
         peerId: conv.peerId,
+        // ★ S5d：会话属于哪个通道（老会话按 chatKey/kind 补，**只读兼容**）
+        channel: conv.channel ?? channelFromStored({ chatKey, kind: conv.kind }),
         status: conv.status,
         updatedAt: conv.updatedAt,
         messageCount: conv.messages.length,
@@ -4838,6 +5223,11 @@ export class Bridge extends EventTarget {
       // 分成四类挑措辞：思考 / 搜索 / 调用工具 / 权限受阻（见 src/interim.mjs）。
       const interim = this.config.humanize?.interim ?? {}
       let interimTimer = null
+      // ★★ `mode:'ai'` 的生成状态：`{settled, ac}` —— **必须在 `if` 之外声明**，
+      //   因为 `cancelInterimAi()`（回合结束时清理）要用它，而那个函数在块外。
+      //   第一版把它声明在块内，于是外面那句 `interimAiState?.ac` 直接抛
+      //   `ReferenceError`（这在本项目里是有前科的：任务段那四条路由）。
+      let interimAiState = null
       // ── ★★★ 游戏内那一轮**不发**「先应一声」（使用者 2026-10-04 明确要求）──────
       //
       // 两条理由，第一条是使用者的要求，第二条是它本来就不该发生：
@@ -4848,6 +5238,73 @@ export class Bridge extends EventTarget {
       //      本来就会发出去），而且和"每条发言都像普通玩家"那条要求相冲。
       // ∴ 游戏通道**整条跳过**：不挂定时器、也不留"改天补发"的口子。
       if (interim.enabled !== false && deliverTo?.channel !== 'game') {
+        // ── ★★★ 0.3.3：`mode: 'ai'` ⇒ **并行生成**一句垫场白 ─────────────────
+        //
+        // 使用者原话：「为先应一声新增选项，由 ai 根据唤醒时的上下文自主决定如何先应一声」。
+        // 三个取舍都是当面问的：
+        //   ① **并行生成**：回合一开始就去生成，到 `afterMs` 那一刻生成好了就发它、
+        //      没好就发话术池那一句 —— 既不推迟垫场白，也不会出现"垫场白比正文还晚"；
+        //   ② 给它看的是**当前这句 + 最近几条**（**不告诉它"正在做什么"** ——
+        //      并行时那一刻还没调工具，告诉它等于让它编"我在搜"）；
+        //   ③ **允许它决定"这一轮不先应声"**（输出空）。
+        //
+        // ⚠️ 三个"绝不"（缺一个就会变成新的坑）：
+        //   · **绝不阻塞**：到点那一刻只看它好了没有，不 `await`；
+        //   · **绝不因为生成失败就变成静默**：拿不到 / 看不懂 / 超时 ⇒ 退回池子那句；
+        //   · **绝不把失败当成"它说不发"**：`{ok:false}` 与 `{ok:true,text:''}` 是两回事
+        //     （前者退池子，后者才真的不发）—— 判据在 `createInterimAi` 里。
+        const interimAiStateLocal = (() => {
+          if (interim.mode !== 'ai') return null
+          // 静默时段里连生成都不做（省一次调用；反正发不出去）
+          if (isQuietNow(new Date(), this.config.humanize?.quietHours)) return null
+          const ai = this.#ensureInterimAi()
+          if (!ai?.available) return null
+          const persona = interim.ai?.usePersona === false ? '' : this.#interimPersonaLine()
+          // ★★★ 0.3.3（真机反馈「垫场白文不对题」的修法，见 `docs/0.3.3-release-notes.md` §11.7）：
+          //
+          //   ① **私聊**的"最近几条"改从**会话镜像**取，并且**含机器人自己说的** ——
+          //      原来那条路只认 `group:`（私聊永远空数组），于是模型只看到孤零零一句
+          //      「你好像理解错了」，不知道我刚说岔了，就猜成"你还要接着说"。
+          //   ② 两条路都补一段【你上一条回的是】并**标明这是你自己说的** ——
+          //      不标明的话模型会把它当成对方说的，比看不到更乱。
+          //   ③ 群聊那批行**取数口径一个字不动**（群聊的窗口是 0.3.1 调过的），
+          //      只是同样多出"我自己上一条"这一段。
+          const recentRows =
+            kind === 'group'
+              ? this.#recentMissedMessages({ chatKey, messageId, text: rendered.text }).slice(-4)
+              : this.#recentMirrorRows(chatKey, { limit: 4, excludeText: rendered.text })
+          const lastBotReply = this.#lastBotReplyOf(chatKey)
+          const prompt = buildInterimAiPrompt({
+            current: { name: identity?.name || senderId, text: rendered.text },
+            recent: recentRows,
+            persona,
+            lastBotReply,
+            private: kind !== 'group',
+          })
+          const ac = new AbortController()
+          const state = { settled: null, ac }
+          ai.decide(prompt, { signal: ac.signal })
+            .then((r) => {
+              state.settled = r?.ok ? { ok: true, text: String(r.text ?? '') } : { ok: false, why: r?.why ?? '' }
+            })
+            .catch(() => {
+              state.settled = { ok: false, why: '生成异常' }
+            })
+          return state
+        })()
+        interimAiState = interimAiStateLocal
+        // ── 池子那句**先定下来**（不是回调里现抽）──────────────────────────
+        //
+        // ★ 为什么必须提前抽：`mode:'ai'` 那条路上，回调里要按"AI 到底答没答上"
+        //   决定发哪一句。如果池子那句在回调里才抽，那么**每一次调用 `pick()` 都会写冷却历史**
+        //   —— 于是"抽了但没用上"的那一句会把冷却窗口推后，而使用者从没看到它
+        //   （表现成"某句话很久不出现"，且查不出来）。提前抽一次、两种结果共用一条记录，
+        //   才是诚实的。
+        const interimFallback = this.interimPicker.pick(collector, {
+          // ⚠️ 提前抽签必须用**确定性**的随机源：否则"先抽好的那一句"就成了纯随机，
+          //    而同一会话同一轮里 `pick` 两次会抽到不同句（假断言式的不可复现）。
+          rng: this.#seededRngOf(chatKey),
+        })
         interimTimer = setTimeout(() => {
           // ── ★★ 静默时段：**不发**「先应一声」（用户 2026-09-30 要求）──────────
           //
@@ -4875,13 +5332,46 @@ export class Bridge extends EventTarget {
           // 静默时段那一条仍然有效（它有自己的判据），而"这一轮是不是闲聊"不再参与。
           // ⚠️ 这条抑制如果将来要回来，它需要的判据是**这一轮真的跑了很久且有工具调用**，
           //    不是"消息属于哪一类" —— 后者是这次被拆掉的那个分类器。
-          const text = this.interimPicker.pick(collector)
-          if (!text) return
+          //
+          // ── AI 垫场白：到点那一刻**只看它好了没有**，绝不等它 ────────────────
+          //
+          //   · `aiSettled.ok === true` 且 `text` 非空 → 发它（AI 按上下文写的）；
+          //   · `aiSettled.ok === true` 且 `text === ''` → **它明确决定不说** ⇒ 这一轮不发；
+          //   · `aiSettled.ok === false`（超时 / 看不懂 / 没问成）→ **退回池子**那句；
+          //   · `aiSettled === null`（还没回来）→ 同样退回池子。
+          //   ⚠️ 最后两种**都不能当成"它说不发"** —— 把失败读成"它决定沉默"
+          //     会让每次坏输出都表现成"这一轮没有垫场白"，而那是最难查的静默失效。
+          let text = ''
+          if (!interimAiState) {
+            // `pool` 档（默认）：行为与升级前**逐字一致**
+            text = interimFallback
+          } else if (interimAiState.settled?.ok === true) {
+            // AI 答上了：`text` 为空是**它明确决定不说** ⇒ 这一轮真的不发
+            text = interimAiState.settled.text
+          } else {
+            // 还没回来 / 超时 / 看不懂 / 没问成 ⇒ **退回池子那句**
+            text = interimFallback
+          }
+          // 生成已经用不上了（无论用没用）→ 立刻喊停，别白烧一次调用
+          cancelInterimAi()
+          if (!text) {
+            if (interimAiState?.settled?.ok === true) {
+              this.log('[bridge] AI 决定这一轮不先应声（所以什么都没发）')
+            }
+            return
+          }
+          this.log(
+            `[bridge] 回合仍在进行，先发一条：${text}（${chatKey}）` +
+              (interimAiState
+                ? interimAiState.settled?.ok
+                  ? '【AI 按上下文写的】'
+                  : '【生成没赶上，用话术池】'
+                : ''),
+          )
           // ★★ 既然已经答应了，这一轮就**不许再被作废**（判据在 `#runTurn` 的作废那段）。
           //   否则使用者看到的是"稍等，我想想"然后永远没有正文 —— 比静默更伤
           //   （实测 12 次作废里 6 次是这种）。标记在**真要发之前**打，不是挂定时器时打。
           token.interimSent = true
-          this.log(`[bridge] 回合仍在进行，先发一条：${text}（${chatKey}）`)
           // 用 safeSend：这条只是"应一声"，发失败不该影响主流程。
           // 也**不走拟人延迟** —— 它的价值就在于"立刻让使用者知道没坏"。
           // （safeSend 内部会把它记进会话镜像，并标成 notice 类。）
@@ -4889,12 +5379,21 @@ export class Bridge extends EventTarget {
         }, interim.afterMs ?? 8000)
         if (typeof interimTimer.unref === 'function') interimTimer.unref()
       }
+      // ⚠️ 生成器要能被**回合结束时**喊停（省一次用不掉的调用）。
+      const cancelInterimAi = () => {
+        try {
+          interimAiState?.ac?.abort()
+        } catch {
+          /* ignore */
+        }
+      }
       const clearInterim = () => {
         if (interimTimer) clearTimeout(interimTimer)
         interimTimer = null
+        cancelInterimAi()
       }
 
-      // ── 看图：把这条消息里的图片取进工作区 ───────────────────────────────
+      // ── 看图：把这一轮该看的图取进工作区 ─────────────────────────────────
       //
       // ★ 位置很讲究：放在**准入之后**。
       //
@@ -4902,7 +5401,33 @@ export class Bridge extends EventTarget {
       //   的消息"也会去下载图片 —— 那等于开了一个白送的入口：任何人在群里
       //   连发图片就能让机器人不停发网络请求、不停往磁盘写。而我们一开始
       //   就定下"不唤醒 = 零成本"，所以取图必须发生在**确认要回复之后**。
-      const imagePlan = await this.#collectImages(imageRefs, { kind, peerId })
+      //
+      // ── ★★★ 0.3.3：**两组图**，不是一组 ────────────────────────────────
+      //
+      //   第一组：**当前这条消息**带的图（原有能力）。
+      //   第二组：**上下文窗口里那几条**消息带的图 —— 修的就是使用者报的那个现象：
+      //     「某人发了一张图片，紧接着唤醒小鲸鱼」→ 之前那张图被完全无视。
+      //
+      //   ⚠️ 第二组的取数**只从语料库的上下文行里来**（`#recentMissedMessages` 用的那批），
+      //     所以它天然被"最近几条 + 条数上限"约束住；语料库关掉时它就是空的
+      //     （⇒ 退回改之前的行为，不报错、也不假装成功）。
+      const ctxRows = this.#recentMissedRows({ chatKey, messageId, text: rendered.text })
+      const ctxGroups = this.#contextImageRefs({
+        chatKey,
+        rows: ctxRows,
+        maxCount: Math.max(0, Number(this.config.image?.maxCount ?? 4) - (imageRefs?.length ?? 0)),
+      })
+      if (ctxGroups.length > 0) {
+        this.log(
+          `[bridge] 图片：上下文里还有 ${ctxGroups.reduce((n, g) => n + g.refs.length, 0)} 张` +
+            `（来自 ${ctxGroups.length} 条更早的消息）—— 一起取给模型看`,
+        )
+      }
+      const imageGroups = [
+        ...(Array.isArray(imageRefs) && imageRefs.length > 0 ? [{ refs: imageRefs, source: null }] : []),
+        ...ctxGroups,
+      ]
+      const imagePlan = await this.#collectImages(imageRefs, { kind, peerId, images: imageGroups })
 
       // ── 截图技能的管理员硬闸：写这一轮的会话授权 ──────────────────────────
       //
@@ -5242,23 +5767,19 @@ export class Bridge extends EventTarget {
       //   做成 `privacy.enabled` 就等于给了一个把它关掉的入口 —— 而关掉之后
       //   没有任何提示，表现成"今天开始它什么都说"（那是更难发现的失败）。
       //   要调整只能改代码，且会经过测试。
-      const priv = screenForOutput(answer)
-      if (!priv.ok) {
-        logPrivacyBlock({
-          workspace: this.config.dsh?.workspace,
-          side: 'output',
-          categories: priv.categories ?? [],
-          length: answer.length,
-          chatKey,
-        })
-        this.log(
-          `[privacy] ⚠️ 输出侧拦下一条回复（${(priv.categories ?? []).join('、')}，${answer.length} 字）：` +
-            '改为发送安全话术。原文**没有**发出去。',
-        )
+      // ★★ 0.3.3：**替换逻辑只有一处**（`#screenOutbound`）——
+      //   这里只需要"拦了就记镜像、并把正文换成固定话术"这两步属于本层的事。
+      //   位置仍然在**表情包决策之前**：被拦下的回复不该再配一张图。
+      const priv = this.#screenOutbound({ dest: { chatKey }, text: answer })
+      if (priv.blocked) {
         // 镜像里记下"原本想说什么"（只给控制台看，不发 QQ）——
         // 否则使用者会以为模型变哑巴了，而实际是隐私闸门在工作。
-        this.#mirrorThinking(dKey, `[隐私闸门] 拦下一条含隐私的回复（${(priv.categories ?? []).join('、')}）`, dWho)
-        answer = BLOCKED_OUTPUT_NOTICE
+        this.#mirrorThinking(
+          dKey,
+          `[隐私闸门] 拦下一条含隐私的回复（${priv.categories.join('、')}）`,
+          dWho,
+        )
+        answer = priv.text
       }
 
       // ── 表情包（0.2.4）：模型没要就自主判一次 ───────────────────────────
@@ -5300,7 +5821,7 @@ export class Bridge extends EventTarget {
             //   凭空多出几件游戏里根本不存在的东西）。共用的是**上游**：
             //   模型那一轮、终检门、**隐私闸门**都在上面，一条都不会漏。
             this.#deliverToGame(deliverTo.server, deliverTo.playerName, answer, { turnStartedAt })
-          : this.#deliver(kind, peerId, answer, result, {
+          : this.#deliver(this.#targetOfEvent(kind, peerId), answer, result, {
               replyTo,
               faceId,
               sticker,
@@ -5417,6 +5938,102 @@ export class Bridge extends EventTarget {
    * @returns {Array<{name: string, text: string}>} 空数组 = 这一轮没什么可补的
    */
   #recentMissedMessages({ chatKey, messageId, text } = {}) {
+    // ⚠️ `keepImageRows: false` —— 正文段**保持原样**（只给"机器人上一条之后"的对话）。
+    //   带图那条如果要额外补进来，只补进**取图**那一侧（见 `#recentMissedRows` 的说明）：
+    //   往正文段里塞更早的消息会改变模型读到的对话边界，而那不是这次要动的东西。
+    return this.#recentMissedRows({ chatKey, messageId, text, keepImageRows: false }).map((row) => ({
+      name: String(row.senderName ?? row.userId ?? '某人'),
+      text: String(row.text).trim(),
+    }))
+  }
+
+  /**
+   * 私聊的「最近几条」（**含机器人自己说的**）—— 0.3.3 补。
+   *
+   * ── 为什么要单独开一条路（而不是改 `#recentMissedRows` 那个 `group:` 判断）─────
+   * 2026-10-18 真机反馈「垫场白文不对题」，根因当场查清：垫场白的上下文只有
+   * 「当前这句 + 场外几条」，而**场外那条路只认 `group:`**，私聊永远返回空数组 ——
+   * 于是模型只看到孤零零一句「你好像理解错了」，不知道我刚说岔了，就猜成"你还要接着说"。
+   *
+   * 改 `group:` 那个判断会让**群聊**那套（"机器人上一条之后"的窗口）跟着变，
+   * 而群聊的行为是 0.3.1 调过的；所以私聊走**镜像**（内存里按轮记了谁说了什么，
+   * 包括机器人自己发出去的），群聊那条路一个字不动。
+   *
+   * @param {string} chatKey
+   * @param {{limit?: number, excludeText?: string}} [o]
+   * @returns {Array<{name: string, text: string, self?: boolean}>} 旧的在前
+   */
+  #recentMirrorRows(chatKey, { limit = 4, excludeText = '' } = {}) {
+    try {
+      const conv = this.#conversations.get(chatKey)
+      const list = Array.isArray(conv?.messages) ? conv.messages : []
+      const cur = String(excludeText ?? '').trim()
+      // ★ 排除"当前这一条"：触发这一轮的那句已经作为【当前消息】单独给了，
+      //   重复会让模型以为对方说了两遍（与 `#recentMissedRows` 同一条纪律）。
+      const rows = list
+        .filter((m) => m && (m.role === 'user' || m.role === 'bot'))
+        .filter((m) => String(m.text ?? '').trim() !== '')
+        .filter((m) => !(cur && String(m.text).trim() === cur))
+      return rows.slice(-limit).map((m) => ({
+        name: m.role === 'bot' ? '你（自己）' : String(m.senderName ?? m.senderId ?? '对方'),
+        text: String(m.text).trim(),
+        ...(m.role === 'bot' ? { self: true } : {}),
+      }))
+    } catch (error) {
+      this.#warnInjectOnce('垫场白最近几条', error)
+      return []
+    }
+  }
+
+  /**
+   * 「你自己上一条回复说了什么」—— 垫场白判断"对方是不是在纠正我"的唯一依据。
+   *
+   * 取数顺序：**会话镜像优先 → 语料库兜底**。
+   * ★ 为什么要兜底：镜像只在内存里，**重启后的第一轮是空的**。
+   *   那时若不回退，重启后第一条消息就退回"看不到自己上一句"的老样子 ——
+   *   而这个缺陷正是靠"永远看不到"活了一整版，不能留一个"偶尔看不见"的版本。
+   *   语料库那条多几毫秒（bot 自己的话也入库了），只在镜像没命中时才走。
+   */
+  #lastBotReplyOf(chatKey) {
+    const stripPlaceholders = (t) =>
+      String(t ?? '')
+        .replace(/^\[(表情包?|贴纸)[^\]]*\]$/u, '')
+        .trim()
+    try {
+      const conv = this.#conversations.get(chatKey)
+      const list = Array.isArray(conv?.messages) ? conv.messages : []
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const m = list[i]
+        if (m?.role !== 'bot') continue
+        const text = stripPlaceholders(m.text)
+        if (text) return text
+      }
+    } catch (error) {
+      this.#warnInjectOnce('垫场白上一条回复', error)
+    }
+    // 兜底：语料库（重启后第一轮走这里）
+    const rows = this.#corpusRecentRows({ chatKey, limit: RECENT_CTX_SCAN })
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      if (!rows[i]?.isBot) continue
+      const text = stripPlaceholders(rows[i].text)
+      if (text) return text
+    }
+    return ''
+  }
+
+  /**
+   * 上一条的**原始行**版本（0.3.3 抽出来的）。
+   *
+   * ★ 为什么要抽：同一批行现在有**两个**用途 ——
+   *   ① 提示词里的「你被叫到之前，群里刚说了什么」（只用 name/text，见上面那个包装）；
+   *   ② **这一轮该看哪些图**（`#contextImageRefs` 要 `messageId` 与 `mediaCount`，
+   *      而包装后的 `{name,text}` 把这两个字段都丢了）。
+   *   ∴ 取数只做一次、两种形状各取所需 —— 分成两次查库迟早分叉
+   *   （那时"提示词里有那句话、却不带那张图"就会变成一个说不清的 bug）。
+   *
+   * @returns {Array<object>} 语料库原始行（含 `messageId` / `mediaCount` / `isBot`）
+   */
+  #recentMissedRows({ chatKey, messageId, text, keepImageRows = true } = {}) {
     if (!chatKey || !String(chatKey).startsWith('group:')) return [] // 私聊每条都唤醒，没有"场外"
     const rows = this.#corpusRecentRows({ chatKey, messageId, text, limit: RECENT_CTX_SCAN })
     if (rows.length === 0) return []
@@ -5428,18 +6045,41 @@ export class Bridge extends EventTarget {
         break
       }
     }
-    return rows
-      .slice(cut)
-      .filter((row) => !row.isBot && String(row.text ?? '').trim())
-      .slice(-RECENT_CTX_MAX)
-      .map((row) => ({ name: String(row.senderName ?? row.userId ?? '某人'), text: String(row.text).trim() }))
+    // ⚠️ 过滤条件与包装版（`#recentMissedMessages`）的关系：那边只取 `{name,text}`，
+    //   所以这里多加的 `keepImageRows` 只影响**取图**这一路，不改提示词正文段。
+    const tail = rows.slice(cut).filter((row) => !row.isBot && String(row.text ?? '').trim()).slice(-RECENT_CTX_MAX)
+
+    // ★★★ 0.3.3：**带图的那条不能被"机器人回过一句"挤出窗口**。
+    //
+    //   使用者报的原始现象是「发图 → 紧接着叫它」。第一版只按"机器人上一条之后"切，
+    //   于是**只要机器人答过一次**，那条图就掉出窗口：
+    //     ① 发图（没叫它）② 叫它（答了）③ 再问那张图 → 这次窗口从②之后开始，图没了。
+    //   实测就是这么复现的（`ctxRows=1` → `ctxRows=0`）。
+    //   而现在"归于个人"的记忆、以及用户的心智模型都是"**我们刚才在聊那张图**"——
+    //   图不该在它回过一句话之后就当没发生过。
+    //
+    //   ∴ 这里**向前补一段**：跳过机器人那条回复，把之前**紧挨着的、带图的**消息也纳入
+    //     （只补带图的，所以不会把整段闲聊都翻出来；条数仍受 `RECENT_CTX_MAX` 约束）。
+    if (keepImageRows) {
+      const before = rows
+        .slice(0, cut)
+        .filter((row) => Number(row.mediaCount) > 0 && String(row.text ?? '').trim())
+        .slice(-RECENT_CTX_MAX)
+      // 去重（按 id）后拼在前面：老的在前，时间顺序不乱
+      const seen = new Set(tail.map((r) => String(r.id)))
+      const extra = before.filter((r) => !seen.has(String(r.id)))
+      const room = Math.max(0, RECENT_CTX_MAX - tail.length)
+      if (extra.length > 0 && room > 0) return [...extra.slice(-room), ...tail]
+    }
+    return tail
   }
 
   /**
-   * 从语料库取该会话最近的几行（**排除当前这条**）。两个用处共用这一处取数：
+   * 从语料库取该会话最近的几行（**排除当前这条**）。这一处取数给：
    *   · `#recentMissedMessages`（提示词里的「你被叫到之前，群里刚说了什么」）；
-   *   · `#maybePrewakeAffect`（情绪闸门的上下文 —— 同一句话放在不同上下文里，
-   *     "是不是在跟机器人说"的答案会变，所以闸门也必须看得到）。
+   *   · 垫场白的最近上下文（`#recentMirrorRows` 的那条路不走这里，但语义相同）。
+   * ★ 0.3.3 起**不再有**"情绪闸门"这个消费方（那条支线已整条下线，
+   *   使用者要求：清理不需要的功能）。这里保留说明只是为了解释取数的边界。
    *
    * ★ 排除当前这条的**两条判据都要有**：`message_id` 认得出就按 id 排；
    *   认不出（语料库里是 null）时按正文比对。只按 id 比会踩到一个很隐蔽的坑 ——
@@ -5467,166 +6107,133 @@ export class Bridge extends EventTarget {
   }
 
   /**
-   * ★★ 取（必要时建）**情绪闸门**。建不起来就返回 null，调用方按"不记"处理。
+   * ★ 0.3.3：给 AI 垫场白用的**一小段画像**（只取"说话方式"那一节）。
    *
-   * ── 通路复用 `wake.judge` 的那把 key（不是新开一个输入框）────────────────────
-   * 两者都是"**额外来一次小额模型判定**"，用户要配的东西、以及它的成本口径完全相同
-   * （有没有专用 key ⇒ 直连或一次性进程）。再开一个 `memory.affect.judge.apiKey`
-   * 只会多一处会漂的真值，而使用者根本无法判断该给哪个配。所以：**档位**由
-   * `memory.affect.prewake` 决定，**通路**沿用 `wake.judge`。
+   * 为什么要给：不给的话垫场白的语气与正文会是两套（正文是软糯群友腔，
+   * 垫场白却是通用助手腔）—— 那正是这个项目一直在防的"人设被一句工具话打回原形"。
+   *
+   * 为什么**不是整份人设**：那有 4000 字，为一句垫场白付这个 token 不值；
+   * 而且整份人设里有"被指出错了先认""别的 bot 不接力"这些与垫场白无关的规则。
+   * ∴ 只取 `personaVoiceSections()` 认出来的那一节，再截到 600 字。
+   * 认不出那一节（使用者写的散文人设）就返回空串 —— **不编、也不退回硬编码的话术**。
    */
-  #ensureAffectGate() {
-    if (this.affectGateInjected) return this.affectGateInjected
-    if (this.#affectGate) return this.#affectGate
+  #interimPersonaLine() {
+    try {
+      const { voice } = personaVoiceSections(this.personaText ?? '')
+      const body = String(voice?.body ?? '').trim()
+      if (!body) return ''
+      return body.length > 600 ? `${body.slice(0, 600)}…` : body
+    } catch {
+      return ''
+    }
+  }
+
+  /** 造一个**确定性**的伪随机源（给"提前抽签"用；见 `pick()` 的 `rng` 参数）。 */
+  #seededRngOf(seedText) {
+    let h = 2166136261
+    for (const ch of String(seedText ?? '')) {
+      h ^= ch.codePointAt(0)
+      h = Math.imul(h, 16777619)
+    }
+    let s = h >>> 0
+    return () => {
+      // xorshift32：够用、无依赖、结果稳定
+      s ^= s << 13
+      s ^= s >>> 17
+      s ^= s << 5
+      s >>>= 0
+      return s / 4294967296
+    }
+  }
+
+  /**
+   * ★★★ 0.3.3：取（必要时建）**AI 垫场白**的生成器。
+   *
+   * ── 通路复用 `wake.judge`（与情绪闸门同一条纪律）────────────────────────────
+   * 它也是"额外来一次小额模型调用"，要配的东西、成本口径与唤醒判定完全相同
+   * （有没有专用 key ⇒ 直连或一次性进程）。再开一个 `humanize.interim.ai.apiKey`
+   * 只会多一处会漂的真值，而使用者根本判断不出该给哪个配。
+   * ∴ **开关**由 `humanize.interim.mode` 决定，**通路**沿用 `wake.judge`。
+   *
+   * ── 两条超时纪律（不遵守就会"垫场白比正文还晚"）─────────────────────────────
+   *   ① 生成必须**赶在 afterMs 之前**回来 —— 否则到点那一刻它还没好，
+   *      而我们照样会发池子那句（不会等它）。所以超时默认取 `afterMs - 1500`；
+   *   ② 没配 `wake.judge.apiKey` 时走一次性 DSH 进程（3~5 秒）——
+   *      那种情况下 `afterMs` 只有 8 秒时它**常常来不及**，于是退回池子的比例很高。
+   *      **这是如实记下的代价**，不假装它总能生效；界面/文档里也这么写。
+   *
+   * @returns {{available:boolean, decide:Function}|null} 建不起来返回 null（那一轮就用池子）
+   */
+  #ensureInterimAi() {
+    if (this.interimAiInjected) return this.interimAiInjected
+    if (this.#interimAi) return this.#interimAi
     const j = this.config.wake?.judge ?? {}
     const judgeKey = String(j.apiKey ?? '').trim()
     const transport = judgeTransport(j)
     const direct = judgeKey ? resolveDirectTarget({ config: this.config }) : null
+    const afterMs = Number(this.config.humanize?.interim?.afterMs ?? 8000)
+    const configured = Number(this.config.humanize?.interim?.ai?.timeoutMs ?? 0)
+    // 自动超时的三条边界（每一条都有代价，别只留一条）：
+    //   · 上限 2500ms：直连一次小调用约 1 秒，给它 6.5 秒毫无意义 ——
+    //     那只是让"来不及"的情况白等（真慢的模型等 6.5 秒也救不回来）；
+    //   · 下限 1500ms：★★ 这条是被**真实链路测试**逼出来的 ——
+    //     原来下限是 800ms，于是 `afterMs=1500` 这种中等配置算出 800ms，
+    //     而一次直连调用就要 ~1 秒 ⇒ **每个回合都会被掐断、退回话术池**。
+    //     "先应一声"本身是 1.5 秒后才发，生成只要赶在它之前，1500ms 的预算完全合理。
+    //   · `afterMs - 1500`：必须赶在"发出那一刻"之前回来。
+    // ⚠️ 三个值都随 `afterMs` 走；`timeoutMs >= afterMs` 时生成永远赶不上（lint 会喊）。
+    const autoTimeout = Math.max(1500, Math.min(2500, Math.floor(afterMs * 0.6)))
+    const timeoutMs = configured > 0 ? configured : autoTimeout
+    // ★ 把"这一档到底会不会来得及"直接写进日志：使用者看日志就能判断要不要配 apiKey / 调 afterMs。
+    const tight = timeoutMs >= afterMs
     try {
-      this.#affectGate = createAffectGate({
+      const gate = createModelGate({
+        // 我们**自己拼好整段提示词**再递进去 —— 垫场白不按"每条消息"重算输入
+        buildPrompt: (input) => String(input?.prompt ?? ''),
+        // `failVerdict` 只用来占位：语义是"这次没拿到可用的输出"，
+        //   所以内容必须是一个**永远不会被当成正文发出去**的标记，
+        //   而消费方（`createInterimAi`）靠 `fallback`/`judged` 两个字段判断，
+        //   不看这个字符串本身。
+        parseVerdict: (text) => ({ ok: true, verdict: String(text ?? ''), reason: '', via: 'raw' }),
+        failVerdict: '',
+        tag: 'interim',
         transport,
         cliPath: this.config.dsh?.cliPath,
         cwd: this.config.dsh?.workspace,
         baseUrl: direct?.baseUrl ?? j.baseUrl,
         apiKey: direct?.apiKey ?? '',
         model: direct?.model ?? '',
+        timeoutMs,
+        maxPerHour: Number(this.config.humanize?.interim?.ai?.maxPerHour ?? 120),
         log: (m) => this.log(m),
+        label: '垫场白',
       })
+      this.#interimAi = createInterimAi({ gate, tag: 'interim', log: (m) => this.log(m) })
       this.log(
-        `[memory] 情绪闸门已就绪：prewake=${this.#prewakeMode()} · 通路=${transport}` +
+        `[bridge] 「先应一声」= AI 自主决定 · 通路=${transport}` +
           `（${judgeKey ? '复用 wake.judge.apiKey ⇒ 直连' : '没配 wake.judge.apiKey ⇒ 一次性进程'}）` +
-          ' · 只在"未唤醒 + 情绪命中"时才问一次',
+          ` · 超时 ${timeoutMs}ms（要赶在 ${afterMs}ms 发出之前回来）` +
+          ` · 每小时最多 ${this.config.humanize?.interim?.ai?.maxPerHour ?? 120} 次 · 拿不到就退回话术池`,
       )
+      // ★★ 两条**会让人以为"功能是坏的"**的组合，启动时就说清楚（别让人去猜日志）：
+      if (tight) {
+        this.log(
+          `⚠️ [bridge] 生成超时（${timeoutMs}ms）不小于 afterMs（${afterMs}ms）：生成**永远赶不上**发出那一刻，` +
+            '这一档会每次都退回话术池、还白付一次模型调用。把 humanize.interim.ai.timeoutMs 调小（0 = 自动）或把 afterMs 调大。',
+        )
+      }
+      if (transport === 'headless') {
+        this.log(
+          `⚠️ [bridge] 没配 wake.judge.apiKey ⇒ 每次生成都要起一个一次性 DSH 进程（约 3~5 秒）；` +
+            `afterMs=${afterMs}ms 时它**常常来不及**，于是多数回合会退回话术池。` +
+            '想让 AI 那一档真的生效：配一把 wake.judge.apiKey（直连约 1 秒），或把 afterMs 调大。',
+        )
+      }
     } catch (error) {
-      this.log(`❌ [memory] 情绪闸门建不起来（这一层停用，未唤醒的情绪一律不记）：${error?.message ?? error}`)
+      this.log(`❌ [bridge] AI 垫场白建不起来（这一档退回话术池，不影响聊天）：${error?.message ?? error}`)
       return null
     }
-    return this.#affectGate
-  }
-
-  /** 当前档位（每次现读活配置：改完下一轮就生效，不需要重启）。 */
-  #prewakeMode() {
-    return normalizePrewakeMode(this.config.memory?.affect?.prewake)
-  }
-
-  /**
-   * ★★ 未唤醒的情绪：**先筛、再问一次、然后才决定记不记**（2026-09-30 用户拍板）。
-   *
-   * ── 为什么需要它（真机语料，不是设想）──────────────────────────────────────
-   * 群聊 3598 条消息里 3488 条（97%）是未唤醒的 —— 桥接在唤醒判定那一刻就丢掉了它们，
-   * 所以"有人对着机器人倾诉、但没 @ 它也没写名字"这件事**从来没被记下来过**。
-   * 但把确定性判定直接前移也不行：那批候选里 **5 条有 4 条是错的**（"舍不得就别走呐"
-   * 是对**别人**说的挽留、"压力大肥鱼是吧"说的是别人且是玩笑）。
-   *
-   * ── 三个档位 ───────────────────────────────────────────────────────────────
-   *   `off`（默认）→ 直接返回，**一次模型调用都不发**；
-   *   `shadow`     → 判定照跑，**只写日志、不写盘**（先看一周它会记下什么）；
-   *   `judge`      → 判定说"是在跟机器人说话"才写。
-   *
-   * ── 失败了怎么办 ───────────────────────────────────────────────────────────
-   * 判定不出来/超预算/通路没配好 ⇒ **不记**（`failVerdict`），但**留一行日志说明原因**
-   * （"它怎么没记住"必须查得到）。
-   *
-   * @returns {Promise<{mode: string, recorded: boolean, verdict?: string, why: string}>}
-   *   返回值只用于测试与日志；**任何分支都不抛**（增强路径纪律）。
-   */
-  async #maybePrewakeAffect({ kind, peerId, senderId, senderName, chatKey, messageId, text, chatName = '' } = {}) {
-    const mode = this.#prewakeMode()
-    if (mode === PREWAKE.OFF) return { mode, recorded: false, why: '档位是 off' }
-    if (kind !== 'group') return { mode, recorded: false, why: '私聊每条都唤醒，不走这条' }
-    // 记忆关掉时**一个字节都不写**（与 #settleMemory 同一条闸门）
-    if (this.config.memory?.enabled === false) return { mode, recorded: false, why: '记忆开关关着' }
-    if (!senderId) return { mode, recorded: false, why: '没有发言人 id，归属无从裁定' }
-    // ★ 名单准入**不可省**（与唤醒闸门同一条理由）：这条钩子挂在唤醒判定那一层，
-    //   而那里**还没有过 roster 准入**。少了这一道，任何在群里发过情绪词的陌生人
-    //   都能让桥接替他花一次判定调用 —— 那就是一个免费的拒绝服务面。
-    const admitted = this.roster?.decide({ kind, peerId, senderId })
-    if (!admitted?.respond) {
-      return { mode, recorded: false, why: `名单外（${admitted?.reason ?? 'unknown'}）` }
-    }
-
-    const pour = detectAffectPour({ text })
-    if (!pour.hit) return { mode, recorded: false, why: '没有情绪线索' }
-    const entry = affectEntryText(pour)
-    if (!entry) return { mode, recorded: false, why: '组不出条目' }
-
-    const gate = this.#ensureAffectGate()
-    if (!gate) return { mode, recorded: false, why: '闸门不可用' }
-
-    const r = await gate.judge({
-      senderName,
-      text,
-      recent: this.#corpusRecentRows({ chatKey, messageId, text, limit: 10 }),
-    })
-    const toBot = r.judged === true && r.verdict === GATE_VERDICT.TO_BOT
-    const detail = `判定=${r.verdict}${r.judged ? '' : '（没问成：' + String(r.why ?? '未知') + '）'}${
-      r.reason ? `｜它说：${r.reason}` : ''
-    }`
-
-    if (mode === PREWAKE.SHADOW) {
-      this.log(
-        `[memory] 情绪倾注（未唤醒·**影子**）：${
-          toBot ? `若判定通过会记下「${entry}」` : `判定不通过、本来也不会记「${entry}」`
-        } —— ${detail}（只记账，没写盘）`,
-      )
-      return { mode, recorded: false, verdict: r.verdict, why: detail }
-    }
-
-    if (!toBot) {
-      this.log(`[memory] 情绪倾注（未唤醒）→ **不记**（${pour.why}）：${entry} —— ${detail}`)
-      return { mode, recorded: false, verdict: r.verdict, why: detail }
-    }
-
-    const out = applyMemoryItems({
-      workspace: this.config.dsh?.workspace,
-      kind,
-      peerId,
-      senderId: String(senderId),
-      tier: 'user',
-      chatName,
-      // ★ 发言人昵称（0.3.0alpha）：这条通道的 `senderName` 是调用方核实过的那个
-      //   （见 `#maybePrewakeAffect` 的入参）。它可能与 `contacts.md` 里的按人昵称不同 ——
-      //   这里**优先按人昵称**（使用者亲自设的那份），与 `#speakerLabel` 同一条口径。
-      speakerName: this.#speakerLabel({ senderId: String(senderId), identity: senderName ? { ok: true, name: senderName } : null }),
-      items: [{ scope: SCOPE.PERSON, text: entry, source: 'cue-gate' }],
-      log: (m) => this.log(m),
-    })
-    const applied = out.applied?.[0] ?? null
-    this.log(
-      `[memory] 情绪倾注（未唤醒·闸门通过）→ 记入个人档：${entry} —— ${detail}` +
-        (applied ? `｜落盘 ${applied.rel}${applied.deduped ? '（已有同一条）' : ''}` : '｜**没落盘**'),
-    )
-    // 审计与桥接自己那条通道同格式（来源 `cue-gate`，一眼看得出它走的是未唤醒闸门）
-    for (const a of out.applied ?? []) {
-      appendAuditEntry({
-        workspace: this.config.dsh?.workspace,
-        entry: {
-          chatKey,
-          senderId: String(senderId),
-          source: a.source ?? 'cue-gate',
-          scope: a.scope ?? SCOPE.PERSON,
-          outcome: a.deduped ? 'deduped' : 'applied',
-          chars: String(a.entry ?? '').length,
-        },
-        log: (m) => this.log(m),
-      })
-    }
-    for (const i of out.ignored ?? []) {
-      appendAuditEntry({
-        workspace: this.config.dsh?.workspace,
-        entry: {
-          chatKey,
-          senderId: String(senderId),
-          source: i.source ?? 'cue-gate',
-          scope: i.scope ?? SCOPE.PERSON,
-          outcome: 'ignored',
-          chars: String(i.entry ?? '').length,
-          why: i.why,
-        },
-        log: (m) => this.log(m),
-      })
-    }
-    return { mode, recorded: (out.applied?.length ?? 0) > 0, verdict: r.verdict, why: detail }
+    return this.#interimAi
   }
 
   /**
@@ -5723,6 +6330,21 @@ export class Bridge extends EventTarget {
         messageId: opts.messageId,
         text: rendered?.text,
       }),
+      // ── ★★★ S3（0.3.3）：上一轮「说了但没发出去」的回执 ──────────────────
+      // ★ 与「记忆回执」同一条纪律：**取用即清**（一次性语义），且它**不是**
+      //   "我说过的话" —— 不进镜像/语料/账本（`#noteDeliveryDrops` 那边保证）。
+      deliveryReceipt: this.#takeDeliveryReceipt(opts.chatKey),
+      // ── ★★★ 0.3.3：上一轮回复被**隐私闸门**换掉 → 告诉她"那条没发出去"──────
+      // ★ 与投递回执分开：那个是"没发出去、请重发"，这个是"对方根本没收到"。
+      // ★ 空串 ⇒ 提示词逐字不变（golden 基线靠这条）。
+      privacyNotice: this.#takePrivacyNotice(opts.chatKey),
+      // ── ★★ 0.3.3（P3）：语感（统计 + 少量真实样本）────────────────────────
+      //   ★ 加载一次、缓存：画像是**离线蒸馏**出来的静态产物，不是每轮现算。
+      //   ★ `style.enabled` 关着 / 画像不存在 ⇒ 空串（提示词逐字不变，golden 基线靠这条）。
+      //   ★★ **不分闲聊/办事、不按群**：使用者明确纠正过两次 —— 语感是**全局**的，
+      //     而且"闲聊模式"这个状态 0.3.0 就整组下线了（见 `config.mjs` 的 `chat.mode.*` 注释），
+      //     所以这里**没有**任何"这一轮算不算闲聊"的判据（曾经加过，已按使用者要求撤掉）。
+      styleBlock: this.#styleBlockText(),
       // ★ 缺口的**所有权仍在桥接**：取用即清（一次性语义不能在搬动中丢掉）
       consumeGap: () => {
         const gap = this.#pendingGap
@@ -5730,6 +6352,54 @@ export class Bridge extends EventTarget {
         return gap
       },
     })
+  }
+
+  /**
+   * ★★★ 0.3.3（P3）：**语感块**（提示词里那一段）。
+   *
+   * ── 它是什么 ────────────────────────────────────────────────────────────────
+   * `tools/distill-style-profile.mjs` 从"人工判成可用"的样本里蒸馏出的画像，
+   * 加上一小撮（默认 ≤60 条）真实发言 —— 让模型照着**这个群**的语感说话。
+   *
+   * ── 三条纪律 ────────────────────────────────────────────────────────────────
+   * 1. **开关默认关**（`style.enabled`）：没配的人，提示词**逐字不变**（golden 基线靠这条）。
+   * 2. **读不到就降级并留痕**：画像文件不在 / 坏了 ⇒ 空串 + 一行日志（只报一次）。
+   *    绝不让"增强路径失败"变成"提示词悄悄少一段却没人知道"。
+   * 3. **加载一次就缓存**：画像是离线产物，不是每轮现算；`profile.json` 改了要重启桥接
+   *    （与"配置只在启动时读一次"同一条语义，界面上也写明）。
+   */
+  #styleBlockText() {
+    if (this.config?.style?.enabled !== true) return ''
+    if (this.#styleBlockLoaded) return this.#styleBlockCache
+    this.#styleBlockLoaded = true
+    try {
+      const rel = 'store/style/profile.json'
+      const workspace = this.config?.dsh?.workspace
+      if (!workspace) return ''
+      const abs = `${String(workspace).replace(/[\\/]+$/, '')}/${rel}`
+      if (!existsSync(abs)) {
+        this.log(
+          `⚠️ [style] 群语感已开启，但画像文件不存在（${abs}）——这一轮不注入。` +
+            '先跑 `node tools/distill-style-profile.mjs`，然后重启桥接。',
+        )
+        return ''
+      }
+      const profile = JSON.parse(nodeReadFileSync(abs, 'utf8'))
+      const block = renderPromptStyleBlock(profile, {
+        includeSamples: this.config?.style?.samples !== false,
+      })
+      this.#styleBlockCache = block
+      const samples = Array.isArray(profile?.sampleLines) ? profile.sampleLines.length : 0
+      this.log(
+        `[style] 群语感已注入：n=${profile?.stats?.n ?? '?'} 条统计` +
+          `${this.config?.style?.samples === false ? '（样本已关）' : ` + ${samples} 条样本`}` +
+          ` · ${block.length} 字`,
+      )
+      return block
+    } catch (error) {
+      this.log(`⚠️ [style] 画像读取失败（这一轮不注入）：${error?.message ?? error}`)
+      return ''
+    }
   }
 
   /**
@@ -5805,30 +6475,81 @@ export class Bridge extends EventTarget {
    * @returns {Promise<Array>} 每张图的结果（ok / relPath / mediaType / bytes /
    *          base64（仅 auto）/ reason）
    */
-  async #collectImages(refs, { kind, peerId }) {
+  async #collectImages(refs, { kind, peerId, images = null } = {}) {
     const cfg = this.config.image ?? {}
     if (cfg.enabled === false || !this.imageInbox) return []
-    if (!Array.isArray(refs) || refs.length === 0) return []
+    // `images` 给了就按条目处理（每条带自己的 `source`，见 `#contextImageRefs`）；
+    // 没给就退回"一条消息一组图"的老形状（内部自己拼一个 source=null 的条目）。
+    const groups = Array.isArray(images) && images.length > 0 ? images : [{ refs: refs ?? [], source: null }]
+    const total = groups.reduce((n, g) => n + (g?.refs?.length ?? 0), 0)
+    if (total === 0) return []
 
     try {
-      const plan = await collectImages({
-        refs,
-        inbox: this.imageInbox,
-        // 传的是"函数"而不是 onebot 实例：images.mjs 只需要能发一个
-        // get_image 动作，这样单测可以直接注入假的 call，不必造一个客户端。
-        call: (action, params) => this.onebot.call(action, params),
-        maxCount: cfg.maxCount,
-        withBase64: cfg.mode === 'auto',
-        fetchOptions: {
-          maxBytes: cfg.maxBytes,
-          timeoutMs: cfg.timeoutMs,
-          maxRedirects: cfg.maxRedirects,
-        },
-        log: this.log,
-      })
+      const plan = []
+      let cachedCount = 0
+      for (const g of groups) {
+        const refs = Array.isArray(g?.refs) ? g.refs : []
+        if (refs.length === 0) continue
+        // ★ 先走引用缓存（同一张图别下第二次，见 `#imageRefCache`）。
+        const fresh = []
+        for (const ref of refs) {
+          const hit = this.#cachedImage(ref)
+          if (hit) {
+            const one = {
+              ok: true,
+              relPath: hit.hit.relPath,
+              mediaType: hit.hit.mediaType || undefined,
+              fromCache: true,
+            }
+            if (cfg.mode === 'auto') {
+              try {
+                const read = readWorkspaceImage(hit.hit.relPath, { workspace: this.config?.dsh?.workspace })
+                if (read?.ok) {
+                  one.base64 = Buffer.from(read.bytes).toString('base64')
+                  one.withBase64 = true
+                  one.bytes = read.bytes.byteLength
+                }
+              } catch {
+                /* 读不回来就当没缓存（下面照常去下） */
+              }
+            }
+            cachedCount += 1
+            plan.push(g.source ? { ...one, source: g.source } : one)
+          } else {
+            fresh.push(ref)
+          }
+        }
+        if (fresh.length > 0) {
+          const got = await collectImages({
+            refs: fresh,
+            inbox: this.imageInbox,
+            // 传的是"函数"而不是 onebot 实例：images.mjs 只需要能发一个
+            // get_image 动作，这样单测可以直接注入假的 call，不必造一个客户端。
+            call: (action, params) => this.onebot.call(action, params),
+            maxCount: cfg.maxCount,
+            withBase64: cfg.mode === 'auto',
+            fetchOptions: {
+              maxBytes: cfg.maxBytes,
+              timeoutMs: cfg.timeoutMs,
+              maxRedirects: cfg.maxRedirects,
+            },
+            log: this.log,
+          })
+          // 下成功的记进缓存，供后面某一轮复用（同一张图只下一次）
+          // ⚠️ `source` 由我们在这里补，**不交给 `collectImages`** ——
+          //   那样它会按"每条引用"复制一份 source，而这里的 source 是**一组图**的属性。
+          //   在这一层补，也保证"图 ↔ 哪条消息"的对应不会在中间某一层丢掉。
+          for (let i = 0; i < got.length; i += 1) {
+            const one = got[i]
+            if (one?.ok) this.#rememberImageFile(fresh[i], one)
+            plan.push(g.source ? { ...one, source: g.source } : one)
+          }
+        }
+      }
       const okCount = plan.filter((x) => x.ok).length
       this.log(
-        `[bridge] 图片：收到 ${refs.length} 张，取到 ${okCount} 张（模式 ${cfg.mode ?? 'on-demand'}）`,
+        `[bridge] 图片：收到 ${total} 张，取到 ${okCount} 张（模式 ${cfg.mode ?? 'on-demand'}` +
+          `${cachedCount > 0 ? `，其中 ${cachedCount} 张复用已收过的` : ''}）`,
       )
       for (const bad of plan) if (!bad.ok) this.log(`[bridge] ⚠️ 取图失败：${bad.reason}`)
 
@@ -5842,8 +6563,12 @@ export class Bridge extends EventTarget {
         })
       }
 
-      // 把图挂到会话镜像的那条"用户消息"上，界面才显示得出图片
-      this.#attachImagesToMirror(`${kind}:${peerId}`, plan)
+      // 把图挂到会话镜像的那条"用户消息"上，界面才显示得出图片。
+      // ⚠️ 只挂**当前这条消息**的图：上下文里那些图属于**更早的那条**，
+      //    挂到最新一条上等于把界面也搞错（界面是我们唯一能核对"它到底看到了什么"的地方）。
+      //    判据用 `source.fromContext` 这个**显式旗标**，不用 messageId 有没有值 —— 见 `#contextImageRefs`。
+      const ownPlan = plan.filter((x) => !x?.source?.fromContext)
+      this.#attachImagesToMirror(`${kind}:${peerId}`, ownPlan)
       return plan
     } catch (error) {
       this.log(`[bridge] ⚠️ 取图过程出错（不影响回复）：${error?.message ?? error}`)
@@ -6006,7 +6731,7 @@ export class Bridge extends EventTarget {
    * ★ H15：给这一次投递落账（**发送之前**）。
    * 失败返回 `null` —— 发送照常进行（增强路径可以失败，但不许安静地失败）。
    */
-  #beginDelivery({ kind, peerId, chatKey, chunks }) {
+  #beginDelivery({ kind, peerId, chatKey, channel = '', chunks }) {
     try {
       const workspace = this.config?.dsh?.workspace
       if (!workspace) return null
@@ -6023,6 +6748,7 @@ export class Bridge extends EventTarget {
         kind,
         peerId,
         chatKey,
+        channel,
         chunks,
         log: this.log,
       })
@@ -6215,7 +6941,237 @@ export class Bridge extends EventTarget {
     }
   }
 
-  async #deliver(kind, peerId, answer, result, { replyTo = null, faceId = null, sticker = null, turnStartedAt = null } = {}) {
+  /**
+   * ★★★ 0.3.3 · S5：**唯一的出站入口**。
+   *
+   * ```js
+   * await this.deliver({ channel: 'qq-group', target: '123456', text: '…', opts: { replyTo } })
+   * ```
+   *
+   * 在此之前出站签名是 `send(kind, peerId, text)`，而 `kind` 是**从会话键字符串反推**的
+   * （`'group:123'` → `group`）—— 那条路上出过一次真实事故：**游戏里说的话被投进 QQ 私聊**。
+   * 现在"发去哪"由**通道对象**决定，`channel` 是枚举、`target` 的格式由通道自己校验，
+   * 不合法**直接抛**（`DeliveryTargetError`），绝不静默降级到"随便找个地方发"。
+   *
+   * 分派（**内部**按通道，而不是调用方各写一份）：
+   *   · `qq-group` / `qq-private` → `#deliverToQqChannel`（会话串行链 + 拟人节流 + 去重）
+   *   · `game` → `#deliverToGameChannel`（`tellraw`，**不写** QQ 账本、不发表情包）
+   *   · `console` → `#deliverToConsoleChannel`（只进控制台预览：这是"发到界面上"，
+   *     一个网络请求都不发 —— 它存在的意义是让"预览/自检"这类消息有正规去处，
+   *     而不是让某处再复制一遍 `#mirror`）
+   *
+   * ★ 跨通道（把 A 通道的对话发到 B 通道）**不在这里开参数分支**：它是独立能力，
+   *   走 `delivery.crossChannel` 的三连校验（开关 → 格式 → 白名单），默认关。
+   *
+   * @returns {Promise<{ok:boolean, reason?:string, why?:string, sendResult?:object,
+   *                    error?:Error, rendered?:string}>}
+   *   失败**不抛**（除了目标非法）：调用方按 `ok` 决定"退回执/留日志/抛给上层"，
+   *   与 `SendQueue.run` 的语义保持一致（漏发比抛更该被处理）。
+   */
+  async deliver({ channel, target, text, opts = {} } = {}) {
+    // ── 目标校验：非法就抛（调用点传错是**代码缺陷**，不是运行时故障）─────────
+    const dest = requireTarget({ channel, target })
+
+    // ── 跨通道：三连校验（同通道直接放行，不消耗"开关"这一档）───────────────
+    const from = String(opts.from ?? dest.channel).trim()
+    if (from !== dest.channel) {
+      const gate = checkCrossChannel({
+        from,
+        to: dest,
+        config: this.config?.delivery?.crossChannel,
+      })
+      if (!gate.ok) {
+        // ★ 留日志再抛：这类拒绝是**安全边界**，不能只让调用栈说话
+        this.log(
+          `❌ [delivery] 跨通道投递被拒：${from} → ${dest.channel}:${dest.target}（${gate.why}）`,
+        )
+        throw new DeliveryTargetError(gate.why, { channel: dest.channel, target: dest.target })
+      }
+      this.log(`[delivery] 跨通道投递：${from} → ${dest.channel}:${dest.target}（白名单内）`)
+    }
+
+    // ★★★ 0.3.3：**出站隐私闸（唯一出口这一层）**。
+    //
+    // 为什么装在这里而不是调用点：`onebot.send` 在整个文件里只有**一处**调用
+    // （`#deliverToQqChannel` 里），而它上游唯一就是这里 ⇒ 装在门口，将来任何
+    // 新调用方（定时任务 / 服务器事件 / 插件 / 跨通道）都绕不过。
+    // ★ 幂等：上面 `#deliver` 已经替换过的固定话术不会再命中（那句话里没有隐私）。
+    const gated = this.#screenOutbound({ dest, text })
+    const body = gated.text
+
+    const out =
+      dest.channel === 'game'
+        ? await this.#deliverToGameChannel(dest, body, opts)
+        : dest.channel === 'console'
+          ? await this.#deliverToConsoleChannel(dest, body, opts)
+          : await this.#deliverToQqChannel(dest, body, opts)
+
+    // ★ 调用方要能知道"发出去的是替换过的固定话术"（定时任务据此如实记账）；
+    //   不改变 `ok` 的语义 —— 话术**确实发出去了**，不是失败。
+    return gated.blocked ? { ...(out ?? {}), privacyBlocked: true } : out
+  }
+
+  /**
+   * QQ 通道的实际发送：**会话串行链**内完成 `check → 等 gap → 复检 → 发送 → markSent`。
+   *
+   * @param {{channel:string, target:string, kind:string, chatKey:string}} dest
+   * @param {string} text 正文（表情段传空串）
+   * @param {{replyTo?:string|number|null, faceId?:string|number|null,
+   *          stickerBase64?:string|null, stickerMime?:string|null,
+   *          dedupeExtra?:string|null, keyText?:string, skipGap?:boolean,
+   *          timeoutMs?:number, label?:string}} [opts]
+   */
+  async #deliverToQqChannel(dest, text, opts = {}) {
+    const {
+      replyTo = null,
+      faceId = null,
+      stickerBase64 = null,
+      stickerMime = null,
+      dedupeExtra = null,
+      keyText = String(text ?? ''),
+      skipGap = false,
+      timeoutMs,
+      label = 'deliver',
+    } = opts
+    const key = deliveryKey({
+      chatKey: dest.chatKey,
+      text: keyText,
+      replyTo,
+      faceId,
+      sticker: dedupeExtra,
+    })
+    const outcome = await this.sendQueue.run(
+      dest.chatKey,
+      async ({ check, markSent, skipGap: chainedSkip, sleep }) => {
+        const verdict = check(keyText, key)
+        if (!verdict.ok) return { ok: false, reason: verdict.reason }
+        // ★ `skipGap` 是**参数里的例外**（提示类消息用），不是"没调 check"
+        if (!skipGap && !chainedSkip && verdict.waitMs > 0) await sleep(verdict.waitMs)
+        // 校验之后可能又过了时间，再查一次（简单但有效）
+        const recheck = check(keyText, key)
+        if (!recheck.ok) return { ok: false, reason: recheck.reason }
+        try {
+          const sendResult = await this.onebot.send(dest.kind, dest.target, text, {
+            replyTo,
+            faceId,
+            stickerBase64,
+            ...(stickerMime ? { stickerMime } : {}),
+          })
+          markSent(keyText, key)
+          return { ok: true, sendResult }
+        } catch (error) {
+          return { ok: false, reason: `发送失败：${error?.message ?? error}`, error }
+        }
+      },
+      { ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}), skipGap, label },
+    )
+    return outcome ?? { ok: false, reason: '未知原因' }
+  }
+
+  /**
+   * 游戏通道：**公屏 `tellraw`**，只有文字。
+   *
+   * ★ 它**不**发 QQ 表情包/内置脸/引用气泡，也**不写**投递账本 —— 那些是 QQ 传输形状的
+   *   东西，游戏里根本不存在（`#deliverToGame` 的注释里记着这条边界）。
+   */
+  async #deliverToGameChannel(dest, text, opts = {}) {
+    const server = opts.server ?? this.#serverById(dest.target)
+    if (!server) {
+      return {
+        ok: false,
+        reason: `找不到服务器「${dest.target}」（配置里没有这台，或它已经被删掉）`,
+      }
+    }
+    const built = buildPublicChat({ text: String(text ?? '') })
+    if (!built.ok) {
+      this.log(`⚠️ [game-chat] 这一片没能构造出公屏命令（${built.why}）`)
+      return { ok: false, reason: `没能构造出公屏命令：${built.why}` }
+    }
+    // ★ 公屏那条是 `tellraw @a`（原来用 `say`）：使用者要求「每条发言都要在前面加上
+    //   `<小鲸鱼>`，不要高亮，模仿正常玩家」。
+    const r = await this.#runGameCommand(server, built.command, 'say')
+    if (!r.ok) {
+      return { ok: false, reason: r.why ?? '未知原因' }
+    }
+    // ★★★ **必须自己记一条**：`tellraw` 与服务端的 `say` 不同 —— 它**不写控制台日志**
+    //   （实测：`say` 会 echo 成 `[Rcon] …`，`tellraw` 一声不响）。所以它说过什么
+    //   在「实时后台」里**看不到**了 ⇒ 由桥接日志补上这条记录。
+    this.log(`[game-chat] 说（公屏）：${built.text}`)
+    return { ok: true, rendered: built.text }
+  }
+
+  /**
+   * 控制台通道：**只进控制台预览**（`#mirror`），一个网络请求都不发。
+   *
+   * ★ 为什么它算一个通道而不是"某处直接调 `#mirror`"：预览/自检这类内容本来没有
+   *   出站去处，于是过去散在各处的 `#mirror(...)` 调用里 —— 那正是"同一种动作有两三种
+   *   写法"的来源。现在它有名字（`console`）、有目标（会话名）、走同一条入口。
+   */
+  async #deliverToConsoleChannel(dest, text) {
+    const body = String(text ?? '')
+    if (!body.trim()) return { ok: false, reason: '空内容' }
+    this.#mirror(dest.chatKey, 'bot', body, {
+      createIfMissing: true,
+      kind: 'console',
+      peerId: dest.target,
+      channel: 'console',
+    })
+    return { ok: true, rendered: body }
+  }
+
+  /** 按 id 找一台服务器（找不到就 `null`：调用方据此报"配置里没有"而不是抛）。 */
+  #serverById(serverId) {
+    const id = String(serverId ?? '').trim()
+    if (!id) return null
+    const list = Array.isArray(this.config?.servers) ? this.config.servers : []
+    return list.find((s) => s && String(s.id ?? '') === id) ?? null
+  }
+
+  /**
+   * 解析"这条回复属于哪个通道"（**只在入口做一次**）。
+   *
+   * @param {'group'|'private'} kind 入站事件给的类型（那是事实，不是猜测）
+   */
+  #targetOfEvent(kind, peerId) {
+    const t = targetOfKind(kind, peerId)
+    if (!t.ok) {
+      throw new DeliveryTargetError(t.why, { channel: String(kind ?? ''), target: String(peerId ?? '') })
+    }
+    return t
+  }
+
+  /**
+   * 老存储（定时任务目标 / 投递账本行）→ 目标。
+   * ★ `channel` 缺省时按 `kind` 补（**只读兼容，不回写**）。
+   */
+  #targetOfStored(row) {
+    const t = requireTarget({
+      channel: channelFromStored(row),
+      target: row?.peerId,
+    })
+    return t
+  }
+
+  async #deliver(dest, answer, result, { replyTo = null, faceId = null, sticker = null, turnStartedAt = null } = {}) {
+    // ★ S5：这一层的入参是**已解析的目标对象**（`{channel,target,kind,chatKey}`），
+    //   不再收 `(kind, peerId)` —— 那两个值一旦分开传，就又会允许某处从会话键反推通道。
+    const { kind, chatKey } = dest
+    const peerId = dest.target
+
+    // ── ★★★ 0.3.3：出站隐私闸（回合级，**分条之前**）──────────────────────
+    //
+    // 为什么还要在这里拦一次（`deliver()` 那道闸已经能拦住）：
+    //   ① 一条回复被分成 3 片时，闸在分条**之后**会变成"3 片各自判断" ——
+    //      隐私的那一片被换成固定话术，其余两片照发，读起来像机器人突然结巴；
+    //   ② 只有在这一层才知道"整条回复"是什么，替换**整条**才是使用者看到的样子；
+    //   ③ 投递回执（`#noteDeliveryDrops`）与"是否整条被拦"的记账也都在这一层。
+    // ★ 交互回复那条路还有一道更早的闸（在 `#runTurn` 里，位置在"表情包决策"之前）——
+    //   那一道是为了**不给被拦下的回复配图**。两者同源、幂等，不冲突。
+    const gateMsg = this.#screenOutbound({ dest, text: answer })
+    let body = gateMsg.text
+    if (gateMsg.blocked) {
+      this.#mirrorThinking(chatKey, `[隐私闸门] 拦下一条出站消息（${gateMsg.categories.join('、')}）`)
+    }
     // ── 分条（★ 两件事，顺序不能换）──────────────────────────────────────
     //   ① **按"观感"分条**（`splitReplyForSend`）：真人长回复是分几条发的，
     //      而模型用空行/换行分段就是在表达"这几句分开说"。
@@ -6223,7 +7179,7 @@ export class Bridge extends EventTarget {
     //      `if (source.length <= maxChars) return [source]`，于是**短回复永远只有一条**，
     //      实测把三段共 101 字的话糊成一个气泡发出去（投递账本 `total=1`）。
     //   ② 再按 QQ 单条上限兜底硬切（`splitForQQ`，那是尺寸约束，不是观感）。
-    const humanChunks = splitReplyForSend(answer, {
+    const humanChunks = splitReplyForSend(body, {
       maxChars: this.config.humanize?.chunkChars ?? 300,
     })
     const limit = this.config.send?.maxCharsPerMessage ?? 1500
@@ -6237,7 +7193,7 @@ export class Bridge extends EventTarget {
     // 落账之后，"正在投递中"这件事在任何时刻都是可查的。
     //
     // ⚠️ 落账**失败不影响发送**（它是增强路径），但会留日志（第 9 条）。
-    const ticket = this.#beginDelivery({ kind, peerId, chatKey: `${kind}:${peerId}`, chunks })
+    const ticket = this.#beginDelivery({ kind, peerId, chatKey, channel: dest.channel, chunks })
 
     // ── ★★ 回应速度档位：它是「下限」不是「附加」（2026-09-30 语义修正）──────
     //
@@ -6256,7 +7212,7 @@ export class Bridge extends EventTarget {
         ? Math.max(0, Date.now() - turnStartedAt)
         : undefined
     const { delayMs, reason, plannedMs } = computeReplyDelay({
-      textLength: answer.length,
+      textLength: body.length,
       humanize: this.config.humanize,
       ...(elapsedMs === undefined ? {} : { elapsedMs }),
     })
@@ -6268,9 +7224,9 @@ export class Bridge extends EventTarget {
         typeof elapsedMs === 'number' && target !== null
           ? `[bridge] ${reasonText}：本轮已用 ${Math.round(elapsedMs / 1000)} 秒，` +
               `补到档位目标 ${target} 秒 → 再等 ${Math.round(delayMs / 1000)} 秒后发` +
-              `（回复 ${answer.length} 字）`
+              `（回复 ${body.length} 字）`
           : `[bridge] 拟人延迟 ${Math.round(delayMs / 1000)} 秒后再发` +
-              `（原因：${reason}，回复 ${answer.length} 字）`,
+              `（原因：${reason}，回复 ${body.length} 字）`,
       )
       const interrupted = await this.#sleepUnlessClosing(delayMs)
       if (interrupted) {
@@ -6291,7 +7247,7 @@ export class Bridge extends EventTarget {
       //   它只是**已经靠模型自己的耗时满足了**。
       this.log(
         `[bridge] ${reasonText}：本轮实际已用 ${Math.round(elapsedMs / 1000)} 秒 ≥ ` +
-          `目标 ${Math.round(plannedMs / 1000)} 秒 → 不再叠加延迟，立即发送（回复 ${answer.length} 字）`,
+          `目标 ${Math.round(plannedMs / 1000)} 秒 → 不再叠加延迟，立即发送（回复 ${body.length} 字）`,
       )
     }
 
@@ -6302,15 +7258,19 @@ export class Bridge extends EventTarget {
     // 为什么表情跟最后一条：读起来是"说完了，再给个表情"，与真人一致。
     // 为什么"只有表情、没有正文"时也要能发：那正是表情的典型用法。
     if (chunks.length === 0 && faceId) {
-      const key = deliveryKey({ chatKey: `${kind}:${peerId}`, text: '', faceId })
-      const verdict = this.sendQueue.check(`[face:${faceId}]`, key)
-      if (verdict.ok) {
-        if (verdict.waitMs > 0) await this.#sleepUnlessClosing(verdict.waitMs)
-        await this.onebot.send(kind, peerId, '', { replyTo, faceId })
-        this.sendQueue.markSent(`[face:${faceId}]`, key)
-        this.#mirror(`${kind}:${peerId}`, 'bot', `[表情 ${faceId}]`, { createIfMissing: false })
+      // ★ S5：这里不再自己拼 `chatKey` + 自己跑链 —— 走**唯一出口**。
+      //   ★ S1：链仍在（`deliver` → `#deliverToQqChannel` 内部），所以
+      //   "check 与 markSent 在同一临界区"这条保证没有因为重构而丢掉。
+      const outcome = await this.deliver({
+        channel: dest.channel,
+        target: peerId,
+        text: '',
+        opts: { replyTo, faceId, keyText: `[face:${faceId}]`, label: 'face' },
+      })
+      if (outcome?.ok) {
+        this.#mirror(chatKey, 'bot', `[表情 ${faceId}]`, { createIfMissing: false, channel: dest.channel })
       } else {
-        this.log(`[bridge] 跳过发送表情：${verdict.reason}`)
+        this.log(`[bridge] 跳过发送表情：${outcome?.reason ?? '未知原因'}`)
       }
     }
 
@@ -6321,101 +7281,103 @@ export class Bridge extends EventTarget {
     // 不抛出去** —— 抛出去会让整个回合被计成"发送失败"，然后对端会再收到一条
     // "我这边没能把回复发出去"，可它明明什么都没丢（这条本来就只有表情）。
     if (chunks.length === 0 && sticker) {
-      const key = deliveryKey({ chatKey: `${kind}:${peerId}`, text: '', sticker: sticker.fp })
-      const verdict = this.sendQueue.check(`[sticker:${sticker.fp}]`, key)
-      if (verdict.ok) {
-        if (verdict.waitMs > 0) await this.#sleepUnlessClosing(verdict.waitMs)
-        try {
-          await this.onebot.send(kind, peerId, '', { replyTo, stickerBase64: sticker.base64 })
-          this.sendQueue.markSent(`[sticker:${sticker.fp}]`, key)
-          this.#noteStickerSent({ chatKey: `${kind}:${peerId}`, sticker })
-          this.#mirror(`${kind}:${peerId}`, 'bot', `[表情包 ${sticker.label}]`, { createIfMissing: false })
-          this.log(`[sticker] 已发（只有表情、无正文）：${sticker.rel}（${sticker.source}）`)
-        } catch (error) {
-          this.#noteStickerFailed({ chatKey: `${kind}:${peerId}`, sticker, why: error?.message ?? error })
-        }
+      // ★ S5：同上，走唯一出口；`dedupeExtra` 让去重键仍然带上这张图
+      //   （否则"同一句文字 + 不同表情包"会被误判成重复）。
+      const outcome = await this.deliver({
+        channel: dest.channel,
+        target: peerId,
+        text: '',
+        opts: {
+          replyTo,
+          stickerBase64: sticker.base64,
+          stickerMime: sticker.mime,
+          dedupeExtra: sticker.fp,
+          keyText: `[sticker:${sticker.fp}]`,
+          label: 'sticker-only',
+        },
+      })
+      // ★ 真的发失败才记失败（被节流跳过不等于发送失败）
+      if (outcome?.ok) {
+        this.#noteStickerSent({ chatKey, sticker })
+        this.#mirror(chatKey, 'bot', `[表情包 ${sticker.label}]`, { createIfMissing: false, channel: dest.channel })
+        this.log(`[sticker] 已发（只有表情、无正文）：${sticker.rel}（${sticker.source}）`)
       } else {
-        this.log(`[bridge] 跳过发送表情包：${verdict.reason}`)
+        const sendFailed =
+          outcome?.error ??
+          (/^发送失败/.test(String(outcome?.reason ?? '')) ? new Error(String(outcome.reason)) : null)
+        if (sendFailed) this.#noteStickerFailed({ chatKey, sticker, why: sendFailed })
+        this.log(`[bridge] 跳过发送表情包：${outcome?.reason ?? '未知原因'}`)
       }
     }
 
+    // ★★★ S3（0.3.3）：**被丢弃的段落不能只进日志**。
+    //   在此之前 `if (!verdict.ok) { log; continue }` —— 模型完全不知道有半句话没发出去，
+    //   下一轮它还会按"我说过了"往下聊（使用者那边是断的）。这里收集原因，循环结束后
+    //   交给 `delivery-receipt.mjs` 决定要不要回执（什么该回执、什么不该，是一张表）。
+    const dropped = []
     for (const [i, chunk] of chunks.entries()) {
       const isFirst = i === 0
       const isLast = i === chunks.length - 1
       const withSticker = Boolean(isLast && sticker)
-      // ★ H9：去重键带上**会话**（以及引用/表情）。用裸文本当键时，
-      //   「同一句话在 8 秒内发给两个不同的会话」会被误判成重复而丢掉第二个 ——
-      //   而 SendQueue 是**整个桥接共用一个**的。
-      const key = deliveryKey({
-        chatKey: `${kind}:${peerId}`,
-        text: chunk,
-        replyTo: isFirst ? replyTo : null,
-        faceId: isLast ? faceId : null,
-        sticker: withSticker ? sticker.fp : null,
-      })
-      const verdict = this.sendQueue.check(chunk, key)
-      if (!verdict.ok) {
-        this.log(`[bridge] 跳过发送：${verdict.reason}`)
-        continue
-      }
-      if (verdict.waitMs > 0) await this.#sleepUnlessClosing(verdict.waitMs)
-
-      // 校验之后可能又过了时间，再查一次（简单但有效）
-      const recheck = this.sendQueue.check(chunk, key)
-      if (!recheck.ok) {
-        this.log(`[bridge] 发送前复检跳过：${recheck.reason}`)
-        continue
-      }
-
+      // ★★★ S1：整段（check → 等 gap → 复检 → 发送 → markSent）进**会话级串行链**。
+      //   之前这段是"先 check、await 网络、再 markSent"，两次并发投递会读到同一个
+      //   旧 `#lastSentAt`（`check` 与 `markSent` 之间隔着一次网络往返）——
+      //   于是 `minGapMs` 只是"尽力"而不是"保证"。链把这段收进同一临界区。
+      //
+      // ★★★ S5（0.3.3）：这段**自己不再拼键、不再自己跑链**，全部交给 `deliver()`：
+      //   "发到哪个通道 + 发不出去算不算失败" 这两件事现在各只有一处写法。
       let stickerOk = false
-      try {
-        // ★★ 发送结果**必须接住**：`message_id` 就在 `data` 里（OneBot 11 的形状），
-        //   它是"自己说过的话也能被检索、被引用"的唯一来源。
-        //   ⚠️ 这里曾经是 `await this.onebot.send(...)` 直接丢弃返回值，注释还写着
-        //   "协议端返回的 message_id 我们目前没接" —— 后果有两个，都是静默的：
-        //     ① 语料库里自己的消息 `message_id` 全是 null ⇒ 检索到自己说的话时
-        //        渲染成 `[mid:?]`，模型**引用不了**（`[reply:?]` 会被校验丢掉）；
-        //     ② 无法判断"某条消息是不是在回复机器人"（这一层将来要做判断时会用到）。
-        let sendResult = null
-        if (withSticker) {
-          // ★★ 正文与表情包**分开发**（不是把两样塞进一个请求）：
-          //   为什么：表情包是附加物，它失败绝不能连累正文（见下面 catch）。
-          //   代价：多一次消息 —— 正好也是 QQ 里"说完一句，再补个表情"的真实形态。
-          sendResult = await this.onebot.send(kind, peerId, chunk, {
-            replyTo: isFirst ? replyTo : null,
-            faceId: null,
-          })
-          stickerOk = true
-        } else {
-          sendResult = await this.onebot.send(kind, peerId, chunk, {
-            replyTo: isFirst ? replyTo : null,
-            faceId: isLast ? faceId : null,
-          })
+      const outcome = await this.deliver({
+        channel: dest.channel,
+        target: peerId,
+        text: chunk,
+        opts: {
+          // 引用只跟第一条；表情只跟最后一条（见上面那段"为什么"）
+          replyTo: isFirst ? replyTo : null,
+          faceId: isLast ? faceId : null,
+          // ★ H9：去重键带上**会话**（`deliver` 内部用 chatKey）+ 引用/表情/表情包。
+          dedupeExtra: withSticker ? sticker.fp : null,
+          keyText: chunk,
+          label: `chunk ${i + 1}/${chunks.length}`,
+        },
+      })
+      if (withSticker && outcome?.ok) stickerOk = true
+
+      if (!outcome?.ok) {
+        // ★★ 超时（S1.2）与发送异常都在这里汇合：**必须记账失败**，让"我明明说了它却没发"
+        //   这件事有据可查（账本上标 failed，不是留在 pending）。
+        if (outcome?.reason === 'timeout' || outcome?.error) {
+          ticket?.fail(outcome?.reason ?? '发送失败')
+          this.log(`[bridge] 发送失败：${outcome?.reason ?? '未知原因'}`)
+          // ⚠️ 超时/异常**照旧抛出**：这条回复确实没发出去，上层据此走"尽力告知对方"那条路。
+          //   而"被节流跳过"不抛（那不是故障，是设计内的丢弃）—— 见下面的 dropped 分支。
+          if (outcome?.error) throw outcome.error
+          throw new Error(outcome?.reason ?? '投递超时')
         }
-        this.sendQueue.markSent(chunk, key)
-        // ★ H15：这一片确认发出去了 —— 账本上标掉（崩溃时留下的 pending 就是没标上的那些）
-        ticket?.markSent(i)
-        // 真正发出去的才记进镜像（节流跳过的那些不算"说过的话"）
-        this.#mirror(`${kind}:${peerId}`, 'bot', chunk, { createIfMissing: false })
-        // ★ H7：自己说过的话也要进语料库（"我上次说的那个方案"要搜得到）。
-        //   ★ 2026-09-30 起**带上协议端返回的 message_id**（见上面那段注释）；
-        //     拿不到时留 null —— UNIQUE 允许 NULL 重复（SQLite 语义），不会互相顶掉。
-        this.#recordCorpus({
-          kind,
-          peerId,
-          // ★ 只有真拿到 id 时才用：`data` 缺失（桩、被节流跳过、协议端没回）时留 null，
-          //   不要编一个（编出来的 id 会让 `[reply:]` 指向一条不存在的消息）。
-          messageId: sendResult?.data?.message_id ?? null,
-          text: chunk,
-          isBot: true,
-          replyToId: replyTo,
-        })
-      } catch (error) {
-        this.log(`[bridge] 发送失败：${error.message}`)
-        // ★ H15：这一轮明确失败了（与"崩溃留下的 pending"是两回事，要能分开看）
-        ticket?.fail(error.message)
-        throw error
+        this.log(`[bridge] 跳过发送：${outcome?.reason ?? '未知原因'}`)
+        // ★★★ S3：**被丢弃的条目不能只进日志** —— 收集起来，循环结束后回执给模型。
+        dropped.push({ index: i, text: chunk, reason: String(outcome?.reason ?? ''), kind })
+        continue
       }
+
+      // ★ H15：这一片确认发出去了 —— 账本上标掉（崩溃时留下的 pending 就是没标上的那些）
+      ticket?.markSent(i)
+      // 真正发出去的才记进镜像（节流跳过的那些不算"说过的话"）
+      this.#mirror(chatKey, 'bot', chunk, { createIfMissing: false, channel: dest.channel })
+      // ★ H7：自己说过的话也要进语料库（"我上次说的那个方案"要搜得到）。
+      //   ★ 2026-09-30 起**带上协议端返回的 message_id**（见上面那段注释）；
+      //     拿不到时留 null —— UNIQUE 允许 NULL 重复（SQLite 语义），不会互相顶掉。
+      this.#recordCorpus({
+        kind,
+        peerId,
+        channel: dest.channel,
+        // ★ 只有真拿到 id 时才用：`data` 缺失（桩、被节流跳过、协议端没回）时留 null，
+        //   不要编一个（编出来的 id 会让 `[reply:]` 指向一条不存在的消息）。
+        messageId: outcome.sendResult?.data?.message_id ?? null,
+        text: chunk,
+        isBot: true,
+        replyToId: replyTo,
+      })
 
       // ── 表情包：**正文已经发成功了**，现在补那张图 ──────────────────────
       //
@@ -6425,21 +7387,38 @@ export class Bridge extends EventTarget {
       //   "我这边没能把回复发出去"。可对方明明收到了正文，只有图没到。
       //   那是**假警报**，比图没到更糟（它会让使用者去查一个不存在的问题）。
       if (withSticker && stickerOk) {
-        try {
-          await this.onebot.send(kind, peerId, '', { stickerBase64: sticker.base64 })
-          this.#noteStickerSent({ chatKey: `${kind}:${peerId}`, sticker })
-          this.#mirror(`${kind}:${peerId}`, 'bot', `[表情包 ${sticker.label}]`, { createIfMissing: false })
+        // ★ S5：补图也走唯一出口（`deliver` 里带 `try/catch`，返回 `{ok}` 而不是抛）。
+        const pic = await this.deliver({
+          channel: dest.channel,
+          target: peerId,
+          text: '',
+          opts: {
+            stickerBase64: sticker.base64,
+            stickerMime: sticker.mime,
+            dedupeExtra: sticker.fp,
+            keyText: `[sticker:${sticker.fp}]`,
+            label: 'sticker',
+          },
+        })
+        if (pic?.ok) {
+          this.#noteStickerSent({ chatKey, sticker })
+          this.#mirror(chatKey, 'bot', `[表情包 ${sticker.label}]`, { createIfMissing: false, channel: dest.channel })
           this.log(`[sticker] 已发：${sticker.rel}（${sticker.source}）`)
-        } catch (error) {
-          this.#noteStickerFailed({ chatKey: `${kind}:${peerId}`, sticker, why: error?.message ?? error })
+        } else {
+          this.#noteStickerFailed({ chatKey, sticker, why: pic?.reason ?? '未知原因' })
         }
       }
     }
 
     ticket?.finish()
 
+    // ★★★ S3：把这一轮的丢弃**回执给模型**（下一轮上下文）。
+    //   ⚠️ 放在 `ticket?.finish()` 之后、且**不参与**镜像/语料/账本 ——
+    //     它不是"我说过的话"，是"我说了但没发出去"。
+    this.#noteDeliveryDrops({ chatKey, dropped, body })
+
     this.log(
-      `[bridge] 已回复 ${kind}:${peerId}（${answer.length} 字，${chunks.length} 条，` +
+      `[bridge] 已回复 ${kind}:${peerId}（${body.length} 字，${chunks.length} 条，` +
         `思考+工具 ${result.durationMs}ms，工具 ${result.toolCalls.length} 次，` +
         // ★ 措辞跟着语义改过（2026-09-30）：`delayMs` 现在是"**额外**等了多久"，
         //   不是"档位目标"。写成"拟人延迟"会让排查的人以为档位没生效
@@ -6447,8 +7426,14 @@ export class Bridge extends EventTarget {
         `档位目标 ${typeof plannedMs === 'number' ? Math.round(plannedMs / 1000) : '—'}s、` +
         `额外等待 ${Math.round(delayMs / 1000)}s` +
         `${replyTo ? `，引用 #${replyTo}` : ''}${faceId ? `，表情 ${faceId}` : ''}` +
-        `${sticker ? `，表情包 ${sticker.label}` : ''}）`,
+        `${sticker ? `，表情包 ${sticker.label}` : ''}）` +
+        (gateMsg.blocked ? '　⚠️ 原文被隐私闸门替换成固定话术（原文没有发出去）' : ''),
     )
+
+    // ★★★ 0.3.3：把**实际发出去的正文**返回给调用方。
+    //   被隐私闸替换过时，主动回合（定时任务 / 服务器事件）据此**如实记账**，
+    //   而不是把模型原文记成"已发送"——那正是"她以为发过了"的同类问题。
+    return { text: body, privacyBlocked: gateMsg.blocked }
   }
 
   /**
@@ -6456,15 +7441,42 @@ export class Bridge extends EventTarget {
    *
    * ⚠️ 刻意**不加拟人延迟**：这类消息是"出问题了"的信号，
    * 让它尽快到达比让它"像人"重要得多。加延迟只会让人以为机器人死了。
+   *
+   * ★★★ 0.3.3（S1.3）：现在**也走会话串行链**，只是显式 `skipGap: true`。
+   *   为什么必须走链（E4 的教训）：它原来直接 `onebot.send` + `markSent(裸文本)` ——
+   *   既**跳过 `check()`**（不受限频/去重约束），又用**裸文本**当去重键
+   *   （同一句提示发给两个会话时，第二个会被误判成重复），还**绕过终检门**。
+   *   ∴ 现在：链内执行、`skipGap` 只跳过"拟人间隔"，**配额计数与账本照旧**
+   *   （"例外写在参数里，不靠它没调 check 这种隐性区别"）。
+   *
+   * ⚠️ 它**不抛**（尽力而为），但失败会留日志；被限频/去重丢掉也会留日志与原因。
+   *
+   * ★★★ 0.3.3（S5）：内部改走 `deliver()` —— 于是"提示类消息"也有**通道对象**，
+   *   而不是靠 `kind` 字符串。**签名保持 `(kind, peerId, text)`**：12 个调用点拿到的
+   *   本来就是入站事件的 kind，改成传目标只会让那些地方各写一遍 `targetOfKind`。
    */
   async #safeSend(kind, peerId, text) {
+    let dest
     try {
-      await this.onebot.send(kind, peerId, text)
-      this.sendQueue.markSent(text)
-      // 提示类消息在镜像里标成 notice，与正常回复区分开
-      this.#mirror(`${kind}:${peerId}`, 'notice', text, { createIfMissing: false })
+      dest = this.#targetOfEvent(kind, peerId)
     } catch (error) {
-      this.log(`[bridge] 提示消息发送失败：${error.message}`)
+      // 目标都不合法 = 代码缺陷：**不许静默**，但也不许把整轮聊坏
+      this.log(`❌ [bridge] 提示消息的目标不合法（${kind}:${peerId}）：${error?.message ?? error}`)
+      return
+    }
+    const chatKey = dest.chatKey
+    const outcome = await this.deliver({
+      channel: dest.channel,
+      target: dest.target,
+      text,
+      // ★ 只有"间隔"被跳过 —— 配额与账本不跳（见上面的注释）
+      opts: { skipGap: true, keyText: text, label: 'notice' },
+    })
+    if (outcome?.ok) {
+      // 提示类消息在镜像里标成 notice，与正常回复区分开
+      this.#mirror(chatKey, 'notice', text, { createIfMissing: false, channel: dest.channel })
+    } else {
+      this.log(`[bridge] 提示消息未发出：${outcome?.reason ?? '未知原因'}`)
     }
   }
 }

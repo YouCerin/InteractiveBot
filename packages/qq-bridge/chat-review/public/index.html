@@ -61,6 +61,22 @@
         <ul class="warn-list" id="pull-warnings"></ul>
       </section>
 
+      <!-- ★ 0.3.3 · P2：语感样本。池子由 `tools/build-style-corpus.mjs` 生成
+           （规则预筛 + 分层抽样，产物在工作区 `store/style/`），这里只负责把它变成一个可打分的批次。
+           「可用 / 拿不准 / 不可用」在这里映射到已有的三档：对 / 还行 / 不对 —— 存储模型一套，不多造一个。 -->
+      <section class="card">
+        <h2>数据源三：语感样本（学习"群友怎么说话"）</h2>
+        <div class="row">
+          <button id="btn-style-import" class="primary">导入语感候选池</button>
+          <span class="note" id="style-note">还没查。</span>
+        </div>
+        <div class="note" id="style-result"></div>
+        <div class="note">
+          这批判的是**样本值不值得学**：<b>对</b> = 可用，<b>还行</b> = 拿不准（不进画像），
+          <b>不对</b> = 不可用。判据是"这条像不像这群体自然的说话方式"，不是"它对不对"。
+        </div>
+      </section>
+
       <section class="card">
         <h2>数据源二：粘贴导入</h2>
         <div class="row">
@@ -107,14 +123,18 @@
         <button id="btn-undo" class="ghost" title="快捷键 U">↶ 撤销上一条</button>
       </div>
 
+      <!-- ★ 0.3.3 · P2：这一批是"语感样本"时，三档的语义不一样（对 = 可用…）。
+           横幅只在那种批次上出现 —— 别的批次上多一条字只会让人以为判据变了。 -->
+      <div class="note score-mode-note" id="score-mode-note" hidden></div>
+
       <section class="card score-card" id="score-card">
         <div class="ctx-head">
           <button id="btn-toggle-ctx" class="ghost"><span id="ctx-label">上下文</span> <span id="ctx-count"></span> <span id="ctx-arrow">▾</span></button>
-          <span class="note">评的是"机器人这句话在这个语境下接得怎么样"</span>
+          <span class="note" id="score-card-note">评的是"机器人这句话在这个语境下接得怎么样"</span>
         </div>
         <div class="ctx" id="ctx"></div>
 
-        <div class="reply-label">机器人当时说：</div>
+        <div class="reply-label" id="reply-label">机器人当时说：</div>
         <div class="reply" id="reply"></div>
         <div class="meta-line" id="item-meta"></div>
 

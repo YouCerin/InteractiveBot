@@ -76,8 +76,7 @@ export function createInterimPicker({
   keepRecent = 5,
   now = () => Date.now(),
   rng = Math.random,
-} = {}) {
-  /** 每类各自的历史：`[{ text, at }]`，新的在后。 */
+} = {}) {  /** 每类各自的历史：`[{ text, at }]`，新的在后。 */
   const history = loadHistory(historyFile)
 
   function poolOf(kind) {
@@ -100,8 +99,15 @@ export function createInterimPicker({
 
   /**
    * 挑一句话。返回空串表示"这次不发"。
+   *
+   * @param {object} collector 回合收集器（用来判是哪一类）
+   * @param {object} [opts]
+   * @param {() => number} [opts.rng] ★ 覆盖随机源（**并行生成**那条路上要用：
+   *   池子那句必须在**挂定时器之前**就定下来，否则回调里现抽会让"抽签"跑到
+   *   生成结果之后 —— 见 `bridge.mjs` 里那段的说明）
    */
-  function pick(collector) {
+  function pick(collector, { rng: rngOverride } = {}) {
+    const roll = typeof rngOverride === 'function' ? rngOverride : rng
     const kind = classifyInterim(collector)
     const pool = poolOf(kind)
     if (pool.length === 0) return ''
@@ -135,7 +141,7 @@ export function createInterimPicker({
     //    （`A|B` 两条话术时得到 `B A A A`）。而那个 bug 只在"话术少"时才出现，
     //    最容易漏测。所以这里先在整个池子里挑，再用冷却规则纠偏。
     const candidates = pool.filter((text) => text !== lastUsed(past))
-    const pickFrom = (list) => list[Math.floor(rng() * list.length)] ?? list[0]
+    const pickFrom = (list) => list[Math.floor(roll() * list.length)] ?? list[0]
 
     if (usable.length > 0) {
       // 在"可用且不是上一句"的里面选；若可用集合只有上一句，则退到整个池子
@@ -156,6 +162,244 @@ export function createInterimPicker({
   }
 
   return { pick, classify: classifyInterim, poolOf, history: () => history }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * ★★★ 0.3.3：让 **AI 按上下文自己决定**怎么先应一声
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * 使用者原话：「为先应一声新增选项，由 ai 根据唤醒时的上下文自主决定如何先应一声」。
+ * 三个取舍都是当面问的（他的选择）：
+ *   ① **并行生成**：回合一开始就去生成，到 `afterMs` 那一刻生成好了就发它、
+ *      没好就退回**话术池**那一句 —— 既不推迟，也不会出现"先应一声比正文还晚"；
+ *   ② 给它看的上下文是**当前这句 + 最近几条**；**不告诉它"正在做什么"**
+ *      （并行生成时那一刻还没调工具，告诉它等于让它编"我在搜"）；
+ *   ③ **允许它决定"这一轮不先应声"**（输出空）。
+ *
+ * ── 与话术池的分工（不是二选一，是两条腿）────────────────────────────────
+ *   · 话术池：**零成本、零延迟**，但只能按"类"挑一句现成的；
+ *   · AI：能接上下文（"那张图我看到了"）、能在不该垫场时闭嘴，
+ *     但要一次小调用，而且**可能来不及** —— 来不及就由话术池兜底。
+ *   ∴ `mode: 'ai'` 不是"把池子删了"，而是"池子退居兜底"。
+ *
+ * ── 一条硬纪律：**不许编"我正在做什么"**（这条写在提示词里，也在解析里兜）
+ *   提示词在这个项目里有一条老规矩：「先应一声必须诚实，按实际在做的事说话」。
+ *   而**并行生成**时我们根本不知道这一轮会调什么工具 ——
+ *   所以这里只让它说"在弄""我想想"这种**不与具体动作绑死**的话。
+ *   反过来，等它真的知道（定时器触发那一刻）再生成就要 1~5 秒，那会推迟垫场白，
+ *   得不偿失（选 ① 的代价就落在这一条上，如实记在这里）。
+ */
+
+/**
+ * 生成用的系统提示词（**只描述要什么**，不举示范句 —— 与四戒同一条规矩）。
+ *
+ * ★★★ 这一档的**真正功能是"结合上下文自主回应"**（使用者原话），不是"从话术池里挑一句"：
+ *   所以这里**不写死**任何"什么情况该说什么"的规则 —— 例如"对方在纠正你时就认一句"
+ *   那种规则**故意不加**（使用者明确说过「第三条不加」）。规则化会让它变成按关键词表演，
+ *   而自主判断才有机会对上下文；代价是它偶尔会判错，那是提示词与上下文给的料不够，
+ *   应当改上下文（见 `buildInterimAiPrompt`），而不是把答案预先写死。
+ *   这里只留**两条边界**：① 只说一句、不代替正文（回答/结论留给正文）；② 允许它决定不说。
+ */
+export const INTERIM_AI_PROMPT = [
+  '你在帮一个 QQ 机器人写**一句「先应一声」**：某个回合跑得久了，先发一句话垫着，',
+  '免得对方对着静默以为机器人坏了。**正文随后就到**，这一句只是垫场。',
+  '',
+  '这一句要**结合下面的上下文自己判断**：对方在说什么、你上一条回过什么、这一轮该不该应一声。',
+  '不是从一堆固定话术里挑一句 —— 上下文不支持时，什么都不发才是对的。',
+  '',
+  '要求：',
+  '· **一句话**，短。像在 QQ 里随手打的 —— 不写句号、不分条、不用 Markdown、不写列表、不加引号。',
+  '· **语气跟画像一致**：软、随口、偶尔自嘲，不承诺具体结果。',
+  '· **绝不说你正在做某件具体的事**（"我在搜""我读到文件了"这类）—— 你不知道后面会做什么，说了就是编。',
+  '· **不回答对方的问题**、不给结论、不给方案（那些留给正文）。',
+  '· **只垫一句，说完就停**：不解释、不补充、不接着往下讲、不复述对方的话。',
+  '· **看到你自己上一条回复时**（标着「你（自己）」的那条）：它是用来让你判断语境的，',
+  '  **不要接着它往下讲**，也不要替它补充理由。',
+  '· **不该垫场时就什么都不发**：对方在认真求助、情绪低落，或者这句本来就只是顺口一说 ——',
+  '  这些时候静默比一句俏皮话好（**这条由你自己判断**，没有硬规则）。',
+  '',
+  '输出**一行 JSON**，不要代码块、不要多余文字：',
+  '{"say":"要发的那一句"}  ← 正常垫场',
+  '{"say":""}              ← 这一轮不先应声（**合法答案，别硬凑一句**）',
+].join('\n')
+
+/** 一次生成的字数上限（超过就**整条不用**，退回话术池 —— 见 `parseInterimAiOutput`）。 */
+export const INTERIM_AI_MAX_CHARS = 40
+
+/**
+ * `INTERIM_AI_PROMPT` 里那句"输出一行 JSON"的**唯一稳定标记**。
+ *
+ * 用它判断"这段提示词里到底有没有带上输出契约"，从而做到**幂等**：
+ * 调用方自己拼过（`composeInterimPrompt`）就不再重复拼一次。
+ */
+const CONTRACT_MARK = '输出**一行 JSON**'
+
+/**
+ * 把输出契约接到提示词前面（**幂等**）。
+ *
+ * ⚠️ 为什么这件事必须由本模块做，而不是让调用方自己 `[PROMPT, x].join()`：
+ *   2026-10-18 真机自检发现 —— `INTERIM_AI_PROMPT` **导出了但从来没人用**，
+ *   于是模型只收到"这段对话"，没有任何"只写一句 JSON"的要求，它就**直接回答了问题**
+ *   （日志里连续 5 次 `不是 JSON 且是多行`，每次都退回话术池）。
+ *   造好的提示词没送出去，和"从未写过它"是同一种缺陷，而离线断言照样全绿
+ *   （假 API 无论收到什么都会回 JSON —— 那是**假绿**）。
+ *   ∴ 契约跟着**解析它的人**走：谁 `JSON.parse`，谁就负责要求模型输出 JSON。
+ */
+export function withContract(prompt) {
+  const s = String(prompt ?? '')
+  return s.includes(CONTRACT_MARK) ? s : `${INTERIM_AI_PROMPT}\n\n${s}`
+}
+
+/**
+ * 拼出**完整**的生成请求（契约 + 上下文）。调用方想要一步到位就用它。
+ *
+ * @param {Parameters<typeof buildInterimAiPrompt>[0]} input
+ */
+export function composeInterimPrompt(input) {
+  return withContract(buildInterimAiPrompt(input))
+}
+
+/**
+ * 从模型输出里解析出"发什么"。
+ *
+ * 返回三种之一（**这三种的区分是安全的全部**）：
+ *   · `{ok:true, text:'…'}`  → 发这句
+ *   · `{ok:true, text:''}`   → **它明确决定不发**（合法，调用方要尊重）
+ *   · `{ok:false, why}`      → 解析不出来 / 输出不合法 ⇒ 调用方**退回话术池**
+ *
+ * ⚠️ 为什么"解析失败"要和"它说不发"分开：把失败当成"不发"会让**每一个坏输出
+ *   都表现为"这一轮没有垫场白"**，而这正是最难查的一类静默失效
+ *   （看起来像"它决定不说"，实际是坏了）。所以失败必须能回到池子那条腿。
+ */
+export function parseInterimAiOutput(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s) return { ok: false, why: '模型没有输出' }
+  // 允许 ```json 围栏（模型很爱加），但**内容必须是我们要的形状**
+  const body = s.replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/i, '').trim()
+  let obj = null
+  try {
+    obj = JSON.parse(body)
+  } catch {
+    // 退化：没写成 JSON，但整段就是一句话（很短、单行）→ 认它
+    //   ⚠️ 只在**短且单行**时认。长段落不能当垫场白（那是"回答"，不是"应一声"）。
+    if (body.includes('\n')) return { ok: false, why: '不是 JSON 且是多行' }
+    if ([...body].length > INTERIM_AI_MAX_CHARS) return { ok: false, why: '不是 JSON 而且太长' }
+    // ⚠️ 还得**像一句话**：纯标点 / 纯符号（`???`、`!!!`、`--`）不是垫场白，
+    //   而是"模型没在回答我们的问题"。放行它们会让这一轮发出一串问号。
+    //   判据用"含至少一个字母或汉字"，比"排除标点"稳（标点表永远列不全）。
+    if (!/[\p{L}\p{Script=Han}]/u.test(body)) return { ok: false, why: '不是一句话（只有符号）' }
+    return { ok: true, text: body }
+  }
+  if (!obj || typeof obj !== 'object') return { ok: false, why: '输出不是对象' }
+  // 「不发」的几种写法都接受（模型不一定只用空串）
+  const rawSay = obj.say
+  if (rawSay === null || rawSay === undefined) return { ok: true, text: '' }
+  if (typeof rawSay !== 'string') return { ok: false, why: 'say 不是字符串' }
+  const text = rawSay.replace(/\s+/g, ' ').trim()
+  if (!text) return { ok: true, text: '' } // 明确的"不发"
+  if (text.includes('http') || /[`*_#>\[\]{}]/.test(text)) return { ok: false, why: '像 Markdown/链接，不适合垫场白' }
+  if ([...text].length > INTERIM_AI_MAX_CHARS) {
+    // ⚠️ **不截断**：截断会把一句话拦腰砍断（"等下，我在想个办法" → "等下，我在想个"）。
+    //    整条不用、退回池子，比发半句强。
+    return { ok: false, why: `超过 ${INTERIM_AI_MAX_CHARS} 字` }
+  }
+  return { ok: true, text }
+}
+
+/**
+ * 拼生成用的**用户提示词**（当前这句 + 最近几条 + 你自己上一条）。
+ *
+ * @param {object} opts
+ * @param {{name?:string, text?:string}} opts.current 当前这条（触发这一轮的那句）
+ * @param {Array<{name?:string, text?:string, self?:boolean}>} [opts.recent] 更早的几条（**旧的在前**）
+ *   `self: true` = **机器人自己说的话**（镜像里 role='bot' 的那些）。私聊那条路上会带，
+ *   因为"上一轮我说了什么"正是判断"对方是不是在纠正我"的唯一依据。
+ * @param {string} [opts.persona] 画像里与"怎么说话"有关的一小段（可选，空则不写）
+ * @param {string} [opts.lastBotReply] 你自己**上一条**回复的原文（可选）
+ * @param {boolean} [opts.private] 私聊语境（决定"最近几条"那段的措辞：私聊不是"群里"）
+ */
+export function buildInterimAiPrompt({ current = {}, recent = [], persona = '', lastBotReply = '', private: isPrivate = false } = {}) {
+  const lines = []
+  if (persona) lines.push('【说话方式】', String(persona).trim(), '')
+  const rows = (Array.isArray(recent) ? recent : [])
+    .filter((r) => String(r?.text ?? '').trim())
+    .map((r) => {
+      // ★ 自己说的话必须**标出来**：不标的话模型会把它当成对方说的 ——
+      //   那比"看不到自己上一句"更乱（它会以为对方刚说了那段，于是接着答）。
+      const who = r?.self === true ? '你（自己）' : String(r?.name ?? '某人').trim()
+      return `${who}：${String(r.text).trim()}`
+    })
+  if (rows.length > 0) {
+    lines.push(
+      isPrivate
+        ? '【你们最近这几条（标「你（自己）」的是你自己说的，其余是对方）】'
+        : '【你没被叫到的时候，群里刚说了这些（标「你（自己）」的是你自己说的）】',
+      ...rows,
+      '',
+    )
+  }
+  const last = String(lastBotReply ?? '').trim()
+  if (last) {
+    lines.push(
+      '【你上一条回的是（**这是你自己说的，不是对方说的**）】',
+      last,
+      '',
+      '★ 它只用来让你判断"对方这句是不是在接/在纠正我上一条"——**不要顺着它往下讲**。',
+      '',
+    )
+  }
+  lines.push(
+    '【现在有人叫你，说的是这句】',
+    `${String(current?.name ?? '某人').trim()}：${String(current?.text ?? '').trim()}`,
+    '',
+    '按上面的上下文，决定这一轮要不要先应一声、以及说什么。',
+  )
+  return lines.join('\n')
+}
+
+/**
+ * 造一个"AI 决定先应一声"的生成器（**懒执行 + 预算由闸门管**）。
+ *
+ * @param {object} opts
+ * @param {(input: object, o: object) => Promise<{verdict:string, reason?:string, judged?:boolean, why?:string}>} opts.gate
+ *   形如 `createModelGate(...)` 的产物（通路/超时/每小时额度都在它里面）。
+ *   它的 `buildPrompt` 会收到 `{ prompt }`（我们**自己拼好整段提示词**再递给它，
+ *   因为垫场白不需要按"每条消息"重算输入）。★ 递过去的那段**已经带上输出契约**
+ *   （`withContract`，幂等）—— 调用方不需要、也不该再拼一次 `INTERIM_AI_PROMPT`。
+ * @param {string} [opts.tag]
+ * @param {(m:string)=>void} [opts.log]
+ * @returns {{available: boolean, decide: (prompt: string, o?: object) => Promise<{ok:boolean, text:string, why?:string}>}}
+ */
+export function createInterimAi({ gate = null, tag = 'interim', log = () => {} } = {}) {
+  const available = Boolean(gate)
+  async function decide(prompt = '', { signal } = {}) {
+    if (!gate) return { ok: false, text: '', why: 'AI 垫场白不可用' }
+    try {
+      // ★ 输出契约在这里统一接上（幂等）：调用方只负责"上下文那半段"，
+      //   绝不会因为哪天忘了拼 `INTERIM_AI_PROMPT` 就退化成"模型直接答题"。
+      const r = await gate.judge({ prompt: withContract(prompt) }, { signal })
+      // ⚠️ 只有 `judged:true` 且**没有** `fallback` 的那一次输出才算"模型真的说了"。
+      //   两种不算的情况必须分开对待，而且都不能当成"它决定不说话"：
+      //     · `judged:false` = 压根没问模型（通路没配好 / 超预算 / 已取消）；
+      //     · `fallback:true` = 问了但结论不可用（超时 / 输出认不出）——
+      //       那时 `verdict` 是 `failVerdict`，**内容不是模型说的**，绝不能发出去。
+      //   把这两种当成"它说不发"，会让每一次失败都表现成"这一轮没有垫场白"，
+      //   而那正是最难查的静默失效（看起来像它决定不说，实际是坏了）。
+      if (r?.judged === false) return { ok: false, text: '', why: r?.why || '这次没有真的问模型' }
+      if (r?.fallback === true) return { ok: false, text: '', why: r?.why || '模型输出不可用' }
+      const parsed = parseInterimAiOutput(r?.verdict)
+      if (!parsed.ok) {
+        log(`⚠️ [${tag}] 生成的垫场白看不懂（退回话术池）：${parsed.why}`)
+        return { ok: false, text: '', why: parsed.why }
+      }
+      return { ok: true, text: parsed.text }
+    } catch (error) {
+      // 绝不抛：垫场白失败只该表现为"这一轮用池子那句"
+      log(`⚠️ [${tag}] 生成垫场白失败（退回话术池）：${error?.message ?? error}`)
+      return { ok: false, text: '', why: error?.message ?? String(error) }
+    }
+  }
+  return { available, decide }
 }
 
 function lastUsedAt(past, text) {

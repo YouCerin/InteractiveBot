@@ -699,6 +699,115 @@ section('⑨ Bridge 集成：提示词怎么写、图片块怎么拼（假 rpc +
     )
   }
 
+  // ── ★★★ 0.3.3：**先发图、再叫它** —— 那张图必须进这一轮的上下文 ──
+  //
+  // 这是使用者报的现象：「某人发了一张图片，紧接着唤醒小鲸鱼，此时应当同时查看包含图片的上下文才对」。
+  // ⚠️ 这一节要跑**两轮**，所以必须开语料库（`#recentMissedMessages` 从它取"被叫到之前刚说了什么"）。
+  {
+    const GROUP = '20002'
+    const build = () =>
+      makeBridge({
+        trigger: { private: true, mention: true, keyword: true, groupEnabled: true, keywords: ['小鲸鱼'] },
+        access: { groupAllowlist: [GROUP] },
+      })
+    const withImg = (extra = {}) => ({
+      post_type: 'message',
+      message_type: 'group',
+      group_id: GROUP,
+      user_id: '10001',
+      self_id: '99999',
+      message: [
+        { type: 'text', data: { text: '你看这个' } },
+        { type: 'image', data: { file: 'ctx.png', url: 'http://93.184.216.34/ctx.png' } },
+      ],
+      ...extra,
+    })
+    const wake = (text) => ({
+      post_type: 'message',
+      message_type: 'group',
+      group_id: GROUP,
+      user_id: '10002',
+      self_id: '99999',
+      message: [{ type: 'text', data: { text } }],
+    })
+
+    fetchLog.length = 0
+    const { bridge, rpc, logs } = build()
+    // 第 1 条：**带图但没叫它** —— 桥接必须一个字都不下载（零成本那条纪律照旧）
+    const r1 = await bridge.handleEvent(withImg())
+    check('前提：带图那条没被唤醒', r1.handled === false, JSON.stringify(r1))
+    check('★★ 没叫它时仍然一次网络请求都不发（0.3.3 不许破这条）', fetchLog.length === 0, JSON.stringify(fetchLog))
+
+    // 第 2 条：**叫它**，但这条自己没有图 —— 上一轮那张图必须被带进这一轮的上下文
+    const r2 = await bridge.handleEvent(wake('小鲸鱼 你看看上面那张图'))
+    check('前提：叫它那条被处理了', r2.handled === true, JSON.stringify(r2))
+    const blocks = rpc.calls[0]?.contentBlocks ?? []
+    const text = blocks.find((b) => b.type === 'text')?.text ?? ''
+    check('★ 上一轮那条的正文进了上下文（这是原有能力，别被这次改动弄坏）',
+      text.includes('你看这个'), text.slice(-400))
+    check('★★★ 上一轮那张图**也进了上下文**（有可读的 inbox 路径）',
+      /inbox\/[0-9a-f]{16}\.png/.test(text), text.slice(-400))
+    check('★★ 而且说清了那张图**是哪条消息带的**（不然模型对不上人）',
+      /上面那条含 1 张图片|（这条消息里含/.test(text) || /你看这个/.test(text) && text.includes('图片'),
+      text.slice(-240))
+    check('★ 为那张图真的去下载了（一次网络请求）', fetchLog.length === 1, JSON.stringify(fetchLog))
+    check('★ 提示词**如实说清了出处**（是"你没被叫到的时候"那条带的图，不是这条的）',
+      /你没被叫到的时候/.test(text) && /别当成本条消息的附图/.test(text), text.slice(-260))
+
+    // ── ★★ 同一张图**不许下第二次**（引用级缓存）────────────────────────────
+    //   场景：那条带图的消息之后**又有人叫了它一次** —— 这时图已经在 inbox 里了，
+    //   再下一次既慢又费钱，而且 rkey 过期时那次重下往往**失败**。
+    {
+      fetchLog.length = 0
+      const r3 = await bridge.handleEvent(wake('小鲸鱼 再说说那张图'))
+      check('第 3 条（又问一次）被处理了', r3.handled === true, JSON.stringify(r3))
+      check('★★★ 第二次**一次网络请求都没发**（那张图已经收过了，不许重下）',
+        fetchLog.length === 0, JSON.stringify(fetchLog))
+      const t3 = (rpc.calls[1]?.contentBlocks ?? []).find((b) => b.type === 'text')?.text ?? ''
+      check('★★ 但路径照旧给到模型（复用已落盘那份，不是"这次没图"）',
+        /inbox\/[0-9a-f]{16}\.png/.test(t3), t3.slice(-260))
+      check('★ 日志里说清了"复用已收过的"（可观测，别让人以为是没取）',
+        logs.some((l) => /复用已收过的/.test(l)), logs.slice(-3).join('｜'))
+    }
+  }
+
+  // ── ★★★ 上下文里的图与"这条消息"的图**必须分开算**（auto 模式）──
+  //
+  //   混成一句"这条消息里含 N 张图"会让模型把**别人的图算到当前这个人头上**
+  //   （它会回一句"你发的这张图…"，而图根本不是他发的）。
+  {
+    const GROUP = '20002'
+    const { bridge, rpc } = makeBridge({
+      image: { mode: 'auto' },
+      trigger: { private: true, mention: true, keyword: true, groupEnabled: true, keywords: ['小鲸鱼'] },
+      access: { groupAllowlist: [GROUP] },
+    })
+    const g = (extra, msg) => ({ post_type: 'message', message_type: 'group', group_id: GROUP, user_id: '10001', self_id: '99999', message: msg, ...extra })
+    fetchLog.length = 0
+    await bridge.handleEvent(
+      g({}, [
+        { type: 'text', data: { text: '你看这个' } },
+        { type: 'image', data: { file: 'ctx2.png', url: 'http://93.184.216.34/ctx2.png' } },
+      ]),
+    )
+    check('auto 模式下、没叫它时也**一次都不下载**', fetchLog.length === 0, JSON.stringify(fetchLog))
+
+    await bridge.handleEvent(
+      g({ user_id: '10002' }, [
+        { type: 'text', data: { text: '小鲸鱼 看看' } },
+        { type: 'image', data: { file: 'own.png', url: 'http://93.184.216.34/own.png' } },
+      ]),
+    )
+    const blocks = rpc.calls[0]?.contentBlocks ?? []
+    const text = blocks.find((b) => b.type === 'text')?.text ?? ''
+    check('★ 当前这条的图走老措辞（"这条消息里…已直接附上"）', /这条消息里的 1 张图片\*\*已直接附在/.test(text), text.slice(-320))
+    check('★★ 上下文那条的图**另起一段**说（带出处），不混进"这条消息"',
+      /你没被叫到的时候/.test(text) && /10001/.test(text), text.slice(-320))
+    check('★ 三张图都作为图片块附上了（当前这条 1 张 + 上下文 2 张：那两条各带 1 张）',
+      blocks.filter((b) => b.type === 'image').length === 3,
+      JSON.stringify(blocks.map((b) => b.type)))
+  }
+
   // ── 会话镜像带上图片（界面才显示得出来）──
   {
     fetchLog.length = 0

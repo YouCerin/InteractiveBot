@@ -57,7 +57,7 @@ const PROTOCOL_VERSION = '2024-11-05'
 // ★★ 0.3.2 起**两个 MCP server 都被断言钉住了**（`verify-manifest.mjs` 的「版本号只有一个
 //   来源」那一节会逐个文件读）：写这份发布文档时这里还是 `0.3.0alpha`，而包名已经是 0.3.2 ——
 //   正是"靠自觉就会分叉"的活例子（而它只在 MCP 握手时报出去，肉眼很难撞见）。
-const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.3.2' }
+const SERVER_INFO = { name: 'qq-bridge-skill-tools', version: '0.3.3' }
 
 /** 服务端配置：`{ skillsDir, configPath, workspace? }`。 */
 let config = null

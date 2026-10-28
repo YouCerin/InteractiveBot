@@ -1564,6 +1564,91 @@ section('⑦ 接线审计：API.md ↔ 服务端路由 ↔ 页面调用（三份
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+section('⑰ ★★★ 语感样本（0.3.3 · P2）：候选池 → 可打分的批次')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 这一节盯三件事：
+//   ① **池子不在时不许"从语料库现抽"冒充**（那会把"筛过一轮"这件事抹掉）；
+//   ② **重导不丢判定**（条目 id 用内容哈希，不用下标 —— 下标会随 seed 变）；
+//   ③ 坏行**跳过并计数**，不整份丢（一条坏行不该让 150 条都没法评）。
+{
+  const ws = freshDir('style')
+  // ★ 人设给一份**临时副本**（与别的节同一条纪律：绝不动真文件）
+  const stylePersonaDir = freshDir('style-persona')
+  const styleVoicePath = join(stylePersonaDir, '小鲸鱼.md')
+  writeFileSync(styleVoicePath, readFileSync(join(PKG_ROOT, 'personas', '小鲸鱼（完整带情绪）.md'), 'utf8'), 'utf8')
+
+  const app = createReviewServer({ workspace: ws, personaPath: styleVoicePath, log: () => {} })
+  await new Promise((r) => app.server.listen(0, '127.0.0.1', r))
+  const base = `http://127.0.0.1:${app.server.address().port}`
+  live.push(app)
+  const call = async (path, init) => {
+    const res = await fetch(`${base}${path}`, init)
+    return { status: res.status, body: await res.json() }
+  }
+
+  // ① 还没有池子
+  const none = await call('/api/style')
+  check('★ 没有池子时 `pool.ok=false` 且**说清该跑哪个命令**',
+    none.body?.pool?.ok === false && /build-style-corpus/.test(none.body.pool.why), none.body?.pool?.why)
+  const bad = await call('/api/style/import', { method: 'POST' })
+  check('★★ 没有池子时导入 → 400（不许拿语料库现抽冒充池子）',
+    bad.status === 400 && /build-style-corpus/.test(bad.body?.error ?? ''), JSON.stringify(bad.body))
+
+  // ② 造一个池子（含一条坏行、一条空正文 → 应当被跳过并计数）
+  mkdirSync(join(ws, 'store', 'style'), { recursive: true })
+  const samples = [
+    { chatKey: 'group:700001', sender: '甲', text: '今天放学好早', at: 1, before: [{ name: '乙', text: '你几点走', self: false }] },
+    { chatKey: 'group:700001', sender: '乙', text: '那我等你', at: 2, before: [{ name: '小鲸鱼', text: '我在查了', self: true }] },
+    { chatKey: 'group:700009', sender: '丙', text: '这方案我认', at: 3, before: [] },
+  ]
+  writeFileSync(
+    join(ws, 'store', 'style', 'candidates.jsonl'),
+    `${samples.map((s) => JSON.stringify(s)).join('\n')}\n{坏行不是 JSON\n${JSON.stringify({ chatKey: 'group:700001', text: '   ' })}\n`,
+    'utf8',
+  )
+  writeFileSync(join(ws, 'store', 'style', 'manifest.json'), JSON.stringify({ seed: 20261018, targetCount: 3 }), 'utf8')
+
+  const status = await call('/api/style')
+  check('★★ 状态里给出条数与 seed（人不该靠猜池子是哪来的）',
+    status.body?.pool?.total === 3 && status.body.pool.seed === 20261018, JSON.stringify(status.body?.pool))
+  check('★★ 坏行被跳过并计数（不是整份失败）', status.body?.pool?.ok === true && /3/.test(String(status.body.pool.total)))
+
+  const imported = await call('/api/style/import', { method: 'POST' })
+  check('★★★ 导入成功，批次固定叫「语感样本」',
+    imported.body?.ok === true && imported.body.batch?.id === '语感样本' && imported.body.items === 3,
+    JSON.stringify(imported.body))
+  check('★ 批次 source=style（页面据此换三档语义）', imported.body.batch?.source === 'style')
+
+  const items = await call(`/api/items?batch=${encodeURIComponent('语感样本')}&filter=all`)
+  const first = items.body?.items?.[0]
+  check('★★ 条目形状对：reply = 样本正文，context 带 isBot 标记',
+    first?.reply === '今天放学好早' && first?.context?.[0]?.isBot === false, JSON.stringify(first)?.slice(0, 160))
+  check('★★ 上下文里保留"机器人自己说的"那条（判"它在接什么话"要看它）',
+    items.body.items.some((it) => (it.context ?? []).some((c) => c.isBot === true)),
+    JSON.stringify(items.body.items.map((it) => it.context?.map((c) => c.isBot))))
+
+  // ③ 判一条 → 重导 → 判定必须还在（id 用内容哈希）
+  const targetId = first?.id
+  await call('/api/score', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: targetId, verdict: 'good', comment: '这句像群里的话', points: [] }),
+  })
+  const redo = await call('/api/style/import', { method: 'POST' })
+  check('★ 重导覆盖同一批（不堆同义批次）', redo.body?.batch?.id === '语感样本' && redo.body.items === 3)
+  const after = await call(`/api/items?batch=${encodeURIComponent('语感样本')}&filter=all`)
+  const kept = after.body.items.find((it) => it.id === targetId)
+  check('★★★ 重导之后**判定还在**（条目 id 用内容哈希，不用下标）',
+    kept?.score?.verdict === 'good', JSON.stringify(kept?.score))
+
+  const batches = await call('/api/sources')
+  check('★ 批次清单里只有一批「语感样本」（重导没有制造重复批次）',
+    batches.body.batches.filter((b) => b.source === 'style').length === 1,
+    JSON.stringify(batches.body.batches.map((b) => `${b.id}/${b.source}`)))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // 收尾
 // ══════════════════════════════════════════════════════════════════════════
 for (const app of live) {

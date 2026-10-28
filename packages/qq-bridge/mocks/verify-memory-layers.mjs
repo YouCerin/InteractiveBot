@@ -1,5 +1,5 @@
 /**
- * 三层记忆测试：**全局 / 群聊 / 个人**，以及"情绪倾注必然落盘"。
+ * 两层记忆测试：**全局 / 个人**（群聊层与黑话层 0.3.3 已下线；情绪支线已按使用者要求删除）
  *
  * ══════════════════════════════════════════════════════════════════════════
  * 这一套在盯什么（每一条都对应一个"错了会静默变坏"的地方）
@@ -36,22 +36,12 @@ import {
   migrateMemoryLayout,
   personMemoryRel,
   readMemoryForPrompt,
-  repairGroupMemoryTitle,
+  retireGroupLayers,
   screenEntry,
   SCOPE,
   thirdPartyNegative,
   verifyAndRestoreMemory,
 } from '../src/memory-store.mjs'
-import { affectEntryText, AFFECT_NEEDS, AFFECT_STATES, detectAffectPour } from '../src/affect-cues.mjs'
-import { createMemoryStore } from '../src/memory-files.mjs'
-import {
-  buildAffectGatePrompt,
-  createAffectGate,
-  isPrewakeMode,
-  normalizePrewakeMode,
-  parseAffectGateVerdict,
-} from '../src/affect-gate.mjs'
-import { detectPromise, promiseEntryText, promiseAgeText, promisedAtOf } from '../src/promises.mjs'
 import {
   MIN_MESSAGES_FOR_LINE,
   notePersonTurn,
@@ -62,6 +52,7 @@ import {
   renderPersonHabitsLine,
   __resetPeopleStatsWarnings,
 } from '../src/people-stats.mjs'
+import { createMemoryStore } from '../src/memory-files.mjs'
 
 let passed = 0
 let failed = 0
@@ -117,27 +108,29 @@ try {
 
   {
     const g = layoutFor({ kind: 'group', peerId: GROUP_A, speakerId: X })
-    check('群里的四个落点各就各位',
-      g.session === `memory/groups/${GROUP_A}.md` &&
-        g.slang === `memory/groups/${GROUP_A}-slang.md` &&
-        g.person === `memory/people/${X}.md` &&
-        g.factTarget === `memory/groups/${GROUP_A}.md` &&
+    // ★★ 0.3.3：群里的落点只剩**两个**（全局 / 个人）—— `session` 与 `slang` 恒为 null。
+    //   使用者原话：「不再对群聊信息进行记忆，群聊中的对话记忆归于个人」。
+    check('★★ 群里的落点：`session` / `slang` **都是 null**（群聊层已下线）',
+      g.session === null && g.slang === null, JSON.stringify(g))
+    check('★★ 群里的 `factTarget` 与 `personTarget` 都是**发言人自己那份**（这就是"归于个人"）',
+      g.person === `memory/people/${X}.md` &&
+        g.factTarget === `memory/people/${X}.md` &&
         g.personTarget === `memory/people/${X}.md`,
       JSON.stringify(g))
     check('★★ 个人层的落点**不含群号**（这是"跟人走"的前提）',
       !String(g.personTarget).includes(GROUP_A), String(g.personTarget))
     const p = layoutFor({ kind: 'private', peerId: X })
-    check('私聊：会话层与个人层是**同一份**（少一层，也不重复注入）',
-      p.session === null && p.person === `memory/people/${X}.md` && p.factTarget === p.personTarget,
+    check('私聊：会话层同样为 null，且 fact 与 person 是**同一份**（不会重复注入）',
+      p.session === null && p.slang === null && p.person === `memory/people/${X}.md` && p.factTarget === p.personTarget,
       JSON.stringify(p))
     const noSpeaker = layoutFor({ kind: 'group', peerId: GROUP_A })
-    check('群里拿不到发言人就**不给**个人层（宁可不注入，也不猜是谁）',
-      noSpeaker.person === `memory/people/${GROUP_A}.md` && noSpeaker.personTarget === `memory/people/${GROUP_A}.md`,
+    check('★★ 群里拿不到发言人 → 个人落点是 **null**（宁可不写，也不拿群号兜底）',
+      noSpeaker.person === null && noSpeaker.factTarget === null && noSpeaker.personTarget === null,
       JSON.stringify(noSpeaker))
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  section('② 三层各写各的（同一个群里四种档位各落到自己的层）')
+  section('② 0.3.3：群里四种档位**只落两份文件**（全局 + 发言人个人档）')
   // ══════════════════════════════════════════════════════════════════════════
   {
     const ws = newWs()
@@ -149,28 +142,30 @@ try {
       tier: 'user',
       items: [
         { scope: SCOPE.FACT, text: '这个群周末有活动', source: 'marker' },
-        { scope: SCOPE.SLANG, text: '滚木 = 什么都没有', source: 'marker' },
+        // ★ 0.3.3：`SCOPE.SLANG` 已删除（黑话档下线）；这里用 `fact` 代表"旧黑话档被当成事实收下"
+        { scope: SCOPE.FACT, text: '滚木 = 什么都没有', source: 'marker' },
         { scope: SCOPE.PERSON, text: '他喜欢喝冰美式', source: 'marker' },
         { scope: SCOPE.GLOBAL, text: '大家都叫我小鲸鱼', source: 'marker' },
       ],
       log: () => {},
     })
-    const rels = r.applied.map((a) => a.rel).sort()
-    check('四条各落到四个不同的层/文件',
+    const rels = r.applied.map((a) => a.rel)
+    check('★★ 四条只落两份文件：全局 + 发言人个人档（群里不再有群档/黑话档）',
       rels.length === 4 &&
-        rels.includes(`memory/groups/${GROUP_A}.md`) &&
-        rels.includes(`memory/groups/${GROUP_A}-slang.md`) &&
-        rels.includes(`memory/people/${X}.md`) &&
-        rels.includes('MEMORY.md'),
+        rels.filter((x) => x === 'MEMORY.md').length === 1 &&
+        rels.filter((x) => x === `memory/people/${X}.md`).length === 3,
       rels.join(' , '))
+    check('★★ 一个群档都没有被创建（`memory/groups/` 下不存在文件）',
+      !existsSync(join(ws, 'memory', 'groups')), String(existsSync(join(ws, 'memory', 'groups'))))
     check('★ 群里写的 person 落在**发言人**名下（不是群号）',
       Boolean(r.applied.find((a) => a.scope === SCOPE.PERSON)?.rel === `memory/people/${X}.md`),
       String(r.applied.find((a) => a.scope === SCOPE.PERSON)?.rel))
-    check('内容真的进了对应文件',
+    check('★ 内容真的进了对应文件（全部在个人档 + 全局那份，群档一个都没有）',
       String(read(ws, `memory/people/${X}.md`)).includes('冰美式') &&
-        String(read(ws, `memory/groups/${GROUP_A}.md`)).includes('周末有活动') &&
-        String(read(ws, `memory/groups/${GROUP_A}-slang.md`)).includes('滚木'),
-      '')
+        String(read(ws, `memory/people/${X}.md`)).includes('周末有活动') &&
+        String(read(ws, `memory/people/${X}.md`)).includes('滚木') &&
+        String(read(ws, 'MEMORY.md')).includes('小鲸鱼'),
+      String(read(ws, `memory/people/${X}.md`)).slice(0, 120))
     check('★ 拿不到发言人号码时**拒绝**写个人档（而不是写错人）',
       applyMemoryItems({
         workspace: ws,
@@ -247,8 +242,12 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  section('④ 群聊层严格隔离（不跟人走）')
+  section('④ ★★ 0.3.3：群里写的事**跟人走**（不再有"群聊层隔离"这回事）')
   // ══════════════════════════════════════════════════════════════════════════
+  //
+  // ⚠️ 这一节原来断言的是**相反**的东西（"A 群的事不进 B 群、也不进任何私聊"）。
+  //   群聊层下线之后那个场景不存在了，所以判据必须换成新语义 ——
+  //   而且要**明确写成反向**，否则下一个人会以为"隔离"这条纪律还在。
   {
     const ws = newWs()
     applyMemoryItems({
@@ -262,8 +261,12 @@ try {
     })
     const inB = readMemoryForPrompt({ workspace: ws, kind: 'group', peerId: GROUP_B, speakerId: X })
     const inPrivate = readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: X })
-    check('★★ A 群的事不进 B 群', !inB.text.includes('周六开黑'), inB.files.join(','))
-    check('★★ A 群的事也不进任何私聊', !inPrivate.text.includes('周六开黑'), inPrivate.files.join(','))
+    const otherMan = readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: Y })
+    check('★★ 他在**别的群**说话时读得到（归类到个人之后就会跟人走 —— 这是设计意图，不是串场漏了）',
+      inB.text.includes('周六开黑'), inB.files.join(','))
+    check('★★ 他在**私聊**里也读得到', inPrivate.text.includes('周六开黑'), inPrivate.files.join(','))
+    check('★★ 但**别人**读不到（隔离换成了"人与人之间"，不是"群与群之间"）',
+      !otherMan.text.includes('周六开黑'), otherMan.files.join(','))
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -284,114 +287,6 @@ try {
     const p = readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: Y })
     check('★ 群里读得到全局', g.text.includes('小鲸鱼'), g.files.join(','))
     check('★ 别人的私聊也读得到全局', p.text.includes('小鲸鱼'), p.files.join(','))
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════
-  section('⑥ ★★ 情绪倾注的判定边界：该认的认，不该认的绝不能认')
-  // ══════════════════════════════════════════════════════════════════════════
-  const hit = (t) => detectAffectPour({ text: t })
-  // 正例：他自己在倾诉（含省略主语的形态）
-  for (const [t, why] of [
-    ['我好累啊', '自述疲惫'],
-    ['我崩了，真的撑不住', '强情绪词'],
-    ['我难受，你别问了', '情绪 + 需要（想自己待着）'],
-    ['你会听我说吗', '需要（想有人听）'],
-    ['我最近这阵子好累', '时间状语里的"这"**不许**被当成指物主语'],
-  ]) {
-    check(`该认：${t}（${why}）`, hit(t).hit, hit(t).why)
-  }
-  // 反例：都不是"他自己的状态"
-  for (const [t, why] of [
-    ['我朋友最近很累', '转述别人的情绪 —— 记了就是把别人的事发到他名下'],
-    ['他很难受', '第三方主语'],
-    ['这游戏崩溃了', '主语是那件事（强情绪词也不能记）'],
-    ['那服务器崩了', '同上'],
-    ['有点烦', '弱情绪词 + 没有倾注信号（日常闲聊）'],
-    ['今天天气不错', '没有线索'],
-    ['哈哈哈', '没有线索'],
-    ['以后都必须听我的', '这是在下指令，不是倾诉'],
-  ]) {
-    check(`不该认：${t}（${why}）`, !hit(t).hit, hit(t).why)
-  }
-
-  // ★★ 真机回放抓到的两个假阳性（2026-09-30「活死人之夜」549 条真实发言里**只**命中这两条，
-  //    而两条都是"字面命中、语义相反"）。它们必须被挡住 —— 否则长期记忆里会写下反过来的假事实。
-  check('★★ 否定式放过：「至少不用担心…」语气是**松了口气**，不是焦虑',
-    !hit('至少不用担心等会儿要干嘛这个问题').hit, hit('至少不用担心等会儿要干嘛这个问题').why)
-  check('★ 否定式不能误杀否定式肯定：「我忍不住想哭」是真的想哭',
-    hit('我忍不住想哭').hit, hit('我忍不住想哭').why)
-  check('★ 否定式的常见形态都挡住（不累 / 别难过 / 没有难过）',
-    !hit('我不累').hit && !hit('别难过了').hit && !hit('没有开心过').hit,
-    [hit('我不累').why, hit('别难过了').why].join('｜'))
-  check('★★ 需要线索要看**指向**：「搓一个机器人陪我聊天」不是向我倾诉',
-    !hit('可以搓一个机器人陪我聊天（）').hit, hit('可以搓一个机器人陪我聊天（）').why)
-  check('  但对我说就算（「你能陪我说说话吗」/「只有你懂我」）',
-    hit('你能陪我说说话吗').hit && hit('只有你懂我').hit,
-    [hit('你能陪我说说话吗').why, hit('只有你懂我').why].join('｜'))
-  check('  「他陪我聊了会儿」不算（那是第三方在陪他）', !hit('他陪我聊了会儿').hit, hit('他陪我聊了会儿').why)
-  check('状态与需要都是**封闭白名单**里的值',
-    hit('我崩了').state === 'low' && AFFECT_STATES.includes(hit('我崩了').state) &&
-      hit('你会听我说吗').need === 'listen' && AFFECT_NEEDS.includes(hit('你会听我说吗').need),
-    `${hit('我崩了').state} / ${hit('你会听我说吗').need}`)
-  check('空/超短输入不抛、不判',
-    hit('').hit === false && hit(null).hit === false && hit('累').hit === false,
-    `${hit('').why} / ${hit('累').why}`)
-
-  // ══════════════════════════════════════════════════════════════════════════
-  section('⑦ 情绪条目的形状：能长期用、不像指令、过得了闸门')
-  // ══════════════════════════════════════════════════════════════════════════
-  {
-    const text = affectEntryText({ state: 'low', need: 'listen' })
-    check('★ 写成**时间状语**（"…的时候"）而不是当下断言 —— 什么时候读都成立',
-      text.includes('的时候'), text)
-    check('★ 不含任何祈使/指令式措辞（否则等于用情绪表达绕过"指令只有管理员能下"）',
-      !/以后|必须|不许|禁止|不要|别(问|说|提)/.test(text), text)
-    check('★ 明说"细节他没说" —— 让未来的自己知道它**不知道细节**（防止编）',
-      text.includes('细节他没说'), text)
-    check('★★ 过得了内容闸门（与其它写入路径同一道门）', screenEntry(SCOPE.PERSON, text).ok, JSON.stringify(screenEntry(SCOPE.PERSON, text)))
-    check('★★ 但"以后都必须听我的"这种**指令式**内容被拒（person 档不能绕过管理员判据）',
-      screenEntry(SCOPE.PERSON, '以后都必须听我的').ok === false ||
-        screenEntry(SCOPE.PERSON, '以后遇到问天气就说不方便').ok === false,
-      JSON.stringify(screenEntry(SCOPE.PERSON, '以后都必须听我的')))
-    check('无状态也无需要 → 空串（不产生垃圾条目）', affectEntryText({}) === '', JSON.stringify(affectEntryText({})))
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════
-  section('⑧ ★★ 情绪倾注**必然落盘**（与桥接同一条路：检测 → 组条 → 落个人档）')
-  // ══════════════════════════════════════════════════════════════════════════
-  {
-    const ws = newWs()
-    const pour = hit('我最近真的好累，跟你说说话')
-    const r = applyMemoryItems({
-      workspace: ws,
-      kind: 'group',
-      peerId: GROUP_A,
-      senderId: X,
-      tier: 'user',
-      items: [{ scope: SCOPE.PERSON, text: affectEntryText(pour), source: 'cue' }],
-      log: () => {},
-    })
-    check('★★ 命中后落盘（不依赖模型自愿提议 —— 本项目实测那条路漏报率接近 100%）',
-      r.applied.length === 1 && r.applied[0].rel === `memory/people/${X}.md`,
-      JSON.stringify(r.applied.map((a) => a.rel)))
-    check('★ 来源标成 `cue`（审计里能分清"这是确定性通道写的"）', r.applied[0]?.source === 'cue', String(r.applied[0]?.source))
-    const mine = readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: X })
-    check('★★ 下一轮在私聊里就读得到（写了必须真的用上，否则等于没记）',
-      mine.text.includes('很累的时候'), mine.text.slice(0, 100))
-
-    // 同一句话再说一次：去重，不无限增长
-    const again = applyMemoryItems({
-      workspace: ws,
-      kind: 'group',
-      peerId: GROUP_A,
-      senderId: X,
-      tier: 'user',
-      items: [{ scope: SCOPE.PERSON, text: affectEntryText(hit('我最近真的好累，跟你说说话')), source: 'cue' }],
-      log: () => {},
-    })
-    check('★ 同一条状态重复出现 → 去重，不无限增长', again.applied[0]?.deduped === true, JSON.stringify(again.applied[0]))
-    const lines = String(read(ws, `memory/people/${X}.md`)).split('\n').filter((l) => l.startsWith('- '))
-    check('  文件里只有一条（去重真的生效）', lines.length === 1, lines.join('｜'))
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -419,104 +314,6 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  section('⑩ ★★ 接纳/归属 + 承诺通道（0.2.9 用户点名的两条）')
-  // ══════════════════════════════════════════════════════════════════════════
-  {
-    // ── 接纳/归属：用户点名的例句必须命中 ──────────────────────────────────
-    const named = '没事，你在这里和我们聊天，大家都很高兴，这就是完美的时间线（也许并不是所有人都开心了😉）'
-    const r = hit(named)
-    check('★★ 用户点名的例句现在**有反应**（原来对它毫无反应）',
-      r.hit === true && r.need === 'stay', JSON.stringify({ hit: r.hit, need: r.need, why: r.why }))
-    check('  落成的条目是"希望你留在这里"（这就是它对行为的意义）',
-      affectEntryText(r) === '他希望你留在这里、继续和大家聊天', affectEntryText(r))
-    check('★ 只有需要、没有状态时**不加**"细节他没说"（那会显得莫名其妙）',
-      !affectEntryText(r).includes('细节他没说'), affectEntryText(r))
-    check('强信号也算（别走 / 有你在真好 / 完美的时间线）',
-      hit('别走啊').need === 'stay' && hit('有你在真好').need === 'stay' && hit('这就是完美的时间线').need === 'stay',
-      [hit('别走啊').need, hit('有你在真好').need].join('/'))
-    check('★★ 弱信号必须配正面词（「你在这里等我一下」不是接纳）',
-      !hit('你在这里等我一下').hit && !hit('你在这里吗').hit, hit('你在这里等我一下').why)
-    check('  否定式也放过（「你在这里也没人高兴」不是接纳）',
-      !hit('你在这里也没人高兴').hit, hit('你在这里也没人高兴').why)
-
-    // ── 承诺通道：判据（真机压出来的几个反例都在）─────────────────────────
-    for (const [t, from, want] of [
-      ['我明天帮你查那个仓库', 'bot', true],
-      ['包在我身上', 'bot', true],
-      ['我马上处理这个报错', 'bot', true],
-      ['你等我，我周四给你看结果', 'user', true],
-      ['我会觉得这样不好', 'bot', false], // 心理动词，不是承诺
-      ['他说他明天会来', 'bot', false], // 转述第三方
-      ['如果以后有空我帮你看看', 'bot', false], // 假设句
-      ['我周三没空', 'bot', false], // 时间词但没动作
-      ['好的，我记住了', 'bot', false], // 没有具体内容
-      ['今天天气不错', 'bot', false],
-    ]) {
-      const p = detectPromise({ text: t, from })
-      check(`${want ? '该记' : '不记'}：${t}（${from}）`, p.hit === want, p.hit ? promiseEntryText(p) : p.why)
-    }
-    check('★ 条目**带来源**（将来的自己要知道这是"谁许的诺"）',
-      promiseEntryText({ from: 'bot', text: '我明天帮你查' }) === '（我许的诺）我明天帮你查' &&
-        promiseEntryText({ from: 'user', text: '我周四给你看' }) === '（对方许的诺）我周四给你看',
-      '')
-    check('★ 承诺条目过得了同一道闸门', screenEntry(SCOPE.FACT, promiseEntryText({ from: 'bot', text: '我明天帮你查那个仓库' })).ok, '')
-
-    /* ── ★★ 承诺带时间戳（2026-10-01 用户要求）────────────────────────────
-     *
-     * 用户原话：「承诺与约定（强记忆，要带时间戳）」+「真人式的表现不是背出来，
-     * 而是**到期前的自然提醒**，或者事后顺势问一句"上次说的那个弄了吗"」。
-     * 判据：句子里那些相对时间（"明天""周四"）**离开当天就没意义** ⇒ 落盘时附日期；
-     * 而"几天前说的"**每过一天就变** ⇒ 只能在注入时现算。
-     */
-    const at0 = Date.parse('2026-10-01T10:00:00')
-    const tagged = promiseEntryText({ from: 'user', text: '@小鲸鱼 我周四给你看结果', at: at0 })
-    check('★★ 落盘时附上"说的日期"（绝对日期，不会过期）',
-      tagged === '（对方许的诺）我周四给你看结果（2026-10-01 说的）', tagged)
-    check('★ @提及仍然被洗掉（与原来一致）', !tagged.includes('@小鲸鱼'), tagged)
-    check('★ 说的日期取回来是对的', promisedAtOf(tagged) === new Date(2026, 9, 1).getTime(),
-      String(promisedAtOf(tagged)))
-    check('★ 不带 at 时不附加日期（老调用点与逐字断言继续成立）',
-      promiseEntryText({ from: 'bot', text: '我明天帮你查' }) === '（我许的诺）我明天帮你查',
-      promiseEntryText({ from: 'bot', text: '我明天帮你查' }))
-    const day = 86_400_000
-    check('★ 注入时补"多久以前说的"（当天不补）',
-      promiseAgeText(tagged, { now: at0 }) === '' &&
-        promiseAgeText(tagged, { now: at0 + day }) === '（昨天说的）' &&
-        promiseAgeText(tagged, { now: at0 + 3 * day }) === '（3 天前说的）' &&
-        promiseAgeText(tagged, { now: at0 + 40 * day }) === '（一个月前说的）',
-      [0, 1, 3, 40].map((d) => promiseAgeText(tagged, { now: at0 + d * day }) || '（空）').join(' / '))
-    check('★ 没有日期的老条目**不补**（宁可不提，也不编一个时间）',
-      promiseAgeText('（对方许的诺）我周四给你看结果') === '')
-    check('★ 非承诺条目不受影响', promiseAgeText('他很爱听歌') === '')
-    check('★ 坏日期不崩', promiseAgeText('（我许的诺）x（2026-99-99 说的）') === '')
-    check('★ @提及被洗掉（被 @ 的是机器人自己，留在档案里读着莫名其妙）',
-      promiseEntryText({ from: 'user', text: '@小鲸鱼 我周四给你看结果' }) === '（对方许的诺）我周四给你看结果',
-      promiseEntryText({ from: 'user', text: '@小鲸鱼 我周四给你看结果' }))
-
-    // ── 端到端：承诺落**会话层**（群→群文件；私聊→那个人的个人档）───────────
-    {
-      const wsP = newWs()
-      const rp = applyMemoryItems({
-        workspace: wsP,
-        kind: 'group',
-        peerId: GROUP_A,
-        senderId: X,
-        tier: 'user',
-        items: [{ scope: SCOPE.FACT, text: promiseEntryText({ from: 'bot', text: '我明天帮你查那个仓库' }), source: 'promise' }],
-        log: () => {},
-      })
-      check('★★ 承诺落在**会话层**（群聊层），不是个人档',
-        rp.applied[0]?.rel === `memory/groups/${GROUP_A}.md` &&
-          String(read(wsP, `memory/groups/${GROUP_A}.md`)).includes('我许的诺') &&
-          read(wsP, `memory/people/${X}.md`) === null,
-        String(rp.applied[0]?.rel))
-      check('★ 来源标成 `promise`（审计里能分清是哪条通道写的）', rp.applied[0]?.source === 'promise', String(rp.applied[0]?.source))
-      const inGroup = readMemoryForPrompt({ workspace: wsP, kind: 'group', peerId: GROUP_A, speakerId: X })
-      check('  下一轮在这个群里读得到（写了必须真的用上）', inGroup.text.includes('我许的诺'), inGroup.text.slice(0, 80))
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════
   section('⑪ ★★ 控制台写入必须留后路（一次误存不可恢复 → 先备份）')
   // ══════════════════════════════════════════════════════════════════════════
   {
@@ -538,83 +335,6 @@ try {
         return existsSync(join(wsC, 'memory', '.backups'))
       })(),
       '')
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════
-  section('⑫ ★★ 情绪闸门：未唤醒的倾诉要"规则先筛 + 判定器再确认"')
-  // ══════════════════════════════════════════════════════════════════════════
-  {
-    // ── 档位：认不出的一律 off（fail-closed，宁可不记也不记错）───────────────
-    check('★★ 未知档位 → off（写错一个字不会导致"开始往档案里写东西"）',
-      normalizePrewakeMode('on') === 'off' && normalizePrewakeMode('true') === 'off' &&
-        normalizePrewakeMode(undefined) === 'off' && normalizePrewakeMode('') === 'off',
-      [normalizePrewakeMode('on'), normalizePrewakeMode(undefined)].join('/'))
-    check('★ 三档取值都认（且大小写与空格不敏感）',
-      normalizePrewakeMode('shadow') === 'shadow' && normalizePrewakeMode(' JUDGE ') === 'judge' &&
-        normalizePrewakeMode('off') === 'off')
-    check('★ `isPrewakeMode` 能区分"没写"与"写错了"（启动告警靠它）',
-      isPrewakeMode('shadow') === true && isPrewakeMode('on') === false)
-
-    // ── 提示词：必须把"没 @ 它"这个**事实**说清楚，否则模型会以为它已经被叫到了 ──
-    const prompt = buildAffectGatePrompt({
-      senderName: '雌小鬼',
-      text: '舍不得就别走呐',
-      recent: [{ senderName: '薯片', text: '我退群了' }],
-    })
-    check('★★ 提示词里写明"这句话没有 @ 它、也没写它的名字"（这是闸门存在的前提）',
-      prompt.includes('没有 @ 它') || prompt.includes('没有 @'), '')
-    check('★ 反例一起写进去（那些反例是被真机语料打出来的，不是设想的）',
-      prompt.includes('在跟**别人**说') && prompt.includes('提到') && prompt.includes('看不出在对谁说'))
-    check('★ 上下文一起给它（同一句话放在不同上下文里，答案会变）',
-      prompt.includes('我退群了') && prompt.includes('雌小鬼：舍不得就别走呐'))
-    check('★ 要求只输出一行 JSON（解析才能稳）',
-      prompt.includes('{"toBot": true 或 false'))
-
-    // ── 解析：认得出来 / 认不出来 / 自相矛盾 ──────────────────────────────────
-    for (const [raw, want] of [
-      ['{"toBot": true, "why": "在跟机器人说话"}', 'to-bot'],
-      ['{"toBot": false, "why": "对别人说的"}', 'not-to-bot'],
-      ['结论：{"to_bot": 是}', 'to-bot'],
-      ['toBot：否', 'not-to-bot'],
-      ['```json\n{"toBot": true, "why": "x"}\n```', 'to-bot'],
-      ['true', 'to-bot'],
-    ]) {
-      const r = parseAffectGateVerdict(raw)
-      check(`解析：${raw.slice(0, 34)}`, r.ok === true && r.verdict === want, JSON.stringify(r))
-    }
-    for (const raw of ['也许吧', '', '{"toBot": true, "to_bot": false}', '{"verdict": "maybe"}']) {
-      check(`★★ 认不出/自相矛盾 → 不 ok（调用方据此**不记**）：${raw.slice(0, 30) || '(空)'}`,
-        parseAffectGateVerdict(raw).ok === false, JSON.stringify(parseAffectGateVerdict(raw)))
-    }
-
-    // ── 闸门对象本身：判不出来时算 **not-to-bot**（与唤醒判定方向相反）────────
-    {
-      const gate = createAffectGate({ runner: null, transport: 'http', apiKey: '', model: '' })
-      const r = await gate.judge({ text: '好累' })
-      check('★★ 通路没配好 → 按 **not-to-bot** 处理（判不出来就不记，方向与唤醒判定相反）',
-        r.judged === false && r.verdict === 'not-to-bot', JSON.stringify({ judged: r.judged, verdict: r.verdict, why: r.why }))
-      const gate2 = createAffectGate({ runner: async () => ({ ok: true, text: '{"toBot": true, "why": "在跟它说话"}' }) })
-      const r2 = await gate2.judge({ text: '好累' })
-      check('★ 判定通过 → to-bot（且带得出理由）',
-        r2.judged === true && r2.verdict === 'to-bot' && r2.reason.includes('在跟它说话'), JSON.stringify(r2))
-      const gate3 = createAffectGate({ runner: async () => ({ ok: true, text: '我猜是吧' }) })
-      const r3 = await gate3.judge({ text: '好累' })
-      check('★★ 模型没照格式写 → 也算 not-to-bot（并且**留下证据**）',
-        r3.judged === false && r3.verdict === 'not-to-bot' && r3.fallback === true, JSON.stringify(r3))
-      // 预算：上限 1 时第二次不再调用（不许把上限变成摆设）
-      let calls = 0
-      const gate4 = createAffectGate({
-        maxPerHour: 1,
-        runner: async () => {
-          calls += 1
-          return { ok: true, text: '{"toBot": true}' }
-        },
-      })
-      await gate4.judge({ text: 'a' })
-      const r5 = await gate4.judge({ text: 'b' })
-      check('★ 小时预算真的挡得住（超了一律不记，且不调用）',
-        calls === 1 && r5.judged === false && r5.verdict === 'not-to-bot', `calls=${calls}`)
-    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -643,12 +363,31 @@ try {
         !existsSync(join(ws, 'memory', '.snapshots', `memory__group-${GROUP_A}.md`)) &&
         existsSync(join(ws, 'memory', '.snapshots', `memory__people__${X}.md`)),
       '')
-    check('★ 迁移后立刻读得到（不是"文件在但注入不到"）',
-      readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: X }).text.includes('冰美式') &&
-        readMemoryForPrompt({ workspace: ws, kind: 'group', peerId: GROUP_A, speakerId: X }).text.includes('周六开黑'),
+    check('★★ 旧个人档迁移后**立刻读得到**（不是"文件在但注入不到"）',
+      readMemoryForPrompt({ workspace: ws, kind: 'private', peerId: X }).text.includes('冰美式'),
       '')
+    // ★★ 0.3.3：群档迁移完**紧接着会被归档**（`retireGroupLayers`，桥接启动时两步连着跑）。
+    //   这里把两步的顺序与结果一起钉住 —— 顺序反了会留下一批"刚搬过去又该归档"的文件。
+    check('★★ 群聊层的事**不再进上下文**（即使文件还在 groups/ 里）',
+      !readMemoryForPrompt({ workspace: ws, kind: 'group', peerId: GROUP_A, speakerId: X }).text.includes('周六开黑'),
+      '')
+    const g = retireGroupLayers({ workspace: ws, log: () => {} })
+    check('★★★ 归档：旧群档（含黑话档）进 memory/.migrated/groups/，个人档**一份都不动**',
+      g.archived.length === 2 &&
+        g.kept.length === 0 &&
+        existsSync(join(ws, 'memory', '.migrated', 'groups', `${GROUP_A}.md`)) &&
+        existsSync(join(ws, 'memory', '.migrated', 'groups', `${GROUP_A}-slang.md`)) &&
+        !existsSync(join(ws, 'memory', 'groups', `${GROUP_A}.md`)) &&
+        String(read(ws, `memory/people/${X}.md`)).includes('冰美式'),
+      JSON.stringify(g))
+    check('★★ 归档**不丢内容**（原件逐字进归档目录）',
+      String(readFileSync(join(ws, 'memory', '.migrated', 'groups', `${GROUP_A}.md`), 'utf8')).includes('本群周六开黑'))
+    check('★ 归档是**幂等**的（再跑一次什么都不做）', (() => {
+      const g2 = retireGroupLayers({ workspace: ws, log: () => {} })
+      return g2.archived.length === 0 && g2.kept.length === 0
+    })())
     const r2 = migrateMemoryLayout({ workspace: ws, log: () => {} })
-    check('★ 幂等：再跑一次什么都不做', r2.moved.length === 0 && r2.merged.length === 0, JSON.stringify(r2))
+    check('★ 迁移也**幂等**：再跑一次什么都不做', r2.moved.length === 0 && r2.merged.length === 0, JSON.stringify(r2))
 
     // 新旧都在 → 合并去重，一条不丢
     const ws2 = newWs()
@@ -704,13 +443,23 @@ try {
       JSON.stringify([thirdPartyNegative('我朋友就是个小丑'), thirdPartyNegative('我朋友帮了我，那天我真蠢')]))
 
     /* ══════════════════════════════════════════════════════════════════════
-     * ★★ 群聊记忆的"开头"要带群名（2026-10-01 用户要求）
+     * ★★ 群聊记忆的"文件头"纯函数（0.3.3：**群聊层已下线**，这里只剩纯函数判据）
      * ══════════════════════════════════════════════════════════════════════
-     * 个人档的文件头本来就带名字（`# 忘忧（QQ …）`），群那份却只有一句
-     * 「# 记忆（桥接维护，勿手改）」—— 打开文件只看得出一个号码，认不出是哪个群。
-     * 而注入时那一行的标签也只有「本群记忆」，模型得靠来源标注里的号码去比对。
-     * 两处都要带上群名（**查不到就不编**）。
+     * 原来这一节盯两件事：① 新建群档时头里带群名；② 注入标签里带群名。
+     * 两件事都**随群聊层一起下线了**（没有群档可写、也没有"本群记忆"那一段可注入），
+     * 所以那些断言**必须删掉**，换成"纯函数仍然认得群档形状"——
+     * 唯一还需要它的地方是**归档**与将来可能的一次性修复脚本。
+     * ⚠️ 把它们留成"已下线"的说明而不是直接删掉整节：`memoryFileTitle` 仍在，
+     *   而它的判据（带群名 / 不编名字 / 黑话那份认得出）是**真实行为**，值得继续钉住。
      */
+    // 标题渲染本身（纯函数：三种形状）
+    check('★ 有群名 → 带群名 + 群号', memoryFileTitle({ rel: `memory/groups/${GROUP_A}.md`, chatName: '摸鱼群' }) === `# 记忆·摸鱼群（群 ${GROUP_A}）（桥接维护，勿手改）`)
+    check('★ 没群名 → 只写号码（不编）', memoryFileTitle({ rel: `memory/groups/${GROUP_A}.md` }) === `# 记忆·群 ${GROUP_A}（桥接维护，勿手改）`)
+    check('★ 黑话那份也认（带「群内黑话」）—— 认得出是为了**归档时看得懂**，不是因为还在用',
+      memoryFileTitle({ rel: `memory/groups/${GROUP_A}-slang.md`, chatName: '摸鱼群' }).includes('群内黑话'))
+    check('★ 非群聊文件用原来的通用头（不受影响）',
+      memoryFileTitle({ rel: 'MEMORY.md', chatName: '摸鱼群' }) === '# 记忆（桥接维护，勿手改）')
+    // ★★ 0.3.3 的反向断言：**写记忆时再也不产生群档**
     const wsN = newWs()
     applyMemoryItems({
       workspace: wsN,
@@ -722,79 +471,21 @@ try {
       items: [{ scope: SCOPE.FACT, text: '这是一个游戏群', source: 'marker' }],
       log: () => {},
     })
-    const gRel = `memory/groups/${GROUP_A}.md`
-    const gRaw = readFileSync(join(wsN, gRel), 'utf8')
-    check('★★ 新建群记忆的文件头**带群名**（不是光秃秃一个号码）',
-      gRaw.startsWith(`# 记忆·摸鱼群（群 ${GROUP_A}）（桥接维护，勿手改）`), gRaw.split('\n')[0])
-    check('★ 文件头只出现一次（不是写两遍）',
-      (gRaw.match(/# 记忆/g) ?? []).length === 1, JSON.stringify(gRaw.split('\n').slice(0, 4)))
-
-    // ★★ 重复头的真缺陷：文件"只有头、还没有条目"时再写一次，旧实现会**又追加一个头**
-    //    （`entries.length === 0 ? 头 : ''` 里 entries 是解析出来的条目，不含标题行）
-    const wsD = newWs()
-    mkdirSync(join(wsD, 'memory', 'groups'), { recursive: true })
-    writeFileSync(join(wsD, gRel), '# 记忆（桥接维护，勿手改）\n\n', 'utf8')
-    applyMemoryItems({
-      workspace: wsD,
-      kind: 'group',
-      peerId: GROUP_A,
-      senderId: X,
-      tier: 'user',
-      chatName: '摸鱼群',
-      items: [{ scope: SCOPE.FACT, text: '这是一个游戏群', source: 'marker' }],
-      log: () => {},
-    })
-    const dRaw = readFileSync(join(wsD, gRel), 'utf8')
-    check('★★★ 已有文件头时**不再写第二个头**（真机上出过：前两行一模一样）',
-      (dRaw.match(/# 记忆/g) ?? []).length === 1, JSON.stringify(dRaw.split('\n').slice(0, 4)))
-
-    // 注入侧：标签带群名；查不到群名时退回不带名字的写法
+    check('★★★ 群里写记忆**不再生成群档**（`memory/groups/` 一个文件都没有）',
+      !existsSync(join(wsN, 'memory', 'groups')), String(existsSync(join(wsN, 'memory', 'groups'))))
+    check('★★ 写进了个人档；**群名不进个人档**（只用于群档的文件头，而群档不再产生）',
+      String(read(wsN, `memory/people/${X}.md`)).includes('这是一个游戏群') &&
+        !String(read(wsN, `memory/people/${X}.md`)).includes('摸鱼群'),
+      String(read(wsN, `memory/people/${X}.md`)).slice(0, 100))
+    // 注入侧：**没有**"本群记忆"这一段了（含旧的两个标签形状）
     const withName = readMemoryForPrompt({ workspace: wsN, kind: 'group', peerId: GROUP_A, speakerId: X, chatName: '摸鱼群' })
-    check('★★ 注入标签带群名（「本群记忆·摸鱼群」）',
-      withName.blocks.some((b) => String(b.label).includes('本群记忆·摸鱼群')), JSON.stringify(withName.blocks.map((b) => b.label)))
-    const noName = readMemoryForPrompt({ workspace: wsN, kind: 'group', peerId: GROUP_A, speakerId: X })
-    check('★ 查不到群名时**退回不带名字的写法**（不编名字）',
-      noName.blocks.some((b) => String(b.label) === '本群记忆（只在这个群）'), JSON.stringify(noName.blocks.map((b) => b.label)))
-    check('★ 私聊那一份不受影响（它本来就没有群名）',
-      readMemoryForPrompt({ workspace: wsN, kind: 'private', peerId: X }).blocks.every((b) => !String(b.label).includes('本群记忆')),
-      '')
-
-    // 标题渲染本身（纯函数：三种形状）
-    check('★ 有群名 → 带群名 + 群号', memoryFileTitle({ rel: `memory/groups/${GROUP_A}.md`, chatName: '摸鱼群' }) === `# 记忆·摸鱼群（群 ${GROUP_A}）（桥接维护，勿手改）`)
-    check('★ 没群名 → 只写号码（不编）', memoryFileTitle({ rel: `memory/groups/${GROUP_A}.md` }) === `# 记忆·群 ${GROUP_A}（桥接维护，勿手改）`)
-    check('★ 黑话那份也认（带「群内黑话」）',
-      memoryFileTitle({ rel: `memory/groups/${GROUP_A}-slang.md`, chatName: '摸鱼群' }).includes('群内黑话'))
-    check('★ 非群聊文件用原来的通用头（不受影响）',
-      memoryFileTitle({ rel: 'MEMORY.md', chatName: '摸鱼群' }) === '# 记忆（桥接维护，勿手改）')
-
-    /* ── ★★ 自愈：老文件的标题要能补群名、并清掉重复的标题行 ───────────────
-     *
-     * 为什么自愈而不是手工改一次：老文件的标题只有一个号码，而**群名要协议端
-     * 查得到**才知道 —— 让它在"这个群下次说话"时自动补上，比手工猜一个名字可靠。
-     * 重复标题则是旧缺陷留下的痕迹（真机上出过），顺手在同一处修掉。
-     */
-    const wsR = newWs()
-    mkdirSync(join(wsR, 'memory', 'groups'), { recursive: true })
-    const rRel = `memory/groups/${GROUP_A}.md`
-    const BROKEN = `# 记忆（桥接维护，勿手改）\n# 记忆（桥接维护，勿手改）\n\n- 这是一个游戏群\n- 群友常拿它开玩笑\n`
-    writeFileSync(join(wsR, rRel), BROKEN, 'utf8')
-    const rep = repairGroupMemoryTitle({ workspace: wsR, rel: rRel, chatName: '摸鱼群', log: () => {} })
-    const repRaw = readFileSync(join(wsR, rRel), 'utf8')
-    check('★★ 自愈：标题补上群名', rep.changed === true && repRaw.startsWith(`# 记忆·摸鱼群（群 ${GROUP_A}）`), repRaw.split('\n')[0])
-    check('★★ 自愈：**重复的标题行被清掉**（真机上曾有两行一模一样的头）',
-      (repRaw.match(/# 记忆/g) ?? []).length === 1, JSON.stringify(repRaw.split('\n').slice(0, 4)))
-    check('★★ 自愈：正文一个字都不许动',
-      repRaw.includes('- 这是一个游戏群') && repRaw.includes('- 群友常拿它开玩笑'), repRaw)
-    check('★ 自愈是幂等的（第二次不用改、也不写盘）',
-      repairGroupMemoryTitle({ workspace: wsR, rel: rRel, chatName: '摸鱼群' }).changed === false)
-    check('★ 文件不存在时不动它（不凭空造文件）',
-      repairGroupMemoryTitle({ workspace: wsR, rel: `memory/groups/999999.md` , chatName: 'x' }).changed === false)
-    check('★ 没有标题行的文件不动它（不猜结构）', (() => {
-      const p = join(wsR, 'memory', 'groups', 'nohead.md')
-      writeFileSync(p, '- 只有条目\n', 'utf8')
-      const r = repairGroupMemoryTitle({ workspace: wsR, rel: 'memory/groups/nohead.md', chatName: 'x' })
-      return r.changed === false && readFileSync(p, 'utf8') === '- 只有条目\n'
-    })())
+    check('★★★ 注入里不再有「本群记忆」/「群内黑话」两段（传了群名也没有）',
+      !withName.text.includes('本群记忆') && !withName.text.includes('群内黑话'),
+      JSON.stringify(withName.blocks.map((b) => b.label)))
+    check('★ 群名**只用于文件头**，不再影响注入标签（个人档那一行的标签与私聊一致）',
+      readMemoryForPrompt({ workspace: wsN, kind: 'private', peerId: X }).blocks.some((b) =>
+        String(b.label).includes('关于正在跟你说话的这个人')),
+      JSON.stringify(readMemoryForPrompt({ workspace: wsN, kind: 'private', peerId: X }).blocks.map((b) => b.label)))
 
     // 端到端：走**同一条写入路径**，被拒要有原因、且磁盘上确实没有
     const ws = newWs()
@@ -941,7 +632,7 @@ try {
 
 console.log('')
 if (failed === 0) {
-  console.log(`🎉 三层记忆与情绪落盘测试全部通过（${passed} 项）`)
+  console.log(`🎉 两层记忆（全局 / 个人）测试全部通过（${passed} 项）`)
   process.exit(0)
 }
 console.log(`❌ ${failed} 项失败 / ${passed} 项通过`)

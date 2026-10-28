@@ -398,7 +398,7 @@ export class OneBotClient extends EventTarget {
 }
 
 /**
- * 发送队列：拟人节流 + 去重。
+ * 发送队列：拟人节流 + 去重 + **会话级串行**。
  *
  * ── 为什么必须有这个 ───────────────────────────────────────────────────
  * 这是**账号安全的必需品**，不是优化项：
@@ -408,11 +408,38 @@ export class OneBotClient extends EventTarget {
  *
  * 参数取自同类成熟项目的实测值（minGap 1s / maxGap 3s / 每分 8 条 /
  * 去重窗口 8 秒），它们是被真实风控"教育"过的数字。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ★★★ 0.3.3（S1）：两套机制，边界必须分清
+ * ══════════════════════════════════════════════════════════════════════════
+ *   ① **会话级串行链**（`run(chatKey, task)`）：同一个 `chatKey` 的投递**排队执行**。
+ *      它保证 `check → 等待 → 发送 → markSent` 落在**同一个临界区**里 ——
+ *      在此之前，`check()` 读 `#lastSentAt`、`markSent()` 写，两者之间隔着一次
+ *      **网络往返**，于是并发投递（中间态 + 最终回复、表情 + 正文）会各自读到
+ *      **同一个旧时间戳**，双双判定"不用等" —— `minGapMs` 从"保证"退化成"尽力"。
+ *   ② **全局限频/去重**（`check`/`markSent` 里的 `#window`/`#recent`）：**不进链**。
+ *      它们是**跨会话共享**的滑动窗口；放进链会让 A 群的长排队卡住 B 群的回复
+ *      （跨会话互相阻塞，比限频失效更糟）。
+ *
+ *   ∴ 一句话：**按会话排队，按全局计数。** 链只管"别插队"，不管"总共能否发"。
+ *
+ * ── 超时预算（S1.2）──────────────────────────────────────────────────────
+ *   链任务有 30 秒预算（gap + 发送合计）。超时 → 该条记 `failed`、**不 markSent**
+ *   （允许后续重试）、**并且放过链**（否则一个永不返回的 `onebot.send` 会把
+ *   这个会话的所有后续消息永久堵死 —— 那是比漏发更严重的故障）。
  */
 export class SendQueue {
   #lastSentAt = 0
   #recent = new Map() // 文本 -> 时间戳
   #window = [] // 最近发送的时间戳，用于限频
+  /**
+   * 会话级串行链：`chatKey → 队尾 Promise`。
+   *
+   * ★ 为什么是 Map 而不是单条链：串行是**按会话**的（A 群的排队不该卡 B 群）。
+   * ★ 为什么用完要删：不删会随会话数无限增长（每次会话都留一条已 resolve 的 Promise）。
+   * @type {Map<string, Promise<void>>}
+   */
+  #chains = new Map()
 
   constructor({
     minGapMs = 1000,
@@ -428,6 +455,71 @@ export class SendQueue {
     this.maxPerHour = maxPerHour
     this.dedupeWindowMs = dedupeWindowMs
     this.log = log
+  }
+
+  /**
+   * ★★★ S1：**按会话串行执行一次投递**（唯一推荐入口）。
+   *
+   * 任务体拿到 `{ check, markSent, sleep }`，在里面完成
+   * `check → 等 gap → 复检 → 发送 → markSent` —— 整段期间**同一会话的其它投递在排队**，
+   * 于是 `check()` 读到的 `#lastSentAt` 一定包含前一条的实际发送时间。
+   *
+   * @param {string} chatKey 会话键（`group:123` / `private:456` / `game:main`）
+   * @param {(ctx: {check: Function, markSent: Function, sleep: (ms:number)=>Promise<void>}) => Promise<any>} task
+   * @param {{timeoutMs?: number, skipGap?: boolean, label?: string}} [opts]
+   * @returns {Promise<any>} 任务体的返回值；超时返回 `{ ok:false, reason:'timeout' }`
+   */
+  async run(chatKey, task, { timeoutMs = 30_000, skipGap = false, label = '' } = {}) {
+    const key = String(chatKey ?? '') || 'default'
+    // ① 排队：等**上一条**结束（不论成功/失败/超时，见下面的 finally）
+    const prev = this.#chains.get(key) ?? Promise.resolve()
+    let release = () => {}
+    const gate = new Promise((r) => {
+      release = r
+    })
+    const tail = prev.then(() => gate)
+    this.#chains.set(key, tail)
+
+    await prev
+
+    // ② 执行（带预算）。超时**不取消**底层发送（无法取消），
+    //    但**放过链**并如实标记 —— 后续投递不该被一个卡死的请求永久堵住。
+    let timer = null
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ __timeout: true }), Math.max(1, Number(timeoutMs) || 30_000))
+      // ⚠️ **不要 unref()**：unref 后一旦没有别的活，Node 会认为事件循环已空而退出，
+      //    于是 `await run(...)` 变成"永远不 settle"（实测：测试里直接报
+      //    `Warning: Detected unsettled top-level await`）。链的超时定时器必须
+      //    **能撑住事件循环** —— 它正是"链被放过"的唯一途径。
+    })
+    try {
+      const ctx = {
+        check: (text, dedupeKey = null) => this.check(text, dedupeKey),
+        markSent: (text, dedupeKey = null) => this.markSent(text, dedupeKey),
+        skipGap: skipGap === true,
+        sleep: (ms) => new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0))),
+      }
+      const result = await Promise.race([Promise.resolve().then(() => task(ctx)), timeout])
+      if (result && result.__timeout) {
+        // ★ 必须留日志（第 9 条：可以失败，不许安静地失败）
+        this.log(
+          `[send-queue] ⏱️ 投递超时（${timeoutMs}ms，${key}${label ? ` · ${label}` : ''}）：` +
+            '本条记 failed、**不 markSent**（允许重试），并放过链 —— 后续投递不受阻',
+        )
+        return { ok: false, reason: 'timeout' }
+      }
+      return result
+    } finally {
+      if (timer) clearTimeout(timer)
+      // ③ 放过链（无论成功、失败、超时）
+      release()
+      if (this.#chains.get(key) === tail) this.#chains.delete(key)
+    }
+  }
+
+  /** 当前还有几条会话的链没跑完（测试/可观测用）。 */
+  get chainCount() {
+    return this.#chains.size
   }
 
   /**

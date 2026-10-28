@@ -9,14 +9,19 @@
  */
 import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { join, relative, extname, sep } from 'node:path'
+import { join, relative, extname, sep, resolve } from 'node:path'
 import { batchHazardMessage, findBatchParenHazards } from '../src/batch-safety.mjs'
 import { auditPackageRefs } from '../src/package-refs.mjs'
 import { DIRS, PKG_ROOT } from '../src/local.mjs'
 
-const root = process.argv[2]
-if (!root) {
-  console.error('用法：node .dsh-release-check.mjs <staging 目录>')
+// ★ 2026-10-28：**先解析成绝对路径**。
+//   传相对路径时（`node scripts/check-release-package.mjs _release/xxx`）原来会出双重拼接：
+//   `cwd: root` 相对 → 子进程 cwd 变成 `<父cwd>/<root>`，而脚本参数 `join(root, 'src', …)`
+//   也是相对 → 子进程再按自己的 cwd 解析一次 ⇒ 拼成 `<父cwd>/<root>/<root>/src/index.mjs`，
+//   于是 `--ui` 自检以 1 退出，报出**"界面新鲜度会失败"这个假红**（同一个包用绝对路径就通过）。
+const root = resolve(String(process.argv[2] ?? ''))
+if (!process.argv[2]) {
+  console.error('用法：node scripts/check-release-package.mjs <staging 目录>')
   process.exit(2)
 }
 

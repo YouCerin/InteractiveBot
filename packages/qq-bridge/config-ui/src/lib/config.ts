@@ -306,6 +306,11 @@ export const DEMO_CONFIG: Record<string, unknown> = {
     interim: {
       enabled: true,
       afterMs: 8000,
+      // ★ 0.3.3：`pool`（本地话术池，默认）/ `ai`（AI 按上下文自己写）。
+      //   演示数据里也给 `ai.*` 三个键 —— 否则**切到 ai 档时那三个输入框会显示空默认值**，
+      //   看起来像"没配"（真模式下后端会给归一化后的值，只有演示模式靠这里）。
+      mode: 'pool',
+      ai: { timeoutMs: 0, maxPerHour: 120, usePersona: true },
       messages: {
         searching: ['等下，我搜一下', '我查查', '网上找一下，稍等'],
         tooling: ['等下，我弄一下', '稍等，我在跑', '马上，正在处理'],

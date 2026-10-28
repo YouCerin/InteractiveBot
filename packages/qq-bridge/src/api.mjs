@@ -684,11 +684,12 @@ export function createApiHandler(deps) {
 
       // ── 会话同步（给"同步 QQ 对话界面"用）────────────────────────────
       // 数据来自桥接的**内存镜像**：最近若干条往来消息 + 每会话当前状态。
-      // 它是滚动视图，不是归档 —— 长期记忆是**三层**的（见 memory-store.mjs）：
-      // 全局 MEMORY.md（所有聊天）、群聊 memory/groups/<群号>.md（只在该群）、
-      // 个人 memory/people/<QQ>.md（**跟人走**：他的私聊 + 他在群里发言时）。
-      // 这句 note 会原样显示给使用者，所以**不能**写成"长期记忆就是 MEMORY.md"，
-      // 也不能漏掉个人层 —— 说错会让使用者以为记忆丢了一半。
+      // 它是滚动视图，不是归档 —— 长期记忆是**两层**的（见 memory-store.mjs）：
+      // 全局 MEMORY.md（所有聊天）、个人 memory/people/<QQ>.md（**跟人走**：他的私聊 + 他在群里发言时）。
+      // ★★ 0.3.3：**群聊层（`memory/groups/<群号>.md`）已下线** —— 群里说的每一条都落进
+      //    **说这话的那个人**自己那份（使用者原话：「群聊中的对话记忆归于个人」）。
+      //    这句 note 会原样显示给使用者，所以**不能**还写着三层：说错会让使用者去找一个
+      //    已经不存在的文件，也会以为"群里的记忆没了"。
       if (method === 'GET' && path === '/api/conversations') {
         if (typeof getConversations !== 'function') return ok({ conversations: [], count: 0 })
         const list = getConversations() ?? []
@@ -696,10 +697,10 @@ export function createApiHandler(deps) {
           conversations: list,
           count: list.length,
           note:
-            '内存镜像，每会话只保留最近若干条；重启桥接后清空。长期记忆在工作区，分三层：' +
+            '内存镜像，每会话只保留最近若干条；重启桥接后清空。长期记忆在工作区，分两层：' +
             '全局 MEMORY.md（跨会话的约定，所有聊天都读得到）+ ' +
-            '群聊 memory/groups/<群号>.md（只在这个群）+ ' +
-            '个人 memory/people/<QQ号>.md（**跟人走**：他的私聊与他在群里发言时都读得到）。',
+            '个人 memory/people/<QQ号>.md（**跟人走**：他的私聊与他在群里发言时都读得到）。' +
+            '★ 群聊没有单独的档案了 —— 群里说过的事记在**说那句话的人**名下。',
         })
       }
 

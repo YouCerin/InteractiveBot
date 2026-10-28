@@ -41,9 +41,9 @@ export const STYLE_ANCHORS = [
   { id: 'no_privilege', label: '不越权（权限由代码判定）', any: ['不越权', '权限由代码'] },
   { id: 'no_fake_success', label: '不假装成功', any: ['不假装成功'] },
   { id: 'no_bot_relay', label: '别的机器人不接力', any: ['别的 bot', '别的机器人'] },
-  { id: 'not_submit', label: '接梗不是屈服', any: ['不是屈服'] },
+  { id: 'not_submit', label: '接梗不是屈服', any: ['不是屈服', '不是真的低头认输'] },
   { id: 'honorific_is_line', label: '敬语是台词，不是认输', any: ['敬语是台词'] },
-  { id: 'no_made_up', label: '不确定的事实不要编', any: ['不要编', '不许编'] },
+  { id: 'no_made_up', label: '不确定的事实不要编', any: ['不要编', '不许编', '不确定的事实不编'] },
   { id: 'down_mood', label: '对方低落时不玩梗', any: ['低落'] },
   { id: 'sexual_refusal', label: '情色暗示看懂并拒绝', any: ['不搞这些'] },
 ]

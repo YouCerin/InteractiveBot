@@ -179,6 +179,24 @@
 响应 `{ "ok": true, "batch": {…}, "items": 118, "scanned": 620, "skippedMarkers": 0, "warnings": [] }`。
 `limit` ≤ 500，`contextBefore` 0~3；只把机器人自己的发言当 `reply`；拉不到可评的回合 → 400 并说明。
 
+### `GET /api/style` —— 语感候选池的现状（0.3.3 · P2）
+
+响应 `{ "ok": true, "pool": { "ok": true, "file": "…/store/style/candidates.jsonl", "total": 150,
+"seed": 20261018, "generatedAt": "…", "scored": 34, "unjudged": 116 } }`；
+池子不存在时 `pool.ok=false` 且 `why` 说清**该跑哪个命令**（`tools/build-style-corpus.mjs`）。
+★ 读不到时**不回落**到"从语料库现抽"——池子是筛过的，"现抽"与它不是一个东西。
+
+### `POST /api/style/import` —— 把语感候选池变成一个可打分的批次
+
+无请求体。响应 `{ "ok": true, "batch": {…}, "items": 150, "seed": 20261018 }`。
+批次 id 固定为 `语感样本`（重导**覆盖**同一批，不会堆一串同义批次）；
+条目 id = `s:<chatKey>:<sender+正文的哈希>` ⇒ **重导不丢已判的档**。
+`context` 取样本的前 3 条（含机器人自己的行，`isBot:true`）；`reply` = 那条样本；
+另有 `sender` 与 `seq`（池子内序号，只用于显示）。
+
+**三档在这里的语义**（页面有横幅说明，别靠猜）：`good` = 可用 · `ok` = 拿不准（不进画像）·
+`bad` = 不可用。判据是"这条像不像这群体自然的说话方式"，**不是**"它对不对"。
+
 ### `POST /api/import` —— 从粘贴/文件导入
 
 请求 `{ "format": "forward-json" | "text", "text": "…", "batchLabel": "老王发的记录" }`；

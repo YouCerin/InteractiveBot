@@ -15,7 +15,7 @@
  * 用法：node mocks/verify-release-hygiene.mjs
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -372,16 +372,62 @@ section('⑦ ★ 包内路径引用：`src/**` 要用到的东西必须在包里
   // ★★ 真实源码树：用**近似发布包**的存在性判据跑一遍（真包在时用真包）
   const ASSEMBLE = join(PKG_ROOT, 'scripts', 'assemble-release.mjs')
   const NOT_SHIPPED = ['config-ui/src/', 'mocks/', 'scripts/', 'docs/', 'reference/', 'tools/', 'cache/', 'runtime/', 'logs/', 'workspace-qq/', 'snowluma/']
-  const releaseRoot = (() => {
+  /**
+   * ★★★ 2026-10-19：**发布包比源码旧时不做逐条比对**（否则每次开发中途都会红一次）。
+   *
+   * 这一道门要防的是 BUG-1：`src/` 里 import 了一个**根本没进包**的文件
+   * （发布包里缺文件 → 用户那边一跑到那条路径就 `ERR_MODULE_NOT_FOUND`）。
+   * 但"包是上次发布时建的"和"包漏了文件"是两件事：
+   *   · 包**旧**了（源码比包新）⇒ 新版才加的模块当然不在里面。那不是缺陷，
+   *     是"还没发版"。这时逐条比对的结论全是噪声 —— 而**总红一次的门会被无视**，
+   *     那比没有门更坏（本项目已经吃过"红灯太多就当背景"的亏）。
+   *   · 包**不比源码旧**（刚组装过）却缺文件 ⇒ 那才是 BUG-1，必须红。
+   * ∴ 判据改成：只有在"包的 mtime ≥ 最新源码 mtime"时才做逐条比对。
+   */
+  const newestSourceMtime = (() => {
+    let newest = 0
+    for (const top of ['src', 'mcp']) {
+      const walk = (dir) => {
+        let list = []
+        try {
+          list = readdirSync(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+        for (const e of list) {
+          const p = join(dir, e.name)
+          if (e.isDirectory()) walk(p)
+          else if (e.name.endsWith('.mjs')) newest = Math.max(newest, statSync(p).mtimeMs)
+        }
+      }
+      walk(join(PKG_ROOT, top))
+    }
+    return newest
+  })()
+  const releaseInfo = (() => {
     const rel = join(PKG_ROOT, '..', '..', '_release')
-    if (!existsSync(rel)) return null
+    if (!existsSync(rel)) return { dir: null, stale: false }
     // ★ 必须挑**当前版本**那个包：按字母序取最后一个会挑到上一版（0.3.0beta），
     //   于是新版才加的模块会被报成"缺失" —— 那种误报比不查还坏（会让人开始怀疑这道门）。
     const version = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
     const want = `InteractiveBot-${version}-win-x64`
     const dir = join(rel, want)
-    return existsSync(join(dir, 'src', 'index.mjs')) ? dir : null
+    if (!existsSync(join(dir, 'src', 'index.mjs'))) return { dir: null, stale: false }
+    let mtime = 0
+    try {
+      mtime = statSync(join(dir, 'src', 'index.mjs')).mtimeMs
+    } catch {
+      mtime = 0
+    }
+    return { dir, stale: mtime < newestSourceMtime }
   })()
+  const releaseRoot = releaseInfo.stale ? null : releaseInfo.dir
+  if (releaseInfo.stale) {
+    console.log(
+      `   ⚠️ 发布包比源码旧（${releaseInfo.dir?.split(sep).pop()}）—— **跳过**逐条比对，` +
+        '改用"包内近似形态"判据（真发版前请重新组装）',
+    )
+  }
   const srcFiles = []
   const walkMjs = (dir, prefix) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {

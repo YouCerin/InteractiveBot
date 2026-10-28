@@ -389,6 +389,129 @@ export function PaceTab({
             />
           </FieldRow>
 
+          {/* ★★★ 0.3.3：这句话**由谁写**（CONFIG-UI.md 2.4 的 `humanize.interim.mode`）。
+              ★ 两选一而不是一个开关：它是同一个问题的两个答案 —— 与 `wake.policy`、
+                `memory.affect.prewake` 同一条理由（两个独立开关会出现"两个都开、互相打架"）。 */}
+          <FieldRow
+            label="这句话由谁写"
+            hint="「本地话术池」零成本零延迟、行为最可预测；「AI 按上下文自己写」能接上刚才的话题，但每个长回合多一次模型调用。"
+          >
+            <div className="flex flex-wrap gap-2">
+              {[
+                {
+                  v: 'pool',
+                  label: '本地话术池（默认）',
+                  desc: '按四类挑一句，不花钱。',
+                },
+                {
+                  v: 'ai',
+                  label: 'AI 按上下文自己写',
+                  desc: '能接话，也可能自己决定不说。',
+                },
+              ].map((o) => {
+                const active = getStr(cfg, 'humanize.interim.mode', 'pool') === o.v
+                return (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => patch('humanize.interim.mode', o.v)}
+                    className={cn(
+                      'rounded-md border px-3 py-1.5 text-left text-xs transition-colors',
+                      active ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'hover:bg-muted/50',
+                    )}
+                  >
+                    <span className="font-medium">{o.label}</span>
+                    <span className="ml-1 text-muted-foreground">{o.desc}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </FieldRow>
+
+          {/* ★ 选 `ai` 时**就地写明代价与兜底**（照 CONFIG-UI.md 2.4 那段）：
+              不写清楚就会出现"配了却看起来没效果"这种最难查的反馈。 */}
+          {getStr(cfg, 'humanize.interim.mode', 'pool') === 'ai' && (
+            <InlineNote level="warn">
+              它会<strong>每个长回合多花一次模型调用</strong>（要花钱），并在回合一开始就
+              <strong>并行</strong>生成 —— 到「超过多久先应一声」那一刻还没生成好，就
+              <strong>自动退回上面那四组话术</strong>（所以那些话术<strong>仍然有用，别删</strong>）。
+              <br />
+              它只看<strong>当前这句 + 最近几条</strong>，<strong>不看</strong>这一轮在做什么 ——
+              所以提示词里明令它<strong>不许说「我在搜」这类具体动作</strong>（并行时我们还不知道）。
+              它也可以<strong>决定这一轮不说话</strong>（对方在认真求助或情绪低落时，静默更好）。
+              <br />
+              通路<strong>复用「唤醒语义判定」那把 API Key</strong>：没配的话会走一次性进程（3~5 秒），
+              8 秒的等待下它<strong>常常来不及</strong>，于是多数回合会退回话术池。
+            </InlineNote>
+          )}
+          {getStr(cfg, 'humanize.interim.mode', 'pool') === 'ai' && (
+            <div className="grid gap-3 lg:grid-cols-2">
+              <FieldRow
+                label="生成超时"
+                hint="0 = 自动。必须赶在「发出那一刻」之前回来，配得比等待还大只会让这次白花钱。"
+                className="py-0 sm:grid-cols-1"
+              >
+                <NumInput
+                  value={getNum(cfg, 'humanize.interim.ai.timeoutMs', 0)}
+                  onChange={(n) => patch('humanize.interim.ai.timeoutMs', Math.max(0, n))}
+                  unit="毫秒"
+                  min={0}
+                />
+                {/* ★★ 把"自动"到底是多少**显示出来**。
+                    理由是一条真缺陷：归一化曾把 `0` 夹成 200ms（`Number(0)` 是有限数），
+                    于是每次生成都在 200 毫秒被掐断、垫场白永远退回话术池 ——
+                    而使用者从界面上完全看不出"它现在到底用多少毫秒"。
+                    公式必须与 `bridge.mjs` 的 `#ensureInterimAi` 保持一致：
+                      clamp(afterMs × 0.6, 1500, 2500) */}
+                {(() => {
+                  const afterMs = getNum(cfg, 'humanize.interim.afterMs', 8000)
+                  const configured = getNum(cfg, 'humanize.interim.ai.timeoutMs', 0)
+                  const auto = Math.max(1500, Math.min(2500, Math.floor(afterMs * 0.6)))
+                  const effective = configured > 0 ? configured : auto
+                  const tooTight = effective >= afterMs
+                  const tooShort = configured > 0 && effective < 1200
+                  return (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      实际会用 <strong>{effective} 毫秒</strong>
+                      {configured > 0 ? '（你填的值）' : `（自动 = 等待 ${afterMs}ms 的 60%，夹在 1500~2500 之间）`}
+                      {tooTight && (
+                        <span className="ml-1 text-amber-700">
+                          ⚠️ 不小于等待时间（{afterMs}ms）——生成**永远赶不上**，会每次都用话术池、还白付一次调用。
+                        </span>
+                      )}
+                      {!tooTight && tooShort && (
+                        <span className="ml-1 text-amber-700">
+                          ⚠️ 太短：一次直连调用通常就要 1 秒左右，这里会几乎每次都超时（表现成"配了 AI 但没效果"）。
+                        </span>
+                      )}
+                    </div>
+                  )
+                })()}
+              </FieldRow>
+              <FieldRow
+                label="每小时最多几次"
+                hint="与「唤醒语义判定」各算各的额度，不挤占它。超了就直接用话术池。"
+                className="py-0 sm:grid-cols-1"
+              >
+                <NumInput
+                  value={getNum(cfg, 'humanize.interim.ai.maxPerHour', 120)}
+                  onChange={(n) => patch('humanize.interim.ai.maxPerHour', Math.max(0, n))}
+                  min={0}
+                />
+              </FieldRow>
+              <FieldRow
+                label="带上说话方式"
+                hint="把人设里「说话方式」那一小段（最多 600 字）交给它。不带的话垫场白语气会跟正文变成两套。"
+                className="py-0 sm:grid-cols-1"
+              >
+                <Switch
+                  checked={getBool(cfg, 'humanize.interim.ai.usePersona', true)}
+                  onCheckedChange={(v) => patch('humanize.interim.ai.usePersona', v)}
+                />
+              </FieldRow>
+            </div>
+          )}
+
           {/* 键名迁移提示：web/working 是旧名（仍能生效，但曾静默不生效过一次），界面按新名展示 */}
           {(getStrArr(cfg, 'humanize.interim.messages.web', []).length > 0 ||
             getStrArr(cfg, 'humanize.interim.messages.working', []).length > 0) && (

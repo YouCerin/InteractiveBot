@@ -268,7 +268,7 @@ async function main() {
   )
   const rawPrompt = String(probeRes?.result?.text ?? '')
   // ★ 记忆约定必须真的被拼进提示词。
-  // 这条断言与"memory.mjs 的单元测试"是两个层次：那边验的是指令文本本身，
+  // 这条断言与"memory-store 的单元测试"是两个层次：那边验的是指令文本本身，
   // 这里验的是"桥接真的把它接上了"。少了这条，接线断了也不会有人发现。
   check(
     '★ 跨重启记忆约定真的被拼进了提示词',

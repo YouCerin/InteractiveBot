@@ -35,7 +35,7 @@
  * 往固定前缀里塞多变内容等于把最便宜的那部分token变成最贵的。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveMemoryPath } from './memory-files.mjs'
 import { screenForStore, logPrivacyBlock } from './privacy.mjs'
@@ -48,18 +48,29 @@ import { readUsage, applyRecencyOrder, recordWrite } from './memory-usage.mjs'
 import { readPersonStats, renderPersonStatsLine, renderPersonHabitsLine } from './people-stats.mjs'
 // ★ 机器人自述（2026-10-01 用户要求：简化 + 降权）：写入侧拦、读取侧压成一行标签。
 import { isBotSelfEntry, compactSelfEntry } from './self-entries.mjs'
-// ★ 承诺的"多久以前说的"：注入时现算（条目里存的是绝对日期，见 promises.mjs）。
-import { promiseAgeText } from './promises.mjs'
 
 /** 各档作用域。 */
 export const SCOPE = {
   /**
-   * 本会话层：群聊写**本群**；私聊写**这个人**（私聊里会话即本人，与 `PERSON` 同落点）。
+   * ★★ 0.3.3：`fact` 这个**旧档位**保留（模型可能还写着它、老日志/老提示词里也有），
+   *  但**语义改成"写个人档"** —— 落点就是 `SCOPE.PERSON` 那一份。
+   *
+   * 为什么不再"只跟这个会话有关"：使用者 2026-10-02 的决定是
+   * **「不再对群聊信息进行记忆，群聊中的对话记忆归于个人」** ——
+   * 群聊层（`memory/groups/<群号>.md`）整层下线，群里的对话一律落进**说话人自己那份**。
+   * ⚠️ 这也意味着**旧的"串场"约束失效了**（"只有本群才知道的事别写进个人层"）——
+   *   现在没有群层可写，群规/群内梗只能进个人档。那条约束已从提示词里删掉。
    */
   FACT: 'fact',
-  /** 群内黑话（只写本群）。 */
-  SLANG: 'slang',
-  /** ★ 全局记忆：对所有聊天生效（私聊 + 每个群）。 */
+  /** ★ 全局记忆：对所有聊天生效（私聊 + 每个群）。
+   *
+   * ⚠️ 这里踩过一次设计错位：有一版把 `MEMORY.md` 当成"管理员指令档"占用了，
+   *   于是"全局记忆"跑到 `facts-global.md` 上，而 `MEMORY.md` 只在管理员私聊里注入。
+   *   用户明确的目标结构是**全局 + 每会话**两层，而 `MEMORY.md` 是它原本的全局记忆文件
+   *   （界面上的记忆页签也一直显示它）。所以现在：
+   *     `MEMORY.md`            = 全局记忆（人人可读、任何人可提议写入）
+   *     `memory/directives.md` = 行为指令（管理员私聊专属写入，跨群生效）—— 单一职责
+   */
   GLOBAL: 'global',
   /**
    * ★★ 个人层：**关于某个人本身**的事，**跟人走** ——
@@ -68,6 +79,8 @@ export const SCOPE = {
    * ⚠️ 归属**由代码裁定**：模型不能指定是谁（它拿不到 QQ 号）。落点永远是
    *   **本轮真实核实过的发言人**。要写"关于第三方"的条目必须先把发言人列入
    *   编号清单（`#1`/`#2`），那是二期的设计（见 docs/0.2.9-per-person-memory-plan.md §3.3）。
+   *
+   * ★ 0.3.3 起它也是**群聊记忆的唯一落点**（群聊层已下线）。
    */
   PERSON: 'person',
   /** 行为指令：管理员私聊下达，跨群生效。 */
@@ -84,7 +97,9 @@ const MARK_BEGIN = '<<<MEMORY'
 const MARK_END = '>>>'
 const SCOPE_WORDS = {
   fact: SCOPE.FACT,
-  slang: SCOPE.SLANG,
+  // ★ 0.3.3：`slang`（黑话）**档位已下线**，但模型可能还写着它 —— 当 `fact` 的别名收下，
+  //   落盘同样是个人档。**不再有** `SCOPE.SLANG` 这个独立档位（留着它就是留一个没人读的落点）。
+  slang: SCOPE.FACT,
   global: SCOPE.GLOBAL,
   directive: SCOPE.DIRECTIVE,
   // ★ L3 个人层：关于**正在跟你说话的这个人**的事（跟人走）。见 `SCOPE.PERSON` 的注释。
@@ -205,46 +220,42 @@ export const MEMORY_FILE_HEADER = '# 记忆（桥接维护，勿手改）'
 const SEPARATOR_RE = /^(?:-{3,}|\*{3,}|_{3,}|={3,})$/
 
 /**
- * 目录与文件名约定 —— **三层：全局 / 群聊 / 个人**。
+ * 目录与文件名约定 —— **两层：全局 / 个人**（0.3.3 起；此前是三层）。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 为什么是这三层（分层的判据是"这条事实**在哪儿成立**"）
+ * 为什么是这两层（分层的判据是"这条事实**在哪儿成立**"）
  * ══════════════════════════════════════════════════════════════════════════
  *   L1 全局  `MEMORY.md`                   对**谁、在哪儿**都成立 → 所有聊天都注入
- *   L2 群聊  `memory/groups/<群号>.md`      只在**某一个群**成立   → 只在该群注入
- *   L3 个人  `memory/people/<QQ>.md`        关于**某个人**成立     → **跟人走**：
- *           该人的私聊里注入；他在群里发言时，只给他自己那一份注入
+ *   L2 个人  `memory/people/<QQ>.md`        关于**某个人**成立     → **跟人走**：
+ *           该人的私聊里注入；他在任何群里发言时，只给他自己那一份注入
  *
- * ★ 这三层取代了原来的 `memory/private-<QQ>.md` + `memory/group-<群号>.md`：
- *   旧布局把"关于这个人"的事关在**私聊这一个会话**里 —— 同一个人在群里说话时，
- *   机器人对他一无所知（而那正是最需要认识他的场合）。现在"关于这个人"是
- *   一等公民：**跟人走，不跟会话走**。
+ * ★★ 0.3.3（使用者 2026-10-02）：**群聊层整层下线**。原话是
+ *   「不再对群聊信息进行记忆，群聊中的对话记忆归于个人」。
+ *   于是 `memory/groups/<群号>.md` 与 `-slang.md` **不再被写、也不再被注入**，
+ *   已有的那些会在启动时归档到 `memory/.migrated/groups/`（`retireGroupLayers()`）。
  *
- * ★ 三层的**写入语义**（提示词里教给模型的也是这三句）：
- *   · 在哪儿、对谁都成立 → 全局
- *   · 只跟某个群有关（群规、群内梗、群里发生的事）→ 群聊层
- *   · 关于某个人本身（偏好、习惯、在做的事、怎么对待他）→ 个人层
- *   ⚠️ 这条分工不是排版洁癖：**个人层会跟着人走进别的群**。所以"只有本群才知道的
- *   事"必须留在群聊层，写进个人层就等于把它带到别的群去（串场）。
+ *   为什么不能留着"群层 + 个人层"两层并存（那也是一种做法）：
+ *   一条在群里说的话到底进哪个文件，**模型判不准**（它连群号都拿不到全貌），
+ *   而判错的表现是**静默的** —— 写进群层的那些，这个人换个群就再也想不起来；
+ *   写进个人层的那些，又会被带到不该带的场合。合成一份之后这个判断消失了。
+ *   ★ 代价如实记：**群规、群内梗这类"只在这个群成立"的事现在只能进个人档**，
+ *     也就是他带着这些印象去别的群（0.2.9 的 D21"串场"因此不再被结构挡住，
+ *     只能靠提示词里那句"别把某群的事当成别处也成立"）。使用者知情并选择了这个取舍。
  *
  * ⚠️ 私聊里**没有**独立的会话层：私聊这个会话就是这个人，
  *   所以 `fact` 与 `person` 在私聊里落到**同一份**个人档（少一层、不重复注入）。
  */
 const FILE = {
-  /**
-   * ★ L1 全局记忆：**对所有聊天生效**（私聊 + 每个群）。
-   *
-   * ⚠️ 这里踩过一次设计错位：有一版把 `MEMORY.md` 当成"管理员指令档"占用了，
-   *   于是"全局记忆"跑到 `facts-global.md` 上，而 `MEMORY.md` 只在管理员私聊里注入。
-   *   用户明确的目标结构是**全局 + 每会话**两层，而 `MEMORY.md` 是它原本的全局记忆文件
-   *   （界面上的记忆页签也一直显示它）。所以现在：
-   *     `MEMORY.md`            = 全局记忆（人人可读、任何人可提议写入）
-   *     `memory/directives.md` = 行为指令（管理员私聊专属写入，跨群生效）—— 单一职责
-   */
+  /** L1 全局记忆（对所有聊天生效）。 */
   global: 'MEMORY.md',
-  /** L2 群聊层目录：一个群一份（含 `-slang.md`）。 */
+  /**
+   * ★ 已下线的群聊层目录（0.3.3）。**保留这个常量**是因为三处还需要它：
+   *   ① 归档旧文件时要按这个名字找；② 体检/统计要能认出"这是历史群档"；
+   *   ③ 测试里那份夹具（`verify-memory-layers`）仍按它构造历史记录。
+   *   ⚠️ **没有任何代码再往这里写**，注入侧也不再读它。
+   */
   groupsDir: 'memory/groups',
-  /** L3 个人层目录：一个人一份。 */
+  /** L2 个人层目录：一个人一份。 */
   peopleDir: 'memory/people',
   /**
    * 行为指令（跨群生效，只有管理员私聊能写）。单独一个文件，避免和全局记忆混在一起。
@@ -302,27 +313,42 @@ export function memoryLayerOf(rel) {
 }
 
 /**
- * 某次对话的**读写落点**（三层布局的**唯一口径**）。
+ * 某次对话的**读写落点**（记忆布局的**唯一口径**）。
  *
  * ★ 为什么"读哪些"与"写哪里"必须同一个函数产出：它们分头写迟早分叉，
  *   而分叉的表现是**最坏的那种** —— 写进去了、下一轮却不注入（等于没记）。
  *
+ * ★★ 0.3.3：**群聊层下线**（见 `FILE` 的说明）。所以：
+ *   · 群里**不再有** `session` / `slang` 这两个落点（`null`，写入侧走不到）；
+ *   · `factTarget` 与 `personTarget` 在群里**都是发言人自己那份** ——
+ *     "群聊记忆归于个人"就是这一行；
+ *   · 私聊不变（会话即本人）。
+ *
  * @param {{kind: 'private'|'group', peerId: string, speakerId?: string|null}} opts
  *   `peerId` = 消息发往哪里（群=群号、私聊=对方号）；
  *   `speakerId` = **这一轮是谁在说话**（群里才有区别）。
+ * @returns {{session: null|string, slang: null|string, person: string|null,
+ *            factTarget: string|null, personTarget: string|null}}
+ *   ⚠️ `session` / `slang` **恒为 null**：留着这两个键是为了让调用方与测试少改一处形状，
+ *   而不是"还有群层"。任何非 null 的群层落点都意味着这一版改漏了。
  */
 export function layoutFor({ kind, peerId, speakerId = null }) {
   const peer = String(peerId ?? '').trim()
-  // 群里没有发言人信息时**不给个人层**（宁可不注入，也不猜是谁）
-  const speaker = String(speakerId ?? peer ?? '').trim()
   if (kind === 'group') {
+    // ★★ 群里**必须真有发言人**才给个人落点 —— 拿不到就 `null`：
+    //   宁可"这一轮不给他写/不给他注入"，也**不能**拿群号兜底。
+    //   兜底的后果是**静默写错人**：`memory/people/<群号>.md` 是一份根本不存在的"人"，
+    //   而下一轮同一个人来说话时读的却是他真正那份 —— 那条记忆从此再也看不到，
+    //   而且全程不报错。（这一条是 0.3.3 改群聊层时被我改坏又改回来的，别再去掉。）
+    const speaker = String(speakerId ?? '').trim()
+    const person = speaker ? personMemoryRel(speaker) : null
     return {
-      session: groupMemoryRel(peer),
-      slang: groupSlangRel(peer),
-      person: personMemoryRel(speaker),
-      /** 写入落点 */
-      factTarget: groupMemoryRel(peer),
-      personTarget: personMemoryRel(speaker),
+      session: null,
+      slang: null,
+      person,
+      /** 写入落点：群里的 `fact` 与 `person` 现在都落**发言人自己那份** */
+      factTarget: person,
+      personTarget: person,
     }
   }
   // 私聊：会话层与个人层是**同一份**（少一层，也不会重复注入）
@@ -363,17 +389,19 @@ function legacyPathOf(rel) {
  *     代价是它**绝不能含任何人的私事**。
  *     ⚠️ 这里曾经写着"群聊拿不到全局"（沿用旧 `memory.mjs` 的说法），而代码**一直**是
  *     两种会话都注入 —— 文档与实现相反，界面据此写出过"群里看不到"这种错话。
- *     2026-09-30 核对代码与真机提示词后按实现改正（详见 `CONFIG-UI.md`「记忆分三层」）。
- *   · **L2 群聊层**按 `groupId` 选，所以群与群之间不串。
- *   · **L3 个人层跟人走**：只注入**当前发言人**那一份 —— 群里别人看不到它，
- *     他在别的群说话时看得到（这正是"个人记忆跟人走"的含义）。
+ *     2026-09-30 核对代码与真机提示词后按实现改正（详见 `CONFIG-UI.md`「记忆」那一节）。
+ *   · **L2 群聊层已下线**（0.3.3）：群里说的话现在只落**发言人自己那份**，
+ *     注入侧也**没有**"本群记忆 / 群内黑话"这两段了（见 `FILE` 与 `layoutFor`）。
+ *   · **个人层跟人走**：只注入**当前发言人**那一份 —— 群里别人看不到它，
+ *     他在别的群说话时看得到（这正是"个人记忆跟人走"的含义；群聊记忆归于个人之后，
+ *     群里说的事也走这一条）。
  *   · 指令档对所有会话都可见 —— 它本来就是跨群生效的东西，且只能由管理员写入。
  *
  * @param {{kind: 'private'|'group', peerId: string, speakerId?: string|null, chatName?: string}} opts
  *   `speakerId` = **这一轮是谁在说话**（群里才有区别）。
- *   `chatName` = 群名（协议端核实过的）—— 只用来把那一行的标签写成
- *   「本群记忆·摸鱼群（只在这个群）」而不是光秃秃的「本群记忆」。
- *   查不到就留空，标签退回不带名字的写法（**不编名字**）。
+ *   `chatName` = 群名（协议端核实过的）。★ 0.3.3 起**注入侧不再用它**
+ *   （唯一用它的那行「本群记忆·群名」随群聊层一起下线）；保留参数是因为
+ *   调用方仍在传、而且**写文件头**那条路（`appendEntry`）还要它。
  * @returns {{ text: string, files: string[], counts: Record<string, number> }}
  */
 export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null, chatName = '', log = () => {} }) {
@@ -385,16 +413,12 @@ export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null,
     // ① L1 全局层：**对所有人都生效**，所以两种会话都注入。
     //    第三项是"层"，只用来做**一件特殊的事**：给个人层补一行行为统计（见下）。
     ['全局记忆（对所有聊天都生效）', FILE.global, 'global'],
-    // ② L2 群聊层：**只在这个群**。
-    //
-    // ★★ 2026-10-01 用户要求：群聊记忆的开头**要像个人记忆一样带上群名** ——
-    //   个人记忆那一行写的是「关于正在跟你说话的这个人」，而群那一行只有
-    //   「本群记忆」，模型得靠来源标注里的群号才知道是哪个群。带上名字之后，
-    //   它一眼就知道"这是摸鱼群的约定"，不必去比对号码。
-    //   ⚠️ 查不到群名时**退回不带名字的写法**（宁可少一个名字，也不要编）。
-    [`本群记忆${groupLabelSuffix(chatName)}（只在这个群）`, L.session, 'group'],
-    ['群内黑话（只在这个群）', L.slang, 'group'],
-    // ③ L3 个人层：**跟人走**。私聊里就是他本人那份；群里只给当前发言人那份。
+    // ② ★★ 0.3.3：**群聊层与黑话层不再注入**（使用者：群聊记忆归于个人）。
+    //    这里刻意**连"本群记忆"那一行都不出现** —— 空段落比"写着一个永远空的标签"诚实。
+    //    ⚠️ 历史文件仍在盘上（归档到 `memory/.migrated/groups/`，见 `retireGroupLayers`），
+    //    但它们**一个字都不会进上下文**，包括下面那段"旧布局回退读"也**不覆盖它们**
+    //    （回退读只为"升级即失忆"服务，而这一层是**故意**不再读的 —— 不能靠回退把它救回来）。
+    // ③ 个人层：**跟人走**。私聊里就是他本人那份；群里只给当前发言人那份。
     ['关于正在跟你说话的这个人（跟人走，别人看不到）', L.person, 'person'],
     // ④ 管理员指令（跨群生效，只有管理员私聊能写）。
     ['管理员指令（跨群生效）', FILE.directives, 'directive'],
@@ -406,10 +430,16 @@ export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null,
   //   为什么不能省：迁移是"一次性动作"，而注入每轮都在跑 —— 迁移没跑成而这里
   //   又只认新路径，表现就是"升级后记忆突然全没了"，**且不报错**（最坏的一种）。
   //   回退时标签会多一个「·旧布局」，体检里一眼看得出来该去修迁移。
+  //
+  // ★★ 0.3.3：回退读**只管个人档**（`memory/private-<QQ>.md`）。
+  //   群聊层的旧文件（`memory/group-<群号>.md`、`memory/groups/*.md`）**刻意不在回退范围**——
+  //   那是这一版**有意不再读**的一层，拿回退去救它就等于把"群聊记忆"偷偷带回来。
   const resolved = wanted.map(([label, rel, layer]) => {
-    const legacy = legacyPathOf(rel)
-    if (legacy && !existsSync(join(root, rel)) && existsSync(join(root, legacy))) {
-      return [`${label}·旧布局`, legacy, layer]
+    if (layer === 'person') {
+      const legacy = legacyPathOf(rel)
+      if (legacy && !existsSync(join(root, rel)) && existsSync(join(root, legacy))) {
+        return [`${label}·旧布局`, legacy, layer]
+      }
     }
     return [label, rel, layer]
   })
@@ -456,15 +486,10 @@ export function readMemoryForPrompt({ workspace, kind, peerId, speakerId = null,
     //   已经落盘的那些不再逐字注入（真机那条 40+ 字的自述会占掉个人档的注入预算，
     //   而它讲的是"我这边如何"，不是关于对方的任何事实）。
     //   ⚠️ 只对**个人层**做：别的层里出现"我这边"多半是引用别人的话。
-    const rendered =
-      layer === 'person'
-        ? entries.map((e) => (isBotSelfEntry(e).hit ? compactSelfEntry(e) : e))
-        : // ── ★★ 承诺补一句"多久以前说的"（2026-10-01 用户要求）──────────────
-          //   条目里存的是**绝对日期**（不会过期），"几天前"只有注入这一刻算才准。
-          //   用户原话：真人式的表现不是背出来，而是**到期前的自然提醒**，
-          //   或者事后顺势问一句"上次说的那个弄了吗" —— 而"上周说的 / 上个月说的"
-          //   对"该不该主动提"是完全不同的判断。
-          entries.map((e) => (e.startsWith('（我许的诺）') || e.startsWith('（对方许的诺）') ? `${e}${promiseAgeText(e)}` : e))
+    // ★ 0.3.3：承诺通道已删除 —— 原来这里给「（我许的诺）/（对方许的诺）」条目
+    //   补一句"多久以前说的"（`promiseAgeText`）。功能删掉之后那些前缀不会再产生，
+    //   这段也就没有消费方了，一并去掉（`promises.mjs` 整份已删）。
+    const rendered = entries.map((e) => (isBotSelfEntry(e).hit ? compactSelfEntry(e) : e))
     const shown = rendered.slice(0, limit)
     const more = entries.length - shown.length
     const text =
@@ -692,30 +717,7 @@ function readEntryLines(abs, { log = null, rel = abs } = {}) {
 }
 
 /**
- * 把一条记忆写进文件（追加 + 去重）。
- *
- * 为什么**只限条数、不限字数**：截断句子会破坏语义 ——
- * "以后在群里别提那件事" 被截成 "以后在群里别提" 意思就反了。
- * 到上限时整条**拒绝**并如实回报，让模型/使用者知道"这条没记上"。
- */
-/**
- * 群名 → 标签后缀（`·摸鱼群`）。查不到就空串（**不编名字**）。
- * 与 `memoryFileTitle` 同一条规矩，只是渲染位置不同（一个是文件头、一个是注入标签）。
- */
-function groupLabelSuffix(chatName) {
-  const n = String(chatName ?? '').trim()
-  return n ? `·${n}` : ''
-}
-
-/**
  * 写文件头（只在文件**真的不存在或还是空的**时候写）。
- *
- * ══════════════════════════════════════════════════════════════════════════
- * ★★ 2026-10-01 用户要求：群聊记忆开头要像个人记忆一样**带上群名**
- * ══════════════════════════════════════════════════════════════════════════
- * 个人档的文件头本来就带名字（`# 忘忧（QQ 100000001）`），群聊那份却只有
- * 一句「# 记忆（桥接维护，勿手改）」—— 打开 `memory/groups/700000001.md`
- * 只看得出一个号码，认不出是哪个群（与"会话列表只显示裸号码"是同一类问题）。
  *
  * ══════════════════════════════════════════════════════════════════════════
  * 顺手修掉一个真缺陷：**文件头会被写两遍**
@@ -724,6 +726,9 @@ function groupLabelSuffix(chatName) {
  * 不包含标题行。于是"文件只有头、还没有任何条目"时再写一次，就**又追加一个头**。
  * 真机上 `memory/groups/700000001.md` 正是这样（前两行一模一样）。
  * 现在判据改成**看文件本身**：不存在、或去掉空白后为空，才写头。
+ *
+ * ★ 0.3.3：`chatName` 现在**只有个人档用得上**（偏好页那一行会带上他常待的群名）；
+ *   群聊层已下线 —— 曾经专为它写的"群名后缀"渲染（`groupLabelSuffix`）随之下线。
  *
  * @returns {string} 要追加的内容（没有头要写时返回空串）
  */
@@ -760,64 +765,50 @@ export function memoryFileTitle({ rel = '', chatName = '' } = {}) {
 const TITLE_LINE_RE = /^#\s*记忆[·（(]/
 
 /**
- * 把群记忆的标题**改成当前该有的样子**（可带群名），并顺手清掉**重复的标题行**。
+ * 「是谁说的/记给谁的」前缀（2026-10-02 用户要求：**记录记忆时带上所记的人的 ID**）。
  *
- * ══════════════════════════════════════════════════════════════════════════
- * 为什么自愈而不是手工修一次性
- * ══════════════════════════════════════════════════════════════════════════
- *   · 老文件的标题只有一个号码，而群名要**协议端查得到**才知道 —— 让它在
- *     "这个群下次说话"时自动补上，比手工猜一个名字可靠；
- *   · 重复标题是**真缺陷留下的痕迹**（旧判据 `entries.length === 0` 会在
- *     "只有头、没有条目"时再写一个头）。自愈能在下一次写入时把它修掉，
- *     而已经被写坏的那份不用等人工处理。
+ * 格式 `（昵称 QQ 号码）`；**查不到昵称就只写号码** `（QQ 号码）` ——
+ * 与"发言人昵称查不到就不编名字"同一条规矩（桥接那边核实不到时 `#nicknameFor` 返回空）。
  *
- * ⚠️ 三条纪律：
- *   ① **只在真的需要改时**才写盘（否则每轮都动文件、还刷快照）；
- *   ② 只动**标题行**：正文、条目、分节一个字符都不碰；
- *   ③ 写盘后**刷新快照**，否则下一次读记忆会被篡改检测当成"绕过桥接的改动"回滚。
- *
- * @returns {{changed: boolean, removed?: number, title?: string, why?: string}}
+ * ⚠️ 为什么写成"人话 + 号码"而不是只写号码：号码是**稳定键**（昵称会变、会有重名），
+ *    而昵称是打开文件时唯一能让人认出"这是谁"的东西。两者都要。
  */
-export function repairGroupMemoryTitle({ workspace, rel, chatName = '', log = () => {} } = {}) {
-  const resolved = resolveMemoryPath(workspace, rel)
-  if (!resolved.ok) return { changed: false, why: resolved.error }
-  const abs = resolved.abs
-  try {
-    if (!existsSync(abs)) return { changed: false, why: '文件不存在' }
-    const raw = readFileSync(abs, 'utf8')
-    const lines = raw.split('\n')
-    const wanted = memoryFileTitle({ rel, chatName })
-    const isTitle = (l) => TITLE_LINE_RE.test(l.trim())
-    const titleIdx = lines.map((l, i) => (isTitle(l) ? i : -1)).filter((i) => i >= 0)
-    if (titleIdx.length === 0) return { changed: false, why: '没有标题行（不动它）' }
-
-    const firstBody = lines.findIndex((l, i) => i > titleIdx[0] && l.trim() !== '')
-    const alreadyOk = titleIdx.length === 1 && lines[titleIdx[0]] === wanted
-    if (alreadyOk) return { changed: false, why: '标题已经是对的' }
-
-    // 保留第一条标题行之前的内容，把**所有**标题行收成一条，其余内容原样
-    const head = lines.slice(0, titleIdx[0])
-    const body = lines.slice(titleIdx[0]).filter((l) => !isTitle(l))
-    // 去掉标题与正文之间的多余空行，重新拼一份干净的
-    while (body.length > 0 && body[0].trim() === '') body.shift()
-    const next = [...head, wanted, ...(body.length > 0 ? ['', ...body] : [''])]
-    const text = next.join('\n')
-    if (text === raw) return { changed: false, why: '算下来没有变化' }
-
-    writeFileSync(abs, text, 'utf8')
-    saveSnapshot({ workspace, rel })
-    log(
-      `[memory] 群记忆标题已更新：${wanted}` +
-        (titleIdx.length > 1 ? `（顺手清掉 ${titleIdx.length - 1} 行重复标题）` : ''),
-    )
-    return { changed: true, removed: titleIdx.length - 1, title: wanted }
-  } catch (error) {
-    // 自愈失败**绝不能**影响主流程，但要留证据
-    log(`⚠️ [memory] 群记忆标题自愈失败（不影响这一轮）：${error?.message ?? error}`)
-    return { changed: false, why: error?.message ?? String(error) }
-  }
+export function speakerPrefix(senderId, speakerName = '') {
+  const id = String(senderId ?? '').trim()
+  if (!id) return ''
+  const name = String(speakerName ?? '').trim()
+  // ⚠️ 昵称里可能出现 `）`／换行之类的字符（它是从协议端来的、不一定是干净文本）：
+  //    统一压成单行并去掉会破坏"这一行"结构的字符，否则一条记忆会被拆成两行
+  //    （而记忆文件是**一行一条**的格式，拆行等于把这条记忆写坏）。
+  const safe = name.replace(/[\r\n]+/g, ' ').replace(/[（）()]/g, '').trim()
+  return safe ? `（${safe} QQ ${id}）` : `（QQ ${id}）`
 }
 
+/** 从一行里认出身份前缀（`（…QQ 号码）`），用于"同一句话"的比较。 */
+const SPEAKER_PREFIX_AT_START = /^（[^（）]*QQ\s*\d{5,15}）/
+
+/** 去掉一行开头的身份前缀（没有就原样返回）。 */
+export function stripSpeakerPrefix(entry) {
+  return String(entry ?? '').replace(SPEAKER_PREFIX_AT_START, '')
+}
+
+/**
+ * 应用一批记忆标记。
+ *
+ * @param {object} opts
+ * @param {string} opts.workspace
+ * @param {'private'|'group'} opts.kind
+ * @param {string|number} opts.peerId
+ * @param {string|number} opts.senderId
+ * @param {'admin'|'user'} opts.tier  发起人的真实权限（由 roster 判定）
+ * @param {string} [opts.chatName] 群名（协议端核实过的）。**只用于写文件头**：
+ *   新建那份群记忆时把头写成「# 记忆·摸鱼群（群 700000001）…」而不是一个裸号码。
+ *   查不到就留空 —— 那时只写号码，**不编名字**（与"昵称查不到就不编"同一条规矩）。
+ * @param {string} [opts.speakerName] 这一轮发言人的昵称（协议端核实过的）。
+ *   **只用于给记忆条目加身份前缀**（见 `speakerPrefix`）：查不到就只写号码。
+ * @param {{scope: string, text: string}[]} opts.items
+ * @returns {{applied: object[], ignored: object[], wroteFiles: string[]}}
+ */
 /**
  * 往一份记忆文件追加一条（含**身份前缀**、去重、更正标注、快照与账本）。
  *
@@ -925,51 +916,6 @@ function appendEntry({ workspace, rel, entry, log, forceSupersede = false, chatN
   return { ok: true, rel, added: line, superseded }
 }
 
-/**
- * 「是谁说的/记给谁的」前缀（2026-10-02 用户要求：**记录记忆时带上所记的人的 ID**）。
- *
- * 格式 `（昵称 QQ 号码）`；**查不到昵称就只写号码** `（QQ 号码）` ——
- * 与"发言人昵称查不到就不编名字"同一条规矩（桥接那边核实不到时 `#nicknameFor` 返回空）。
- *
- * ⚠️ 为什么写成"人话 + 号码"而不是只写号码：号码是**稳定键**（昵称会变、会有重名），
- *    而昵称是打开文件时唯一能让人认出"这是谁"的东西。两者都要。
- */
-export function speakerPrefix(senderId, speakerName = '') {
-  const id = String(senderId ?? '').trim()
-  if (!id) return ''
-  const name = String(speakerName ?? '').trim()
-  // ⚠️ 昵称里可能出现 `）`／换行之类的字符（它是从协议端来的、不一定是干净文本）：
-  //    统一压成单行并去掉会破坏"这一行"结构的字符，否则一条记忆会被拆成两行
-  //    （而记忆文件是**一行一条**的格式，拆行等于把这条记忆写坏）。
-  const safe = name.replace(/[\r\n]+/g, ' ').replace(/[（）()]/g, '').trim()
-  return safe ? `（${safe} QQ ${id}）` : `（QQ ${id}）`
-}
-
-/** 从一行里认出身份前缀（`（…QQ 号码）`），用于"同一句话"的比较。 */
-const SPEAKER_PREFIX_AT_START = /^（[^（）]*QQ\s*\d{5,15}）/
-
-/** 去掉一行开头的身份前缀（没有就原样返回）。 */
-export function stripSpeakerPrefix(entry) {
-  return String(entry ?? '').replace(SPEAKER_PREFIX_AT_START, '')
-}
-
-/**
- * 应用一批记忆标记。
- *
- * @param {object} opts
- * @param {string} opts.workspace
- * @param {'private'|'group'} opts.kind
- * @param {string|number} opts.peerId
- * @param {string|number} opts.senderId
- * @param {'admin'|'user'} opts.tier  发起人的真实权限（由 roster 判定）
- * @param {string} [opts.chatName] 群名（协议端核实过的）。**只用于写文件头**：
- *   新建那份群记忆时把头写成「# 记忆·摸鱼群（群 700000001）…」而不是一个裸号码。
- *   查不到就留空 —— 那时只写号码，**不编名字**（与"昵称查不到就不编"同一条规矩）。
- * @param {string} [opts.speakerName] 这一轮发言人的昵称（协议端核实过的）。
- *   **只用于给记忆条目加身份前缀**（见 `speakerPrefix`）：查不到就只写号码。
- * @param {{scope: string, text: string}[]} opts.items
- * @returns {{applied: object[], ignored: object[], wroteFiles: string[]}}
- */
 export function applyMemoryItems({
   workspace,
   kind,
@@ -1063,7 +1009,7 @@ export function applyMemoryItems({
       continue
     }
 
-    // ── L3 个人层：**跟人走**（落点 = 本轮发言人，且只可能是他）─────────────
+    // ── 个人层：**跟人走**（落点 = 本轮发言人，且只可能是他）─────────────────
     //
     // ★★ 归属由**代码**裁定，模型一个字节都插不上手：它拿不到 QQ 号，
     //   也**没有**任何参数能指定"记给谁"。写第三方的条目要先把发言人列进
@@ -1072,42 +1018,29 @@ export function applyMemoryItems({
     // ★ 0.3.0alpha：个人档里也**照加**身份前缀（用户 2026-10-02 明确要求"所有条目都加"）。
     //   明知文件名与文件头已经带了号码，仍然加 —— 因为要的是**条目自身可查**：
     //   把一条记忆从文件里贴到别处（回执、整理、审计）时，"这是谁"不该依赖它从哪个文件读出来。
-    if (scope === SCOPE.PERSON) {
+    //
+    // ★★ 0.3.3：这一段现在**接管三个档位** —— `person`、以及旧的 `fact` / `slang`。
+    //   为什么合成一条路（而不是留三个分支）：**落点本来就是同一个文件**，
+    //   留三个分支只会让"以后有人改了一个分支、另两个没改"这种漂移有地方发生。
+    //   ⚠️ 这也意味着**不再有**"拿不到群号就写不了"这种拒绝 —— 群号已经不需要了；
+    //   真正需要的只有**发言人号码**（拿不到才拒，理由照实说）。
+    {
       const rel = L.personTarget
       if (!rel) {
         ignored.push({ scope, entry, source, why: '拿不到这一轮发言人的号码，写不了个人档' })
         continue
       }
+      // ★ H4：模型显式写了 `fix` 档 → 它明确说了"这是在更正上面记错的某一条"，
+      //   于是把相似度门槛降到 floor（不再要求自指式措辞 —— 那种措辞实测认不全）。
       const r = appendEntry({ workspace, rel, entry, log, forceSupersede: item.force === true, identity })
       if (r.ok) {
+        // ★ H4：把"这条更正了上面哪一条"的痕迹带出去（调用方要据此写日志/审计）
+        //   —— 不传出去的话，"标注到底发生了没有"在外面完全看不见。
         applied.push({ scope, entry, source, rel, deduped: r.deduped, superseded: r.superseded ?? null })
         if (!r.deduped) wroteFiles.push(rel)
       } else ignored.push({ scope, entry, source, why: r.why })
       continue
     }
-
-    // fact / slang：任何人可写，但只写"当前会话该写的那份"
-    // （私聊里 `factTarget` 就是**这个人的个人档** —— 私聊的会话即本人，不再单开一层）
-    const rel = scope === SCOPE.SLANG ? L.slang : L.factTarget
-    if (!rel) {
-      ignored.push({ scope, entry, source, why: '这个会话没有对应的记忆文件（缺少会话标识）' })
-      continue
-    }
-    const prefix = scope === SCOPE.SLANG ? '（黑话）' : ''
-    // ★ H4：模型显式写了 `fix` 档 → 它明确说了"这是在更正上面记错的某一条"，
-    //   于是把相似度门槛降到 floor（不再要求自指式措辞 —— 那种措辞实测认不全）。
-    const r = appendEntry({ workspace, rel, entry, log, forceSupersede: item.force === true, chatName, identity, prefix })
-    if (r.ok) {
-      // ★ 顺手自愈群记忆的标题（补群名 / 清重复头）。**只在群聊层**做，
-      //   而且它自己会判断"要不要改"（不需要改就一次盘都不写）。
-      if (kind === 'group' && (scope === SCOPE.FACT || scope === SCOPE.SLANG)) {
-        repairGroupMemoryTitle({ workspace, rel, chatName, log })
-      }
-      // ★ H4：把"这条更正了上面哪一条"的痕迹带出去（调用方要据此写日志/审计）
-      //   —— 不传出去的话，"标注到底发生了没有"在外面完全看不见。
-      applied.push({ scope, entry, source, rel, deduped: r.deduped, superseded: r.superseded ?? null })
-      if (!r.deduped) wroteFiles.push(rel)
-    } else ignored.push({ scope, entry, source, why: r.why })
   }
 
   if (applied.length || ignored.length) {
@@ -1338,12 +1271,17 @@ export function saveSnapshot({ workspace, rel, content }) {
 export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   const lines = [
     '【长期记忆】**写入权不在你手上**：你只能"提议"，由系统校验后落盘。',
-    '记忆分**三层**，按"这条事**在哪儿成立**"选档（整行独占，自己单独一行）：',
+    // ★★ 0.3.3：**两层**（使用者 2026-10-02：「不再对群聊信息进行记忆，群聊中的对话记忆归于个人」）。
+    //   群聊层已下线 ⇒ 群里说的每一句都只落进**说话人自己那份**。
+    //   ⚠️ 下面这段是**她行为上唯一会变的地方**（代码改动只是让落点变对），所以措辞要准：
+    //     · 不再教 `fact` 是"只跟这个会话有关"（那是群聊层的旧语义）；
+    //     · 但**仍然保留 `fact` 这个标记词**：模型已经在用，改语法只会让它写错，
+    //       而它现在跟 `person` 落同一份文件。
+    '记忆分**两层**，按"这条事**是关于谁的**"选档（整行独占，自己单独一行）：',
     '  <<<MEMORY global 对谁、在哪儿都成立的事>>>  ← 全局层：所有私聊与所有群都看得到',
-    '  <<<MEMORY fact 只跟这个会话有关的事>>>      ← 会话层：群聊=只写本群；私聊=只写这个人',
     '  <<<MEMORY person 关于对面这个人本身的事>>>  ← 个人层：**跟他走** —— 他的私聊、他在别的群说话时都看得到',
+    '  <<<MEMORY fact 同上，写这个人的事>>>        ← **等价于 person**（写哪份文件由系统按发言人裁定，你选哪个都行）',
   ]
-  if (kind === 'group') lines.push('  <<<MEMORY slang 词 = 意思>>>            ← 群内黑话（只写本群）')
   if (kind === 'private') lines.push('  <<<MEMORY directive 以后遇到 X 就这样做>>>  ← 行为指令（仅管理员，跨群生效）')
   // ★ H4：更正档。为什么需要它 —— 实测证明规则**认不出**纯陈述式的覆盖
   //   （「服务器是 Forge 端」→「服务器是 Paper 端」与「服务器内存改成 32G」
@@ -1359,14 +1297,15 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
   lines.push('每条落盘后，系统会在正文前**自动加上**「（昵称 QQ 号码）」标明这条是谁说的 —— **你别自己写号码**。')
   lines.push(
     '',
-    '**三层怎么选（选错会串场，这一节最重要）**：',
+    '**怎么选（0.3.3 起只有这一条分界线）**：',
     '· `global` —— 对谁都成立、且**不含任何人的私事**（通用约定、叫法、普遍偏好）。它每个群都看得到。',
-    '· `fact` —— **只跟眼前这个会话有关**：群规、群内梗、这个群里发生的事。它**只留在本群**。',
-    '· `person` —— **关于对面这个人本身**：他的偏好、习惯、在做的事、怎么对待他。',
+    '· `person`（或等价的 `fact`）—— **关于正在跟你说话的这个人的事**：他的偏好、习惯、在做的事、怎么对待他。',
     '  它**跟他走**：他自己在别的群说话时也看得到（别人看不到）。',
-    '  ⚠️ 所以**只有本群才知道的事绝不要写进 `person`** —— 那等于替他把它带到别的群去。',
     '  ⚠️ `person` 的落点由系统按**这一轮真实核实过的发言人**决定，你**不用也不能**写号码；',
     '  想记的是另外一个人时，别用 `person`（系统会把它记到正在跟你说话的人名下，那就错了）。',
+    '⚠️ **不再有"只在这个群成立"的那一层记忆**：群里聊到的事也记进**那个说话人自己那份**，' +
+      '所以**只有某个群才知道的事**（群规、群内梗）现在同样落在他名下 —— ' +
+      '以后在别的场合碰到，要**当成"他提过的事"**用，别当成别处也成立的规矩。',
     '**不要用文件工具去写记忆**（写不进去，也不会被采纳）；标记行不会发给对方，系统会剥掉。',
     '系统只接受这几种档位；**涉及"谁是管理员/有什么权限"的内容一律会被拒** —— 身份只由系统判定。',
     '**发现之前记错了就用 `fix` 档重写一遍**（不要试图编辑文件）：旧条目会留着但标注"已被更正"，',
@@ -1390,7 +1329,6 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
     '· **稳定的行为特征**（最有价值）：他一般什么时候在、怎么说话（话短话长、爱玩梗、毒舌但人不坏）、',
     '  有没有固定习惯动作、技术栈与爱好。判据是"**下次还用得上**"，不是"这次发生了"。',
     '· **与这个群有关的事实与共同经历**（"上次那个链接""我们聊过的那台机器"）。',
-    '· **承诺与约定**（强记忆）：谁说过"下周把项目发出来"这类话。写法见下面"带时间"。',
     '· **自我认同信息**（低频但高权重）：他怎么称呼自己、职业/专业、所在城市 ——',
     '  **前提是他自己主动说过，而且在这个群的语境下用得上**（聊天气、约线下）。',
     '**不值得记的**（记了反而显得 creepy，真人也不会翻这种旧账）：',
@@ -1419,11 +1357,15 @@ export function buildMemoryInstructionsV2({ kind, recall, receipt }) {
     //   - 据他说,他每天玩 DSH 大概花30块左右,按 token 计费
     // 三条毛病：① 每条都以转述前缀开头（噪音）② 记的是**对话过程**（"我列了""我提醒"）
     // 而不是事实 ③ 中英标点混用。
-    kind === 'private'
-      ? '写 fact 时**直接写事实**：这个人已经在本文件里了，不要再加"他说/据他说"这类前缀，' +
-        '也不要记"我提醒了他什么"（那是对话过程，不是记忆）。' +
-        '写成一句能独立看懂的短句，例：「他的 MC 服务器是 Forge 端（版本没说）」。'
-      : '写 fact 时**带上来源**：写成"据某人说……""某人提到……"，不要写成你亲自核实过的事实。',
+    // ★★ 0.3.3：这一段**不再按私聊/群聊二分** —— 因为两条路的落点现在是同一份文件
+    //   （"群聊记忆归于个人"）。旧写法是"群里要带来源、私聊不要"，而那个二分的前提
+    //   （群里那份是**公共**档案、会被当长期事实读回来）已经不存在了：
+    //   群里写下的东西只有**那个人自己**在跟他说话时才看得到。
+    //   ∴ 现在的口径是**一律直接写事实**，只是措辞上提醒一句"群里说的话按'他提过'读"。
+    '写的时候**直接写事实**：这条记录是挂在**正在跟你说话的那个人**名下的，' +
+      '不要再加"他说/据他说"这类转述前缀，也不要记"我提醒了他什么"（那是对话过程，不是记忆）。' +
+      '写成一句能独立看懂的短句，例：「他的 MC 服务器是 Forge 端（版本没说）」。' +
+      '（群里聊到的事也一样：按"**他提过**"来写，别写成"这个群规定"。）',
     // ★★ 反流水账：这条是新增的，针对实测里"越记越长、全是过程"的形态。
     '记忆要写**结论**，不写**过程**：不要记"我给他讲了 X""他问了我 Y 然后我答了 Z"，' +
       '只记以后还用得上的那部分（他的偏好/环境/约定/踩过的坑）。一次对话只写一两句，别写流水账。',
@@ -1572,6 +1514,122 @@ export function migrateMemoryLayout({ workspace, log = () => {} }) {
     }
   }
   return { moved, merged, kept, why }
+}
+
+/**
+ * ★★★ 0.3.3：把**已下线的群聊层**归档（`memory/groups/*.md` 与更老的 `memory/group-*.md`）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 使用者的决定与它意味着什么
+ * ══════════════════════════════════════════════════════════════════════════
+ * 原话：「不再对群聊信息进行记忆，群聊中的对话记忆归于个人」。
+ * 当面确认过的三个取舍：
+ *   ① 旧群档 **不读也不迁**（归档到 `memory/.migrated/groups/`）——
+ *      不做"按 QQ 号拆条目"的迁移，因为**群档里的条目大多认不出是谁说的**
+ *      （真机上长这样：「据无忘霞说，本群 QQ 3256154614…的另一个叫法是…」，
+ *      不是机器可解析的 `（昵称 QQ 号码）` 前缀）。宁可不搬，也不搬错。
+ *   ② 新记忆**不记来源群**（只写"他说了什么"）。
+ *   ③ 群内黑话档**一并下线**（`slang` 档位保留但落到个人档）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 三条纪律（与 `migrateMemoryLayout` 同一套）
+ * ══════════════════════════════════════════════════════════════════════════
+ *   · **只搬不删**：原件进 `memory/.migrated/groups/`，一个字都不丢；
+ *   · **幂等**：跑第二次时源目录已经空了，什么也不做、也不写盘；
+ *   · **不抛错**：归档失败只记一行日志 —— 绝不能因为归档不了就让桥接起不来。
+ *     ★ 但失败会**如实说出来**（"归档没成，那些群档仍然在盘上"），
+ *     并且**归档没成也不会让它们被注入**（注入侧已经不看这一层了）。
+ *
+ * ⚠️ 顺序**必须在 `migrateMemoryLayout()` 之后**：那一步会把更老的
+ *   `memory/group-<群号>.md` 搬进 `memory/groups/`，这一步再把整个目录收走 ——
+ *   顺序反了就会留下一批"刚被搬过去、又立刻该归档"的文件。
+ *
+ * @returns {{archived: string[], kept: string[], why: string[]}}
+ */
+export function retireGroupLayers({ workspace, log = () => {} } = {}) {
+  const root = String(workspace ?? '')
+  const archived = []
+  const kept = []
+  const why = []
+  if (!root) return { archived, kept, why: ['没有工作区'] }
+  const archDir = join(root, FILE.migratedDir, 'groups')
+
+  /** 归档一个文件：重名就加序号（**不覆盖**，归档目录里丢东西是最糟的一种）。 */
+  const archive = (abs, name) => {
+    mkdirSync(archDir, { recursive: true })
+    let dest = join(archDir, name)
+    let n = 1
+    while (existsSync(dest)) {
+      dest = join(archDir, `${name}.${n}`)
+      n += 1
+    }
+    renameSync(abs, dest)
+    return dest
+  }
+
+  // ① 新布局的群档目录（`memory/groups/**`）
+  try {
+    const dir = join(root, FILE.groupsDir)
+    if (existsSync(dir)) {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (!e.isFile() || !e.name.endsWith('.md')) continue
+        const abs = join(dir, e.name)
+        try {
+          archive(abs, e.name)
+          archived.push(`${FILE.groupsDir}/${e.name}`)
+        } catch (error) {
+          kept.push(`${FILE.groupsDir}/${e.name}`)
+          why.push(`${e.name}：${error?.message ?? error}`)
+        }
+      }
+      // 目录空了就顺手删掉（不空说明有归档失败的文件，留着）
+      // ⚠️ 用 `rmdirSync`（**只删空目录**），不要用 `rmSync` —— 见 `personas.mjs` 里
+      //    那条实测记录：Windows + 中文文件名下 `rmSync` 可能崩进程，而这里删的正是
+      //    别人工作区里的目录。空目录删不掉也无所谓：它不会注入任何东西。
+      try {
+        if (readdirSync(dir).length === 0) rmdirSync(dir)
+      } catch {
+        /* 删不掉不是问题：空目录不会注入任何东西 */
+      }
+    }
+  } catch (error) {
+    why.push(`memory/groups 列不出来：${error?.message ?? error}`)
+  }
+
+  // ② 更老的布局（`memory/group-<群号>.md` / `-slang.md`）——
+  //    正常情况下 `migrateMemoryLayout()` 已经把它们收进 groups/，这一段是兜底。
+  try {
+    const memDir = join(root, 'memory')
+    if (existsSync(memDir)) {
+      for (const e of readdirSync(memDir, { withFileTypes: true })) {
+        if (!e.isFile()) continue
+        if (!/^group-\d{5,15}(-slang)?\.md$/.test(e.name)) continue
+        const abs = join(memDir, e.name)
+        try {
+          archive(abs, e.name)
+          archived.push(`memory/${e.name}`)
+        } catch (error) {
+          kept.push(`memory/${e.name}`)
+          why.push(`${e.name}：${error?.message ?? error}`)
+        }
+      }
+    }
+  } catch (error) {
+    why.push(`memory/ 列不出来：${error?.message ?? error}`)
+  }
+
+  if (archived.length) {
+    log(
+      `[memory] 群聊层已下线：归档 ${archived.length} 份群档到 ${FILE.migratedDir}/groups/（不再注入）` +
+        `：${archived.join('、')}`,
+    )
+  }
+  if (kept.length) {
+    // ★ 失败必须说出来：这些文件**不会**被注入（注入侧不看这一层），
+    //   但使用者可能想手工收走它们 —— 不说的话他会以为"已经处理过了"。
+    log(`⚠️ [memory] 群档归档失败 ${kept.length} 份（仍留在原处，但**不会被注入**）：${kept.join('、')} —— ${why.join('；')}`)
+  }
+  return { archived, kept, why }
 }
 
 /**

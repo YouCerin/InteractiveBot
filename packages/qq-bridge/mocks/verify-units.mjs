@@ -22,14 +22,8 @@ import { decideTrigger, lintKeywords, REASON } from '../src/trigger.mjs'
 import { makeSessionId, defaultInstanceTag } from '../src/session-id.mjs'
 import { isSelfAuthored } from '../src/bridge.mjs'
 import { computeReplyDelay, isQuietHours, isQuietNow, parseClock, splitIntoMessages, splitReplyForSend } from '../src/humanize.mjs'
-import {
-  buildMemoryInstructions,
-  MEMORY_PATHS,
-  memoryFileName,
-  resolveMemoryScope,
-} from '../src/memory.mjs'
 import { createRoster, buildPermissionInstructions, classifyTool, TIER } from '../src/roster.mjs'
-import { createInterimPicker, classifyInterim, DEFAULT_INTERIM, INTERIM_KINDS } from '../src/interim.mjs'
+import { createInterimPicker, classifyInterim, DEFAULT_INTERIM, INTERIM_KINDS, createInterimAi, parseInterimAiOutput, buildInterimAiPrompt, INTERIM_AI_PROMPT, INTERIM_AI_MAX_CHARS } from '../src/interim.mjs'
 import { buildPersona, lintPersona, PERSONA_PRESETS } from '../src/persona.mjs'
 import { SPEED_PRESETS, buildSpeedPreset, detectSpeedPreset, lintHumanize, DEFAULT_SPEED_PRESET } from '../src/speed.mjs'
 
@@ -711,97 +705,6 @@ section('humanize.mjs · ★★ 按段落分条（`splitReplyForSend`，2026-10-
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-section('memory.mjs · 跨重启记忆的约定')
-// ══════════════════════════════════════════════════════════════════════════
-{
-  const WS = 'C:\\some\\workspace'
-  const text = buildMemoryInstructions({ workspace: WS })
-
-  check('给出了索引文件的绝对路径（不让 agent 猜）',
-    text.includes(`${WS}\\${MEMORY_PATHS.index}`), MEMORY_PATHS.index)
-  check('给出了细节目录的绝对路径',
-    text.includes(`${WS}\\${MEMORY_PATHS.detailDir}`), MEMORY_PATHS.detailDir)
-  check('路径用绝对路径而不是相对路径（避免解析歧义）',
-    /[A-Za-z]:\\/.test(text))
-
-  check('★ 明确要求"只在需要时读一次"（不是每轮都读，否则聊天越久越贵）',
-    /只在.*需要回忆/.test(text) && /不要每轮都读/.test(text))
-  check('★ 明确说"不要每轮都写"（否则每轮多一次工具调用，又慢又贵）',
-    /不要每轮都写/.test(text))
-  check('★ 明确要求记忆文件保持简短并自行合并',
-    /短/.test(text) && /合并/.test(text))
-  check('明确说"宁可少记"（防止记忆文件变成流水账）',
-    /宁可少记/.test(text))
-  check('说明了失忆这个前提（让 agent 理解为什么需要它）',
-    /不记得/.test(text))
-
-  // 指令不能太长 —— 它每一轮都会进提示词
-  check('指令长度可控（每轮都要付这段的 token，不宜超过 900 字）',
-    text.length < 900, `${text.length} 字`)
-
-  // 换行结构合理（便于阅读）
-  check('是多行结构，不是一整行', text.split('\n').length >= 6, `${text.split('\n').length} 行`)
-
-  // 没给会话身份时必须**明确说这是全局**，不能悄悄退化成"没有隔离"
-  check('★ 拿不到会话身份时明确标注"这是全局记忆"',
-    /全局/.test(text) && /没拿到会话身份/.test(text))
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-section('memory.mjs · 记忆**按人分开**（防串人）')
-// ══════════════════════════════════════════════════════════════════════════
-{
-  const WS = 'C:\\some\\workspace'
-
-  // ── 路径解析 ──
-  check('私聊文件名带 QQ 号',
-    memoryFileName('private', '100000001') === 'private-100000001.md',
-    String(memoryFileName('private', '100000001')))
-  check('群聊文件名带群号',
-    memoryFileName('group', '700000002') === 'group-700000002.md',
-    String(memoryFileName('group', '700000002')))
-  check('缺 peerId 时返回 null（不编一个文件名出来）',
-    memoryFileName('private', '') === null && memoryFileName('group', null) === null)
-
-  const priv = resolveMemoryScope({ workspace: WS, kind: 'private', peerId: '100000001' })
-  const grp = resolveMemoryScope({ workspace: WS, kind: 'group', peerId: '700000002' })
-  check('私聊：有自己那份 + 有全局那份',
-    priv.scopeFile?.endsWith('memory\\private-100000001.md') && priv.globalFile?.endsWith('MEMORY.md'),
-    JSON.stringify(priv))
-  check('★★ 群聊：有自己那份，但**没有**全局那份（否则群里能读到私聊积累的笔记）',
-    grp.scopeFile?.endsWith('memory\\group-700000002.md') && grp.globalFile === null,
-    JSON.stringify(grp))
-
-  // ── 提示词注入：两个不同的人拿到的路径必须不同 ──
-  const a = buildMemoryInstructions({ workspace: WS, kind: 'private', peerId: '111' })
-  const b = buildMemoryInstructions({ workspace: WS, kind: 'private', peerId: '222' })
-  const g = buildMemoryInstructions({ workspace: WS, kind: 'group', peerId: '999' })
-
-  check('★★ 不同的人拿到**不同**的记忆路径（这就是"不串人"的机制）',
-    a.includes('private-111.md') && b.includes('private-222.md') && a !== b)
-  check('★ A 的提示词里**不出现** B 的文件名',
-    !a.includes('private-222.md') && !b.includes('private-111.md'))
-  check('群里拿到的是群记忆路径',
-    g.includes('group-999.md') && !g.includes('private-'))
-  check('★★ 群聊的提示词里**不出现**全局记忆的文件名（连"别读它"都不该提名字）',
-    !/MEMORY\.md/.test(g), g.split('\n').find((l) => l.includes('MEMORY')))
-  check('私聊的提示词里有全局记忆路径',
-    /MEMORY\.md/.test(a))
-  check('★ 群聊被明确告知"别处的记忆不是给你看的"',
-    /别处的记忆/.test(g) && /不是给你看的/.test(g))
-  check('★ 私聊明确被要求"不要把私事写进全局"',
-    /不要把某个人的私事写进全局/.test(a))
-
-  // ── 成本控制仍然要在（这些是花真金白银的）──
-  for (const [name, t] of [['私聊', a], ['群聊', g]]) {
-    check(`${name}：仍然明确"不要每轮都读"`, /不要每轮都读/.test(t))
-    check(`${name}：仍然明确"不要每轮都写"`, /不要每轮都写/.test(t))
-    check(`${name}：仍然要求保持短并合并`, /短/.test(t) && /合并/.test(t))
-    check(`${name}：长度可控（< 1100 字）`, t.length < 1100, `${t.length} 字`)
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════════════
 section('roster.mjs · 名单与权限分级（三级）')
 // ══════════════════════════════════════════════════════════════════════════
 {
@@ -933,6 +836,87 @@ section('interim.mjs · 「先应一声」四类话术 + 冷却去重')
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+section('interim.mjs · ★★★ AI 自主决定垫场白（0.3.3）')
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 使用者原话：「为先应一声新增选项，由 ai 根据唤醒时的上下文自主决定如何先应一声」。
+// 这一节盯三件事：① 解析层把"它说不发"与"输出坏了"分开；② 解析层挡住会出洋相的输出；
+// ③ 生成器**绝不抛**、且**绝不把失败当成"它决定沉默"**（那是最难查的一类静默失效）。
+{
+  // ── ① 三种结果的区分（这是安全的全部）──
+  check('★ `{"say":"…"}` → 发这句',
+    parseInterimAiOutput('{"say":"等下，我先看看"}').text === '等下，我先看看')
+  check('★★ `{"say":""}` → **它明确决定不发**（合法答案，不是失败）',
+    parseInterimAiOutput('{"say":""}').ok === true && parseInterimAiOutput('{"say":""}').text === '')
+  check('★ `say` 缺失也当"不发"（模型可能只写了个空对象）',
+    parseInterimAiOutput('{}').ok === true && parseInterimAiOutput('{}').text === '')
+  check('★★ 解析不出来 → **ok:false**（调用方要退回话术池，不能当成"不发"）',
+    parseInterimAiOutput('这不是 JSON 而且带\n换行').ok === false)
+  check('★ 空输出同样是 ok:false（没答上 ≠ 它决定沉默）', parseInterimAiOutput('').ok === false)
+  check('★ 带 ```json 围栏也能解析（模型很爱加）',
+    parseInterimAiOutput('```json\n{"say":"嗯，我在"}\n```').text === '嗯，我在')
+
+  // ── ② 会出洋相的输出要挡住 ──
+  check('★ 太长的**整条不用**（不截断 —— 截断会把话拦腰砍断）',
+    parseInterimAiOutput(JSON.stringify({ say: '啊'.repeat(INTERIM_AI_MAX_CHARS + 1) })).ok === false)
+  check('★ 恰好到上限可以用', parseInterimAiOutput(JSON.stringify({ say: '啊'.repeat(INTERIM_AI_MAX_CHARS) })).ok === true)
+  check('★ 带 Markdown/链接的不要（垫场白不该像文档）',
+    parseInterimAiOutput('{"say":"看这个 **重点**"}').ok === false &&
+      parseInterimAiOutput('{"say":"见 https://x.y"}').ok === false)
+  check('★ 多行（不是 JSON 时）不要', parseInterimAiOutput('第一行\n第二行').ok === false)
+  check('★ 纯符号（`???`）不要 —— 那不是垫场白，是"模型没答我们的问题"',
+    parseInterimAiOutput('???').ok === false && parseInterimAiOutput('!!!').ok === false)
+  check('★ 纯文本一句话（短、单行）认它 —— 模型偶尔不写 JSON',
+    parseInterimAiOutput('等下，我想想').text === '等下，我想想')
+  check('★ 换行/多余空白被压平（垫场白必须是一行）',
+    parseInterimAiOutput('{"say":"  嗯，  我在  "}').text === '嗯， 我在')
+
+  // ── ③ 生成器：失败必须能回到池子那条腿 ──
+  const noGate = createInterimAi({ gate: null })
+  check('没有通路 → available:false（消费方直接用池子）', noGate.available === false)
+  check('没有通路时 decide 返回 ok:false（**不是**"不发"）',
+    (await noGate.decide('x')).ok === false)
+
+  const mk = (verdict) => createInterimAi({
+    gate: { judge: async () => verdict },
+    log: () => {},
+  })
+  check('★ judged:false（没真的问模型）→ ok:false ⇒ 退池子',
+    (await mk({ judged: false, verdict: '', why: '超预算' }).decide('x')).ok === false)
+  check('★★ fallback:true（问了但结论不可用）→ ok:false ⇒ 退池子（**绝不发 failVerdict**）',
+    (await mk({ judged: true, fallback: true, verdict: '占位文案不该被发出去', why: '超时' }).decide('x')).ok === false)
+  check('正常答上 → ok:true + 文本', (await mk({ judged: true, verdict: '{"say":"在的"}' }).decide('x')).text === '在的')
+  check('它决定不发 → ok:true + 空串（消费方据此**什么都不发**）',
+    (await mk({ judged: true, verdict: '{"say":""}' }).decide('x')).ok === true &&
+      (await mk({ judged: true, verdict: '{"say":""}' }).decide('x')).text === '')
+  check('★ 闸门自己抛异常 → 绝不往上抛，返回 ok:false',
+    (await createInterimAi({ gate: { judge: async () => { throw new Error('炸了') } }, log: () => {} }).decide('x')).ok === false)
+  check('★ 输出看不懂 → ok:false（而不是当成"不发"）',
+    (await mk({ judged: true, verdict: '???' }).decide('x')).ok === false)
+
+  // ── ④ 提示词：上下文进得去、且明确"不许编正在做什么" ──
+  const p = buildInterimAiPrompt({
+    current: { name: '忘忧', text: '小鲸鱼 你看看上面那张图' },
+    recent: [
+      { name: '忘忧', text: '你看这个[图片]' },
+      { name: '阿玮', text: '哈哈哈哈' },
+    ],
+    persona: '默认短。像真人在 QQ 里打字。',
+  })
+  check('当前这句在提示词里', p.includes('小鲸鱼 你看看上面那张图'))
+  check('★ 最近几条在提示词里（这才叫"按上下文"）', p.includes('你看这个[图片]') && p.includes('阿玮：哈哈哈哈'))
+  check('画像那一小段也进去了（否则垫场白语气跟正文两套）', p.includes('像真人在 QQ 里打字'))
+  check('★★ 系统提示词明令"绝不说正在做某件具体的事"（并行生成时我们并不知道）',
+    /绝不说你正在做某件具体的事/.test(INTERIM_AI_PROMPT))
+  check('★★ 明令"不该垫场时就什么都不发"（允许沉默是它判断力的一部分）',
+    /不该垫场时就什么都不发/.test(INTERIM_AI_PROMPT))
+  check('★ 要求一行 JSON，且给了 `{"say":""}` 这个合法出口',
+    INTERIM_AI_PROMPT.includes('{"say":""}') && /一行 JSON/.test(INTERIM_AI_PROMPT))
+  check('没有人设段时不留空标题（避免 prompt 里出现光秃秃的一行）',
+    !buildInterimAiPrompt({ current: { name: 'a', text: 'b' } }).includes('【说话方式】'))
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 section('persona.mjs · 人设（也是账号存活相关配置）')
 // ══════════════════════════════════════════════════════════════════════════
 {
@@ -953,20 +937,25 @@ section('persona.mjs · 人设（也是账号存活相关配置）')
 
   // ── 反客服腔：这些要求必须在里面 ──
   //   ★ 0.3.0alpha 第二步：说话方式搬进了人设文件，措辞随之改过（"像 QQ 里打字"
-  //     在出厂那份里就是「像真人在 QQ 里打字」；"不用 Markdown" 那条在
-  //     说话方式的"绝不写这些话"一节里以「不写标题、列表、编号、总结式结尾」的形式存在）。
-  //     ∴ 判据按**实际措辞**重写，但每条要保住的**意思**没变。
+  //     在出厂那份里就是「像真人在 QQ 里打字」）。
+  //   ★ 0.3.3：出厂那份按「写法四戒」重写过一遍（不写示范句 / 一律写倾向 /
+  //     不限句长 / 只规定必须规定的），所以下面两条的**判据跟着新措辞**走：
+  //     · 禁用 Markdown 那条现在是「不写标题、不写列表、不写编号、不写总结式结尾」；
+  //     · "别为了人设瞎编"那层意思现在由「不确定的事实不编」承担。
+  //     要保住的**意思**一个字没松：这两条改成"只匹配新措辞"就会在下次改写时
+  //     变成误报，所以判据写成"意思在不在"，而不是"某一句原话在不在"。
   check('★ 要求"像真人在 QQ 里打字，不像在写回答"',
     /像真人在 QQ 里打字/.test(full) && /不像在写回答/.test(full))
   check('★ 要求短句优先、允许「？」单独成句', /短/.test(full) && /「？」/.test(full))
   check('★ 明确禁用 Markdown / 标题 / 列表 / 总结',
-    /不用 Markdown/.test(full) && /不写标题、列表、编号、总结式结尾/.test(full))
+    /不用 Markdown/.test(full) && /不写标题/.test(full) && /不写列表/.test(full) &&
+      /不写编号/.test(full) && /不写总结式结尾/.test(full))
   check('★ 要求"别变成客服"（不主动揽活、不写客服套话）',
     /不主动揽活/.test(full) && /有什么可以帮您/.test(full))
   check('★★ 反过来：那句老指令（"认真问事实问题就认真答"）**已经不在了** —— 它正是融合要消掉的那一半',
     !/但对方认真问事实、技术问题时，就认真答/.test(full))
   check('★ 但"别为了人设瞎编"这层意思还在（改由"不确定的事实不要编"承担）',
-    /不要编/.test(full))
+    /不确定的事实不要编/.test(full))
   check('★ 列出了不该写的套话（"综上所述""有什么可以帮您"）',
     /综上所述/.test(full) && /有什么可以帮您/.test(full))
   check('★ 包含情绪处理（对方低落时收起玩梗）', /低落/.test(full))

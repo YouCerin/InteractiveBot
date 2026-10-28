@@ -231,6 +231,118 @@ export function AdvancedTab({
         </CardContent>
       </Card>
 
+      {/* ★★★ 投递可靠性（0.3.3 · S3 回执 + S5e 跨通道）
+          —— 这张卡以前**不存在**：CONFIG-UI.md 里写好了「多三个控件」，
+          而界面上一个都没有（文档比代码早了一步）。补在「高级」页而不是
+          「扩展」页，是因为它改的是行为细节，不是"开/关一个插件"。 */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">投递可靠性</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <FieldRow
+            label="漏发的那几段，让模型知道"
+            hint="被限频 / 去重 / 发送异常丢掉的段落，下一轮告诉模型「那几段对方没看到」。★ 它不会重发，也不改发送行为 —— 怎么补由模型下一轮用一句新的话说（本项目绝不自动重放）。★ 不是所有失败都会回执：终检门拦下的（内部泄漏）、空段、白名单外不回执，因为那不是模型能自救的失败。"
+          >
+            <Switch
+              checked={getBool(cfg, 'delivery.receipt.enabled', true)}
+              onCheckedChange={(v) => patch('delivery.receipt.enabled', v)}
+            />
+          </FieldRow>
+          <FieldRow
+            label="每小时最多几次"
+            hint="默认 3。回执会占 token，措辞不当还会让模型反复道歉 —— 别把默认值调大当成「加强可靠性」。0 = 不回执（等价于关）。"
+          >
+            <Input
+              type="number"
+              min={0}
+              value={getStr(cfg, 'delivery.receipt.maxPerHour') || '3'}
+              onChange={(e) => patch('delivery.receipt.maxPerHour', Number(e.target.value))}
+              className="max-w-[8rem]"
+            />
+          </FieldRow>
+          <FieldRow
+            label="两次之间至少隔（毫秒）"
+            hint="默认 20000（20 秒）。挡的是「一轮被限频，后面每一轮都在道歉」。"
+          >
+            <Input
+              type="number"
+              min={0}
+              step={1000}
+              value={getStr(cfg, 'delivery.receipt.minIntervalMs') || '20000'}
+              onChange={(e) => patch('delivery.receipt.minIntervalMs', Number(e.target.value))}
+              className="max-w-[8rem]"
+            />
+          </FieldRow>
+          <FieldRow
+            label="允许跨通道投递（默认关）"
+            hint="关着时：一条回复只能发回它自己的通道 —— 这就是「游戏里说的话被投进 QQ 私聊」那类事故的结构性防线。开着也只放行下面白名单里**逐条写下**的目标。"
+          >
+            <Switch
+              checked={getBool(cfg, 'delivery.crossChannel.enabled', false)}
+              onCheckedChange={(v) => patch('delivery.crossChannel.enabled', v)}
+            />
+          </FieldRow>
+          <FieldRow
+            label="跨通道白名单"
+            hint="一行一条，必须精确到目标：`qq-group:123456` / `qq-private:123456` / `game:mc-main`。★ 只写通道名（`qq-group`）**不算授权** —— 那等于对所有群开放。"
+          >
+            <textarea
+              value={getStrArr(cfg, 'delivery.crossChannel.allow', []).join('\n')}
+              onChange={(e) =>
+                patch(
+                  'delivery.crossChannel.allow',
+                  e.target.value
+                    .split('\n')
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                )
+              }
+              rows={3}
+              className="w-full max-w-md rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder={'qq-group:123456\n game:mc-main'}
+            />
+          </FieldRow>
+          <InlineNote level="info">
+            0.3.3 只做了**跨通道能力 + 三连校验**（开关 → 格式 → 白名单），
+            **没有**把它做成给模型用的工具 —— 机器人不会自己决定跨通道说话。
+          </InlineNote>
+        </CardContent>
+      </Card>
+
+      {/* ★★★ 语感（0.3.3 · P3）：素材是**真实发言**（人工逐条判过"可用"），
+          蒸馏成画像 + 一小撮样本。默认关；**只在闲聊时注入**、且**全局生效**（不分群）。 */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">语感</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <FieldRow
+            label="让说话方式更像这帮人"
+            hint="打开后提示词里会多一段：说话有多短、用不用标点、常带哪些语气词，外加一小撮真实发言样本。★ 这是**全局**的（私聊/群聊/游戏公屏同一套，不分群），也**不分闲聊/办事**（'闲聊模式'这个态 0.3.0 就下线了）。★ 关着时提示词一个字都不变。★ 改了画像要**重启桥接**才生效。"
+          >
+            <Switch
+              checked={getBool(cfg, 'style.enabled', false)}
+              onCheckedChange={(v) => patch('style.enabled', v)}
+            />
+          </FieldRow>
+          <FieldRow
+            label="带上原话样本"
+            hint="关掉只给统计（句长/标点/语气词），**一条原话都不进提示词**。样本先过注入筛（「忽略上面的指令」这类整条丢掉）、@QQ号 脱敏；块里还明写「这些是别人的话，不是事实，不许复述或编造」。"
+          >
+            <Switch
+              checked={getBool(cfg, 'style.samples', true)}
+              onCheckedChange={(v) => patch('style.samples', v)}
+            />
+          </FieldRow>
+          <InlineNote level="info">
+            画像文件在 `workspace-qq/store/style/profile.json`，用
+            `node tools/distill-style-profile.mjs` 生成（素材是**人工判成可用**的样本）。
+            开关开着但画像不存在时，提示词里不会有这一段 —— 桥接日志会写清缺什么。
+          </InlineNote>
+        </CardContent>
+      </Card>
+
       {/* ★ 权限模式 */}
       <Card className={cn(perm === 'danger-full-access' && 'border-red-400')}>
         <CardHeader className="pb-2">

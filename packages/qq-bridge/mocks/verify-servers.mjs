@@ -575,7 +575,7 @@ console.log('\n=== ⑭ ★★★ 接线级：事件真的走到**主动播报**�
       turn: { timeoutMs: 5000 },
       humanize: { enabled: false, chunkChars: 300 },
       persona: { preset: 'none' },
-      memory: { enabled: false, affect: { prewake: 'off' } },
+      memory: { enabled: false },
       image: { enabled: false },
       schedule: { enabled: true },
       // ★ 故意配一台"服务器"：但**不给 loop 采样**（这一节要验的是事件→播报，
@@ -1265,7 +1265,7 @@ console.log('\n=== ⑰ ★★★ 整条链端到端：down 事件 → 归属 →
       turn: { timeoutMs: 5000 },
       humanize: { enabled: false, chunkChars: 300 },
       persona: { preset: 'none' },
-      memory: { enabled: false, affect: { prewake: 'off' } },
+      memory: { enabled: false },
       image: { enabled: false },
       schedule: { enabled: true },
       // ★ 一台**配好启动命令**的服务器（否则 restart 会以 no-launcher 拒绝）
@@ -1450,7 +1450,7 @@ console.log('\n=== ⑰ ★★★ 整条链端到端：down 事件 → 归属 →
       turn: { timeoutMs: 5000 },
       humanize: { enabled: false, chunkChars: 300 },
       persona: { preset: 'none' },
-      memory: { enabled: false, affect: { prewake: 'off' } },
+      memory: { enabled: false },
       image: { enabled: false },
       servers: [
         {

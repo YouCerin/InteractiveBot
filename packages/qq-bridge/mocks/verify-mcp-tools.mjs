@@ -100,14 +100,22 @@ section('② 权限提示：**每个**工具都要有，且写入类与只读类
 {
   const WRITE_HINT = '只有管理员可以让我做'
   const READ_HINT = '只读动作，普通用户也可以用'
+  // ★ 0.3.3：工具可以自带 `hint` 覆盖档位提示（日记那两个 —— 套上"只读动作"就是骗模型）。
+  //   代价是"恰好一种"这条判据要多数一类；**计数仍然是 1**，否则就失去意义了。
+  const SELF_HINT = '【范围】'
   const HONESTY = '没做成'
   for (const t of TOOLS) {
     const d = described(t)
     const isWrite = d.includes(WRITE_HINT)
     const isRead = d.includes(READ_HINT)
-    check(`${t.name}：权限提示恰好一种`, isWrite !== isRead, isWrite ? '写入类' : isRead ? '只读类' : '（没有！）')
+    const isSelf = d.includes(SELF_HINT)
+    const n = [isWrite, isRead, isSelf].filter(Boolean).length
+    check(`${t.name}：权限提示恰好一种`, n === 1, n === 1 ? (isWrite ? '写入类' : isRead ? '只读类' : '自带范围说明') : `（${n} 种！）`)
     check(`${t.name}：带"如实"提示`, d.includes(HONESTY))
   }
+  check('★★ 自带 `hint` 的只有日记那两个（多了就说明有人绕开了档位判据）',
+    TOOLS.filter((t) => t.hint).map((t) => t.name).sort().join(',') === 'diary_read,diary_write',
+    TOOLS.filter((t) => t.hint).map((t) => t.name).join(','))
   check('★ 写入类与只读类的**判据是数据**（adminOnly），不是靠名字猜',
     TOOLS.every((t) => typeof t.adminOnly === 'boolean'))
   check('★ 只读工具不被误标成写入（否则模型会拒绝普通用户的正常提问）',
@@ -183,9 +191,10 @@ section('⑤ qq_api 的**白名单**（2026-09-27 修的漏洞）与暴露档位
   check('★ 白名单内的只读动作**放行到网络层**（这里连不上是预期的，但不能是"被清单拒绝"）', !gated(allowed))
 
   // ★ 0.3.2 收尾：新增 `mc_command`（服务器控制台，adminOnly）⇒ 14 → 15。
+  //   ★ 0.3.3：新增 `diary_write` / `diary_read`（她的日记）⇒ 15 → 17。
   //   这条断言的意思是"工具增减是**有意的**、要显式更新这个数字"，
   //   所以改数字时必须同时说清是哪个工具 —— 见下一条。
-  check('工具总数（14 → 15：0.3.2 收尾新增 `mc_command`）', TOOLS.length === 15, `${TOOLS.length} 个`)
+  check('工具总数（15 → 17：0.3.3 新增 `diary_write` / `diary_read`）', TOOLS.length === 17, `${TOOLS.length} 个`)
   check('★ `mc_command` 在名单里且标了 adminOnly（档位过滤靠它）', byName('mc_command')?.adminOnly === true)
   check('★★★ `mc_command` 的工具描述**必须写明"只有管理员"与"被拒不要重试"**（否则模型会反复试探）',
     /只有管理员/.test(String(byName('mc_command')?.description ?? '')) && /不要重试/.test(String(byName('mc_command')?.description ?? '')),

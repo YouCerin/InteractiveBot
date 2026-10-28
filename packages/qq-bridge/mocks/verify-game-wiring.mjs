@@ -99,7 +99,7 @@ function wiringBridge({
     turn: { timeoutMs: turnTimeoutMs },
     humanize,
     persona: { preset: 'none' },
-    memory: { enabled: false, affect: { prewake: 'off' } },
+    memory: { enabled: false },
     image: { enabled: false },
     wake: { policy: semantic ? 'semantic' : 'off' },
     servers: servers ?? [{ ...SERVER }],

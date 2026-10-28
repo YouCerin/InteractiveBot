@@ -36,7 +36,7 @@
 
 import { spawn } from 'node:child_process'
 import { discoverOnebotConfig, listAccountNames } from './token-discovery.mjs'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { findSnowluma, findNodeBinary, PKG_ROOT } from './local.mjs'
 import { checkPortFree, probeHttpAnswered } from './ports.mjs'
@@ -54,6 +54,130 @@ export const SNOWLUMA_STATUS = {
 }
 
 const DEFAULT_PROBE_MS = 1500
+
+/**
+ * ★★★ 0.3.3：**启动锁**（真机事故：两个 SnowLuma 同时起来，抢 3000/3001）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 那一次到底发生了什么（有日志，不是推测）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 2026-10-20 10:57:33，日志里连着两行 `[App] SnowLuma starting` —— 两个实例在
+ * **同一秒**被拉起。它们把端口分掉了：
+ *   · 先绑上的那个拿到 OneBot 3000/3001（桥接连的是它，机器人能用）；
+ *   · 后起的那个两个适配器都 `EADDRINUSE`，WebUI 退让到 **5100**，但它照样
+ *     登录了同一个 QQ 号、照样 hook 同一批 QQ 进程。
+ * 后果有三个，而且都不响：
+ *   ① **控制台指向错的那个实例** —— 大家打开的是 5099，落到的恰恰是"适配器全失败"
+ *      那一份，于是看起来就是"端口被占用、机器人不在线"；
+ *   ② 两个进程往同一个 SQLite 里写 ⇒ 日志里成串的 `database is locked` 与
+ *      `database migration failed`（身份库降级）；
+ *   ③ 同一账号被登录两次（账号风控敏感）。
+ *
+ * **为什么原来的三道防线没挡住**：它们（探控制台 / 问 OneBot / 探端口）都是
+ * **串行的判断**，判断和 spawn 之间有几百毫秒到几秒的空隙（探控制台超时就有
+ * 1.5~2.5 秒）。两次启动同时进入这个窗口时，**双方都看到"没人跑"**，然后都 spawn。
+ * 判断"现在有没有人在跑"永远有竞争 —— 所以这里要的不是又一道判断，而是**互斥**。
+ *
+ * 做法：`cache/snowluma-launch.lock`，`openSync(..., 'wx')` 原子创建。拿不到锁
+ * 就去等对面（轮询控制台），而不是跟着再起一个。锁带时间戳，超过 `staleMs` 视为
+ * 崩溃残留、直接接管；拿到的锁在 `finally` 里删掉（失败路径也必须删）。
+ */
+const LAUNCH_LOCK = Object.freeze({
+  /** 相对包根的锁文件（放 `cache/`：它本来就在 .gitignore 里，属于"机器专属的运行期产物"）。 */
+  file: 'cache/snowluma-launch.lock',
+  /** 超过多久算"上一次启动崩了"，可以直接接管。 */
+  staleMs: 120_000,
+  /** 拿不到锁时，最多等对面多久（毫秒）。 */
+  waitMs: 20_000,
+  /** 等待时的轮询间隔。 */
+  pollMs: 500,
+})
+
+/** 锁文件路径。 */
+export function launchLockPath(pkgRoot = PKG_ROOT) {
+  return join(pkgRoot, ...LAUNCH_LOCK.file.split('/'))
+}
+
+/**
+ * 拿启动锁（**原子**）。
+ *
+ * @returns {{ok: true, release: () => void, path: string}
+ *          | {ok: false, why: string, holder: {pid?: number, at?: number}, path: string}}
+ */
+export function acquireLaunchLock({ pkgRoot = PKG_ROOT, now = Date.now(), staleMs = LAUNCH_LOCK.staleMs } = {}) {
+  const path = launchLockPath(pkgRoot)
+  const tryOnce = () => {
+    try {
+      mkdirSync(dirname(path), { recursive: true })
+      const fd = openSync(path, 'wx') // ★ 'wx' = 文件已存在就失败 —— 这一步是**原子**的
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid, at: now }))
+      } finally {
+        closeQuietly(fd)
+      }
+      return { ok: true, path, release: () => releaseLaunchLock(path) }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') {
+        // 拿不到锁的**其它**原因（目录建不出来、权限）—— 不能因此拒绝启动，
+        // 那会把"启动 SnowLuma"整个卡死。如实说一句，然后放行。
+        return { ok: true, path, release: () => {}, lockError: error?.message ?? String(error) }
+      }
+      let holder = {}
+      try {
+        holder = JSON.parse(readFileSync(path, 'utf8'))
+      } catch {
+        holder = {}
+      }
+      const at = Number(holder?.at) || 0
+      if (!at || now - at > staleMs) {
+        // 崩溃残留（或文件坏掉）：清掉再抢一次。**只重试一次** —— 反复重试会掩盖真问题。
+        try {
+          unlinkSync(path)
+        } catch {
+          /* 已经没了 */
+        }
+        try {
+          const fd = openSync(path, 'wx')
+          try {
+            writeSync(fd, JSON.stringify({ pid: process.pid, at: now }))
+          } finally {
+            closeQuietly(fd)
+          }
+          return { ok: true, path, release: () => releaseLaunchLock(path) }
+        } catch (e2) {
+          return { ok: false, path, holder, why: `启动锁抢不到（${e2?.code ?? e2?.message}）` }
+        }
+      }
+      const ageS = Math.max(1, Math.round((now - at) / 1000))
+      return {
+        ok: false,
+        path,
+        holder: { pid: Number(holder?.pid) || undefined, at },
+        why: `另一次 SnowLuma 启动正在进行（pid ${holder?.pid ?? '未知'}，${ageS} 秒前开始）`,
+      }
+    }
+  }
+  return tryOnce()
+}
+
+/** 放锁（删文件；删不掉不算错 —— 过期后会被接管）。 */
+function releaseLaunchLock(path) {
+  try {
+    unlinkSync(path)
+  } catch {
+    /* 已经不在了 */
+  }
+}
+
+/** 关句柄，不抛（关不掉不影响锁的语义：锁的语义在**文件存在**）。 */
+function closeQuietly(fd) {
+  try {
+    closeSync(fd)
+  } catch {
+    /* 无所谓 */
+  }
+}
+
 
 /**
  * 从**运行中那份 SnowLuma 自己的配置**里读 OneBot 的 token。
@@ -614,7 +738,99 @@ export function makeLaunchDetect({
  *
  * @returns {Promise<{ok: true, data: object} | {ok: false, status: number, error: string}>}
  */
-export async function startSnowluma({
+export async function startSnowluma(opts = {}) {
+  const pkgRoot = opts.pkgRoot ?? PKG_ROOT
+  const log = typeof opts.log === 'function' ? opts.log : () => {}
+
+  // ★★★ 0.3.3：**先抢启动锁**，再走原来那三步判断。
+  //
+  // 为什么判断不够、必须互斥：判断（探控制台 / 问 OneBot / 探端口）和 spawn 之间
+  // 隔着几百毫秒到几秒，两次启动同时进入这个窗口时**双方都看到"没人跑"**，
+  // 于是都 spawn —— 2026-10-20 10:57:33 的两个实例就是这么来的（见 LAUNCH_LOCK）。
+  const lock = acquireLaunchLock({ pkgRoot })
+  if (lock.ok === false) {
+    return waitForConcurrentLaunch({ ...opts, pkgRoot, log, why: lock.why, holder: lock.holder })
+  }
+  if (lock.lockError) {
+    // 拿不到锁的**其它**原因（权限/目录）：能启动就启动，但要说清"这一次没有互斥保护"。
+    log(`⚠️ 启动锁不可用（${lock.lockError}）—— 这一次没有互斥保护，别同时双击两次。`)
+  }
+  try {
+    return await startSnowlumaUnlocked(opts)
+  } finally {
+    lock.release()
+  }
+}
+
+/**
+ * 另一次启动正在进行 → **不跟着起第二个**，改为等它。
+ *
+ * ★ 为什么是"等"而不是"直接返回失败"：双击两次的第二次，用户真正想要的就是
+ *   "把 SnowLuma 拉起来"。第一次的失败模式恰恰是**两个都起、一个残废**；
+ *   这里让第二次变成"等第一个起完"，成功了就报"已在运行"。
+ * @returns {Promise<{ok: true, data: object}>}
+ */
+async function waitForConcurrentLaunch({
+  config,
+  probe = probeConsole,
+  log = () => {},
+  consoleUrl: injectedConsoleUrl,
+  why = '',
+  holder = {},
+  waitMs = LAUNCH_LOCK.waitMs,
+  pollMs = LAUNCH_LOCK.pollMs,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = () => Date.now(),
+} = {}) {
+  const consoleUrl = injectedConsoleUrl || config?.snowluma?.consoleUrl || DEFAULT_CONSOLE_URL
+  const probeTimeoutMs = Number(config?.snowluma?.probeTimeoutMs) || DEFAULT_PROBE_MS
+  const deadline = now() + Math.max(pollMs, Number(waitMs) || 0)
+  log(`⏳ ${why} —— 这次**不跟着再起一个**（两个实例会抢 3000/3001 与 QQ 登录态）。`)
+  while (now() < deadline) {
+    await sleep(pollMs)
+    try {
+      const p = await probe(consoleUrl, probeTimeoutMs)
+      if (p?.reachable) {
+        log(`✅ 另一次启动已经把 SnowLuma 拉起来了（控制台 ${consoleUrl}），这次没有重复启动。`)
+        return {
+          ok: true,
+          data: {
+            started: false,
+            alreadyRunning: true,
+            launchInProgress: true,
+            concurrentPid: holder?.pid ?? null,
+            consoleUrl,
+            consoleTitle: p.title ?? null,
+            hint: '另一次启动已经把 SnowLuma 拉起来了，这次没有重复启动。',
+          },
+        }
+      }
+    } catch {
+      /* 探测失败继续等 */
+    }
+  }
+  // ★ 如实说"等超时了"，但**不要**在这里补起一个：那正是要防的重复启动。
+  log(
+    `⚠️ 等 ${Math.round((Number(waitMs) || 0) / 1000)} 秒，另一次启动仍未把控制台拉起来 —— ` +
+      `先看 logs/snowluma-console.log 有没有报错，**不要立刻再点一次**。`,
+  )
+  return {
+    ok: true,
+    data: {
+      started: false,
+      alreadyRunning: false,
+      launchInProgress: true,
+      concurrentPid: holder?.pid ?? null,
+      consoleUrl,
+      hint:
+        `另一次 SnowLuma 启动还在进行（pid ${holder?.pid ?? '未知'}），等了 ` +
+        `${Math.round((Number(waitMs) || 0) / 1000)} 秒控制台还没起来。` +
+        '先看 logs/snowluma-console.log —— 不要立刻再点一次（那会变成两个实例）。',
+    },
+  }
+}
+
+async function startSnowlumaUnlocked({
   config,
   detect,
   log = () => {},
@@ -768,6 +984,12 @@ export async function startSnowluma({
         `⚠️ 不再启动新的 SnowLuma：${busy.map((b) => `${b.label} ${b.port}`).join('、')} 已被占用 —— ${who}`,
       )
       log('   → 这是刻意的第三道防线：重复启动会让两个实例抢端口与 QQ 登录态，且都不会自己退出。')
+      // ★ 0.3.3：把"重复实例长什么样"写清楚 —— 真机上最迷惑的正是这一点：
+      //   两个实例会把端口**分掉**，看起来像"某个端口被占了"，其实是起了两次。
+      log(
+        '   → 两个实例的典型样子：一个占 3000/3001（能用），另一个的网页端**退让到 5100**' +
+          '（所以 5099 上那个可能是"残废的那份"，它的适配器全 EADDRINUSE）。',
+      )
       log('   → 若那确实是你想用的 SnowLuma（只是 token 不匹配），去它的控制台核对 token，不要重启它。')
       log('   → 若那是残留的旧实例：`node src/index.mjs --processes` 看登记，用 --kill <pid> 停掉它。')
       return {

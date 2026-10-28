@@ -64,7 +64,7 @@ export function normalizeUsage(usage) {
  * @param {(input: object) => string} opts.buildPrompt
  * @param {(raw: string) => {ok: boolean, verdict?: string, reason?: string, via?: string, why?: string}} opts.parseVerdict
  * @param {string} opts.failVerdict 判不出来时的结论
- * @param {string} [opts.tag] 日志前缀（`[wake]` / `[affect-gate]`）
+ * @param {string} [opts.tag] 日志前缀（例如 `[wake]` / `[interim]`）
  * @param {'http'|'headless'} [opts.transport] 默认 `'http'`（快、便宜）；`'headless'` 是逃生舱
  * @param {string} [opts.baseUrl]       直连端点（默认与 DSH 适配器一致：https://api.deepseek.com）
  * @param {string} [opts.apiKey]        直连用的 key（由 `resolveDirectTarget()` 解析好后传进来）

@@ -254,7 +254,12 @@ async function switchTab(page) {
     $(`tab-${name}`).classList.toggle('active', name === page)
     $(`page-${name}`).hidden = name !== page
   }
-  if (page === 'import') await refreshSources()
+  if (page === 'import') {
+    await refreshSources()
+    // ★ 语感候选池的状态（0.3.3 · P2）：只在这个页签查 —— 池子可能不存在，
+    //   每次都查会让"还没生成池子"的人在别的页也看到一条红字。
+    await refreshStylePool()
+  }
   if (page === 'score') await enterScore()
   if (page === 'report') await enterReport()
 }
@@ -296,7 +301,17 @@ function renderCorpusSelect() {
   $('corpus-note').textContent = `共 ${chats.length} 个会话；只取机器人自己的发言当"被评的那句话"。`
 }
 
-const sourceLabel = (src) => (src === 'corpus' ? '语料库' : src === 'import' ? '粘贴导入' : src ? String(src) : '未知')
+// ★ 0.3.3 · P2：`style` = 语感样本（判的是"值不值得学"，不是"它对不对"）
+const sourceLabel = (src) =>
+  src === 'corpus'
+    ? '语料库'
+    : src === 'import'
+      ? '粘贴导入'
+      : src === 'style'
+        ? '语感样本'
+        : src
+          ? String(src)
+          : '未知'
 
 function renderBatches() {
   const tbody = $('batch-rows')
@@ -363,8 +378,49 @@ async function pullFromCorpus() {
   toast(`拉取完成：可评回合 ${numOrDash(data.items)} 条`, 'ok')
 }
 
-async function importPasted() {
-  const text = $('import-text').value
+/**
+ * 0.3.3 · P2：语感候选池的状态。
+ *
+ * 池子是 `tools/build-style-corpus.mjs` 的产物（工作区 `store/style/`），**不是**从语料库现抽的 ——
+ * 两者混在一起，"我筛过一轮"这件事就消失了，人工剔除的结论也就对不上了。
+ */
+async function refreshStylePool() {
+  const note = $('style-note')
+  if (!note) return
+  const data = await api('/api/style')
+  const p = data?.pool
+  if (!p || p.ok !== true) {
+    note.textContent = p?.why ?? '拿不到候选池状态（原因见上方红条）'
+    return
+  }
+  note.textContent = `候选池 ${numOrDash(p.total)} 条（seed ${p.seed ?? '未知'}），已判 ${numOrDash(p.scored)} 条，剩 ${numOrDash(p.unjudged)} 条。`
+}
+
+/** 把候选池导成一个 `source:'style'` 的批次（重导覆盖同一批，已判的档不丢）。 */
+async function importStylePool() {
+  const btn = $('btn-style-import')
+  if (btn) btn.disabled = true
+  let data
+  try {
+    data = await api('/api/style/import', { method: 'POST', body: {} })
+  } finally {
+    if (btn) btn.disabled = false
+  }
+  if (!data?.ok) return
+  const b = data.batch ?? {}
+  // ★ 顺序：先刷新（会重画批次表与状态），再写结果那句 —— 反了就被刷掉（与 pull 那条同一个坑）
+  await refreshSources()
+  await refreshStylePool()
+  const out = $('style-result')
+  if (out) {
+    out.textContent =
+      `已建批次「${b.label ?? b.id ?? '（无标签）'}」：${numOrDash(data.items)} 条样本待判。` +
+      `三档在这批判的是**样本值不值得学**：对 = 可用 · 还行 = 拿不准 · 不对 = 不可用。`
+  }
+  toast(`语感样本已导入：${numOrDash(data.items)} 条`, 'ok')
+}
+
+async function importPasted() {  const text = $('import-text').value
   if (!text.trim()) return toast('先把内容粘进文本框', 'err')
   const data = await api('/api/import', {
     method: 'POST',
@@ -450,11 +506,41 @@ async function enterScore() {
   if (state.score.batch) await loadBatch(state.score.batch, state.score.filter)
 }
 
+/**
+ * 0.3.3 · P2：当前批次是「语感样本」时，把三档的**语义**说清楚。
+ *
+ * 为什么必须说：同一套按钮在两种批次上意义不同 —— 评机器人回复时"对/还行/不对"说的是
+ * **接得怎么样**；评语感样本时说的是**这条值不值得学**。不写清楚，人会按老习惯判，
+ * 判出来的数据就不可用（而且错得很安静）。
+ */
+function applyScoreMode() {
+  const s = state.score
+  const meta = (state.sources.batches ?? []).find((b) => String(b?.id ?? '') === String(s.batch ?? ''))
+  const isStyle = String(meta?.source ?? '') === 'style'
+  const banner = $('score-mode-note')
+  if (banner) {
+    banner.hidden = !isStyle
+    banner.textContent = isStyle
+      ? '这一批是**语感样本**：判的是「这条像不像这群体自然的说话方式」，不是「它接得对不对」。' +
+        '对 = 可用样本 · 还行 = 拿不准（不进画像）· 不对 = 不可用。'
+      : ''
+  }
+  const head = $('score-card-note')
+  if (head) {
+    head.textContent = isStyle
+      ? '评的是"这条值不值得学"（上下文照常看：它是在接什么话）'
+      : '评的是"机器人这句话在这个语境下接得怎么样"'
+  }
+  const label = $('reply-label')
+  if (label) label.textContent = isStyle ? '这条样本（某人当时说的话）：' : '机器人当时说：'
+}
+
 async function loadBatch(batch, filter, { focusId = '' } = {}) {
   const s = state.score
   Object.assign(s, { batch: String(batch ?? ''), filter, offset: 0, exhausted: false, fetching: false, fetchError: '' })
   resetQueue()
   s.loadedFor = `${s.batch}|${s.filter}`
+  applyScoreMode()
   renderProgress()
   renderCard()
   if (!s.batch) return
@@ -1662,6 +1748,7 @@ function bindEvents() {
   bind('error-close', 'onclick', () => { $('error-banner').hidden = true })
   // 导入页
   bind('btn-pull', 'onclick', () => void pullFromCorpus())
+  bind('btn-style-import', 'onclick', () => void importStylePool())
   bind('btn-import', 'onclick', () => void importPasted())
   bind('import-format', 'onclick', (e) => {
     const btn = e.target?.closest?.('button[data-format]')

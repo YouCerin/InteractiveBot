@@ -120,6 +120,10 @@ export function beginDelivery({
   chatKey,
   kind = '',
   peerId = '',
+  // ★★ 0.3.3 · S5d：投递**通道**（`qq-group` / `qq-private` / `game` / `console`）。
+  //   老账本里没有这一列 —— 读的时候由 `channelFromStored()` 补（只读兼容，**不回写**），
+  //   因为"当年到底存了什么"在排查老事故时是唯一的证据。
+  channel = '',
   chunks = [],
   key = '',
   at = Date.now(),
@@ -140,6 +144,7 @@ export function beginDelivery({
     chatKey: String(chatKey ?? ''),
     kind: String(kind),
     peerId: String(peerId),
+    channel: String(channel ?? ''),
     total: Array.isArray(chunks) ? chunks.length : 0,
     key: String(key),
     state: STATE.pending,

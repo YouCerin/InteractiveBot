@@ -78,8 +78,8 @@ let instanceCounter = 0
  *   重启后自然换成新的一套（不会撞名，机器人照常工作）。
  *
  * 【代价，如实说明】重启后 DSH 侧不记得之前的对话。
- *   但**长期记忆不受影响** —— 那由工作区里的 `MEMORY.md` 负责（见 memory.mjs），
- *   重启后 agent 会自己读回来。
+ *   但**长期记忆不受影响** —— 那由工作区里的 `MEMORY.md` 负责（见 memory-store.mjs），
+ *   重启后桥接每轮把记忆注入提示词。
  *
  * 想固定住某个 instance（例如你就是想让它撞名、以便观察错误）？
  * 在 config.json 的 `session.instance` 里显式写一个值即可。

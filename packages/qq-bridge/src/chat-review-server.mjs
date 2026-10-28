@@ -49,6 +49,9 @@ import {
   VERDICTS,
   createReviewStore,
 } from './chat-review-store.mjs'
+// ★ 0.3.3 · P2/P3：语感样本的条目 id 只有**一个**实现（蒸馏工具与这里共用），
+//   否则"两边各算一遍哈希"迟早漂移，而漂移的表现是**判定静默丢失**。
+import { styleSampleId } from './style-profile.mjs'
 import {
   CONSOLIDATE_LIMITS,
   STYLE_ANCHORS,
@@ -104,6 +107,67 @@ function readReviewTarget(path) {
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 /** 静态页在包根的 `chat-review/public/`（`src/` 的上一级）。 */
 const STATIC = join(HERE, '..', 'chat-review', 'public')
+
+/**
+ * 读**语感候选池**（0.3.3 · P2）。
+ *
+ * 来源是 `tools/build-style-corpus.mjs` 的两个产物（都在工作区）：
+ *   · `store/style/candidates.jsonl` —— 一行一条样本（含上下文）
+ *   · `store/style/manifest.json`   —— 统计（seed / 各规则筛掉多少 / 按群按人分布）
+ *
+ * ★ 三条纪律：
+ *   1. **读不到就如实说**（`{ok:false, why}`），不回落到"从语料库现抽" ——
+ *      那会把"我筛过一轮的池子"和"原始语料"混成一件事，人工剔除的结论就对不上了。
+ *   2. **只读**：候选池是产出物，评审台的判定写在它自己的数据目录，不往池子里写。
+ *   3. 坏行**跳过并计数**（`skipped`），不整份丢 —— 一条坏行不该让 150 条都没法评。
+ *
+ * @param {string} root 工作区绝对路径
+ */
+function readStylePool(root) {
+  const dir = join(String(root ?? ''), 'store', 'style')
+  const file = join(dir, 'candidates.jsonl')
+  if (!existsSync(file)) {
+    return {
+      ok: false,
+      why:
+        `没有语感候选池：${file} 不存在。` +
+        '先跑 `node tools/build-style-corpus.mjs` 生成（它只读语料库、产物留在工作区）。',
+    }
+  }
+  let raw = ''
+  try {
+    raw = readFileSyncTop(file, 'utf8')
+  } catch (error) {
+    return { ok: false, why: `读不出候选池：${error?.message ?? error}` }
+  }
+  const samples = []
+  let skipped = 0
+  for (const line of raw.split(/\r?\n/)) {
+    const s = line.trim()
+    if (!s) continue
+    try {
+      const obj = JSON.parse(s)
+      if (!obj || typeof obj !== 'object' || !String(obj.text ?? '').trim()) {
+        skipped += 1
+        continue
+      }
+      samples.push(obj)
+    } catch {
+      skipped += 1
+    }
+  }
+  let manifest = null
+  try {
+    manifest = JSON.parse(readFileSyncTop(join(dir, 'manifest.json'), 'utf8'))
+  } catch {
+    // manifest 只是"怎么筛出来的"的说明，缺了不影响评审（页面会显示 seed 未知）
+    manifest = null
+  }
+  if (!samples.length) {
+    return { ok: false, why: `候选池是空的（${skipped} 行读不出来）：${file}` }
+  }
+  return { ok: true, file, samples, skipped, manifest }
+}
 
 /** 本进程的启动时刻（`/api/health` 报出去，用来分辨"页面跑的是不是新起的进程"）。 */
 const STARTED_AT = Date.now()
@@ -521,6 +585,80 @@ export function createReviewServer({
           scanned: t.rows.length,
           skippedMarkers: built.skippedMarkers,
           warnings: t.rows.some((r) => r.truncated) ? ['有些消息在语料库里本身就是截断的（入库时超长）'] : [],
+        })
+      }
+
+      // ── ④-b ★★★ 0.3.3 · P2：**语感样本**（"学群友怎么说话"的人工剔除）────────
+      //
+      // 为什么接在评审台而不是另做一个页面：这里的存储模型（批次 → 条目 → 三档判定 +
+      // 评论 + 标签）正好就是"逐条过一遍并留下判断"需要的形状；另起一套只会多一份
+      // 需要同步的数据。∴ 语感样本 = 一个 `source:'style'` 的批次，**三档的语义**换成
+      // 「对 = 可用 / 还行 = 拿不准 / 不对 = 不可用」（页面上有横幅说明，别靠猜）。
+      //
+      // 数据来源是 `tools/build-style-corpus.mjs` 的产物（工作区里，含聊天原文）：
+      //   `store/style/candidates.jsonl` + `manifest.json`
+      // 本路由**只读**它们；写只写评审台自己的数据目录。
+      if (req.method === 'GET' && path === '/api/style') {
+        const info = readStylePool(root)
+        if (!info.ok) return json(res, 200, { ok: true, pool: { ok: false, why: info.why } })
+        const scored = store.listBatches().find((b) => b.source === 'style')?.scored ?? 0
+        return json(res, 200, {
+          ok: true,
+          pool: {
+            ok: true,
+            file: info.file,
+            total: info.samples.length,
+            seed: info.manifest?.seed ?? null,
+            generatedAt: info.manifest?.generatedAt ?? null,
+            /** 池子里有多少条已经判过（跨批次；条目 id 稳定，重导不丢判定） */
+            scored,
+            unjudged: Math.max(0, info.samples.length - scored),
+          },
+        })
+      }
+
+      if (req.method === 'POST' && path === '/api/style/import') {
+        const info = readStylePool(root)
+        if (!info.ok) return fail(res, 400, info.why)
+        const batch = '语感样本'
+        const items = info.samples.map((s, i) => {
+          const text = String(s?.text ?? '').trim()
+          const chatKey = String(s?.chatKey ?? '')
+          const sender = String(s?.sender ?? '某人')
+          // ★ id 必须**稳定**（重导同一份池子不产生重复、判定不丢），所以用
+          //   `chatKey + 发送人 + 正文` 的哈希而不是下标 —— 下标会随 seed/目标数变。
+          //   ★★ 与 `tools/distill-style-profile.mjs` 共用 `styleSampleId()`：
+          //   两边各写一份算法迟早漂移，而漂移的表现是"判定静默丢失"。
+          const id = styleSampleId({ chatKey, sender, text })
+          return {
+            id,
+            batch,
+            source: 'style',
+            chatKey,
+            chatLabel: chatLabelOf(chatKey),
+            at: Number(s?.at) || null,
+            context: (Array.isArray(s?.before) ? s.before : [])
+              .slice(-3)
+              .map((b) => ({ name: String(b?.name ?? '某人'), text: String(b?.text ?? ''), isBot: b?.self === true })),
+            reply: text,
+            sender,
+            seq: i + 1,
+          }
+        })
+        if (!items.length) return fail(res, 400, '候选池里一条可用样本都没有（先跑 tools/build-style-corpus.mjs）')
+        const created = store.createBatch({
+          label: batch,
+          source: 'style',
+          chatKey: '',
+          chatLabel: batch,
+          items,
+        })
+        if (!created.ok) return fail(res, 400, created.why)
+        return json(res, 200, {
+          ok: true,
+          batch: created.batch,
+          items: items.length,
+          seed: info.manifest?.seed ?? null,
         })
       }
 

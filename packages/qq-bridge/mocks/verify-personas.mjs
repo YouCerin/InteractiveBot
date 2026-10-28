@@ -147,12 +147,16 @@ section('① 出厂那一份：落成**文件**（不是代码里的特例），
   //    变异测试当场抓到了这一点（把文件里"不像在写回答"改成"不太像"⇒ 一条都没红）。
   //    ∴ 必须**读那个文件**来比。这条断言才是"两份会漂"的真正门禁。
   const factoryFile = readFileSync(join(PKG_ROOT, 'personas', `${DEFAULT_PERSONA_FILES[0].name}.md`), 'utf8')
+  // ⚠️ 比的必须是 `trimEnd()` 之后 —— 见下面那条注释：常量是**去过换行**的正文，
+  //    而盘上那份由 `ensureDefaultPersonas` 补了一个结尾换行。不这么比，
+  //    每次同步常量之后这条都会红一次，而红的原因不是缺陷。
   check('★★★ 仓库里那份人设文件与 `FACTORY_PERSONA` 常量**逐字一致**（改了文件必须同步常量）',
-    factoryFile === DEFAULT_PERSONA_FILES[0].text,
-    factoryFile === DEFAULT_PERSONA_FILES[0].text
-      ? `${factoryFile.length} 字`
-      : `文件 ${factoryFile.length} 字 vs 常量 ${DEFAULT_PERSONA_FILES[0].text.length} 字 —— ` +
-        '改了 personas/*.md 就要把 src/persona.mjs 的 FACTORY_PERSONA 同步过去（「恢复默认」靠它）')
+    factoryFile.trimEnd() === DEFAULT_PERSONA_FILES[0].text,
+    factoryFile.trimEnd() === DEFAULT_PERSONA_FILES[0].text
+      ? `${[...factoryFile.trimEnd()].length} 字`
+      : `文件 ${[...factoryFile.trimEnd()].length} 字 vs 常量 ${[...DEFAULT_PERSONA_FILES[0].text].length} 字 —— ` +
+        '改了 personas/*.md 就要把 src/persona.mjs 的 FACTORY_PERSONA 同步过去（「恢复默认」靠它）；' +
+        '同步用 `node tools/sync-persona-constant.mjs`（手抄这行 4900+ 字的字面量必然出错）')
 
   // ── ★★★ 长度上限必须**容得下出厂那份**（否则自相矛盾）────────────────
   //
@@ -171,7 +175,7 @@ section('① 出厂那一份：落成**文件**（不是代码里的特例），
   check('空目录 → 落**一份**，并如实回报落了哪一份', r.ok === true && r.created.length === 1, JSON.stringify(r))
   check('文件真的在盘上', existsSync(join(d, '小鲸鱼（完整带情绪）.md')))
   check('文件内容与预设**逐字一致**（不多不少，别自作主张加标题）',
-    readFileSync(join(d, '小鲸鱼（完整带情绪）.md'), 'utf8') === PERSONA_PRESETS['mermaid-emotional'])
+    readFileSync(join(d, '小鲸鱼（完整带情绪）.md'), 'utf8').trimEnd() === PERSONA_PRESETS['mermaid-emotional'])
 
   // ★ 关键：目录里已经有"别人的"人设时，**不许**把默认塞回来
   const d2 = freshDir()

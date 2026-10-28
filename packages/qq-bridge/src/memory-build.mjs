@@ -123,10 +123,15 @@ export function buildMemoryPrompt({ kind, chatLabel = '', batch }) {
     '',
     '规则（写错会被系统拒绝，并且**会**把原因回给你）：',
     '- `who` 只能写上面出现过的编号（`#1`/`#2`…）；**不要写 QQ 号**（你也不知道，写了会被拒）。',
-    '- `scope` 三选一：',
-    '  · `person` —— **关于某个人本身**的事（他的偏好、习惯、在做的事、怎么对待他）。**必须带 who**。',
-    '  · `group`  —— 只跟这个会话有关的事（群规、群内梗、这里发生过的事）。**不要带 who**。',
+    // ★★ 0.3.3：`scope` **只剩两档**（使用者：不再对群聊信息进行记忆，群聊中的对话记忆归于个人）。
+    //   原来那档 `group`（"只跟这个会话有关、不要带 who"）**已经下线**：
+    //   群里说的每一条现在都挂到**说这话的那个人**名下，所以**每条都必须带 who**。
+    //   ⚠️ 这里不是"把 group 改个名字" —— 判据本身变了：以前可以写"不带人"的条目，现在不行。
+    '- `scope` 二选一（**0.3.3 起没有"只跟本群有关"那一档了**）：',
+    '  · `person` —— **关于某个人本身**的事（他的偏好、习惯、在做的事、跟他说过的事）。**必须带 who**。',
     '  · `global` —— 对谁都成立、且不含任何人私事的通用约定。**不要带 who**。',
+    '  ⚠️ 群里聊到的事（群规、群内梗、这里发生过什么）也算 `person`，写**说这话的那个人**，',
+    '     文里按"他提过"写 —— 别写成"这个群规定"（那会让它在别处也成立）。',
     '- 写**结论**，不写过程：不要写"我回答了他什么"，只写以后还用得上的那部分。',
     '- 一次最多 8 条；**宁少勿多**。这一段确实没什么值得记的，就输出 {"entries":[]} 并在 note 里说明。',
     '- **不记隐私**：身份证号、手机号、银行卡号、密码密钥、具体住址、健康医疗、生物特征。',
@@ -164,7 +169,14 @@ export function normalizeBuildOutput(raw) {
   for (const e of list) {
     const text = String(e?.text ?? '').trim()
     if (!text) continue
-    const scope = ['person', 'group', 'global'].includes(String(e?.scope)) ? String(e.scope) : 'group'
+    // ★★ 0.3.3：认不出的 scope 现在兜底到 **`person`**（原来兜底到 `group`）。
+    //   为什么必须改：兜底到 `group` 会让它走"不带 who"那条路，而在新布局下
+    //   那条路的落点仍要一个发言人 —— 结果就是"模型写错一个词 ⇒ 这条被记到**第一个说话人**名下"。
+    //   兜底到 `person` 之后，`who` 不合法会被**明确拒绝并说明**（`ignored` 里带原因），
+    //   比静默记错人好。另：`group` 这个旧词**仍然认**（模型可能还写着它），
+    //   它现在与 `person` 同义 —— 但**同样要求 who**。
+    const raw = String(e?.scope)
+    const scope = raw === 'global' ? 'global' : 'person'
     const who = String(e?.who ?? '').trim()
     entries.push({ who, scope, text })
   }
@@ -321,7 +333,7 @@ export async function buildMemoryFromMessages({
 
   // ── 归属：**编号 → QQ 由代码做**；person 档还要有合法的 who ──────────────
   const byUser = new Map() // userId -> items[]
-  const plain = [] // group / global（与"谁说的"无关）
+  const plain = [] // global（与"谁说的"无关的那一档；**0.3.3 起只剩它**）
   const ignored = []
   for (const e of parsed.entries) {
     if (e.scope === 'person') {
@@ -334,7 +346,7 @@ export async function buildMemoryFromMessages({
       byUser.get(hit.userId).push({ scope: SCOPE.PERSON, text: e.text, source: 'build' })
       continue
     }
-    plain.push({ scope: e.scope === 'global' ? SCOPE.GLOBAL : SCOPE.FACT, text: e.text, source: 'build' })
+    plain.push({ scope: SCOPE.GLOBAL, text: e.text, source: 'build' })
   }
 
   const appliedAll = []
@@ -359,7 +371,9 @@ export async function buildMemoryFromMessages({
     ignoredAll.push(...r.ignored.map((i) => ({ ...i, userId: uid })))
     for (const f of r.wroteFiles) wroteFiles.add(f)
   }
-  // ② group / global：与发言人无关，用第一个说话人（只为拿到合法的落点）
+  // ② global：与发言人无关，但仍要**一个合法的落点**才能写
+  //    （`applyMemoryItems` 的全局分支不看发言人，所以这里传谁都行 ——
+  //     传第一个说话人只是为了让审计里的"谁把它讲出来的"有值）。
   if (plain.length > 0) {
     const r = applyMemoryItems({
       workspace: root,
